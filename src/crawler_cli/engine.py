@@ -6,9 +6,12 @@ from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .archive import discover_historical_urls
 from .backends import RateLimiter, build_backend
+from .circuit_breaker import CircuitBreakerRegistry
 from .config import CrawlConfig
 from .extract import extract_links, extract_page_data
+from .hashing import sha256_hash, simhash64
 from .models import CrawlJobResult, CrawlResult
 from .persistence import AsyncpgStore
 from .robots import RobotsPolicyCache
@@ -24,6 +27,10 @@ class CrawlEngine:
         self._robots = RobotsPolicyCache(config)
         self._host_delays: dict[str, asyncio.Lock] = {}
         self._host_last_fetch: dict[str, float] = {}
+        self._circuit_breakers = CircuitBreakerRegistry(
+            failure_threshold=config.circuit_breaker_failure_threshold,
+            recovery_timeout_seconds=config.circuit_breaker_recovery_seconds,
+        )
 
     async def crawl(self, url: str) -> CrawlResult:
         async with self._semaphore:
@@ -46,14 +53,35 @@ class CrawlEngine:
                     if self.config.honor_robots_crawl_delay:
                         await self._wait_for_host_delay(url)
                 await self._rate_limiter.wait()
+                host = urlparse(url).netloc.lower()
+                if self.config.circuit_breaker_enabled:
+                    circuit = self._circuit_breakers.for_host(host)
+                    if not circuit.should_allow():
+                        return CrawlResult(
+                            requested_url=url,
+                            final_url=url,
+                            status=0,
+                            headers={},
+                            content_type=None,
+                            fetch_backend=self.config.backend,
+                            extracted=None,
+                            raw_html=None,
+                            allowed_by_robots=True if self.config.respect_robots_txt else None,
+                            skip_reason="circuit_breaker_open",
+                        )
                 response = await self.backend.fetch(url)
                 content_type = response.headers.get("Content-Type")
                 extracted = None
                 raw_html = None
+                content_hash_sha256 = None
+                content_hash_simhash = None
                 discovered_links: list[str] = []
                 if content_type and "html" in content_type.lower():
                     raw_html = response.text
                     extracted = extract_page_data(response.text, response.url, response.headers)
+                    if self.config.enable_content_hashing:
+                        content_hash_sha256 = sha256_hash(response.text)
+                        content_hash_simhash = simhash64(response.text)
                     discovered_links = extract_links(
                         response.text,
                         response.url,
@@ -68,13 +96,24 @@ class CrawlEngine:
                     fetch_backend=self.config.backend,
                     extracted=extracted,
                     raw_html=raw_html,
+                    content_hash_sha256=content_hash_sha256,
+                    content_hash_simhash=content_hash_simhash,
                     discovered_links=discovered_links,
                     allowed_by_robots=True if self.config.respect_robots_txt else None,
                 )
+                if self.config.circuit_breaker_enabled:
+                    circuit = self._circuit_breakers.for_host(host)
+                    if response.status >= 500:
+                        circuit.record_failure()
+                    else:
+                        circuit.record_success()
                 if self.store is not None:
                     await self.store.persist(result)
                 return result
             except Exception as exc:
+                host = urlparse(url).netloc.lower()
+                if self.config.circuit_breaker_enabled:
+                    self._circuit_breakers.for_host(host).record_failure()
                 return CrawlResult(
                     requested_url=url,
                     final_url=url,
@@ -114,6 +153,11 @@ class CrawlEngine:
         if self.store is None:
             raise RuntimeError("crawl_open requires an AsyncpgStore for resumable DB-driven frontier management")
         seeds = list(seed_urls)
+        if self.config.seed_from_archive:
+            archive_candidates: list[str] = []
+            for seed in seeds:
+                archive_candidates.extend(await discover_historical_urls(seed, self.config))
+            seeds = list(dict.fromkeys([*seeds, *archive_candidates]))
         if not seeds:
             job = CrawlJobResult(mode="open", seed_urls=[], results=[], saved_to=save_to)
             if save_to:
@@ -131,7 +175,7 @@ class CrawlEngine:
             },
         )
         await self.store.frontier_reset_all_pending_to_queued()
-        await self.store.enqueue_frontier([(url, 0, None) for url in seeds])
+        await self.store.enqueue_frontier([(url, 0, None, self._priority_score(url, 0)) for url in seeds])
 
         while True:
             _, _, done_count = await self.store.frontier_stats()
@@ -144,19 +188,26 @@ class CrawlEngine:
             if not frontier_batch:
                 break
 
-            batch_results = await asyncio.gather(*(self.crawl(url) for url, _, _ in frontier_batch))
+            batch_results = await asyncio.gather(*(self.crawl(url) for url, _, _, _ in frontier_batch))
             results.extend(batch_results)
 
             discovered_to_enqueue: list[tuple[str, int, str | None]] = []
             done_urls: list[str] = []
-            for (url, depth, _parent_url), result in zip(frontier_batch, batch_results):
+            for (url, depth, _parent_url, retry_count), result in zip(frontier_batch, batch_results):
+                transient_error = result.status in {429, 500, 502, 503, 504} or (
+                    result.skip_reason is not None and "Timeout" in result.skip_reason
+                )
+                if transient_error and retry_count < self.config.frontier_max_retries:
+                    delay = self.config.frontier_retry_base_delay_seconds * (2**retry_count)
+                    await self.store.frontier_mark_retry(url, retry_count + 1, delay)
+                    continue
                 done_urls.append(url)
                 if result.skip_reason is not None:
                     continue
                 for link in result.discovered_links:
                     if self.config.same_host_only and not any(self._same_host(seed, link) for seed in seeds):
                         continue
-                    discovered_to_enqueue.append((link, depth + 1, url))
+                    discovered_to_enqueue.append((link, depth + 1, url, self._priority_score(link, depth + 1)))
 
             await self.store.frontier_mark_done(done_urls)
             if discovered_to_enqueue:
@@ -211,6 +262,8 @@ class CrawlEngine:
             "content_type": result.content_type,
             "fetch_backend": result.fetch_backend,
             "raw_html": result.raw_html,
+            "content_hash_sha256": result.content_hash_sha256,
+            "content_hash_simhash": result.content_hash_simhash,
             "discovered_links": result.discovered_links,
             "allowed_by_robots": result.allowed_by_robots,
             "skip_reason": result.skip_reason,
@@ -234,3 +287,15 @@ class CrawlEngine:
                 "metadata": result.extracted.metadata,
             },
         }
+
+    def _priority_score(self, url: str, depth: int) -> float:
+        parsed = urlparse(url)
+        path_segments = [segment for segment in parsed.path.split("/") if segment]
+        score = 100.0
+        score -= depth * 5.0
+        score -= len(path_segments) * 2.0
+        if parsed.query:
+            score -= 10.0
+        if parsed.path.endswith((".jpg", ".png", ".pdf", ".zip")):
+            score -= 20.0
+        return score

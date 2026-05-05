@@ -47,15 +47,23 @@ class FakeStore:
     async def save_metadata(self, key: str, value: dict[str, object]) -> None:
         self.saved_metadata[key] = value
 
-    async def enqueue_frontier(self, frontier_data: list[tuple[str, int, str | None]]) -> int:
+    async def enqueue_frontier(
+        self,
+        frontier_data: list[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
+    ) -> int:
         inserted = 0
-        for url, depth, parent_url in frontier_data:
+        for item in frontier_data:
+            url, depth, parent_url = item[0], item[1], item[2]
+            priority_score = float(item[3]) if len(item) > 3 and item[3] is not None else 0.0
             if url in self.frontier:
                 continue
             self.frontier[url] = {
                 "depth": depth,
                 "parent_url": parent_url,
                 "status": "queued",
+                "priority_score": priority_score,
+                "retry_count": 0,
+                "retry_at": 0,
             }
             inserted += 1
         return inserted
@@ -68,16 +76,26 @@ class FakeStore:
                 reset += 1
         return reset
 
-    async def frontier_next_batch(self, batch_size: int) -> list[tuple[str, int, str | None]]:
-        batch: list[tuple[str, int, str | None]] = []
-        for url, state in self.frontier.items():
+    async def frontier_next_batch(self, batch_size: int) -> list[tuple[str, int, str | None, int]]:
+        batch: list[tuple[str, int, str | None, int]] = []
+        for url, state in sorted(
+            self.frontier.items(),
+            key=lambda item: (-float(item[1].get("priority_score", 0.0)), item[0]),
+        ):
             if state["status"] != "queued":
                 continue
             state["status"] = "pending"
-            batch.append((url, int(state["depth"]), state["parent_url"]))  # type: ignore[arg-type]
+            batch.append(
+                (url, int(state["depth"]), state["parent_url"], int(state.get("retry_count", 0)))  # type: ignore[arg-type]
+            )
             if len(batch) >= batch_size:
                 break
         return batch
+
+    async def frontier_mark_retry(self, url: str, retry_count: int, delay_seconds: float) -> None:
+        if url in self.frontier:
+            self.frontier[url]["status"] = "queued"
+            self.frontier[url]["retry_count"] = retry_count
 
     async def frontier_mark_done(self, urls: list[str]) -> None:
         for url in urls:
@@ -150,3 +168,55 @@ async def test_open_crawl_resets_pending_rows_on_resume():
 
     assert len(job.results) == 1
     assert store.frontier["https://example.com/stale"]["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_crawl_with_content_hashing_sets_hash_fields():
+    html = "<html><body><h1>Hello</h1><p>World</p></body></html>"
+    engine = CrawlEngine(CrawlConfig(enable_content_hashing=True))
+    engine.backend = FakeBackend({"https://example.com/": html})
+    engine._robots = FakeRobots()
+
+    result = await engine.crawl("https://example.com/")
+
+    assert result.content_hash_sha256 is not None
+    assert len(result.content_hash_sha256) == 64
+    assert isinstance(result.content_hash_simhash, int)
+
+
+class FlakyBackend:
+    def __init__(self) -> None:
+        self.count = 0
+
+    async def fetch(self, url: str) -> FetchResponse:
+        self.count += 1
+        if self.count <= 2:
+            return FetchResponse(
+                url=url,
+                requested_url=url,
+                status=503,
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=b"<html><body>retry</body></html>",
+                text="<html><body>retry</body></html>",
+            )
+        return FetchResponse(
+            url=url,
+            requested_url=url,
+            status=200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><body>ok</body></html>",
+            text="<html><body>ok</body></html>",
+        )
+
+
+@pytest.mark.asyncio
+async def test_open_crawl_retries_transient_errors():
+    store = FakeStore()
+    engine = CrawlEngine(CrawlConfig(max_concurrency=1, default_open_crawl_limit=1, frontier_max_retries=2), store=store)
+    engine.backend = FlakyBackend()
+    engine._robots = FakeRobots()
+
+    job = await engine.crawl_open(["https://example.com/"], max_urls=1)
+
+    assert len(job.results) >= 1
+    assert store.frontier["https://example.com/"]["status"] == "done"

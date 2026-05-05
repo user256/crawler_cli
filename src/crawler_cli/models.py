@@ -54,6 +54,8 @@ class CrawlResult:
     fetch_backend: str
     extracted: ExtractedContent | None
     raw_html: str | None
+    content_hash_sha256: str | None = None
+    content_hash_simhash: int | None = None
     discovered_links: list[str] = field(default_factory=list)
     allowed_by_robots: bool | None = None
     skip_reason: str | None = None

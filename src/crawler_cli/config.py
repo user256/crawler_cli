@@ -22,6 +22,15 @@ class CrawlConfig:
     honor_robots_crawl_delay: bool = True
     default_open_crawl_limit: int = 200
     same_host_only: bool = True
+    enable_content_hashing: bool = False
+    circuit_breaker_enabled: bool = True
+    circuit_breaker_failure_threshold: int = 3
+    circuit_breaker_recovery_seconds: float = 30.0
+    seed_from_archive: bool = False
+    archive_timeout_seconds: float = 10.0
+    archive_max_urls: int = 250
+    frontier_max_retries: int = 3
+    frontier_retry_base_delay_seconds: float = 2.0
     request_headers: dict[str, str] = field(default_factory=dict)
 
     @property

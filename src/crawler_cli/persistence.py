@@ -55,6 +55,8 @@ SCHEMA_STATEMENTS = [
         word_count INTEGER,
         html_lang_id INTEGER,
         content_length INTEGER,
+        content_hash_sha256 TEXT,
+        content_hash_simhash BIGINT,
         FOREIGN KEY (url_id) REFERENCES urls (id),
         FOREIGN KEY (meta_description_id) REFERENCES meta_descriptions (id),
         FOREIGN KEY (html_lang_id) REFERENCES html_languages (id)
@@ -165,9 +167,23 @@ SCHEMA_STATEMENTS = [
         inlinks_count INTEGER DEFAULT 0,
         content_type_score DOUBLE PRECISION DEFAULT 1.0,
         reset_count INTEGER DEFAULT 0,
+        retry_count INTEGER DEFAULT 0,
+        retry_at INTEGER DEFAULT 0,
         FOREIGN KEY (url_id) REFERENCES urls (id),
         FOREIGN KEY (parent_id) REFERENCES urls (id)
     )
+    """,
+    """
+    ALTER TABLE content ADD COLUMN IF NOT EXISTS content_hash_sha256 TEXT
+    """,
+    """
+    ALTER TABLE content ADD COLUMN IF NOT EXISTS content_hash_simhash BIGINT
+    """,
+    """
+    ALTER TABLE frontier ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0
+    """,
+    """
+    ALTER TABLE frontier ADD COLUMN IF NOT EXISTS retry_at INTEGER DEFAULT 0
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_frontier_status ON frontier(status)
@@ -258,7 +274,7 @@ class AsyncpgStore:
 
     async def enqueue_frontier(
         self,
-        frontier_data: list[tuple[str, int, str | None]],
+        frontier_data: list[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
     ) -> int:
         """Lifted in shape from WIP batch_enqueue_frontier, narrowed to asyncpg only."""
         if not frontier_data:
@@ -269,7 +285,8 @@ class AsyncpgStore:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 urls_to_resolve: list[str] = []
-                for child_url, _, parent_url in frontier_data:
+                for item in frontier_data:
+                    child_url, _, parent_url = item[0], item[1], item[2]
                     urls_to_resolve.append(child_url)
                     if parent_url:
                         urls_to_resolve.append(parent_url)
@@ -298,7 +315,9 @@ class AsyncpgStore:
 
                 current_time = int(time.time())
                 batch_data = []
-                for child_url, depth, parent_url in filtered:
+                for item in filtered:
+                    child_url, depth, parent_url = item[0], item[1], item[2]
+                    priority_score = float(item[3]) if len(item) > 3 and item[3] is not None else 0.0
                     batch_data.append(
                         (
                             url_to_id[child_url],
@@ -307,10 +326,12 @@ class AsyncpgStore:
                             "queued",
                             current_time,
                             current_time,
-                            0.0,
+                            priority_score,
                             0.5,
                             0,
                             1.0,
+                            0,
+                            0,
                             0,
                         )
                     )
@@ -319,16 +340,17 @@ class AsyncpgStore:
                     """
                     INSERT INTO frontier (
                         url_id, depth, parent_id, status, enqueued_at, updated_at,
-                        priority_score, sitemap_priority, inlinks_count, content_type_score, reset_count
+                        priority_score, sitemap_priority, inlinks_count, content_type_score, reset_count,
+                        retry_count, retry_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                     ON CONFLICT (url_id) DO NOTHING
                     """,
                     batch_data,
                 )
                 return len(batch_data)
 
-    async def frontier_next_batch(self, batch_size: int) -> list[tuple[str, int, str | None]]:
+    async def frontier_next_batch(self, batch_size: int) -> list[tuple[str, int, str | None, int]]:
         """Lifted from WIP frontier_next_batch: atomically claim queued URLs as pending."""
         await self.connect()
         assert self.pool is not None
@@ -336,16 +358,17 @@ class AsyncpgStore:
             async with conn.transaction():
                 rows = await conn.fetch(
                     """
-                    SELECT f.url_id, u.url, f.depth, p.url AS parent_url
+                    SELECT f.url_id, u.url, f.depth, p.url AS parent_url, f.retry_count
                     FROM frontier f
                     JOIN urls u ON f.url_id = u.id
                     LEFT JOIN urls p ON f.parent_id = p.id
-                    WHERE f.status = 'queued'
+                    WHERE f.status = 'queued' AND f.retry_at <= $2
                     ORDER BY f.priority_score DESC, f.enqueued_at ASC
                     LIMIT $1
                     FOR UPDATE OF f SKIP LOCKED
                     """,
                     batch_size * 2,
+                    int(time.time()),
                 )
                 if not rows:
                     return []
@@ -372,9 +395,35 @@ class AsyncpgStore:
                     claimed_ids,
                 )
                 return [
-                    (str(row["url"]), int(row["depth"]), str(row["parent_url"]) if row["parent_url"] else None)
+                    (
+                        str(row["url"]),
+                        int(row["depth"]),
+                        str(row["parent_url"]) if row["parent_url"] else None,
+                        int(row["retry_count"] or 0),
+                    )
                     for row in unique_rows
                 ]
+
+    async def frontier_mark_retry(self, url: str, retry_count: int, delay_seconds: float) -> None:
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            url_id = await self._get_or_create_url(conn, url)
+            retry_at = int(time.time() + max(0.0, delay_seconds))
+            await conn.execute(
+                """
+                UPDATE frontier
+                SET status = 'queued',
+                    retry_count = $2,
+                    retry_at = $3,
+                    updated_at = $4
+                WHERE url_id = $1
+                """,
+                url_id,
+                retry_count,
+                retry_at,
+                int(time.time()),
+            )
 
     async def frontier_mark_done(self, urls: list[str]) -> None:
         if not urls:
@@ -394,7 +443,9 @@ class AsyncpgStore:
                     ON CONFLICT (url_id) DO UPDATE
                     SET status = 'done',
                         updated_at = EXCLUDED.updated_at,
-                        reset_count = 0
+                        reset_count = 0,
+                        retry_count = 0,
+                        retry_at = 0
                     WHERE frontier.status IN ('pending', 'queued')
                     """,
                     current_time,
@@ -487,7 +538,8 @@ class AsyncpgStore:
                     """
                     INSERT INTO content (
                         url_id, title, meta_description_id, h1_tags, h2_tags, word_count, html_lang_id, content_length
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        , content_hash_sha256, content_hash_simhash
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     ON CONFLICT (url_id) DO UPDATE
                     SET title = EXCLUDED.title,
                         meta_description_id = EXCLUDED.meta_description_id,
@@ -495,7 +547,9 @@ class AsyncpgStore:
                         h2_tags = EXCLUDED.h2_tags,
                         word_count = EXCLUDED.word_count,
                         html_lang_id = EXCLUDED.html_lang_id,
-                        content_length = EXCLUDED.content_length
+                        content_length = EXCLUDED.content_length,
+                        content_hash_sha256 = EXCLUDED.content_hash_sha256,
+                        content_hash_simhash = EXCLUDED.content_hash_simhash
                     """,
                     url_id,
                     result.extracted.title,
@@ -505,6 +559,8 @@ class AsyncpgStore:
                     result.extracted.word_count,
                     html_lang_id,
                     len(result.raw_html or ""),
+                    result.content_hash_sha256,
+                    result.content_hash_simhash,
                 )
 
                 await conn.execute(
