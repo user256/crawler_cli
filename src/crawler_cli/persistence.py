@@ -198,6 +198,19 @@ SCHEMA_STATEMENTS = [
         updated_at INTEGER NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS url_sources (
+        url_id INTEGER NOT NULL REFERENCES urls(id),
+        source TEXT NOT NULL CHECK (source IN ('seed', 'link', 'sitemap', 'archive_org', 'robots_sitemap')),
+        detail TEXT,
+        detail_key TEXT GENERATED ALWAYS AS (COALESCE(detail, '')) STORED,
+        first_seen_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (url_id, source, detail_key)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_url_sources_source ON url_sources(source)
+    """,
 ]
 
 
@@ -275,6 +288,9 @@ class AsyncpgStore:
     async def enqueue_frontier(
         self,
         frontier_data: list[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
+        *,
+        source: str | None = None,
+        source_detail: str | None = None,
     ) -> int:
         """Lifted in shape from WIP batch_enqueue_frontier, narrowed to asyncpg only."""
         if not frontier_data:
@@ -286,7 +302,8 @@ class AsyncpgStore:
             async with conn.transaction():
                 urls_to_resolve: list[str] = []
                 for item in frontier_data:
-                    child_url, _, parent_url = item[0], item[1], item[2]
+                    child_url = item[0]
+                    parent_url = item[2] if len(item) > 2 else None
                     urls_to_resolve.append(child_url)
                     if parent_url:
                         urls_to_resolve.append(parent_url)
@@ -295,7 +312,7 @@ class AsyncpgStore:
                 for url in dict.fromkeys(urls_to_resolve):
                     url_to_id[url] = await self._get_or_create_url(conn, url)
 
-                child_ids = [url_to_id[child_url] for child_url, _, _ in frontier_data]
+                child_ids = [url_to_id[item[0]] for item in frontier_data]
                 existing_rows = await conn.fetch(
                     """
                     SELECT url_id, status
@@ -348,6 +365,19 @@ class AsyncpgStore:
                     """,
                     batch_data,
                 )
+                if source:
+                    source_batch = [
+                        (url_to_id[item[0]], source, source_detail)
+                        for item in filtered
+                    ]
+                    await conn.executemany(
+                        """
+                        INSERT INTO url_sources (url_id, source, detail)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (url_id, source, detail_key) DO NOTHING
+                        """,
+                        source_batch,
+                    )
                 return len(batch_data)
 
     async def frontier_next_batch(self, batch_size: int) -> list[tuple[str, int, str | None, int]]:
@@ -483,6 +513,81 @@ class AsyncpgStore:
                 int(time.time()),
             )
         return int(result.split()[-1])
+
+    async def record_source(self, url_id: int, source: str, detail: str | None = None) -> None:
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO url_sources (url_id, source, detail)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (url_id, source, detail_key) DO NOTHING
+                """,
+                url_id,
+                source,
+                detail,
+            )
+
+    async def record_source_by_url(self, url: str, source: str, detail: str | None = None) -> None:
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            url_id = await self._get_or_create_url(conn, url)
+            await conn.execute(
+                """
+                INSERT INTO url_sources (url_id, source, detail)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (url_id, source, detail_key) DO NOTHING
+                """,
+                url_id,
+                source,
+                detail,
+            )
+
+    async def urls_with_source(self, source: str) -> list[str]:
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT u.url
+                FROM urls u
+                JOIN url_sources us ON us.url_id = u.id
+                WHERE us.source = $1
+                ORDER BY u.url
+                """,
+                source,
+            )
+            return [str(row["url"]) for row in rows]
+
+    async def simhash_neighbours(self, target: int, max_distance: int = 8) -> list[tuple[str, int]]:
+        """Return URLs whose simhash is within Hamming distance of target."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT u.url, c.content_hash_simhash
+                FROM content c
+                JOIN urls u ON u.id = c.url_id
+                WHERE c.content_hash_simhash IS NOT NULL
+                """
+            )
+        results: list[tuple[str, int]] = []
+        for row in rows:
+            sim = row["content_hash_simhash"]
+            if sim is None:
+                continue
+            try:
+                sim_int = int(sim)
+            except (ValueError, TypeError):
+                continue
+            distance = bin(sim_int ^ int(target)).count("1")
+            if distance <= max_distance:
+                results.append((str(row["url"]), distance))
+        results.sort(key=lambda x: x[1])
+        return results
 
     async def frontier_stats(self) -> tuple[int, int, int]:
         await self.connect()

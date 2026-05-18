@@ -35,6 +35,9 @@ class FakeRobots:
     async def get_crawl_delay(self, url: str) -> float | None:
         return self.crawl_delay
 
+    async def sitemaps(self, url: str) -> list[str]:
+        return []
+
 
 class FakeStore:
     def __init__(self) -> None:
@@ -50,6 +53,9 @@ class FakeStore:
     async def enqueue_frontier(
         self,
         frontier_data: list[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
+        *,
+        source: str | None = None,
+        source_detail: str | None = None,
     ) -> int:
         inserted = 0
         for item in frontier_data:

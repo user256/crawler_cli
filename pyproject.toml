@@ -28,5 +28,8 @@ test = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[project.scripts]
+crawler-cli = "crawler_cli.__main__:main"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

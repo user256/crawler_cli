@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import time
-import urllib.robotparser
+from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Optional
 from urllib.parse import urlparse
@@ -52,44 +53,114 @@ def calculate_cache_ttl(headers: dict[str, str], default_ttl: int = 3600) -> int
         return default_ttl
 
 
+@dataclass(slots=True)
+class RobotsDecision:
+    allowed: bool
+    matched_rule: str | None
+    matched_user_agent: str | None
+    source_url: str
+
+
+class _RobotsRules:
+    """Minimal robots.txt parser that exposes matched rules."""
+
+    def __init__(self, domain: str, content: str) -> None:
+        self.domain = domain
+        self.source_url = f"https://{domain}/robots.txt"
+        self._groups: dict[str, list[tuple[str, str]]] = {}
+        self._crawl_delays: dict[str, float] = {}
+        self._sitemaps: list[str] = []
+        current_ua: str | None = None
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if key == "user-agent":
+                current_ua = value
+                self._groups.setdefault(current_ua, [])
+            elif key in {"disallow", "allow"} and current_ua is not None:
+                self._groups[current_ua].append((key, value))
+            elif key == "crawl-delay" and current_ua is not None:
+                try:
+                    self._crawl_delays[current_ua] = float(value)
+                except ValueError:
+                    pass
+            elif key == "sitemap":
+                self._sitemaps.append(value)
+        if not self._groups:
+            self._groups["*"] = []
+
+    def check(self, path: str, user_agent: str) -> RobotsDecision:
+        uas = [user_agent, "*"] if user_agent != "*" else ["*"]
+        matched_rule: str | None = None
+        matched_ua: str | None = None
+        allowed = True
+        for ua in uas:
+            rules = self._groups.get(ua, [])
+            for rule_type, rule_path in rules:
+                if self._match(path, rule_path):
+                    matched_rule = f"{rule_type.capitalize()}: {rule_path}"
+                    matched_ua = ua
+                    if rule_type == "allow":
+                        allowed = True
+                    elif rule_type == "disallow":
+                        allowed = False
+        return RobotsDecision(
+            allowed=allowed,
+            matched_rule=matched_rule,
+            matched_user_agent=matched_ua,
+            source_url=self.source_url,
+        )
+
+    def crawl_delay(self, user_agent: str) -> float | None:
+        return self._crawl_delays.get(user_agent) or self._crawl_delays.get("*")
+
+    def sitemaps(self) -> list[str]:
+        return list(self._sitemaps)
+
+    @staticmethod
+    def _match(path: str, rule: str) -> bool:
+        if rule == "/":
+            return True
+        if "*" in rule or "?" in rule:
+            return fnmatch.fnmatchcase(path, rule)
+        return path.startswith(rule)
+
+
 class RobotsCache:
     """Lifted and adapted from PostgreSQLCrawlerWIP."""
 
     def __init__(self, default_ttl: int = 86400) -> None:
-        self._cache: dict[str, tuple[urllib.robotparser.RobotFileParser, float, dict[str, float], dict[str, str]]] = {}
+        self._cache: dict[str, tuple[_RobotsRules, float, dict[str, str]]] = {}
         self._failed_domains: set[str] = set()
         self._default_ttl = default_ttl
 
-    def get_robots_parser(self, domain: str) -> Optional[urllib.robotparser.RobotFileParser]:
+    def get_rules(self, domain: str) -> _RobotsRules | None:
         if domain not in self._cache:
             return None
-
-        parser, cached_time, _, headers = self._cache[domain]
+        rules, cached_time, headers = self._cache[domain]
         server_ttl = calculate_cache_ttl(headers, self._default_ttl)
         if time.time() - cached_time > server_ttl:
             del self._cache[domain]
             return None
-        return parser
+        return rules
 
     def get_crawl_delay(self, domain: str, user_agent: str = "*") -> Optional[float]:
-        if domain not in self._cache:
+        rules = self.get_rules(domain)
+        if rules is None:
             return None
+        return rules.crawl_delay(user_agent)
 
-        _, cached_time, crawl_delays, headers = self._cache[domain]
-        server_ttl = calculate_cache_ttl(headers, self._default_ttl)
-        if time.time() - cached_time > server_ttl:
-            del self._cache[domain]
-            return None
-        return crawl_delays.get(user_agent) or crawl_delays.get("*")
-
-    def set_robots_parser(
+    def set_rules(
         self,
         domain: str,
-        parser: urllib.robotparser.RobotFileParser,
-        crawl_delays: dict[str, float] | None = None,
+        rules: _RobotsRules,
         headers: dict[str, str] | None = None,
     ) -> None:
-        self._cache[domain] = (parser, time.time(), crawl_delays or {}, headers or {})
+        self._cache[domain] = (rules, time.time(), headers or {})
 
     def mark_failed(self, domain: str) -> None:
         self._failed_domains.add(domain)
@@ -104,60 +175,60 @@ class RobotsPolicyCache:
         self.cache = RobotsCache(default_ttl=int(config.robots_cache_ttl_seconds))
         self._locks: dict[str, asyncio.Lock] = {}
 
-    async def get_policy(self, url: str) -> Optional[urllib.robotparser.RobotFileParser]:
+    async def get_rules(self, url: str) -> _RobotsRules | None:
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
 
         if self.cache.is_failed(domain):
             return None
 
-        cached = self.cache.get_robots_parser(domain)
+        cached = self.cache.get_rules(domain)
         if cached is not None:
             return cached
 
         lock = self._locks.setdefault(domain, asyncio.Lock())
         async with lock:
-            cached = self.cache.get_robots_parser(domain)
+            cached = self.cache.get_rules(domain)
             if cached is not None:
                 return cached
-            return await self._parse_robots_txt(domain)
+            return await self._fetch_and_parse(domain)
 
-    async def is_allowed(self, url: str) -> bool:
+    async def check(self, url: str) -> RobotsDecision:
         domain = urlparse(url).netloc.lower()
         if self.cache.is_failed(domain):
-            return True
+            return RobotsDecision(
+                allowed=True,
+                matched_rule=None,
+                matched_user_agent=None,
+                source_url=f"https://{domain}/robots.txt",
+            )
 
-        parser = await self.get_policy(url)
-        if parser is None:
-            return True
-
-        entries = getattr(parser, "_entries", {}).get(self.config.user_agent, []) + getattr(parser, "_entries", {}).get("*", [])
-        if not entries:
-            return True
+        rules = await self.get_rules(url)
+        if rules is None:
+            return RobotsDecision(
+                allowed=True,
+                matched_rule=None,
+                matched_user_agent=None,
+                source_url=f"https://{domain}/robots.txt",
+            )
 
         path = urlparse(url).path or "/"
-        allowed = True
-        for rule_type, rule_path in entries:
-            matches = False
-            if rule_path == "/":
-                matches = True
-            elif rule_path.endswith("*"):
-                matches = path.startswith(rule_path[:-1])
-            else:
-                matches = path.startswith(rule_path)
+        return rules.check(path, self.config.user_agent)
 
-            if not matches:
-                continue
-            if rule_type == "allow":
-                allowed = True
-            elif rule_type == "disallow":
-                allowed = False
-        return allowed
+    async def is_allowed(self, url: str) -> bool:
+        decision = await self.check(url)
+        return decision.allowed
 
     async def get_crawl_delay(self, url: str) -> Optional[float]:
         domain = urlparse(url).netloc.lower()
-        await self.get_policy(url)
+        await self.get_rules(url)
         return self.cache.get_crawl_delay(domain, self.config.user_agent)
+
+    async def sitemaps(self, url: str) -> list[str]:
+        rules = await self.get_rules(url)
+        if rules is None:
+            return []
+        return rules.sitemaps()
 
     async def _fetch_robots_txt(self, domain: str) -> tuple[str | None, dict[str, str]]:
         robots_url = f"https://{domain}/robots.txt"
@@ -178,46 +249,16 @@ class RobotsPolicyCache:
         except Exception:
             return None, {}
 
-    async def _parse_robots_txt(self, domain: str) -> Optional[urllib.robotparser.RobotFileParser]:
+    async def _fetch_and_parse(self, domain: str) -> _RobotsRules | None:
         robots_content, headers = await self._fetch_robots_txt(domain)
         if robots_content is None:
             self.cache.mark_failed(domain)
             return None
 
         try:
-            parser = urllib.robotparser.RobotFileParser()
-            parser.set_url(f"https://{domain}/robots.txt")
-            parser._user_agents = []
-            parser._entries = {}
-
-            current_user_agent = None
-            crawl_delays: dict[str, float] = {}
-            for line in robots_content.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or ":" not in line:
-                    continue
-                key, value = line.split(":", 1)
-                key = key.strip().lower()
-                value = value.strip()
-
-                if key == "user-agent":
-                    current_user_agent = value
-                    if current_user_agent not in parser._user_agents:
-                        parser._user_agents.append(current_user_agent)
-                elif key in {"disallow", "allow"} and current_user_agent:
-                    parser._entries.setdefault(current_user_agent, []).append((key, value))
-                elif key == "crawl-delay" and current_user_agent:
-                    try:
-                        crawl_delays[current_user_agent] = float(value)
-                    except ValueError:
-                        pass
-
-            if not parser._user_agents:
-                parser._user_agents = ["*"]
-                parser._entries.setdefault("*", [])
-
-            self.cache.set_robots_parser(domain, parser, crawl_delays, headers)
-            return parser
+            rules = _RobotsRules(domain, robots_content)
+            self.cache.set_rules(domain, rules, headers)
+            return rules
         except Exception:
             self.cache.mark_failed(domain)
             return None

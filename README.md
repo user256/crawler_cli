@@ -28,6 +28,10 @@
   - sitemap indexes
   - `.gz` sitemap files
   - `sitemap.txt`
+- Detect CMS platforms:
+  - WordPress, Shopify, Drupal, Joomla, Squarespace, Wix
+  - Pattern-based detection via headers, meta tags, and content
+  - Configurable detection with confidence scoring
 - Persist normalized crawl data into PostgreSQL with `asyncpg`
 
 ## Install
@@ -51,19 +55,41 @@ For tests:
 pip install -e ".[test]"
 ```
 
+## CLI Usage
+
+```bash
+python -m crawler_cli https://www.example.com \
+  --max-workers 15 --concurrency 20 --js \
+  --archive-org-check --custom-ua "...Googlebot..."
+```
+
+Or via the installed entry point:
+
+```bash
+crawler-cli https://www.example.com --max-pages 500 --skip-sitemaps
+```
+
+Connection can be configured via environment variables (`PostgreSQLCrawler_POSTGRES_*` or `CRAWLER_CLI_POSTGRES_*`) or CLI flags. CLI flags override env vars.
+
 ## Package Layout
 
 ```text
 src/crawler_cli/
   __init__.py
+  __main__.py
+  archive.py
   backends.py
+  compare_renders.py
   config.py
   engine.py
   extract.py
+  hashing.py
   models.py
   persistence.py
+  probes.py
   robots.py
   sitemap.py
+  variants.py
 ```
 
 ## Default Behavior
@@ -289,12 +315,59 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-## Current Boundaries
+## URL Variant Probes
 
-This repo carries over the modular crawler core and now includes a resumable PostgreSQL frontier plus robots checks. It still does not carry over the full WIP project surface area, especially:
+Test canonicalisation of trailing-slash, suffix, and case variants:
 
-- the full WIP retry/scoring pipeline
-- reporting views and analysis queries
+```python
+from crawler_cli import generate_variants, probe_variant
+
+variants = generate_variants("https://example.com/about")
+for v in variants:
+    result = await probe_variant(engine, "https://example.com/about", v)
+    print(v.kind, result.verdict)
+```
+
+## Render Parity (JS vs No-JS)
+
+```python
+from crawler_cli import compare_renders, CrawlConfig
+
+result = await compare_renders(
+    "https://example.com/",
+    nojs_config=CrawlConfig(backend="aiohttp"),
+    js_config=CrawlConfig(backend="playwright"),
+)
+print(result.verdict)  # ok, nav_js_injected, content_js_only, meta_drift
+```
+
+## Soft-404 Detection
+
+```python
+from crawler_cli import soft_404_fingerprint
+
+fp = await soft_404_fingerprint(engine, "https://example.com")
+print(fp.status, fp.simhash)
+```
+
+## Robots.txt Introspection
+
+```python
+from crawler_cli import RobotsPolicyCache, CrawlConfig
+
+cache = RobotsPolicyCache(CrawlConfig())
+decision = await cache.check("https://example.com/wp-admin/")
+print(decision.allowed, decision.matched_rule, decision.matched_user_agent)
+```
+
+## Archive.org Audit
+
+```python
+from crawler_cli import audit_archive_urls, CrawlConfig
+
+result = await audit_archive_urls("example.com", store, CrawlConfig())
+print(len(result.missing_urls), len(result.legacy_issues))
+```
 
 ## Run Tests
 

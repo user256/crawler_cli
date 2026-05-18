@@ -59,6 +59,7 @@ class CrawlResult:
     discovered_links: list[str] = field(default_factory=list)
     allowed_by_robots: bool | None = None
     skip_reason: str | None = None
+    detected_cms: Any = None  # Will be CMSDetectionResult if cms_detection is enabled
 
 
 @dataclass(slots=True)

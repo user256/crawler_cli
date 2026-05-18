@@ -21,6 +21,7 @@ class CrawlConfig:
     robots_cache_ttl_seconds: float = 3600.0
     honor_robots_crawl_delay: bool = True
     default_open_crawl_limit: int = 200
+    max_pages: int = 200
     same_host_only: bool = True
     enable_content_hashing: bool = False
     circuit_breaker_enabled: bool = True
@@ -32,6 +33,11 @@ class CrawlConfig:
     frontier_max_retries: int = 3
     frontier_retry_base_delay_seconds: float = 2.0
     request_headers: dict[str, str] = field(default_factory=dict)
+    cms_detection: bool = False
+    discover_sitemaps: bool = True
+    sitemap_max_urls: int = 50_000
+    sitemap_max_depth: int = 3
+    skip_sitemaps: bool = False
 
     @property
     def min_interval_seconds(self) -> float:

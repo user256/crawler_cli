@@ -10,11 +10,13 @@ from .archive import discover_historical_urls
 from .backends import RateLimiter, build_backend
 from .circuit_breaker import CircuitBreakerRegistry
 from .config import CrawlConfig
+from .detection import CMSDetector
 from .extract import extract_links, extract_page_data
 from .hashing import sha256_hash, simhash64
-from .models import CrawlJobResult, CrawlResult
+from .models import CrawlJobResult, CrawlResult, SitemapDocument
 from .persistence import AsyncpgStore
 from .robots import RobotsPolicyCache
+from .sitemap import SitemapParser, discover_sitemap_paths
 
 
 class CrawlEngine:
@@ -31,6 +33,7 @@ class CrawlEngine:
             failure_threshold=config.circuit_breaker_failure_threshold,
             recovery_timeout_seconds=config.circuit_breaker_recovery_seconds,
         )
+        self._cms_detector = CMSDetector() if config.cms_detection else None
 
     async def crawl(self, url: str) -> CrawlResult:
         async with self._semaphore:
@@ -70,12 +73,15 @@ class CrawlEngine:
                             skip_reason="circuit_breaker_open",
                         )
                 response = await self.backend.fetch(url)
-                content_type = response.headers.get("Content-Type")
+                # Case-insensitive header lookup (Playwright returns lowercase keys)
+                headers_lower = {k.lower(): v for k, v in response.headers.items()}
+                content_type = headers_lower.get("content-type")
                 extracted = None
                 raw_html = None
                 content_hash_sha256 = None
                 content_hash_simhash = None
                 discovered_links: list[str] = []
+                detected_cms = None
                 if content_type and "html" in content_type.lower():
                     raw_html = response.text
                     extracted = extract_page_data(response.text, response.url, response.headers)
@@ -87,6 +93,11 @@ class CrawlEngine:
                         response.url,
                         same_host_only=self.config.same_host_only,
                     )
+                    
+                    # Perform CMS detection if enabled and this is HTML content
+                    if self._cms_detector is not None:
+                        detected_cms = self._cms_detector.detect(response)
+                
                 result = CrawlResult(
                     requested_url=response.requested_url,
                     final_url=response.url,
@@ -100,6 +111,7 @@ class CrawlEngine:
                     content_hash_simhash=content_hash_simhash,
                     discovered_links=discovered_links,
                     allowed_by_robots=True if self.config.respect_robots_txt else None,
+                    detected_cms=detected_cms,
                 )
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)
@@ -143,6 +155,114 @@ class CrawlEngine:
             await self._save_results(job, save_to)
         return job
 
+    async def _discover_and_enqueue_sitemaps(
+        self,
+        seeds: list[str],
+        limit: int,
+    ) -> list[tuple[str, int, str | None, float]]:
+        """Fetch robots.txt + well-known sitemaps, parse them, enqueue URLs."""
+        sitemap_urls: list[str] = []
+        parser = SitemapParser()
+        for seed in seeds:
+            host = urlparse(seed).netloc.lower()
+            # 1. robots.txt sitemap directives
+            robots_sitemaps = await self._robots.sitemaps(seed)
+            for sm in robots_sitemaps:
+                sitemap_urls.append((sm, "robots_sitemap"))
+            # 2. well-known paths
+            for candidate in discover_sitemap_paths(seed):
+                sitemap_urls.append((candidate, "sitemap"))
+
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique_sitemaps: list[tuple[str, str]] = []
+        for sm_url, source_kind in sitemap_urls:
+            if sm_url in seen:
+                continue
+            seen.add(sm_url)
+            unique_sitemaps.append((sm_url, source_kind))
+
+        all_page_urls: list[tuple[str, str]] = []  # (url, detail=sitemap_url)
+        hreflang_data: list[tuple[str, list]] = []  # (sitemap_url, hreflang_links)
+
+        # BFS over sitemap indexes
+        to_fetch = [(sm_url, source_kind, 0) for sm_url, source_kind in unique_sitemaps]
+        fetched: set[str] = set()
+        while to_fetch:
+            sm_url, source_kind, depth = to_fetch.pop(0)
+            if sm_url in fetched:
+                continue
+            if depth > self.config.sitemap_max_depth:
+                continue
+            fetched.add(sm_url)
+            try:
+                response = await self.backend.fetch(sm_url)
+                if response.status != 200:
+                    continue
+                doc = parser.parse(sm_url, response.body, response.headers.get("Content-Type"))
+                if doc.kind == "sitemap_index":
+                    for child in doc.children:
+                        to_fetch.append((child, source_kind, depth + 1))
+                else:
+                    for su in doc.urls:
+                        all_page_urls.append((su.loc, sm_url))
+                        if su.hreflang_links:
+                            hreflang_data.append((su.loc, su.hreflang_links))
+            except Exception:
+                continue
+
+        # Cap
+        if len(all_page_urls) > self.config.sitemap_max_urls:
+            all_page_urls = all_page_urls[: self.config.sitemap_max_urls]
+
+        # Enqueue and persist hreflang
+        frontier_data: list[tuple[str, int, str | None, float]] = []
+        for url, sm_url in all_page_urls:
+            frontier_data.append((url, 0, None, self._priority_score(url, 0)))
+
+        if frontier_data:
+            await self.store.enqueue_frontier(
+                frontier_data,
+                source="sitemap",
+                source_detail=None,
+            )
+            # Also record source detail per URL
+            for url, sm_url in all_page_urls:
+                await self.store.record_source_by_url(url, "sitemap", detail=sm_url)
+
+        # Persist hreflang from sitemap
+        for page_url, links in hreflang_data:
+            # We need to persist into hreflang_sitemap table via the store
+            # Reuse existing persist logic by creating a minimal CrawlResult
+            if self.store is not None:
+                await self._persist_sitemap_hreflang(page_url, links)
+
+        return frontier_data
+
+    async def _persist_sitemap_hreflang(self, url: str, links: list) -> None:
+        """Write sitemap-derived hreflang rows directly."""
+        await self.store.connect()
+        assert self.store.pool is not None
+        async with self.store.pool.acquire() as conn:
+            url_id = await self.store._get_or_create_url(conn, url)
+            for link in links:
+                hreflang_id = await self.store._get_or_create_lookup(
+                    conn, "hreflang_languages", "language_code", link.hreflang
+                )
+                href_url_id = await self.store._get_or_create_url(
+                    conn, link.href, classification="network", is_from_hreflang=True
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO hreflang_sitemap (url_id, hreflang_id, href_url_id)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    url_id,
+                    hreflang_id,
+                    href_url_id,
+                )
+
     async def crawl_open(
         self,
         seed_urls: Iterable[str],
@@ -175,7 +295,13 @@ class CrawlEngine:
             },
         )
         await self.store.frontier_reset_all_pending_to_queued()
-        await self.store.enqueue_frontier([(url, 0, None, self._priority_score(url, 0)) for url in seeds])
+        await self.store.enqueue_frontier(
+            [(url, 0, None, self._priority_score(url, 0)) for url in seeds],
+            source="seed",
+        )
+
+        if self.config.discover_sitemaps and not self.config.skip_sitemaps:
+            await self._discover_and_enqueue_sitemaps(seeds, limit)
 
         while True:
             _, _, done_count = await self.store.frontier_stats()
@@ -190,6 +316,10 @@ class CrawlEngine:
 
             batch_results = await asyncio.gather(*(self.crawl(url) for url, _, _, _ in frontier_batch))
             results.extend(batch_results)
+
+            for result in batch_results:
+                if result.skip_reason is None:
+                    await self.store.persist(result)
 
             discovered_to_enqueue: list[tuple[str, int, str | None]] = []
             done_urls: list[str] = []
@@ -208,13 +338,24 @@ class CrawlEngine:
                     if self.config.same_host_only and not any(self._same_host(seed, link) for seed in seeds):
                         continue
                     discovered_to_enqueue.append((link, depth + 1, url, self._priority_score(link, depth + 1)))
-
-            await self.store.frontier_mark_done(done_urls)
+                # Also enqueue hreflang targets so language variants are crawled
+                if result.extracted is not None:
+                    for hl in result.extracted.hreflang_links:
+                        href = hl.href
+                        if self.config.same_host_only and not any(self._same_host(seed, href) for seed in seeds):
+                            continue
+                        discovered_to_enqueue.append((href, depth + 1, url, self._priority_score(href, depth + 1)))
             if discovered_to_enqueue:
                 queued_count, pending_count, done_count = await self.store.frontier_stats()
                 remaining_frontier_budget = max(0, limit - (queued_count + pending_count + done_count))
                 if remaining_frontier_budget > 0:
-                    await self.store.enqueue_frontier(discovered_to_enqueue[:remaining_frontier_budget])
+                    await self.store.enqueue_frontier(
+                        discovered_to_enqueue[:remaining_frontier_budget],
+                        source="link",
+                    )
+                discovered_to_enqueue = []
+
+            await self.store.frontier_mark_done(done_urls)
 
         job = CrawlJobResult(mode="open", seed_urls=seeds, results=results[:limit], saved_to=save_to)
         if save_to:
