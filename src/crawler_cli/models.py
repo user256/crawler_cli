@@ -42,6 +42,18 @@ class ExtractedContent:
     text: str
     word_count: int
     metadata: dict[str, Any]
+    schema_data: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class DiscoveredLink:
+    href: str
+    anchor_text: str | None
+    xpath: str
+    is_image: bool
+    fragment: str | None = None
+    url_parameters: str | None = None
+    original_href: str | None = None
 
 
 @dataclass(slots=True)
@@ -56,7 +68,7 @@ class CrawlResult:
     raw_html: str | None
     content_hash_sha256: str | None = None
     content_hash_simhash: int | None = None
-    discovered_links: list[str] = field(default_factory=list)
+    discovered_links: list[DiscoveredLink] = field(default_factory=list)
     allowed_by_robots: bool | None = None
     skip_reason: str | None = None
     detected_cms: Any = None  # Will be CMSDetectionResult if cms_detection is enabled

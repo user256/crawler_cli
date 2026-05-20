@@ -55,21 +55,73 @@ For tests:
 pip install -e ".[test]"
 ```
 
+## GuardGeese Monitoring
+
+`crawler_cli` exposes a small bridge for GuardGeese-style monitoring without running `CrawlEngine`, the CLI, or PostgreSQL persistence:
+
+```python
+from crawler_cli import extract_page, fetch_page
+
+response = await fetch_page(
+    "https://example.com/health",
+    user_agent="GuardGeeseBot/1.0",
+    headers={"X-Monitor": "1"},
+)
+extracted = extract_page(response.text, response.headers, response.url)
+```
+
+This boundary is intentional:
+
+- `fetch_page()` and `extract_page()` are the supported integration surface for `guardgeese-worker`
+- `AsyncpgStore` and the resumable frontier are for standalone crawl jobs in this repo
+- portal MariaDB state and scheduling remain authoritative in `GuardGueeseRedux`, not in `crawler_cli`
+- there is no `crawler-cli worker` subcommand in this package unless the architecture changes
+
+For `guardgeese-worker[crawler]`, depend on the base package with `pip install -e ../../crawler_cli`. Add the `playwright` extra only if JS rendering is actually required.
+
 ## CLI Usage
 
+The CLI supports multiple subcommands. The default command is `crawl` if you just pass a URL.
+
+### 1. Crawl
+
 ```bash
-python -m crawler_cli https://www.example.com \
+# Basic crawl
+crawler-cli crawl https://www.example.com --max-pages 500
+
+# Multi-seed crawl across related hosts
+crawler-cli https://www.example.com \
+  --seed-url https://app.example.com \
+  --max-pages 1000
+
+# Crawl with Playwright (JS), 15 workers, and an archive.org audit
+crawler-cli https://www.example.com \
   --max-workers 15 --concurrency 20 --js \
+  --max-requests-per-context 50 \
+  --memory-high-watermark 85 \
   --archive-org-check --custom-ua "...Googlebot..."
+
+# Crawl with CSV ingestion and HTTP Auth
+crawler-cli --csv-file urls.csv --auth-type basic --auth-username admin --auth-password secret
 ```
 
-Or via the installed entry point:
+### 2. Generate Embeddings
+
+Generate vector embeddings for the crawled pages using the OpenAI API:
 
 ```bash
-crawler-cli https://www.example.com --max-pages 500 --skip-sitemaps
+crawler-cli generate-embeddings --api-key sk-... --model text-embedding-3-small
 ```
 
-Connection can be configured via environment variables (`PostgreSQLCrawler_POSTGRES_*` or `CRAWLER_CLI_POSTGRES_*`) or CLI flags. CLI flags override env vars.
+### 3. Compare Crawls
+
+Run a deep comparison between two saved crawl JSON files to identify missing URLs, title changes, schema regressions, and link drift:
+
+```bash
+crawler-cli compare baseline.json candidate.json --compare-links --persist
+```
+
+Connection to PostgreSQL can be configured via environment variables (`CRAWLER_CLI_POSTGRES_*` or `PostgreSQLCrawler_POSTGRES_*`) or CLI flags (`--postgres-dsn`, `--postgres-host`, etc.). CLI flags override env vars.
 
 ## Package Layout
 
@@ -84,6 +136,7 @@ src/crawler_cli/
   engine.py
   extract.py
   hashing.py
+  monitoring.py
   models.py
   persistence.py
   probes.py
@@ -187,10 +240,15 @@ config = CrawlConfig(
     backend="playwright",
     timeout_seconds=45,
     max_concurrency=2,
+    max_requests_per_context=50,
+    playwright_network_idle_timeout_seconds=5.0,
+    memory_high_watermark_percent=85.0,
     rate_limit_per_second=1.0,
 )
 engine = CrawlEngine(config)
 ```
+
+For long JS-enabled crawls, `max_requests_per_context` recycles Playwright contexts before they bloat, and the engine will temporarily reduce batch concurrency if system memory usage crosses `memory_high_watermark_percent`.
 
 ## Extracted Data Shape
 

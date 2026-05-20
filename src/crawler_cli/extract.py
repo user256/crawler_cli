@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 from typing import Iterable
 from urllib.parse import urljoin, urlparse
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
-from .models import ExtractedContent, HreflangLink, RobotsDirectives
+from .models import DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
+from .schema import extract_schema_data
 
 
 def _header_map(headers: dict[str, str]) -> dict[str, str]:
@@ -138,23 +140,74 @@ def extract_page_data(html: str, base_url: str, headers: dict[str, str]) -> Extr
                 }
             ),
         },
+        schema_data=extract_schema_data(html, base_url),
     )
 
 
-def extract_links(html: str, base_url: str, *, same_host_only: bool = True) -> list[str]:
+def generate_xpath(element: Tag) -> str:
+    path: list[str] = []
+    current: Tag | None = element
+    while current and current.name:
+        tag = current.name
+        if current.parent:
+            siblings = [s for s in current.parent.find_all(tag, recursive=False) if s.name == tag]
+            if len(siblings) > 1:
+                tag = f"{tag}[{siblings.index(current) + 1}]"
+        path.insert(0, tag)
+        current = current.parent if isinstance(current.parent, Tag) else None
+    return "/" + "/".join(path) if path else ""
+
+
+def _anchor_text_for_link(anchor: Tag, href: str) -> str | None:
+    anchor_text = anchor.get_text(strip=True)
+    if not anchor_text:
+        img = anchor.find("img")
+        if img:
+            alt_text = img.get("alt", "").strip()
+            if alt_text:
+                anchor_text = f"[IMG: {alt_text}]"
+            else:
+                src = img.get("src", "")
+                if src:
+                    filename = os.path.basename(src)
+                    if filename:
+                        anchor_text = f"[IMG: {filename}]"
+    if not anchor_text and anchor.get("title"):
+        anchor_text = f"[TITLE: {anchor.get('title', '').strip()}]"
+    if not anchor_text and anchor.get("aria-label"):
+        anchor_text = f"[ARIA: {anchor.get('aria-label', '').strip()}]"
+    if not anchor_text and href.startswith("#"):
+        anchor_text = f"[ANCHOR: {href[1:]}]"
+    return anchor_text or None
+
+
+def extract_links(html: str, base_url: str, *, same_host_only: bool = True) -> list[DiscoveredLink]:
     soup = BeautifulSoup(html, "html.parser")
     base_host = urlparse(base_url).netloc.lower()
-    links: list[str] = []
+    links: list[DiscoveredLink] = []
     seen: set[str] = set()
     for anchor in soup.find_all("a", href=True):
-        href = urljoin(base_url, anchor["href"].strip())
-        parsed = urlparse(href)
+        raw_href = anchor["href"].strip()
+        original_href = urljoin(base_url, raw_href)
+        parsed = urlparse(original_href)
         if parsed.scheme not in {"http", "https"}:
             continue
-        normalized = parsed._replace(fragment="").geturl()
         if same_host_only and parsed.netloc.lower() != base_host:
             continue
-        if normalized not in seen:
-            seen.add(normalized)
-            links.append(normalized)
+        normalized = parsed._replace(fragment="").geturl()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        anchor_text = _anchor_text_for_link(anchor, raw_href)
+        links.append(
+            DiscoveredLink(
+                href=normalized,
+                anchor_text=anchor_text,
+                xpath=generate_xpath(anchor),
+                is_image=bool(anchor_text and anchor_text.startswith("[IMG:")),
+                fragment=parsed.fragment or None,
+                url_parameters=parsed.query or None,
+                original_href=original_href,
+            )
+        )
     return links

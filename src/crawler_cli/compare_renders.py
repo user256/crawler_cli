@@ -38,7 +38,7 @@ def _extract_links_set(raw_html: str | None, base_url: str) -> set[str]:
     if not raw_html:
         return set()
     links = extract_links(raw_html, base_url, same_host_only=True)
-    return set(links)
+    return {link.href for link in links}
 
 
 def _cluster_paths(paths: set[str]) -> dict[str, int]:
@@ -59,10 +59,13 @@ async def compare_renders(
     nojs_engine = CrawlEngine(nojs_config)
     js_engine = CrawlEngine(js_config)
 
-    nojs_result, js_result = await asyncio.gather(
-        nojs_engine.crawl(url),
-        js_engine.crawl(url),
-    )
+    try:
+        nojs_result, js_result = await asyncio.gather(
+            nojs_engine.crawl(url),
+            js_engine.crawl(url),
+        )
+    finally:
+        await asyncio.gather(nojs_engine.close(), js_engine.close())
 
     nojs_title = _norm(nojs_result.extracted.title if nojs_result.extracted else None)
     js_title = _norm(js_result.extracted.title if js_result.extracted else None)

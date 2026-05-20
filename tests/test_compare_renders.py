@@ -2,7 +2,8 @@ import pytest
 
 from crawler_cli import CrawlConfig, CrawlEngine
 from crawler_cli.compare_renders import _cluster_paths, compare_renders
-from crawler_cli.models import FetchResponse
+from crawler_cli.extract import extract_page_data
+from crawler_cli.models import CrawlResult, FetchResponse
 
 
 class StaticBackend:
@@ -22,11 +23,23 @@ class StaticBackend:
 
 
 @pytest.mark.asyncio
-async def test_compare_renders_static_page_ok():
+async def test_compare_renders_static_page_ok(monkeypatch):
     html = "<html><head><title>Hello</title></head><body><a href='/a'>A</a></body></html>"
     config = CrawlConfig(backend="aiohttp")
-    engine = CrawlEngine(config)
-    engine.backend = StaticBackend(html)
+
+    async def fake_crawl(self, url: str) -> CrawlResult:
+        return CrawlResult(
+            requested_url=url,
+            final_url=url,
+            status=200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            content_type="text/html; charset=utf-8",
+            fetch_backend=self.config.backend,
+            extracted=extract_page_data(html, url, {"Content-Type": "text/html; charset=utf-8"}),
+            raw_html=html,
+        )
+
+    monkeypatch.setattr(CrawlEngine, "crawl", fake_crawl)
 
     # Both nojs and js use same backend in this test
     result = await compare_renders(

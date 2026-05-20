@@ -43,6 +43,7 @@ class FakeStore:
     def __init__(self) -> None:
         self.frontier: dict[str, dict[str, object]] = {}
         self.saved_metadata: dict[str, dict[str, object]] = {}
+        self.requested_batch_sizes: list[int] = []
 
     async def persist(self, result) -> None:
         return None
@@ -83,6 +84,7 @@ class FakeStore:
         return reset
 
     async def frontier_next_batch(self, batch_size: int) -> list[tuple[str, int, str | None, int]]:
+        self.requested_batch_sizes.append(batch_size)
         batch: list[tuple[str, int, str | None, int]] = []
         for url, state in sorted(
             self.frontier.items(),
@@ -226,3 +228,40 @@ async def test_open_crawl_retries_transient_errors():
 
     assert len(job.results) >= 1
     assert store.frontier["https://example.com/"]["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_open_crawl_reduces_batch_size_under_memory_pressure(monkeypatch):
+    store = FakeStore()
+    pages = {
+        f"https://example.com/{idx}": f"<html><body>{idx}</body></html>"
+        for idx in range(6)
+    }
+    for idx in range(6):
+        store.frontier[f"https://example.com/{idx}"] = {
+            "depth": 0,
+            "parent_url": None,
+            "status": "queued",
+            "priority_score": 100.0 - idx,
+            "retry_count": 0,
+            "retry_at": 0,
+        }
+
+    config = CrawlConfig(
+        max_concurrency=4,
+        default_open_crawl_limit=6,
+        memory_high_watermark_percent=85.0,
+        memory_recovery_watermark_percent=70.0,
+    )
+    engine = CrawlEngine(config, store=store)
+    engine.backend = FakeBackend(pages)
+    engine._robots = FakeRobots()
+
+    samples = iter([90.0, 90.0, 60.0])
+    monkeypatch.setattr(engine, "_sample_memory_usage_percent", lambda: next(samples, 60.0))
+
+    job = await engine.crawl_open(["https://example.com/0"], max_urls=6)
+
+    assert len(job.results) == 6
+    assert store.requested_batch_sizes[:3] == [3, 2, 1]
+    assert engine._effective_worker_limit == 3

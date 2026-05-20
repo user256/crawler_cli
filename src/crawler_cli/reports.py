@@ -65,6 +65,57 @@ class CrawlReports:
         }
         return json.dumps(payload, indent=2, sort_keys=True)
 
+    async def comparison_summary(self, session_id: int) -> dict[str, object]:
+        return {
+            "url_moves": await self.view_url_moves(session_id),
+            "content_differences": await self.view_content_differences(session_id),
+            "schema_comparison": await self.view_schema_comparison(session_id),
+        }
+
+    async def view_url_moves(self, session_id: int) -> list[dict[str, object]]:
+        return await self._fetch(
+            """
+            SELECT path, moved_from_path, moved_to_path, redirect_chain
+            FROM crawl_comparison_urls
+            WHERE session_id = $1 AND is_moved_content = TRUE
+            ORDER BY path
+            """,
+            session_id,
+        )
+
+    async def view_content_differences(self, session_id: int) -> list[dict[str, object]]:
+        return await self._fetch(
+            """
+            SELECT path, baseline_title, candidate_title, baseline_h1, candidate_h1,
+                   baseline_meta_description, candidate_meta_description,
+                   baseline_word_count, candidate_word_count
+            FROM crawl_comparison_urls
+            WHERE session_id = $1
+              AND exists_on_baseline AND exists_on_candidate
+              AND (
+                baseline_title IS DISTINCT FROM candidate_title
+                OR baseline_h1 IS DISTINCT FROM candidate_h1
+                OR baseline_meta_description IS DISTINCT FROM candidate_meta_description
+                OR baseline_word_count IS DISTINCT FROM candidate_word_count
+              )
+            ORDER BY path
+            """,
+            session_id,
+        )
+
+    async def view_schema_comparison(self, session_id: int) -> list[dict[str, object]]:
+        return await self._fetch(
+            """
+            SELECT path, baseline_schema_types, candidate_schema_types
+            FROM crawl_comparison_urls
+            WHERE session_id = $1
+              AND exists_on_baseline AND exists_on_candidate
+              AND baseline_schema_types IS DISTINCT FROM candidate_schema_types
+            ORDER BY path
+            """,
+            session_id,
+        )
+
     async def create_materialized_views(self) -> None:
         await self.store.connect()
         assert self.store.pool is not None

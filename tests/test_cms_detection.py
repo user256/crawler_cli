@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.crawler_cli.detection.cms import CMSDetector, CMSDetectionResult
-from src.crawler_cli.models import FetchResponse
+from crawler_cli.detection.cms import CMSDetector, CMSDetectionResult
+from crawler_cli.models import FetchResponse
 
 
 class TestCMSDetector:
