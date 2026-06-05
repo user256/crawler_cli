@@ -173,9 +173,6 @@ class CrawlEngine:
                         circuit.record_failure()
                     else:
                         circuit.record_success()
-                if self.store is not None:
-                    await self.store.persist(result)
-                return result
             except Exception as exc:
                 host = urlparse(url).netloc.lower()
                 if self.config.circuit_breaker_enabled:
@@ -192,6 +189,34 @@ class CrawlEngine:
                     allowed_by_robots=True if self.config.respect_robots_txt else None,
                     skip_reason=f"fetch_error:{type(exc).__name__}",
                 )
+            # Persist OUTSIDE the fetch try-block: a database error must never
+            # masquerade as a fetch error or discard a successfully-fetched page.
+            if self.store is not None:
+                await self._persist_with_retry(result)
+            return result
+
+    async def _persist_with_retry(self, result: CrawlResult, *, max_attempts: int = 5) -> None:
+        """Persist a fetched page, retrying on transient write contention.
+
+        Concurrent persists can hit PostgreSQL deadlocks / serialization
+        failures on shared lookup-table upserts. We back off and retry; on final
+        failure we record ``persist_error`` on the result rather than losing the
+        page (its fetched data is still returned and saved)."""
+        import asyncpg
+
+        assert self.store is not None
+        for attempt in range(max_attempts):
+            try:
+                await self.store.persist(result)
+                return
+            except (asyncpg.DeadlockDetectedError, asyncpg.SerializationError) as exc:
+                if attempt + 1 >= max_attempts:
+                    result.persist_error = type(exc).__name__
+                    return
+                await asyncio.sleep(0.05 * (2**attempt))
+            except Exception as exc:  # noqa: BLE001 - persistence must not lose the page
+                result.persist_error = type(exc).__name__
+                return
 
     async def crawl_many(self, urls: Iterable[str], *, save_to: str | None = None) -> list[CrawlResult]:
         url_list = list(urls)
@@ -428,10 +453,8 @@ class CrawlEngine:
                 batch_results = await asyncio.gather(*(self.crawl(url) for url, _, _, _ in fetch_batch))
                 results.extend(batch_results)
                 session_crawled += len(batch_results)
-
-                for result in batch_results:
-                    if result.skip_reason is None:
-                        await self.store.persist(result)
+                # Pages are persisted inside crawl() via _persist_with_retry; no
+                # second persist here (it doubled the write load and deadlock risk).
 
                 discovered_to_enqueue: list[tuple[str, int, str | None, float]] = []
                 out_of_scope_discovered: list[str] = []
@@ -484,7 +507,13 @@ class CrawlEngine:
 
                 await self.store.frontier_mark_done(done_urls)
 
-            job = CrawlJobResult(mode="open", seed_urls=seeds, results=results[:limit], saved_to=save_to)
+            # limit == 0 means "unlimited"; results[:0] would wrongly drop everything.
+            job = CrawlJobResult(
+                mode="open",
+                seed_urls=seeds,
+                results=results if limit <= 0 else results[:limit],
+                saved_to=save_to,
+            )
             if save_to:
                 await self._save_results(job, save_to)
             return job
@@ -595,6 +624,7 @@ class CrawlEngine:
             ],
             "allowed_by_robots": result.allowed_by_robots,
             "skip_reason": result.skip_reason,
+            "persist_error": result.persist_error,
             "detected_cms": None
             if result.detected_cms is None
             else {

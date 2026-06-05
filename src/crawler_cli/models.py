@@ -75,6 +75,7 @@ class CrawlResult:
     discovered_links: list[DiscoveredLink] = field(default_factory=list)
     allowed_by_robots: bool | None = None
     skip_reason: str | None = None
+    persist_error: str | None = None
     detected_cms: "CMSDetectionResult | None" = None
     detected_analytics: "AnalyticsDetectionResult | None" = None
 

@@ -45,3 +45,23 @@ def simhash64(html: str) -> int:
             fingerprint |= 1 << i
     return fingerprint
 
+
+_UINT64 = 1 << 64
+_INT63 = 1 << 63
+
+
+def simhash_to_signed(value: int | None) -> int | None:
+    """Map an unsigned 64-bit simhash into the signed range a PostgreSQL BIGINT
+    can hold. Without this, fingerprints with the high bit set overflow int64."""
+    if value is None:
+        return None
+    return value - _UINT64 if value >= _INT63 else value
+
+
+def simhash_to_unsigned(value: int | None) -> int | None:
+    """Inverse of :func:`simhash_to_signed`; recover the unsigned fingerprint so
+    Hamming-distance comparisons stay consistent with :func:`simhash64`."""
+    if value is None:
+        return None
+    return value + _UINT64 if value < 0 else value
+

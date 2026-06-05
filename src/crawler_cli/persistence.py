@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from .compression import compress_html, decompress_html, is_compressed
 from .detection.analytics import AnalyticsDetectionResult
-from .hashing import sha256_hash, simhash64
+from .hashing import sha256_hash, simhash64, simhash_to_signed, simhash_to_unsigned
 from .models import CrawlResult, DiscoveredLink
 from .schema import create_schema_content_hash, identify_schema_relationships
 
@@ -952,7 +952,7 @@ class AsyncpgStore:
             if sim is None:
                 continue
             try:
-                sim_int = int(sim)
+                sim_int = simhash_to_unsigned(int(sim))
             except (ValueError, TypeError):
                 continue
             distance = bin(sim_int ^ int(target)).count("1")
@@ -1101,7 +1101,7 @@ class AsyncpgStore:
                     html_lang_id,
                     len(result.raw_html or ""),
                     result.content_hash_sha256,
-                    result.content_hash_simhash,
+                    simhash_to_signed(result.content_hash_simhash),
                 )
 
                 await self._persist_directives(conn, content_url_id, result)
