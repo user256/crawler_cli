@@ -116,6 +116,83 @@ class CrawlReports:
             session_id,
         )
 
+    async def pages_missing_analytics(self, vendor: str | None = None) -> list[dict[str, object]]:
+        """Pages with zero analytics hits (optionally filtered to a specific vendor)."""
+        if vendor:
+            return await self._fetch(
+                """
+                SELECT u.url
+                FROM urls u
+                JOIN pages p ON p.url_id = u.id
+                WHERE u.kind = 'html'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM page_analytics_hits h
+                      JOIN analytics_vendors v ON v.id = h.vendor_id
+                      WHERE h.page_id = p.id AND v.vendor = $1
+                  )
+                ORDER BY u.url
+                """,
+                vendor,
+            )
+        return await self._fetch(
+            """
+            SELECT u.url
+            FROM urls u
+            JOIN pages p ON p.url_id = u.id
+            WHERE u.kind = 'html'
+              AND NOT EXISTS (
+                  SELECT 1 FROM page_analytics_hits h
+                  WHERE h.page_id = p.id
+              )
+            ORDER BY u.url
+            """
+        )
+
+    async def pages_missing_expected_id(self, expected_id: str) -> list[dict[str, object]]:
+        """Pages where the expected identifier is not present."""
+        return await self._fetch(
+            """
+            SELECT u.url
+            FROM urls u
+            JOIN pages p ON p.url_id = u.id
+            WHERE u.kind = 'html'
+              AND NOT EXISTS (
+                  SELECT 1 FROM page_analytics_hits h
+                  WHERE h.page_id = p.id AND h.identifier = $1
+              )
+            ORDER BY u.url
+            """,
+            expected_id,
+        )
+
+    async def analytics_inventory(self) -> list[dict[str, object]]:
+        """Rollup of (vendor, identifier, page_count)."""
+        return await self._fetch(
+            """
+            SELECT v.vendor, v.category, h.identifier, COUNT(DISTINCT h.page_id)::INT AS page_count
+            FROM page_analytics_hits h
+            JOIN analytics_vendors v ON v.id = h.vendor_id
+            GROUP BY v.vendor, v.category, h.identifier
+            ORDER BY page_count DESC, v.vendor, h.identifier
+            """
+        )
+
+    async def analytics_per_page(self, url: str) -> list[dict[str, object]]:
+        """Full hit list for a single URL."""
+        return await self._fetch(
+            """
+            SELECT u.url, v.vendor, v.category, h.identifier,
+                   h.evidence_type, h.evidence_snippet, h.confidence, h.detected_at
+            FROM page_analytics_hits h
+            JOIN analytics_vendors v ON v.id = h.vendor_id
+            JOIN pages p ON p.id = h.page_id
+            JOIN urls u ON u.id = p.url_id
+            WHERE u.url = $1
+            ORDER BY h.confidence DESC, v.vendor
+            """,
+            url,
+        )
+
     async def create_materialized_views(self) -> None:
         await self.store.connect()
         assert self.store.pool is not None

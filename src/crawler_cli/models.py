@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from .detection.analytics import AnalyticsDetectionResult
+    from .detection.cms import CMSDetectionResult
 
 
 @dataclass(slots=True)
@@ -71,7 +75,8 @@ class CrawlResult:
     discovered_links: list[DiscoveredLink] = field(default_factory=list)
     allowed_by_robots: bool | None = None
     skip_reason: str | None = None
-    detected_cms: Any = None  # Will be CMSDetectionResult if cms_detection is enabled
+    detected_cms: "CMSDetectionResult | None" = None
+    detected_analytics: "AnalyticsDetectionResult | None" = None
 
 
 @dataclass(slots=True)

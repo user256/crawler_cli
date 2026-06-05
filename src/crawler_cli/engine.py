@@ -10,7 +10,7 @@ from .archive import discover_historical_urls
 from .backends import RateLimiter, build_backend
 from .circuit_breaker import CircuitBreakerRegistry
 from .config import CrawlConfig
-from .detection import CMSDetector
+from .detection import CMSDetector, AnalyticsDetector
 from .extract import extract_links, extract_page_data
 from .hashing import sha256_hash, simhash64
 from .models import CrawlJobResult, CrawlResult, SitemapDocument
@@ -45,6 +45,13 @@ def _linux_memory_usage_percent() -> float | None:
     return (used / total) * 100.0
 
 
+def _archive_seed_target(seed: str) -> str | None:
+    """Normalise a seed URL to the host used for archive.org expansion."""
+    parsed = urlparse(seed)
+    target = (parsed.netloc or seed).lower().strip()
+    return target or None
+
+
 class CrawlEngine:
     def __init__(self, config: CrawlConfig, store: AsyncpgStore | None = None) -> None:
         self.config = config
@@ -60,6 +67,7 @@ class CrawlEngine:
             recovery_timeout_seconds=config.circuit_breaker_recovery_seconds,
         )
         self._cms_detector = CMSDetector() if config.cms_detection else None
+        self._analytics_detector = AnalyticsDetector() if config.analytics_detection else None
         self._effective_worker_limit = max(1, config.max_concurrency)
 
     async def crawl(self, url: str) -> CrawlResult:
@@ -122,6 +130,7 @@ class CrawlEngine:
                 content_hash_simhash = None
                 discovered_links = []
                 detected_cms = None
+                detected_analytics = None
                 if content_type and "html" in content_type.lower():
                     raw_html = response.text
                     extracted = extract_page_data(response.text, response.url, response.headers)
@@ -137,6 +146,10 @@ class CrawlEngine:
                     # Perform CMS detection if enabled and this is HTML content
                     if self._cms_detector is not None:
                         detected_cms = self._cms_detector.detect(response)
+                    
+                    # Perform analytics detection if enabled and this is HTML content
+                    if self._analytics_detector is not None:
+                        detected_analytics = self._analytics_detector.detect(response)
                 
                 result = CrawlResult(
                     requested_url=response.requested_url,
@@ -152,6 +165,7 @@ class CrawlEngine:
                     discovered_links=discovered_links,
                     allowed_by_robots=True if self.config.respect_robots_txt else None,
                     detected_cms=detected_cms,
+                    detected_analytics=detected_analytics,
                 )
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)
@@ -329,8 +343,15 @@ class CrawlEngine:
             seeds = list(dict.fromkeys([*self.config.csv_urls, *seeds]))
         if self.config.seed_from_archive:
             archive_candidates: list[str] = []
-            for seed in seeds:
-                archive_candidates.extend(await discover_historical_urls(seed, self.config))
+            archive_targets = list(
+                dict.fromkeys(
+                    target
+                    for seed in seeds
+                    if (target := _archive_seed_target(seed)) is not None
+                )
+            )
+            for archive_target in archive_targets:
+                archive_candidates.extend(await discover_historical_urls(archive_target, self.config))
             seeds = list(dict.fromkeys([*seeds, *archive_candidates]))
         if not seeds:
             job = CrawlJobResult(mode="open", seed_urls=[], results=[], saved_to=save_to)
@@ -574,6 +595,26 @@ class CrawlEngine:
             ],
             "allowed_by_robots": result.allowed_by_robots,
             "skip_reason": result.skip_reason,
+            "detected_cms": None
+            if result.detected_cms is None
+            else {
+                "cms_name": result.detected_cms.cms_name,
+                "confidence": result.detected_cms.confidence,
+                "indicators": result.detected_cms.indicators,
+            },
+            "detected_analytics": None
+            if result.detected_analytics is None
+            else [
+                {
+                    "vendor": hit.vendor,
+                    "category": hit.category,
+                    "identifier": hit.identifier,
+                    "evidence_type": hit.evidence_type,
+                    "evidence_snippet": hit.evidence_snippet,
+                    "confidence": hit.confidence,
+                }
+                for hit in result.detected_analytics.hits
+            ],
             "extracted": None
             if result.extracted is None
             else {

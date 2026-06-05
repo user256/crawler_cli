@@ -265,3 +265,47 @@ async def test_open_crawl_reduces_batch_size_under_memory_pressure(monkeypatch):
     assert len(job.results) == 6
     assert store.requested_batch_sizes[:3] == [3, 2, 1]
     assert engine._effective_worker_limit == 3
+
+
+@pytest.mark.asyncio
+async def test_open_crawl_archive_seed_dedupes_same_host_csv_urls(monkeypatch):
+    pages = {
+        "https://www.officeriders.com/": "<html><body>home</body></html>",
+        "https://www.officeriders.com/fr": "<html><body>fr</body></html>",
+        "https://www.officeriders.com/en/contact": "<html><body>contact</body></html>",
+        "https://app.officeriders.com/": "<html><body>app</body></html>",
+    }
+    store = FakeStore()
+    engine = CrawlEngine(
+        CrawlConfig(
+            max_concurrency=1,
+            default_open_crawl_limit=4,
+            seed_from_archive=True,
+            discover_sitemaps=False,
+            csv_urls=[
+                "https://www.officeriders.com/",
+                "https://www.officeriders.com/fr",
+                "https://www.officeriders.com/en/contact",
+            ],
+            csv_seed_mode=True,
+        ),
+        store=store,
+    )
+    engine.backend = FakeBackend(pages)
+    engine._robots = FakeRobots()
+
+    archive_calls: list[str] = []
+
+    async def fake_discover_historical_urls(seed: str, config: CrawlConfig) -> list[str]:
+        archive_calls.append(seed)
+        return []
+
+    monkeypatch.setattr("crawler_cli.engine.discover_historical_urls", fake_discover_historical_urls)
+
+    job = await engine.crawl_open(
+        ["https://www.officeriders.com/", "https://app.officeriders.com/"],
+        max_urls=4,
+    )
+
+    assert len(job.results) == 4
+    assert archive_calls == ["www.officeriders.com", "app.officeriders.com"]

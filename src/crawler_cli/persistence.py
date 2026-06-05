@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncpg
 import json
 import time
+from urllib.parse import urlparse
 
+from .compression import compress_html, decompress_html, is_compressed
+from .detection.analytics import AnalyticsDetectionResult
+from .hashing import sha256_hash, simhash64
 from .models import CrawlResult, DiscoveredLink
 from .schema import create_schema_content_hash, identify_schema_relationships
 
@@ -372,6 +376,37 @@ SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_crawl_comparison_urls_session ON crawl_comparison_urls(session_id)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS analytics_vendors (
+        id SERIAL PRIMARY KEY,
+        vendor TEXT UNIQUE NOT NULL,
+        category TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS page_analytics_hits (
+        id BIGSERIAL PRIMARY KEY,
+        page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+        vendor_id INTEGER NOT NULL REFERENCES analytics_vendors(id),
+        identifier TEXT,
+        evidence_type TEXT NOT NULL,
+        evidence_snippet TEXT,
+        confidence REAL NOT NULL,
+        detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_page_analytics_hits_page ON page_analytics_hits(page_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_page_analytics_hits_vendor ON page_analytics_hits(vendor_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_page_analytics_hits_identifier ON page_analytics_hits(identifier) WHERE identifier IS NOT NULL
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_page_analytics_hits_page_vendor_id ON page_analytics_hits(page_id, vendor_id, identifier)
+    """,
 ]
 
 COMPARISON_VIEW_STATEMENTS = [
@@ -438,10 +473,67 @@ COMPARISON_VIEW_STATEMENTS = [
     """,
 ]
 
+# Tables owned by crawler_cli (used for truncate / row-count summaries).
+CRAWL_TABLES: tuple[str, ...] = (
+    "page_analytics_hits",
+    "page_schema_references",
+    "internal_links",
+    "page_embeddings",
+    "crawl_comparison_urls",
+    "robots_directives",
+    "canonical_urls",
+    "hreflang_http_header",
+    "hreflang_html_head",
+    "hreflang_sitemap",
+    "page_metadata",
+    "indexability",
+    "content",
+    "pages",
+    "schema_data",
+    "frontier",
+    "url_sources",
+    "urls",
+    "html_languages",
+    "meta_descriptions",
+    "robots_directive_strings",
+    "hreflang_languages",
+    "anchor_texts",
+    "fragments",
+    "xpaths",
+    "schema_instances",
+    "schema_types",
+    "analytics_vendors",
+    "crawl_comparison_sessions",
+    "crawl_metadata",
+)
+
+
+def database_name_from_dsn(dsn: str) -> str:
+    path = urlparse(dsn).path.strip("/")
+    if not path:
+        return "postgres"
+    return path.split("/")[0]
+
+
+def encode_html_for_storage(text: str, *, compress: bool) -> bytes | None:
+    if not text:
+        return None
+    if compress:
+        return compress_html(text)
+    return text.encode("utf-8")
+
 
 class AsyncpgStore:
-    def __init__(self, dsn: str) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        compress_html: bool = True,
+        store_html: bool = True,
+    ) -> None:
         self.dsn = dsn
+        self.compress_html = compress_html
+        self.store_html = store_html
         self.pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
@@ -945,17 +1037,24 @@ class AsyncpgStore:
                     )
 
                 # Store full content against the URL that actually served it
-                await conn.execute(
+                html_blob = None
+                if self.store_html and result.raw_html:
+                    html_blob = encode_html_for_storage(
+                        result.raw_html,
+                        compress=self.compress_html,
+                    )
+                page_id = await conn.fetchval(
                     """
                     INSERT INTO pages (url_id, headers_json, html_compressed)
-                    VALUES ($1, $2, convert_to($3, 'UTF8'))
+                    VALUES ($1, $2, $3)
                     ON CONFLICT (url_id) DO UPDATE
                     SET headers_json = EXCLUDED.headers_json,
                         html_compressed = EXCLUDED.html_compressed
+                    RETURNING id
                     """,
                     content_url_id,
                     json.dumps(result.headers, sort_keys=True),
-                    result.raw_html or "",
+                    html_blob,
                 )
 
                 meta_description_id = None
@@ -1016,6 +1115,8 @@ class AsyncpgStore:
                         content_url_id,
                         result.discovered_links,
                     )
+                if result.detected_analytics is not None and page_id is not None:
+                    await self._persist_analytics(conn, int(page_id), result.detected_analytics)
 
                 overall_indexable = (
                     result.status == 200
@@ -1036,6 +1137,62 @@ class AsyncpgStore:
                     not result.extracted.x_robots_tag.noindex,
                     overall_indexable,
                 )
+
+    async def _persist_analytics(
+        self,
+        conn: asyncpg.Connection,
+        page_id: int,
+        detected: AnalyticsDetectionResult,
+    ) -> None:
+        """Persist analytics hits for a page inside the current transaction."""
+        if not detected.hits:
+            return
+
+        # Seed vendors idempotently
+        vendor_rows = [(hit.vendor, hit.category) for hit in detected.hits]
+        await conn.executemany(
+            """
+            INSERT INTO analytics_vendors (vendor, category)
+            VALUES ($1, $2)
+            ON CONFLICT (vendor) DO NOTHING
+            """,
+            vendor_rows,
+        )
+
+        # Fetch vendor IDs
+        vendor_names = [hit.vendor for hit in detected.hits]
+        rows = await conn.fetch(
+            "SELECT id, vendor FROM analytics_vendors WHERE vendor = ANY($1::text[])",
+            vendor_names,
+        )
+        vendor_to_id = {str(r["vendor"]): int(r["id"]) for r in rows}
+
+        batch = []
+        for hit in detected.hits:
+            vendor_id = vendor_to_id.get(hit.vendor)
+            if vendor_id is None:
+                continue
+            batch.append(
+                (
+                    page_id,
+                    vendor_id,
+                    hit.identifier,
+                    hit.evidence_type,
+                    hit.evidence_snippet[:200],
+                    hit.confidence,
+                )
+            )
+
+        if batch:
+            await conn.executemany(
+                """
+                INSERT INTO page_analytics_hits
+                    (page_id, vendor_id, identifier, evidence_type, evidence_snippet, confidence)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT DO NOTHING
+                """,
+                batch,
+            )
 
     async def _persist_directives(self, conn: asyncpg.Connection, url_id: int, result: CrawlResult) -> None:
         assert result.extracted is not None
@@ -1376,7 +1533,7 @@ class AsyncpgStore:
             if urls:
                 rows = await conn.fetch(
                     """
-                    SELECT p.url_id, u.url, convert_from(p.html_compressed, 'UTF8') AS html
+                    SELECT p.url_id, u.url, p.html_compressed
                     FROM pages p
                     JOIN urls u ON u.id = p.url_id
                     WHERE u.url = ANY($1::text[]) AND p.html_compressed IS NOT NULL
@@ -1386,13 +1543,16 @@ class AsyncpgStore:
             else:
                 rows = await conn.fetch(
                     """
-                    SELECT p.url_id, u.url, convert_from(p.html_compressed, 'UTF8') AS html
+                    SELECT p.url_id, u.url, p.html_compressed
                     FROM pages p
                     JOIN urls u ON u.id = p.url_id
                     WHERE p.html_compressed IS NOT NULL
                     """
                 )
-        return [(int(row["url_id"]), str(row["url"]), str(row["html"])) for row in rows]
+        return [
+            (int(row["url_id"]), str(row["url"]), decompress_html(bytes(row["html_compressed"])))
+            for row in rows
+        ]
 
     async def embedding_url_ids(self, *, model: str) -> set[int]:
         await self.connect()
@@ -1522,159 +1682,230 @@ class AsyncpgStore:
                     )
                 return int(session_id)
 
-    async def fetch_pages_for_embeddings(
-        self,
-        *,
-        urls: list[str] | None = None,
-    ) -> list[tuple[int, str, str]]:
+    async def table_row_counts(self) -> dict[str, int]:
         await self.connect()
         assert self.pool is not None
+        counts: dict[str, int] = {}
         async with self.pool.acquire() as conn:
-            if urls:
-                rows = await conn.fetch(
-                    """
-                    SELECT p.url_id, u.url, convert_from(p.html_compressed, 'UTF8') AS html
-                    FROM pages p
-                    JOIN urls u ON u.id = p.url_id
-                    WHERE u.url = ANY($1::text[]) AND p.html_compressed IS NOT NULL
-                    """,
-                    urls,
-                )
-            else:
-                rows = await conn.fetch(
-                    """
-                    SELECT p.url_id, u.url, convert_from(p.html_compressed, 'UTF8') AS html
-                    FROM pages p
-                    JOIN urls u ON u.id = p.url_id
-                    WHERE p.html_compressed IS NOT NULL
-                    """
-                )
-        return [(int(row["url_id"]), str(row["url"]), str(row["html"])) for row in rows]
+            for table in CRAWL_TABLES:
+                value = await conn.fetchval(f"SELECT COUNT(*) FROM {table}")
+                counts[table] = int(value or 0)
+        return counts
 
-    async def embedding_url_ids(self, *, model: str) -> set[int]:
+    async def pages_relation_bytes(self) -> int:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT url_id FROM page_embeddings WHERE model = $1",
-                model,
+            value = await conn.fetchval(
+                "SELECT COALESCE(pg_total_relation_size('pages'::regclass), 0)"
             )
-        return {int(row["url_id"]) for row in rows}
+        return int(value or 0)
 
-    async def store_embedding(
-        self,
-        url_id: int,
-        embedding: list[float],
-        *,
-        model: str,
-        text_length: int,
-    ) -> None:
+    async def html_storage_stats(self) -> dict[str, int]:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
-            await conn.execute(
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM pages WHERE html_compressed IS NOT NULL"
+            )
+            legacy = await conn.fetchval(
                 """
-                INSERT INTO page_embeddings (url_id, embedding_json, model, text_length)
-                VALUES ($1, $2::jsonb, $3, $4)
-                ON CONFLICT (url_id) DO UPDATE
-                SET embedding_json = EXCLUDED.embedding_json,
-                    model = EXCLUDED.model,
-                    text_length = EXCLUDED.text_length,
-                    created_at = CURRENT_TIMESTAMP
-                """,
-                url_id,
-                json.dumps(embedding),
-                model,
-                text_length,
+                SELECT COUNT(*) FROM pages
+                WHERE html_compressed IS NOT NULL
+                  AND (length(html_compressed) = 0 OR get_byte(html_compressed, 0) <> 1)
+                """
             )
+            with_html = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM pages p
+                JOIN page_metadata pm ON pm.url_id = p.url_id
+                WHERE p.html_compressed IS NOT NULL
+                """
+            )
+            missing_hash = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM pages p
+                WHERE p.html_compressed IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM content c
+                    WHERE c.url_id = p.url_id AND c.content_hash_sha256 IS NOT NULL
+                  )
+                """
+            )
+        return {
+            "pages_with_html": int(total or 0),
+            "pages_legacy_uncompressed": int(legacy or 0),
+            "pages_with_metadata_and_html": int(with_html or 0),
+            "pages_with_html_missing_hash": int(missing_hash or 0),
+        }
 
-    async def persist_comparison_session(
-        self,
-        *,
-        baseline_label: str,
-        candidate_label: str,
-        rows: list[dict[str, object]],
-    ) -> int:
+    async def truncate_crawl_tables(self) -> None:
         await self.connect()
         assert self.pool is not None
+        table_list = ", ".join(CRAWL_TABLES)
         async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                session_id = await conn.fetchval(
+            await conn.execute(f"TRUNCATE TABLE {table_list} RESTART IDENTITY CASCADE")
+
+    async def drop_crawl_database(self, *, maintenance_dsn: str | None = None) -> None:
+        db_name = database_name_from_dsn(self.dsn)
+        if maintenance_dsn is None:
+            parsed = urlparse(self.dsn)
+            maintenance_dsn = (
+                f"{parsed.scheme}://{parsed.netloc}/postgres"
+                if parsed.scheme
+                else self.dsn.rsplit("/", 1)[0] + "/postgres"
+            )
+        admin = await asyncpg.connect(maintenance_dsn)
+        try:
+            await admin.execute(
+                """
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname = $1 AND pid <> pg_backend_pid()
+                """,
+                db_name,
+            )
+            await admin.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+        finally:
+            await admin.close()
+        await self.close()
+
+    async def compact_html_storage(
+        self,
+        *,
+        batch_size: int = 500,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        await self.connect()
+        assert self.pool is not None
+        bytes_before = await self.pages_relation_bytes()
+        updated = 0
+        skipped = 0
+        async with self.pool.acquire() as conn:
+            while True:
+                rows = await conn.fetch(
                     """
-                    INSERT INTO crawl_comparison_sessions (baseline_label, candidate_label)
-                    VALUES ($1, $2)
-                    RETURNING id
+                    SELECT url_id, html_compressed
+                    FROM pages
+                    WHERE html_compressed IS NOT NULL
+                      AND (length(html_compressed) = 0 OR get_byte(html_compressed, 0) <> $1)
+                    ORDER BY url_id
+                    LIMIT $2
                     """,
-                    baseline_label,
-                    candidate_label,
+                    1,
+                    batch_size,
                 )
-                batch = [
-                    (
-                        session_id,
-                        row["path"],
-                        row.get("baseline_url"),
-                        row.get("candidate_url"),
-                        row.get("exists_on_baseline", False),
-                        row.get("exists_on_candidate", False),
-                        row.get("baseline_title"),
-                        row.get("candidate_title"),
-                        row.get("baseline_h1"),
-                        row.get("candidate_h1"),
-                        row.get("baseline_meta_description"),
-                        row.get("candidate_meta_description"),
-                        row.get("baseline_word_count"),
-                        row.get("candidate_word_count"),
-                        row.get("is_moved_content", False),
-                        row.get("moved_from_path"),
-                        row.get("moved_to_path"),
-                        row.get("redirect_chain"),
-                        json.dumps(row.get("baseline_schema_types", [])),
-                        json.dumps(row.get("candidate_schema_types", [])),
-                        json.dumps(row.get("links_added", [])),
-                        json.dumps(row.get("links_removed", [])),
+                if not rows:
+                    break
+                for row in rows:
+                    raw = bytes(row["html_compressed"])
+                    if is_compressed(raw):
+                        skipped += 1
+                        continue
+                    text = decompress_html(raw)
+                    compressed = compress_html(text)
+                    if dry_run:
+                        updated += 1
+                        continue
+                    await conn.execute(
+                        "UPDATE pages SET html_compressed = $2 WHERE url_id = $1",
+                        int(row["url_id"]),
+                        compressed,
                     )
-                    for row in rows
-                ]
-                if batch:
-                    await conn.executemany(
+                    updated += 1
+        bytes_after = bytes_before if dry_run else await self.pages_relation_bytes()
+        return {
+            "rows_updated": updated,
+            "rows_skipped_already_compressed": skipped,
+            "pages_bytes_before": bytes_before,
+            "pages_bytes_after": bytes_after,
+        }
+
+    async def backfill_content_hashes(
+        self,
+        *,
+        batch_size: int = 500,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        await self.connect()
+        assert self.pool is not None
+        updated = 0
+        async with self.pool.acquire() as conn:
+            while True:
+                rows = await conn.fetch(
+                    """
+                    SELECT p.url_id, p.html_compressed
+                    FROM pages p
+                    WHERE p.html_compressed IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM content c
+                        WHERE c.url_id = p.url_id AND c.content_hash_sha256 IS NOT NULL
+                      )
+                    ORDER BY p.url_id
+                    LIMIT $1
+                    """,
+                    batch_size,
+                )
+                if not rows:
+                    break
+                for row in rows:
+                    html = decompress_html(bytes(row["html_compressed"]))
+                    sha = sha256_hash(html)
+                    sim = simhash64(html)
+                    if dry_run:
+                        updated += 1
+                        continue
+                    await conn.execute(
                         """
-                        INSERT INTO crawl_comparison_urls (
-                            session_id, path, baseline_url, candidate_url,
-                            exists_on_baseline, exists_on_candidate,
-                            baseline_title, candidate_title,
-                            baseline_h1, candidate_h1,
-                            baseline_meta_description, candidate_meta_description,
-                            baseline_word_count, candidate_word_count,
-                            is_moved_content, moved_from_path, moved_to_path, redirect_chain,
-                            baseline_schema_types, candidate_schema_types,
-                            links_added, links_removed
-                        )
-                        VALUES (
-                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                            $15, $16, $17, $18, $19::jsonb, $20::jsonb, $21::jsonb, $22::jsonb
-                        )
-                        ON CONFLICT (session_id, path) DO UPDATE
-                        SET baseline_url = EXCLUDED.baseline_url,
-                            candidate_url = EXCLUDED.candidate_url,
-                            exists_on_baseline = EXCLUDED.exists_on_baseline,
-                            exists_on_candidate = EXCLUDED.exists_on_candidate,
-                            baseline_title = EXCLUDED.baseline_title,
-                            candidate_title = EXCLUDED.candidate_title,
-                            baseline_h1 = EXCLUDED.baseline_h1,
-                            candidate_h1 = EXCLUDED.candidate_h1,
-                            baseline_meta_description = EXCLUDED.baseline_meta_description,
-                            candidate_meta_description = EXCLUDED.candidate_meta_description,
-                            baseline_word_count = EXCLUDED.baseline_word_count,
-                            candidate_word_count = EXCLUDED.candidate_word_count,
-                            is_moved_content = EXCLUDED.is_moved_content,
-                            moved_from_path = EXCLUDED.moved_from_path,
-                            moved_to_path = EXCLUDED.moved_to_path,
-                            redirect_chain = EXCLUDED.redirect_chain,
-                            baseline_schema_types = EXCLUDED.baseline_schema_types,
-                            candidate_schema_types = EXCLUDED.candidate_schema_types,
-                            links_added = EXCLUDED.links_added,
-                            links_removed = EXCLUDED.links_removed
+                        INSERT INTO content (url_id, content_hash_sha256, content_hash_simhash, content_length)
+                        VALUES ($1, $2, $3, $4)
+                        ON CONFLICT (url_id) DO UPDATE
+                        SET content_hash_sha256 = EXCLUDED.content_hash_sha256,
+                            content_hash_simhash = EXCLUDED.content_hash_simhash,
+                            content_length = COALESCE(content.content_length, EXCLUDED.content_length)
                         """,
-                        batch,
+                        int(row["url_id"]),
+                        sha,
+                        sim,
+                        len(html),
                     )
-                return int(session_id)
+                    updated += 1
+        return {"rows_updated": updated}
+
+    async def purge_stored_html(
+        self,
+        *,
+        drop_headers: bool = False,
+        vacuum: bool = False,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        await self.connect()
+        assert self.pool is not None
+        bytes_before = await self.pages_relation_bytes()
+        async with self.pool.acquire() as conn:
+            with_html = await conn.fetchval(
+                "SELECT COUNT(*) FROM pages WHERE html_compressed IS NOT NULL"
+            )
+            if dry_run:
+                bytes_after = bytes_before
+            else:
+                if drop_headers:
+                    await conn.execute(
+                        """
+                        UPDATE pages
+                        SET html_compressed = NULL, headers_json = NULL
+                        WHERE html_compressed IS NOT NULL OR headers_json IS NOT NULL
+                        """
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE pages SET html_compressed = NULL WHERE html_compressed IS NOT NULL"
+                    )
+                if vacuum:
+                    await conn.execute("VACUUM ANALYZE pages")
+                bytes_after = await self.pages_relation_bytes()
+        return {
+            "pages_cleared": int(with_html or 0),
+            "pages_bytes_before": bytes_before,
+            "pages_bytes_after": bytes_after,
+        }

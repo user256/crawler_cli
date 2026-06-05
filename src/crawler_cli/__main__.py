@@ -14,7 +14,7 @@ from .config import CrawlConfig
 from .csv_urls import load_urls_from_csv
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine
-from .persistence import AsyncpgStore
+from .persistence import AsyncpgStore, database_name_from_dsn
 from .reports import CrawlReports
 
 
@@ -64,6 +64,43 @@ def _collect_seed_urls(args: argparse.Namespace) -> list[str]:
     return list(dict.fromkeys(seeds))
 
 
+def _store_from_args(args: argparse.Namespace) -> AsyncpgStore:
+    compress_html = not getattr(args, "no_html_compression", False)
+    store_html = not getattr(args, "no_store_html", False)
+    return AsyncpgStore(
+        _build_dsn(args),
+        compress_html=compress_html,
+        store_html=store_html,
+    )
+
+
+def _add_confirm_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--confirm",
+        metavar="DATABASE",
+        help="Must match the database name in --postgres-dsn before mutating data",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print planned actions without writing",
+    )
+
+
+def _require_confirm(args: argparse.Namespace, dsn: str) -> int | None:
+    db_name = database_name_from_dsn(dsn)
+    if args.dry_run:
+        return None
+    if getattr(args, "confirm", None) != db_name:
+        print(
+            f"Refusing to modify database {db_name!r} without "
+            f"--confirm {db_name}",
+            file=sys.stderr,
+        )
+        return 2
+    return None
+
+
 def _build_config(args: argparse.Namespace) -> CrawlConfig:
     backend: str = "playwright" if args.js else (args.http_backend or "aiohttp")
     headers: dict[str, str] = {}
@@ -101,6 +138,12 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         auth=_build_auth(args),
         csv_urls=csv_urls,
         csv_seed_mode=bool(getattr(args, "csv_seed", False)),
+        cms_detection=getattr(args, "cms_detection", False),
+        analytics_detection=getattr(args, "analytics_detection", False),
+        analytics_expected_ids=getattr(args, "analytics_expected_id", []) or [],
+        enable_content_hashing=getattr(args, "content_hashing", False),
+        compress_html=not getattr(args, "no_html_compression", False),
+        store_html=not getattr(args, "no_store_html", False),
     )
 
 
@@ -164,6 +207,14 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--archive-org-check", action="store_true", help="Seed from archive.org + run audit")
     parser.add_argument("--skip-sitemaps", action="store_true", help="Skip sitemap discovery")
+    parser.add_argument("--cms-detection", action="store_true", help="Enable CMS platform detection")
+    parser.add_argument("--analytics-detection", action="store_true", help="Enable analytics / tag manager / pixel detection")
+    parser.add_argument(
+        "--analytics-expected-id",
+        action="append",
+        default=[],
+        help="Expected analytics identifier (e.g. GTM-ABC123, G-XYZ). Repeatable.",
+    )
     parser.add_argument("--output-dir", type=Path, help="Directory for CSV/JSON output")
     parser.add_argument("--save-to", help="Path to save crawl JSON results")
     parser.add_argument("--csv-file", help="CSV file containing URLs to crawl")
@@ -172,6 +223,21 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "--csv-seed",
         action="store_true",
         help="Treat CSV URLs as seeds for an open crawl (follow links/sitemaps)",
+    )
+    parser.add_argument(
+        "--content-hashing",
+        action="store_true",
+        help="Store SHA256 + SimHash fingerprints of normalized page text in content table",
+    )
+    parser.add_argument(
+        "--no-html-compression",
+        action="store_true",
+        help="Store page HTML as raw UTF-8 bytes instead of gzip",
+    )
+    parser.add_argument(
+        "--no-store-html",
+        action="store_true",
+        help="Skip persisting raw HTML (structured extraction + hashes still stored)",
     )
     auth = parser.add_argument_group("HTTP authentication")
     auth.add_argument("--auth-type", choices=["basic", "digest", "bearer"], help="Authentication type")
@@ -196,7 +262,7 @@ async def _run_crawl(args: argparse.Namespace) -> int:
     config.default_open_crawl_limit = args.max_pages
     config.max_pages = args.max_pages
 
-    store = AsyncpgStore(dsn)
+    store = _store_from_args(args)
     await store.initialize()
     engine = CrawlEngine(config, store=store)
 
@@ -232,8 +298,7 @@ async def _run_embeddings(args: argparse.Namespace) -> int:
         print("Error: set --api-key or OPENAI_API_KEY", file=sys.stderr)
         return 2
 
-    dsn = _build_dsn(args)
-    store = AsyncpgStore(dsn)
+    store = _store_from_args(args)
     await store.initialize()
 
     try:
@@ -286,6 +351,8 @@ async def _run_compare(args: argparse.Namespace) -> int:
                     content_hash_sha256=item.get("content_hash_sha256"),
                     content_hash_simhash=item.get("content_hash_simhash"),
                     discovered_links=[],
+                    detected_cms=None,
+                    detected_analytics=None,
                 )
             )
         return results
@@ -301,8 +368,7 @@ async def _run_compare(args: argparse.Namespace) -> int:
         print(f"Wrote comparison rows to {args.output}")
 
     if args.persist:
-        dsn = _build_dsn(args)
-        store = AsyncpgStore(dsn)
+        store = _store_from_args(args)
         await store.initialize()
         try:
             session_id = await store.persist_comparison_session(
@@ -330,6 +396,101 @@ async def _run_compare(args: argparse.Namespace) -> int:
                 indent=2,
             )
         )
+    return 0
+
+
+async def _run_compact_html(args: argparse.Namespace) -> int:
+    dsn = _build_dsn(args)
+    store = _store_from_args(args)
+    await store.initialize()
+    try:
+        stats = await store.html_storage_stats()
+        print(f"Pages with HTML: {stats['pages_with_html']}")
+        print(f"Legacy uncompressed rows: {stats['pages_legacy_uncompressed']}")
+        if (code := _require_confirm(args, dsn)) is not None:
+            return code
+        result = await store.compact_html_storage(
+            batch_size=args.batch_size,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(result, indent=2))
+    finally:
+        await store.close()
+    return 0
+
+
+async def _run_delete_crawl(args: argparse.Namespace) -> int:
+    dsn = _build_dsn(args)
+    store = _store_from_args(args)
+    await store.initialize()
+    db_name = database_name_from_dsn(dsn)
+    try:
+        counts = await store.table_row_counts()
+        queued, pending, done = await store.frontier_stats()
+        print(f"Database: {db_name}")
+        print(f"Mode: {args.mode}")
+        for table in ("pages", "urls", "frontier", "content", "page_analytics_hits"):
+            if table in counts:
+                print(f"  {table}: {counts[table]:,}")
+        print(f"  frontier: {done:,} done, {pending:,} pending, {queued:,} queued")
+        if args.dry_run:
+            print("Dry run — no changes made.")
+            return 0
+        if getattr(args, "confirm", None) != db_name:
+            print(f"Re-run with --confirm {db_name} to proceed.", file=sys.stderr)
+            return 2
+        if args.mode == "drop-database":
+            await store.drop_crawl_database(
+                maintenance_dsn=args.maintenance_dsn or None,
+            )
+            print(f"Dropped database {db_name}")
+        else:
+            await store.truncate_crawl_tables()
+            print(f"Truncated crawler_cli tables in {db_name}")
+    finally:
+        if store.pool is not None:
+            await store.close()
+    return 0
+
+
+async def _run_compact_crawl(args: argparse.Namespace) -> int:
+    dsn = _build_dsn(args)
+    store = _store_from_args(args)
+    await store.initialize()
+    try:
+        stats = await store.html_storage_stats()
+        print(json.dumps(stats, indent=2))
+        missing = stats["pages_with_html_missing_hash"]
+        if args.require_hashes and missing > 0 and not args.backfill_hashes:
+            print(
+                f"Refusing: {missing} pages have HTML but no content_hash_sha256. "
+                "Re-crawl with --content-hashing or pass --backfill-hashes.",
+                file=sys.stderr,
+            )
+            return 2
+        if (code := _require_confirm(args, dsn)) is not None:
+            return code
+        if args.backfill_hashes:
+            backfill = await store.backfill_content_hashes(
+                batch_size=args.batch_size,
+                dry_run=args.dry_run,
+            )
+            print(f"Hash backfill: {json.dumps(backfill)}")
+            stats = await store.html_storage_stats()
+            missing = stats["pages_with_html_missing_hash"]
+            if args.require_hashes and missing > 0:
+                print(f"Still missing hashes on {missing} pages.", file=sys.stderr)
+                return 2
+        result = await store.purge_stored_html(
+            drop_headers=args.drop_headers,
+            vacuum=args.vacuum,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(result, indent=2))
+        if args.dry_run:
+            print("Dry run — HTML not purged.")
+    finally:
+        await store.close()
     return 0
 
 
@@ -362,13 +523,74 @@ def _build_parser() -> argparse.ArgumentParser:
     cmp_parser.add_argument("--persist", action="store_true", help="Persist comparison to PostgreSQL")
     _add_postgres_args(cmp_parser)
 
+    compact_html_parser = subparsers.add_parser(
+        "compact-html",
+        help="Gzip-compress legacy uncompressed HTML in pages.html_compressed",
+    )
+    compact_html_parser.add_argument("--batch-size", type=int, default=500)
+    _add_confirm_args(compact_html_parser)
+    _add_postgres_args(compact_html_parser)
+
+    delete_parser = subparsers.add_parser(
+        "delete-crawl",
+        help="Truncate all crawler_cli tables or drop the crawl database",
+    )
+    delete_parser.add_argument(
+        "--mode",
+        choices=("truncate", "drop-database"),
+        default="truncate",
+        help="truncate: empty tables in place; drop-database: DROP DATABASE",
+    )
+    delete_parser.add_argument(
+        "--maintenance-dsn",
+        help="DSN for postgres DB used when --mode drop-database (default: same host, db postgres)",
+    )
+    _add_confirm_args(delete_parser)
+    _add_postgres_args(delete_parser)
+
+    compact_parser = subparsers.add_parser(
+        "compact-crawl",
+        help="Drop stored HTML while keeping audit metadata and content hashes",
+    )
+    compact_parser.add_argument("--batch-size", type=int, default=500)
+    compact_parser.add_argument(
+        "--require-hashes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Refuse to purge HTML unless content_hash_sha256 exists (default: on)",
+    )
+    compact_parser.add_argument(
+        "--backfill-hashes",
+        action="store_true",
+        help="Compute missing hashes from stored HTML before purging",
+    )
+    compact_parser.add_argument(
+        "--drop-headers",
+        action="store_true",
+        help="Also clear pages.headers_json",
+    )
+    compact_parser.add_argument(
+        "--vacuum",
+        action="store_true",
+        help="Run VACUUM ANALYZE pages after purge (can be slow)",
+    )
+    _add_confirm_args(compact_parser)
+    _add_postgres_args(compact_parser)
+
     return parser
 
 
 def _normalize_argv(argv: list[str]) -> list[str]:
     if not argv:
         return ["crawl"]
-    if argv[0] in {"crawl", "generate-embeddings", "compare"}:
+    if argv[0] in {
+        "crawl",
+        "generate-embeddings",
+        "compare",
+        "compact-html",
+        "delete-crawl",
+        "compact-crawl",
+    }:
         return argv
     if "://" in argv[0]:
         return ["crawl", *argv]
@@ -383,6 +605,12 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_embeddings(args)
     if command == "compare":
         return await _run_compare(args)
+    if command == "compact-html":
+        return await _run_compact_html(args)
+    if command == "delete-crawl":
+        return await _run_delete_crawl(args)
+    if command == "compact-crawl":
+        return await _run_compact_crawl(args)
     print(f"Unknown command: {command}", file=sys.stderr)
     return 2
 

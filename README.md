@@ -32,6 +32,12 @@
   - WordPress, Shopify, Drupal, Joomla, Squarespace, Wix
   - Pattern-based detection via headers, meta tags, and content
   - Configurable detection with confidence scoring
+- Detect analytics, tag managers, marketing pixels & A/B-test platforms:
+  - GTM, GA4, Universal Analytics, Meta Pixel, Adobe Launch/Analytics, Hotjar, Microsoft Clarity, and 20+ more
+  - Identifier extraction (container IDs, measurement IDs) for audit reporting
+  - Per-page hit list persisted to PostgreSQL for SQL-driven "missing tag" reports
+  - `--analytics-detection` to enable; `--analytics-expected-id` to flag missing primary tags
+  - **Known limitation**: JS-injected tags (e.g. GTM-loaded pixels) are only visible with the Playwright (`--js`) backend
 - Persist normalized crawl data into PostgreSQL with `asyncpg`
 
 ## Install
@@ -101,9 +107,22 @@ crawler-cli https://www.example.com \
   --memory-high-watermark 85 \
   --archive-org-check --custom-ua "...Googlebot..."
 
+# Crawl with analytics detection and expected-ID audit
+crawler-cli https://www.example.com \
+  --analytics-detection \
+  --analytics-expected-id GTM-PROD123 \
+  --analytics-expected-id G-PROD456 \
+  --content-hashing \
+  --js
+
+# Skip storing raw HTML (structured fields + optional hashes only)
+crawler-cli https://www.example.com --no-store-html --content-hashing
+
 # Crawl with CSV ingestion and HTTP Auth
 crawler-cli --csv-file urls.csv --auth-type basic --auth-username admin --auth-password secret
 ```
+
+Page HTML is **gzip-compressed by default** in `pages.html_compressed`. Use `--no-html-compression` only for debugging. Legacy uncompressed rows can be migrated with `compact-html`.
 
 ### 2. Generate Embeddings
 
@@ -120,6 +139,24 @@ Run a deep comparison between two saved crawl JSON files to identify missing URL
 ```bash
 crawler-cli compare baseline.json candidate.json --compare-links --persist
 ```
+
+### 4. Storage lifecycle
+
+```bash
+# Gzip legacy uncompressed HTML already in the database
+crawler-cli compact-html --postgres-dsn ... --dry-run
+crawler-cli compact-html --postgres-dsn ... --confirm crawler_db_example
+
+# Wipe a crawl (truncate tables in place, or drop the whole database)
+crawler-cli delete-crawl --postgres-dsn ... --dry-run
+crawler-cli delete-crawl --postgres-dsn ... --confirm crawler_db_example
+crawler-cli delete-crawl --postgres-dsn ... --mode drop-database --confirm crawler_db_example
+
+# Drop stored HTML but keep URLs, metadata, analytics hits, and content hashes
+crawler-cli compact-crawl --postgres-dsn ... --backfill-hashes --confirm crawler_db_example
+```
+
+Run `generate-embeddings` **before** `compact-crawl` if you need vectors — compact removes HTML required for embedding generation.
 
 Connection to PostgreSQL can be configured via environment variables (`CRAWLER_CLI_POSTGRES_*` or `PostgreSQLCrawler_POSTGRES_*`) or CLI flags (`--postgres-dsn`, `--postgres-host`, etc.). CLI flags override env vars.
 
