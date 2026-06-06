@@ -101,7 +101,53 @@ def _require_confirm(args: argparse.Namespace, dsn: str) -> int | None:
     return None
 
 
+def _validate_obscura_args(args: argparse.Namespace) -> None:
+    """Validate Obscura-related CLI arguments and raise SystemExit on errors."""
+    has_obscura = getattr(args, "obscura", False)
+    has_obscura_port = hasattr(args, "obscura_port")
+    has_obscura_host = hasattr(args, "obscura_host")
+    has_obscura_binary = hasattr(args, "obscura_binary")
+    has_obscura_proxy = hasattr(args, "obscura_proxy")
+    has_obscura_workers = hasattr(args, "obscura_workers")
+    has_obscura_stealth = getattr(args, "obscura_stealth", False)
+    has_no_obscura_stealth = getattr(args, "no_obscura_stealth", False)
+    has_obscura_unmanaged = getattr(args, "obscura_unmanaged", False)
+
+    any_obscura_flag = (
+        has_obscura_port
+        or has_obscura_host
+        or has_obscura_binary
+        or has_obscura_proxy
+        or has_obscura_workers
+        or has_obscura_stealth
+        or has_no_obscura_stealth
+        or has_obscura_unmanaged
+    )
+
+    if not has_obscura and any_obscura_flag:
+        print("Error: --obscura-* flags require --obscura", file=sys.stderr)
+        sys.exit(2)
+
+    if has_obscura_stealth and has_no_obscura_stealth:
+        print("Error: --obscura-stealth and --no-obscura-stealth are mutually exclusive", file=sys.stderr)
+        sys.exit(2)
+
+    if has_obscura and getattr(args, "playwright_cdp_endpoint", None):
+        print("Error: --playwright-cdp-endpoint and --obscura are mutually exclusive", file=sys.stderr)
+        sys.exit(2)
+
+
+def _resolve_obscura_stealth(args: argparse.Namespace) -> bool | None:
+    """Resolve explicit stealth flags into tri-state."""
+    if getattr(args, "obscura_stealth", False):
+        return True
+    if getattr(args, "no_obscura_stealth", False):
+        return False
+    return None
+
+
 def _build_config(args: argparse.Namespace) -> CrawlConfig:
+    _validate_obscura_args(args)
     backend: str = "playwright" if args.js else (args.http_backend or "aiohttp")
     headers: dict[str, str] = {}
     if args.custom_ua:
@@ -117,6 +163,21 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     if getattr(args, "csv_file", None):
         csv_urls = load_urls_from_csv(args.csv_file, column=args.csv_column)
 
+    obscura_enabled = getattr(args, "obscura", False)
+    obscura_stealth = _resolve_obscura_stealth(args)
+
+    if obscura_enabled:
+        backend = "playwright"
+        args.js = True
+        analytics = getattr(args, "analytics_detection", False)
+        if analytics and obscura_stealth is None:
+            print(
+                "Error: --obscura --analytics-detection requires an explicit stealth choice "
+                "(--obscura-stealth or --no-obscura-stealth)",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
     return CrawlConfig(
         backend=backend,  # type: ignore[arg-type]
         user_agent=args.custom_ua or "crawler_cli/0.1",
@@ -125,6 +186,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         max_pages=args.max_pages,
         timeout_seconds=args.timeout,
         playwright_network_idle_timeout_seconds=args.playwright_network_idle_timeout,
+        playwright_cdp_endpoint=getattr(args, "playwright_cdp_endpoint", "") or "",
         memory_high_watermark_percent=args.memory_high_watermark,
         memory_recovery_watermark_percent=args.memory_recovery_watermark,
         respect_robots_txt=not args.ignore_robots,
@@ -144,6 +206,14 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         enable_content_hashing=getattr(args, "content_hashing", False),
         compress_html=not getattr(args, "no_html_compression", False),
         store_html=not getattr(args, "no_store_html", False),
+        obscura_enabled=obscura_enabled,
+        obscura_binary=getattr(args, "obscura_binary", "obscura"),
+        obscura_host=getattr(args, "obscura_host", "127.0.0.1"),
+        obscura_port=getattr(args, "obscura_port", 9222),
+        obscura_proxy=getattr(args, "obscura_proxy", ""),
+        obscura_workers=getattr(args, "obscura_workers", 1),
+        obscura_managed=not getattr(args, "obscura_unmanaged", False),
+        obscura_stealth=obscura_stealth,
     )
 
 
@@ -184,6 +254,10 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         help="Additional Playwright network-idle settle timeout in seconds",
     )
     parser.add_argument(
+        "--playwright-cdp-endpoint",
+        help="Connect Playwright to an existing CDP browser such as Obscura",
+    )
+    parser.add_argument(
         "--memory-high-watermark",
         type=float,
         default=85.0,
@@ -214,6 +288,31 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         help="Expected analytics identifier (e.g. GTM-ABC123, G-XYZ). Repeatable.",
+    )
+    obscura = parser.add_argument_group("Obscura browser backend")
+    obscura.add_argument("--obscura", action="store_true", help="Use Obscura as the JS backend (implies --js)")
+    obscura.add_argument("--obscura-binary", default=argparse.SUPPRESS, help="Path to the obscura binary")
+    obscura.add_argument("--obscura-host", default=argparse.SUPPRESS, help="Obscura host")
+    obscura.add_argument("--obscura-port", type=int, default=argparse.SUPPRESS, help="Obscura port")
+    obscura.add_argument("--obscura-proxy", default=argparse.SUPPRESS, help="Proxy URL for Obscura")
+    obscura.add_argument("--obscura-workers", type=int, default=argparse.SUPPRESS, help="Obscura worker count")
+    obscura.add_argument(
+        "--obscura-stealth",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Explicitly enable Obscura stealth",
+    )
+    obscura.add_argument(
+        "--no-obscura-stealth",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Explicitly disable Obscura stealth",
+    )
+    obscura.add_argument(
+        "--obscura-unmanaged",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Connect to an already-running Obscura instance; do not spawn/kill it",
     )
     parser.add_argument("--output-dir", type=Path, help="Directory for CSV/JSON output")
     parser.add_argument("--save-to", help="Path to save crawl JSON results")
@@ -338,6 +437,17 @@ async def _run_compare(args: argparse.Namespace) -> int:
     def _load_results(payload: dict) -> list[CrawlResult]:
         results = []
         for item in payload.get("results", []):
+            browser_runtime = None
+            br = item.get("browser_runtime")
+            if br:
+                from .models import BrowserRuntime
+
+                browser_runtime = BrowserRuntime(
+                    provider=br.get("provider", "chromium"),
+                    cdp_endpoint=br.get("cdp_endpoint"),
+                    managed=br.get("managed"),
+                    stealth=br.get("stealth"),
+                )
             results.append(
                 CrawlResult(
                     requested_url=item["requested_url"],
@@ -353,6 +463,7 @@ async def _run_compare(args: argparse.Namespace) -> int:
                     discovered_links=[],
                     detected_cms=None,
                     detected_analytics=None,
+                    browser_runtime=browser_runtime,
                 )
             )
         return results

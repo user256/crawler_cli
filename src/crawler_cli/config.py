@@ -21,6 +21,7 @@ class CrawlConfig:
     verify_ssl: bool = True
     max_response_bytes: int = 5_000_000
     playwright_network_idle_timeout_seconds: float = 5.0
+    playwright_cdp_endpoint: str = ""
     memory_high_watermark_percent: float = 85.0
     memory_recovery_watermark_percent: float = 70.0
     respect_robots_txt: bool = True
@@ -60,6 +61,14 @@ class CrawlConfig:
     auth: AuthConfig | None = None
     csv_urls: list[str] = field(default_factory=list)
     csv_seed_mode: bool = False
+    obscura_enabled: bool = False
+    obscura_binary: str = "obscura"
+    obscura_host: str = "127.0.0.1"
+    obscura_port: int = 9222
+    obscura_proxy: str = ""
+    obscura_workers: int = 1
+    obscura_managed: bool = True
+    obscura_stealth: bool | None = None
 
     @staticmethod
     def _url_path(url: str) -> str:

@@ -18,6 +18,7 @@ async def fetch_page(
     backend: BackendName = "aiohttp",
     verify_ssl: bool = True,
     max_response_bytes: int = 5_000_000,
+    playwright_cdp_endpoint: str = "",
 ) -> FetchResponse:
     """Fetch a single page without invoking CrawlEngine or persistence."""
     config = CrawlConfig(
@@ -27,6 +28,7 @@ async def fetch_page(
         follow_redirects=follow_redirects,
         verify_ssl=verify_ssl,
         max_response_bytes=max_response_bytes,
+        playwright_cdp_endpoint=playwright_cdp_endpoint,
         request_headers=dict(headers or {}),
     )
     fetch_backend = build_backend(config)

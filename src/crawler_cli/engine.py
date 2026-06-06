@@ -13,7 +13,7 @@ from .config import CrawlConfig
 from .detection import CMSDetector, AnalyticsDetector
 from .extract import extract_links, extract_page_data
 from .hashing import sha256_hash, simhash64
-from .models import CrawlJobResult, CrawlResult, SitemapDocument
+from .models import BrowserRuntime, CrawlJobResult, CrawlResult, SitemapDocument
 from .persistence import AsyncpgStore
 from .robots import RobotsPolicyCache
 from .sitemap import SitemapParser, discover_sitemap_paths
@@ -151,6 +151,7 @@ class CrawlEngine:
                     if self._analytics_detector is not None:
                         detected_analytics = self._analytics_detector.detect(response)
                 
+                browser_runtime = self._build_browser_runtime()
                 result = CrawlResult(
                     requested_url=response.requested_url,
                     final_url=response.url,
@@ -166,6 +167,7 @@ class CrawlEngine:
                     allowed_by_robots=True if self.config.respect_robots_txt else None,
                     detected_cms=detected_cms,
                     detected_analytics=detected_analytics,
+                    browser_runtime=browser_runtime,
                 )
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)
@@ -234,6 +236,7 @@ class CrawlEngine:
 
     async def crawl_list(self, urls: Iterable[str], *, save_to: str | None = None) -> CrawlJobResult:
         seed_urls = list(urls)
+        self._log_browser_runtime()
         results = await self.crawl_many(seed_urls, save_to=None)
         job = CrawlJobResult(mode="list", seed_urls=seed_urls, results=results, saved_to=save_to)
         if save_to:
@@ -352,6 +355,19 @@ class CrawlEngine:
                     href_url_id,
                 )
 
+    def _log_browser_runtime(self) -> None:
+        runtime = self._build_browser_runtime()
+        if runtime is None:
+            print("JS backend: none (HTTP backend)")
+            return
+        print(f"JS backend: {runtime.provider}")
+        if runtime.cdp_endpoint:
+            print(f"CDP endpoint: {runtime.cdp_endpoint}")
+        if runtime.provider == "obscura":
+            stealth = "unknown" if runtime.stealth is None else ("enabled" if runtime.stealth else "disabled")
+            print(f"Stealth: {stealth}")
+            print(f"Managed process: {'yes' if runtime.managed else 'no'}")
+
     async def crawl_open(
         self,
         seed_urls: Iterable[str],
@@ -385,6 +401,7 @@ class CrawlEngine:
             return job
         limit = max_urls if max_urls is not None else self.config.default_open_crawl_limit
         results: list[CrawlResult] = []
+        self._log_browser_runtime()
         await self.store.save_metadata(
             "crawl_open",
             {
@@ -602,8 +619,39 @@ class CrawlEngine:
             self._effective_worker_limit += 1
         return self._effective_worker_limit
 
+    def _build_browser_runtime(self) -> BrowserRuntime | None:
+        if self.config.backend != "playwright":
+            return None
+        if self.config.obscura_enabled:
+            effective_stealth = self.config.obscura_stealth
+            if (
+                effective_stealth is None
+                and self.config.obscura_managed
+                and not self.config.analytics_detection
+            ):
+                effective_stealth = True
+            return BrowserRuntime(
+                provider="obscura",
+                cdp_endpoint=f"http://{self.config.obscura_host}:{self.config.obscura_port}",
+                managed=self.config.obscura_managed,
+                stealth=effective_stealth,
+            )
+        if self.config.playwright_cdp_endpoint:
+            return BrowserRuntime(
+                provider="cdp",
+                cdp_endpoint=self.config.playwright_cdp_endpoint,
+                managed=None,
+                stealth=None,
+            )
+        return BrowserRuntime(
+            provider="chromium",
+            cdp_endpoint=None,
+            managed=None,
+            stealth=None,
+        )
+
     def _result_to_dict(self, result: CrawlResult) -> dict[str, object]:
-        return {
+        d: dict[str, object] = {
             "requested_url": result.requested_url,
             "final_url": result.final_url,
             "status": result.status,
@@ -665,6 +713,14 @@ class CrawlEngine:
                 "metadata": result.extracted.metadata,
             },
         }
+        if result.browser_runtime is not None:
+            d["browser_runtime"] = {
+                "provider": result.browser_runtime.provider,
+                "cdp_endpoint": result.browser_runtime.cdp_endpoint,
+                "managed": result.browser_runtime.managed,
+                "stealth": result.browser_runtime.stealth,
+            }
+        return d
 
     def _priority_score(self, url: str, depth: int) -> float:
         parsed = urlparse(url)

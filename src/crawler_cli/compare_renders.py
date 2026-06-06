@@ -56,6 +56,11 @@ async def compare_renders(
     js_config: CrawlConfig,
 ) -> RenderComparison:
     """Fetch the same URL with aiohttp and playwright backends and diff SEO signals."""
+    if js_config.obscura_enabled and js_config.obscura_stealth is not False:
+        # Stealth may affect the diff; warn but do not block.
+        print(
+            "[compare_renders] Warning: Obscura stealth may alter page behaviour and affect render comparison."
+        )
     nojs_engine = CrawlEngine(nojs_config)
     js_engine = CrawlEngine(js_config)
 

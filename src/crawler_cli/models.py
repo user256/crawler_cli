@@ -9,6 +9,14 @@ if TYPE_CHECKING:
 
 
 @dataclass(slots=True)
+class BrowserRuntime:
+    provider: Literal["chromium", "cdp", "obscura"]
+    cdp_endpoint: str | None = None
+    managed: bool | None = None
+    stealth: bool | None = None
+
+
+@dataclass(slots=True)
 class FetchResponse:
     url: str
     requested_url: str
@@ -78,6 +86,7 @@ class CrawlResult:
     persist_error: str | None = None
     detected_cms: "CMSDetectionResult | None" = None
     detected_analytics: "AnalyticsDetectionResult | None" = None
+    browser_runtime: BrowserRuntime | None = None
 
 
 @dataclass(slots=True)

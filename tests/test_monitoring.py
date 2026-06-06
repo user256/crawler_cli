@@ -35,6 +35,7 @@ async def test_fetch_page_uses_backend_and_closes_it(monkeypatch):
         assert config.user_agent == "GuardGeeseBot/1.0"
         assert config.timeout_seconds == 12.5
         assert config.follow_redirects is False
+        assert config.playwright_cdp_endpoint == "http://127.0.0.1:9222"
         assert config.request_headers == {"X-Monitor": "1"}
         return stub
 
@@ -46,6 +47,7 @@ async def test_fetch_page_uses_backend_and_closes_it(monkeypatch):
         headers={"X-Monitor": "1"},
         timeout_seconds=12.5,
         follow_redirects=False,
+        playwright_cdp_endpoint="http://127.0.0.1:9222",
     )
 
     assert result.status == 200

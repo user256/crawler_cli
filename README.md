@@ -8,6 +8,7 @@
   - `aiohttp`
   - `curl_cffi`
   - `playwright`
+  - existing CDP-compatible browsers via Playwright, such as Obscura
 - Crawl asynchronously with:
   - `asyncio`
   - `Semaphore`-based concurrency control
@@ -107,7 +108,21 @@ crawler-cli https://www.example.com \
   --memory-high-watermark 85 \
   --archive-org-check --custom-ua "...Googlebot..."
 
+# Crawl with Obscura (managed — starts/stops automatically)
+crawler-cli https://www.example.com --obscura
+
+# Crawl with Obscura exposed over CDP (unmanaged — connect to existing instance)
+crawler-cli https://www.example.com \
+  --obscura --obscura-unmanaged \
+  --obscura-host 127.0.0.1 --obscura-port 9222
+
+# Obscura with explicit stealth choice (stealth is on by default when managed)
+crawler-cli https://www.example.com --obscura --no-obscura-stealth
+
 # Crawl with analytics detection and expected-ID audit
+# Note: when using --obscura with --analytics-detection you must explicitly
+# choose --obscura-stealth or --no-obscura-stealth, because stealth blocks
+trackers and can produce false "missing tag" findings.
 crawler-cli https://www.example.com \
   --analytics-detection \
   --analytics-expected-id GTM-PROD123 \
@@ -286,6 +301,44 @@ engine = CrawlEngine(config)
 ```
 
 For long JS-enabled crawls, `max_requests_per_context` recycles Playwright contexts before they bloat, and the engine will temporarily reduce batch concurrency if system memory usage crosses `memory_high_watermark_percent`.
+
+## Obscura Browser Backend
+
+`crawler_cli` can use [Obscura](https://github.com/user256/obscura) as its JS rendering backend. Obscura runs as a stealth CDP server that is harder for anti-bot systems to detect.
+
+### Managed mode (default)
+
+Pass `--obscura` and `crawler_cli` will start `obscura serve` automatically, connect over CDP, and terminate the process when the crawl finishes:
+
+```bash
+crawler-cli https://www.example.com --obscura
+```
+
+Stealth is **enabled by default** in managed mode unless you explicitly disable it.
+
+### Unmanaged mode
+
+If you already have `obscura serve` running, pass `--obscura-unmanaged`:
+
+```bash
+crawler-cli https://www.example.com --obscura --obscura-unmanaged
+```
+
+In unmanaged mode, `crawler_cli` can only report the stealth state if you explicitly supplied `--obscura-stealth` or `--no-obscura-stealth`. Otherwise the connected server is treated as `stealth: unknown` in logs and saved crawl JSON.
+
+### Stealth policy
+
+| Situation | Effective stealth |
+|---|---|
+| `--obscura` alone | `enabled` |
+| `--obscura --obscura-stealth` | `enabled` (explicit) |
+| `--obscura --no-obscura-stealth` | `disabled` (explicit) |
+| `--obscura --obscura-unmanaged` | `unknown` unless you also choose an explicit stealth flag |
+| `--obscura --analytics-detection` | **Error** — requires explicit `--obscura-stealth` or `--no-obscura-stealth` |
+
+Passing both `--obscura-stealth` and `--no-obscura-stealth` is an error.
+
+Stealth blocks trackers and fingerprinting scripts. That is desirable for resilient crawling, but it can **invalidate analytics audits** because tags may be blocked before they fire. For measurement-focused runs, use `--no-obscura-stealth` or plain `--js` Playwright/Chromium instead.
 
 ## Extracted Data Shape
 

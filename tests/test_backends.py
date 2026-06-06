@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
 from crawler_cli.backends import PlaywrightBackend
@@ -75,6 +78,18 @@ class StubPlaywrightBackend(PlaywrightBackend):
         await self._create_context_locked()
 
 
+class EnsureStartedBackend(PlaywrightBackend):
+    def __init__(self, config: CrawlConfig) -> None:
+        super().__init__(config)
+        self.created_context = False
+
+    async def _create_context_locked(self) -> None:
+        self._context = object()
+        self._context_request_count = 0
+        self._context_recycle_requested = False
+        self.created_context = True
+
+
 @pytest.mark.asyncio
 async def test_playwright_backend_recycles_context_after_request_cap():
     backend = StubPlaywrightBackend(
@@ -103,3 +118,50 @@ async def test_playwright_backend_recycles_context_after_request_cap():
     await backend.close()
 
     assert backend.contexts[1].closed is True
+
+
+@pytest.mark.asyncio
+async def test_playwright_backend_can_connect_to_existing_cdp_endpoint(monkeypatch):
+    class FakeChromium:
+        def __init__(self) -> None:
+            self.connected_endpoint: str | None = None
+            self.launch_called = False
+
+        async def connect_over_cdp(self, endpoint: str):
+            self.connected_endpoint = endpoint
+            return object()
+
+        async def launch(self, *, headless: bool):
+            self.launch_called = True
+            return object()
+
+    class FakePlaywright:
+        def __init__(self) -> None:
+            self.chromium = FakeChromium()
+
+        async def start(self):
+            return self
+
+        async def stop(self) -> None:
+            return None
+
+    fake_playwright = FakePlaywright()
+    async_api_module = types.ModuleType("playwright.async_api")
+    async_api_module.async_playwright = lambda: fake_playwright
+    playwright_module = types.ModuleType("playwright")
+    playwright_module.async_api = async_api_module
+    monkeypatch.setitem(sys.modules, "playwright", playwright_module)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", async_api_module)
+
+    backend = EnsureStartedBackend(
+        CrawlConfig(
+            backend="playwright",
+            playwright_cdp_endpoint="http://127.0.0.1:9222",
+        )
+    )
+
+    await backend._ensure_started()
+
+    assert fake_playwright.chromium.connected_endpoint == "http://127.0.0.1:9222"
+    assert fake_playwright.chromium.launch_called is False
+    assert backend.created_context is True

@@ -168,6 +168,8 @@ class PlaywrightBackend(FetchBackend):
         self._active_pages = 0
         self._baseline_browser_pids: set[int] = set()
         self._tracked_browser_pids: set[int] = set()
+        self._managed_obscura_proc: asyncio.subprocess.Process | None = None
+        self._obscura_stderr: list[str] = []
 
     @staticmethod
     def _timeout_ms(seconds: float) -> int:
@@ -207,6 +209,83 @@ class PlaywrightBackend(FetchBackend):
         if self._browser is not None:
             await self._create_context_locked()
 
+    def _obscura_cdp_endpoint(self) -> str:
+        return f"http://{self.config.obscura_host}:{self.config.obscura_port}"
+
+    async def _start_managed_obscura(self) -> None:
+        """Spawn obscura serve and wait for CDP readiness."""
+        assert self._playwright is not None
+        argv = [
+            self.config.obscura_binary,
+            "serve",
+            "--port",
+            str(self.config.obscura_port),
+            "--workers",
+            str(self.config.obscura_workers),
+        ]
+        if self.config.obscura_proxy:
+            argv.extend(["--proxy", self.config.obscura_proxy])
+        effective_stealth = self.config.obscura_stealth
+        if effective_stealth is None and not self.config.analytics_detection:
+            effective_stealth = True
+        if effective_stealth:
+            argv.append("--stealth")
+
+        self._managed_obscura_proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        deadline = asyncio.get_running_loop().time() + 10.0
+        last_err = ""
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                browser = await self._playwright.chromium.connect_over_cdp(self._obscura_cdp_endpoint())
+                await browser.close()
+                return
+            except Exception as exc:
+                last_err = str(exc)
+                # Collect any stderr for diagnostics
+                if (
+                    self._managed_obscura_proc.stderr is not None
+                    and self._managed_obscura_proc.returncode is None
+                ):
+                    with contextlib.suppress(Exception):
+                        data = await asyncio.wait_for(
+                            self._managed_obscura_proc.stderr.read(4096), timeout=0.2
+                        )
+                        if data:
+                            self._obscura_stderr.append(data.decode("utf-8", errors="replace"))
+                await asyncio.sleep(0.3)
+
+        # Startup failed — terminate subprocess and raise
+        await self._terminate_managed_obscura()
+        stderr_snippet = "".join(self._obscura_stderr)[-800:]
+        raise RuntimeError(
+            f"Managed Obscura failed to start within 10s: {' '.join(argv)}\n"
+            f"Last error: {last_err}\n"
+            f"Stderr snippet: {stderr_snippet or '(none captured)'}"
+        )
+
+    async def _terminate_managed_obscura(self) -> None:
+        proc = self._managed_obscura_proc
+        if proc is None:
+            return
+        if proc.returncode is not None:
+            self._managed_obscura_proc = None
+            return
+        try:
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=3.0)
+        except asyncio.TimeoutError:
+            with contextlib.suppress(Exception):
+                proc.kill()
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except Exception:
+            pass
+        finally:
+            self._managed_obscura_proc = None
+
     async def _ensure_started(self) -> None:
         if self._browser is not None:
             return
@@ -216,9 +295,36 @@ class PlaywrightBackend(FetchBackend):
             raise RuntimeError("playwright backend requested but playwright is not installed") from exc
         self._baseline_browser_pids = _browser_like_descendants(os.getpid())
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(headless=True)
-        self._tracked_browser_pids = _browser_like_descendants(os.getpid()) - self._baseline_browser_pids
-        await self._create_context_locked()
+        try:
+            if self.config.obscura_enabled:
+                if self.config.obscura_managed:
+                    await self._start_managed_obscura()
+                self._browser = await self._playwright.chromium.connect_over_cdp(
+                    self._obscura_cdp_endpoint()
+                )
+                self._tracked_browser_pids = set()
+            elif self.config.playwright_cdp_endpoint:
+                self._browser = await self._playwright.chromium.connect_over_cdp(
+                    self.config.playwright_cdp_endpoint
+                )
+                self._tracked_browser_pids = set()
+            else:
+                self._browser = await self._playwright.chromium.launch(headless=True)
+                self._tracked_browser_pids = _browser_like_descendants(os.getpid()) - self._baseline_browser_pids
+            await self._create_context_locked()
+        except Exception:
+            if self._browser is not None:
+                with contextlib.suppress(Exception):
+                    await self._browser.close()
+                self._browser = None
+            if self._playwright is not None:
+                with contextlib.suppress(Exception):
+                    await self._playwright.stop()
+                self._playwright = None
+            await self._terminate_managed_obscura()
+            self._tracked_browser_pids.clear()
+            self._baseline_browser_pids.clear()
+            raise
 
     async def fetch(self, url: str) -> FetchResponse:
         async with self._lock:
@@ -320,12 +426,14 @@ class PlaywrightBackend(FetchBackend):
                     await self._playwright.stop()
                 self._playwright = None
         finally:
+            await self._terminate_managed_obscura()
             await self._kill_tracked_browser_processes()
             self._tracked_browser_pids.clear()
             self._baseline_browser_pids.clear()
             self._context_request_count = 0
             self._context_recycle_requested = False
             self._active_pages = 0
+            self._obscura_stderr.clear()
 
 
 def build_backend(config: CrawlConfig) -> FetchBackend:
