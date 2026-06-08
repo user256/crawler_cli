@@ -5,6 +5,7 @@ import contextlib
 import os
 import signal
 import ssl
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -12,14 +13,49 @@ import aiohttp
 from curl_cffi.requests import AsyncSession
 
 from .config import CrawlConfig
+from .cookies import build_cookie_header
 from .models import FetchResponse
 
 
 def _request_headers(config: CrawlConfig, url: str) -> dict[str, str]:
     headers = {"User-Agent": config.user_agent, **config.request_headers}
+    if config.cookies:
+        existing = headers.get("Cookie")
+        cookie_value = build_cookie_header(config.cookies)
+        headers["Cookie"] = f"{existing}; {cookie_value}" if existing else cookie_value
     if config.auth and config.auth.applies_to(url):
         headers.update(config.auth.auth_headers())
     return headers
+
+
+def _proxy_url(config: CrawlConfig) -> str | None:
+    """Build the effective proxy URL, folding in ``proxy_auth`` if given.
+
+    Returns None when no proxy is configured. When ``proxy_auth`` is set and the
+    proxy URL has no embedded credentials, ``user:pass@`` is injected after the
+    scheme.
+    """
+    if not config.proxy:
+        return None
+    proxy = config.proxy
+    if config.proxy_auth and "@" not in proxy.split("://", 1)[-1]:
+        scheme, _, rest = proxy.partition("://")
+        if rest:
+            return f"{scheme}://{config.proxy_auth}@{rest}"
+        return f"{config.proxy_auth}@{proxy}"
+    return proxy
+
+
+def _playwright_proxy(config: CrawlConfig) -> dict[str, str] | None:
+    """Playwright wants the proxy split into server + optional username/password."""
+    if not config.proxy:
+        return None
+    proxy_setting: dict[str, str] = {"server": config.proxy}
+    if config.proxy_auth and ":" in config.proxy_auth:
+        user, password = config.proxy_auth.split(":", 1)
+        proxy_setting["username"] = user
+        proxy_setting["password"] = password
+    return proxy_setting
 
 
 def _basic_auth(config: CrawlConfig, url: str):
@@ -65,14 +101,21 @@ class AiohttpBackend(FetchBackend):
 
         headers = _request_headers(self.config, url)
         auth = _basic_auth(self.config, url)
+        proxy = _proxy_url(self.config)
+        started = time.monotonic()
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             async with session.get(
                 url,
                 allow_redirects=self.config.follow_redirects,
                 ssl=ssl_context,
                 auth=auth,
+                proxy=proxy,
             ) as response:
+                # Response headers are available here, before the body is read,
+                # so this is a good proxy for time-to-first-byte.
+                ttfb = time.monotonic() - started
                 body = await response.read()
+                elapsed = time.monotonic() - started
                 if len(body) > self.config.max_response_bytes:
                     body = body[: self.config.max_response_bytes]
                 header_map = dict(response.headers)
@@ -83,6 +126,8 @@ class AiohttpBackend(FetchBackend):
                     headers=header_map,
                     body=body,
                     text=_decode_body(body, header_map.get("Content-Type")),
+                    ttfb_seconds=ttfb,
+                    elapsed_seconds=elapsed,
                 )
 
 
@@ -92,6 +137,12 @@ class CurlCffiBackend(FetchBackend):
         auth = None
         if self.config.auth and self.config.auth.applies_to(url):
             auth = self.config.auth.basic_credentials()
+        get_kwargs: dict[str, object] = {}
+        if self.config.proxy:
+            get_kwargs["proxy"] = self.config.proxy
+            if self.config.proxy_auth:
+                get_kwargs["proxy_auth"] = tuple(self.config.proxy_auth.split(":", 1))
+        started = time.monotonic()
         async with AsyncSession() as session:
             response = await session.get(
                 url,
@@ -100,9 +151,15 @@ class CurlCffiBackend(FetchBackend):
                 timeout=self.config.timeout_seconds,
                 allow_redirects=self.config.follow_redirects,
                 verify=self.config.verify_ssl,
+                **get_kwargs,
             )
+        elapsed = time.monotonic() - started
         body = response.content[: self.config.max_response_bytes]
         header_map = dict(response.headers)
+        # curl_cffi's AsyncSession returns only after the full body is read, and
+        # its pooled curl handle makes a precise STARTTRANSFER_TIME (TTFB) lookup
+        # unreliable across versions, so we record total duration only and leave
+        # ttfb_seconds None. See DECISIONS-2026-06-07.md (ticket 029).
         return FetchResponse(
             url=str(response.url),
             requested_url=url,
@@ -110,6 +167,8 @@ class CurlCffiBackend(FetchBackend):
             headers=header_map,
             body=body,
             text=_decode_body(body, header_map.get("Content-Type")),
+            ttfb_seconds=None,
+            elapsed_seconds=elapsed,
         )
 
 
@@ -176,18 +235,29 @@ class PlaywrightBackend(FetchBackend):
         return max(1, int(seconds * 1000))
 
     def _context_kwargs(self) -> dict[str, object]:
+        extra_headers: dict[str, str] = dict(self.config.request_headers)
+        if self.config.cookies:
+            existing = extra_headers.get("Cookie")
+            cookie_value = build_cookie_header(self.config.cookies)
+            extra_headers["Cookie"] = f"{existing}; {cookie_value}" if existing else cookie_value
         context_kwargs: dict[str, object] = {
             "user_agent": self.config.user_agent,
             "ignore_https_errors": not self.config.verify_ssl,
-            "extra_http_headers": self.config.request_headers,
+            "extra_http_headers": extra_headers,
         }
+        # Obscura handles its own proxy via the obscura binary's --proxy flag;
+        # only apply the generic proxy to plain Playwright contexts (ticket 027).
+        if not self.config.obscura_enabled:
+            proxy_setting = _playwright_proxy(self.config)
+            if proxy_setting is not None:
+                context_kwargs["proxy"] = proxy_setting
         auth = self.config.auth
         if auth and auth.enabled and auth.basic_credentials():
             user, password = auth.basic_credentials()  # type: ignore[misc]
             context_kwargs["http_credentials"] = {"username": user, "password": password}
         if auth and auth.enabled:
             context_kwargs["extra_http_headers"] = {
-                **self.config.request_headers,
+                **extra_headers,
                 **auth.auth_headers(),
             }
         return context_kwargs
@@ -347,6 +417,7 @@ class PlaywrightBackend(FetchBackend):
             timeout_ms = self._timeout_ms(self.config.timeout_seconds)
             page.set_default_timeout(timeout_ms)
             page.set_default_navigation_timeout(timeout_ms)
+            started = time.monotonic()
             response = await asyncio.wait_for(
                 page.goto(
                     url,
@@ -355,6 +426,7 @@ class PlaywrightBackend(FetchBackend):
                 ),
                 timeout=self.config.timeout_seconds + 1.0,
             )
+            ttfb = time.monotonic() - started
             if self.config.playwright_network_idle_timeout_seconds > 0:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(
@@ -364,7 +436,20 @@ class PlaywrightBackend(FetchBackend):
                         ),
                         timeout=self.config.playwright_network_idle_timeout_seconds + 1.0,
                     )
+            # Ticket 031: wait for a specific selector on SPAs that hydrate
+            # content asynchronously. Times out gracefully (suppressed) so a
+            # missing selector degrades to "snapshot what we have" rather than
+            # failing the fetch.
+            selector = self.config.playwright_wait_for_selector
+            if selector:
+                sel_timeout = self.config.playwright_wait_for_selector_timeout_seconds
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        page.wait_for_selector(selector, timeout=self._timeout_ms(sel_timeout)),
+                        timeout=sel_timeout + 1.0,
+                    )
             html = await asyncio.wait_for(page.content(), timeout=self.config.timeout_seconds + 1.0)
+            elapsed = time.monotonic() - started
             header_map = dict(response.headers) if response else {}
             body = html.encode("utf-8")[: self.config.max_response_bytes]
             return FetchResponse(
@@ -374,6 +459,8 @@ class PlaywrightBackend(FetchBackend):
                 headers=header_map,
                 body=body,
                 text=html,
+                ttfb_seconds=ttfb,
+                elapsed_seconds=elapsed,
             )
         finally:
             if page is not None:

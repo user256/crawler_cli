@@ -24,6 +24,10 @@ class FetchResponse:
     headers: dict[str, str]
     body: bytes
     text: str
+    ttfb_seconds: float | None = None
+    """Time to first byte: request send → first response byte (ticket 029)."""
+    elapsed_seconds: float | None = None
+    """Total fetch duration: request send → full body received (ticket 029)."""
 
 
 @dataclass(slots=True)
@@ -87,6 +91,9 @@ class CrawlResult:
     detected_cms: "CMSDetectionResult | None" = None
     detected_analytics: "AnalyticsDetectionResult | None" = None
     browser_runtime: BrowserRuntime | None = None
+    ttfb_seconds: float | None = None
+    total_duration_seconds: float | None = None
+    custom_data: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

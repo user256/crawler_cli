@@ -8,14 +8,16 @@ from urllib.parse import urlparse
 
 from .archive import discover_historical_urls
 from .backends import RateLimiter, build_backend
-from .circuit_breaker import CircuitBreakerRegistry
+from .circuit_breaker import CircuitBreaker, CircuitBreakerRegistry, CircuitState
 from .config import CrawlConfig
+from .custom_extract import CustomExtractor
 from .detection import CMSDetector, AnalyticsDetector
 from .extract import extract_links, extract_page_data
 from .hashing import sha256_hash, simhash64
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, SitemapDocument
 from .persistence import AsyncpgStore
 from .robots import RobotsPolicyCache
+from .serialization import serialize_crawl_job, serialize_crawl_result
 from .sitemap import SitemapParser, discover_sitemap_paths
 
 
@@ -68,7 +70,20 @@ class CrawlEngine:
         )
         self._cms_detector = CMSDetector() if config.cms_detection else None
         self._analytics_detector = AnalyticsDetector() if config.analytics_detection else None
+        self._custom_extractor = (
+            CustomExtractor(config.extraction_rules) if config.extraction_rules else None
+        )
         self._effective_worker_limit = max(1, config.max_concurrency)
+
+    def _record_breaker_failure(self, circuit: CircuitBreaker, host: str, trigger: str) -> None:
+        """Record a failure and log the trigger if it opens the breaker."""
+        was_open = circuit.state == CircuitState.OPEN
+        circuit.record_failure()
+        if not was_open and circuit.state == CircuitState.OPEN:
+            print(
+                f"Circuit breaker OPEN for {host} after {circuit.failure_count} "
+                f"failures (last trigger: {trigger})"
+            )
 
     async def crawl(self, url: str) -> CrawlResult:
         async with self._semaphore:
@@ -131,6 +146,7 @@ class CrawlEngine:
                 discovered_links = []
                 detected_cms = None
                 detected_analytics = None
+                custom_data = None
                 if content_type and "html" in content_type.lower():
                     raw_html = response.text
                     extracted = extract_page_data(response.text, response.url, response.headers)
@@ -150,7 +166,11 @@ class CrawlEngine:
                     # Perform analytics detection if enabled and this is HTML content
                     if self._analytics_detector is not None:
                         detected_analytics = self._analytics_detector.detect(response)
-                
+
+                    # Evaluate custom extraction rules if configured
+                    if self._custom_extractor is not None:
+                        custom_data = self._custom_extractor.extract(response.text)
+
                 browser_runtime = self._build_browser_runtime()
                 result = CrawlResult(
                     requested_url=response.requested_url,
@@ -168,17 +188,21 @@ class CrawlEngine:
                     detected_cms=detected_cms,
                     detected_analytics=detected_analytics,
                     browser_runtime=browser_runtime,
+                    ttfb_seconds=response.ttfb_seconds,
+                    total_duration_seconds=response.elapsed_seconds,
+                    custom_data=custom_data,
                 )
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)
-                    if response.status >= 500:
-                        circuit.record_failure()
+                    if response.status >= 500 or response.status == 429:
+                        self._record_breaker_failure(circuit, host, f"http_{response.status}")
                     else:
                         circuit.record_success()
             except Exception as exc:
                 host = urlparse(url).netloc.lower()
                 if self.config.circuit_breaker_enabled:
-                    self._circuit_breakers.for_host(host).record_failure()
+                    circuit = self._circuit_breakers.for_host(host)
+                    self._record_breaker_failure(circuit, host, f"fetch_error:{type(exc).__name__}")
                 return CrawlResult(
                     requested_url=url,
                     final_url=url,
@@ -588,14 +612,7 @@ class CrawlEngine:
         await self.store.frontier_mark_done(unique_urls)
 
     async def _save_results(self, job: CrawlJobResult, save_to: str) -> None:
-        payload = {
-            "mode": job.mode,
-            "seed_urls": job.seed_urls,
-            "saved_to": save_to,
-            "crawled_count": job.crawled_count,
-            "blocked_count": job.blocked_count,
-            "results": [self._result_to_dict(result) for result in job.results],
-        }
+        payload = serialize_crawl_job(job, saved_to=save_to)
         path = Path(save_to)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -651,76 +668,7 @@ class CrawlEngine:
         )
 
     def _result_to_dict(self, result: CrawlResult) -> dict[str, object]:
-        d: dict[str, object] = {
-            "requested_url": result.requested_url,
-            "final_url": result.final_url,
-            "status": result.status,
-            "headers": result.headers,
-            "content_type": result.content_type,
-            "fetch_backend": result.fetch_backend,
-            "raw_html": result.raw_html,
-            "content_hash_sha256": result.content_hash_sha256,
-            "content_hash_simhash": result.content_hash_simhash,
-            "discovered_links": [
-                {
-                    "href": link.href,
-                    "anchor_text": link.anchor_text,
-                    "xpath": link.xpath,
-                    "is_image": link.is_image,
-                }
-                for link in result.discovered_links
-            ],
-            "allowed_by_robots": result.allowed_by_robots,
-            "skip_reason": result.skip_reason,
-            "persist_error": result.persist_error,
-            "detected_cms": None
-            if result.detected_cms is None
-            else {
-                "cms_name": result.detected_cms.cms_name,
-                "confidence": result.detected_cms.confidence,
-                "indicators": result.detected_cms.indicators,
-            },
-            "detected_analytics": None
-            if result.detected_analytics is None
-            else [
-                {
-                    "vendor": hit.vendor,
-                    "category": hit.category,
-                    "identifier": hit.identifier,
-                    "evidence_type": hit.evidence_type,
-                    "evidence_snippet": hit.evidence_snippet,
-                    "confidence": hit.confidence,
-                }
-                for hit in result.detected_analytics.hits
-            ],
-            "extracted": None
-            if result.extracted is None
-            else {
-                "title": result.extracted.title,
-                "meta_description": result.extracted.meta_description,
-                "meta_robots": result.extracted.meta_robots.raw,
-                "x_robots_tag": result.extracted.x_robots_tag.raw,
-                "canonical": result.extracted.canonical,
-                "x_canonical": result.extracted.x_canonical,
-                "hreflang_links": [
-                    {"hreflang": link.hreflang, "href": link.href, "source": link.source}
-                    for link in result.extracted.hreflang_links
-                ],
-                "html_lang": result.extracted.html_lang,
-                "headings": result.extracted.headings,
-                "text": result.extracted.text,
-                "word_count": result.extracted.word_count,
-                "metadata": result.extracted.metadata,
-            },
-        }
-        if result.browser_runtime is not None:
-            d["browser_runtime"] = {
-                "provider": result.browser_runtime.provider,
-                "cdp_endpoint": result.browser_runtime.cdp_endpoint,
-                "managed": result.browser_runtime.managed,
-                "stealth": result.browser_runtime.stealth,
-            }
-        return d
+        return serialize_crawl_result(result)
 
     def _priority_score(self, url: str, depth: int) -> float:
         parsed = urlparse(url)

@@ -10,7 +10,16 @@ from pathlib import Path
 from .archive import audit_archive_urls
 from .auth import AuthConfig
 from .comparison import compare_deep, comparison_rows
-from .config import CrawlConfig
+from .config import (
+    CB_ENABLED_DEFAULT,
+    CB_RECOVERY_SECONDS_DEFAULT,
+    CB_THRESHOLD_DEFAULT,
+    CrawlConfig,
+    _env_bool,
+    _env_float,
+    _env_int,
+)
+from .cookies import load_cookies_file, parse_cookie_pairs
 from .csv_urls import load_urls_from_csv
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine
@@ -146,6 +155,36 @@ def _resolve_obscura_stealth(args: argparse.Namespace) -> bool | None:
     return None
 
 
+def _resolve_circuit_breaker(args: argparse.Namespace) -> tuple[bool, int, float]:
+    """Resolve circuit-breaker settings with CLI > env var > default precedence.
+
+    CLI flags use ``default=None`` (numeric) / a dedicated ``--no-circuit-breaker``
+    store_true so we can tell "not passed" from an explicit value.
+    """
+    # enabled: --no-circuit-breaker forces off; otherwise env then default.
+    if getattr(args, "no_circuit_breaker", False):
+        enabled = False
+    else:
+        env_enabled = _env_bool("CRAWLER_CLI_CB_ENABLED")
+        enabled = env_enabled if env_enabled is not None else CB_ENABLED_DEFAULT
+
+    cli_threshold = getattr(args, "circuit_breaker_threshold", None)
+    if cli_threshold is not None:
+        threshold = cli_threshold
+    else:
+        env_threshold = _env_int("CRAWLER_CLI_CB_THRESHOLD")
+        threshold = env_threshold if env_threshold is not None else CB_THRESHOLD_DEFAULT
+
+    cli_recovery = getattr(args, "circuit_breaker_recovery_seconds", None)
+    if cli_recovery is not None:
+        recovery = cli_recovery
+    else:
+        env_recovery = _env_float("CRAWLER_CLI_CB_RECOVERY_SECONDS")
+        recovery = env_recovery if env_recovery is not None else CB_RECOVERY_SECONDS_DEFAULT
+
+    return enabled, threshold, recovery
+
+
 def _build_config(args: argparse.Namespace) -> CrawlConfig:
     _validate_obscura_args(args)
     backend: str = "playwright" if args.js else (args.http_backend or "aiohttp")
@@ -178,6 +217,21 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
             )
             sys.exit(2)
 
+    cb_enabled, cb_threshold, cb_recovery = _resolve_circuit_breaker(args)
+
+    extraction_rules: list = []
+    if getattr(args, "extraction_rules", None):
+        from .custom_extract import load_extraction_rules
+
+        extraction_rules = load_extraction_rules(args.extraction_rules)
+
+    cookies: dict[str, str] = {}
+    if getattr(args, "cookies_file", None):
+        cookies.update(load_cookies_file(args.cookies_file))
+    if getattr(args, "cookies", None):
+        # CLI --cookie pairs override file values on name collision.
+        cookies.update(parse_cookie_pairs(args.cookies))
+
     return CrawlConfig(
         backend=backend,  # type: ignore[arg-type]
         user_agent=args.custom_ua or "crawler_cli/0.1",
@@ -185,7 +239,13 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         max_requests_per_context=args.max_requests_per_context,
         max_pages=args.max_pages,
         timeout_seconds=args.timeout,
-        playwright_network_idle_timeout_seconds=args.playwright_network_idle_timeout,
+        playwright_network_idle_timeout_seconds=(
+            args.wait_for_network_idle
+            if getattr(args, "wait_for_network_idle", None) is not None
+            else args.playwright_network_idle_timeout
+        ),
+        playwright_wait_for_selector=getattr(args, "wait_for_selector", "") or "",
+        playwright_wait_for_selector_timeout_seconds=getattr(args, "wait_for_selector_timeout", 10.0),
         playwright_cdp_endpoint=getattr(args, "playwright_cdp_endpoint", "") or "",
         memory_high_watermark_percent=args.memory_high_watermark,
         memory_recovery_watermark_percent=args.memory_recovery_watermark,
@@ -193,6 +253,10 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         same_host_only=not args.offsite,
         seed_from_archive=args.archive_org_check,
         request_headers=headers,
+        cookies=cookies,
+        proxy=getattr(args, "proxy", "") or "",
+        proxy_auth=getattr(args, "proxy_auth", "") or "",
+        extraction_rules=extraction_rules,
         discover_sitemaps=not args.skip_sitemaps,
         allowed_hosts=allowed_hosts,
         path_restriction=getattr(args, "path_restriction", "") or "",
@@ -203,6 +267,9 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         cms_detection=getattr(args, "cms_detection", False),
         analytics_detection=getattr(args, "analytics_detection", False),
         analytics_expected_ids=getattr(args, "analytics_expected_id", []) or [],
+        circuit_breaker_enabled=cb_enabled,
+        circuit_breaker_failure_threshold=cb_threshold,
+        circuit_breaker_recovery_seconds=cb_recovery,
         enable_content_hashing=getattr(args, "content_hashing", False),
         compress_html=not getattr(args, "no_html_compression", False),
         store_html=not getattr(args, "no_store_html", False),
@@ -258,6 +325,24 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         help="Connect Playwright to an existing CDP browser such as Obscura",
     )
     parser.add_argument(
+        "--wait-for-selector",
+        help="JS backend only: wait for this CSS selector before snapshotting the DOM "
+        "(for SPAs that hydrate content async). Times out gracefully.",
+    )
+    parser.add_argument(
+        "--wait-for-selector-timeout",
+        type=float,
+        default=10.0,
+        help="Timeout in seconds for --wait-for-selector (default 10)",
+    )
+    parser.add_argument(
+        "--wait-for-network-idle",
+        type=float,
+        metavar="SECONDS",
+        help="JS backend only: override the network-idle settle timeout in seconds "
+        "(alias for --playwright-network-idle-timeout; 0 disables the idle wait)",
+    )
+    parser.add_argument(
         "--memory-high-watermark",
         type=float,
         default=85.0,
@@ -279,8 +364,37 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "--path-exclude",
         help="Comma-separated path prefixes to exclude (e.g. /news/,/admin/)",
     )
+    cb = parser.add_argument_group("Circuit breaker (per-host)")
+    cb.add_argument(
+        "--circuit-breaker-threshold",
+        type=int,
+        default=None,
+        help=(
+            "Consecutive per-host failures before the breaker opens "
+            f"(default {CB_THRESHOLD_DEFAULT}; env CRAWLER_CLI_CB_THRESHOLD)"
+        ),
+    )
+    cb.add_argument(
+        "--circuit-breaker-recovery-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Seconds an open breaker waits before a half-open retry "
+            f"(default {CB_RECOVERY_SECONDS_DEFAULT}; env CRAWLER_CLI_CB_RECOVERY_SECONDS)"
+        ),
+    )
+    cb.add_argument(
+        "--no-circuit-breaker",
+        action="store_true",
+        help="Disable the per-host circuit breaker entirely (env CRAWLER_CLI_CB_ENABLED=0)",
+    )
     parser.add_argument("--archive-org-check", action="store_true", help="Seed from archive.org + run audit")
     parser.add_argument("--skip-sitemaps", action="store_true", help="Skip sitemap discovery")
+    parser.add_argument(
+        "--extraction-rules",
+        help="Path to a JSON file of custom extraction rules (CSS/XPath/regex). "
+        "Results are stored in the content.custom_data JSONB column.",
+    )
     parser.add_argument("--cms-detection", action="store_true", help="Enable CMS platform detection")
     parser.add_argument("--analytics-detection", action="store_true", help="Enable analytics / tag manager / pixel detection")
     parser.add_argument(
@@ -338,6 +452,32 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Skip persisting raw HTML (structured extraction + hashes still stored)",
     )
+    proxy = parser.add_argument_group("Proxy")
+    proxy.add_argument(
+        "--proxy",
+        help="Proxy URL routed through all backends (e.g. http://host:8080, "
+        "socks5://host:1080). Credentials may be embedded or passed via --proxy-auth.",
+    )
+    proxy.add_argument(
+        "--proxy-auth",
+        metavar="USER:PASSWORD",
+        help="Proxy credentials when not embedded in --proxy.",
+    )
+    cookies = parser.add_argument_group("Session cookies")
+    cookies.add_argument(
+        "--cookie",
+        action="append",
+        default=[],
+        dest="cookies",
+        metavar="NAME=VALUE",
+        help="Session cookie to inject on every request. Repeatable; a single "
+        "value may also contain ';'-joined pairs.",
+    )
+    cookies.add_argument(
+        "--cookies-file",
+        help="Load cookies from a JSON (dev-tools / storageState) or Netscape "
+        "cookies.txt file.",
+    )
     auth = parser.add_argument_group("HTTP authentication")
     auth.add_argument("--auth-type", choices=["basic", "digest", "bearer"], help="Authentication type")
     auth.add_argument("--auth-username", help="Username for basic/digest auth")
@@ -360,6 +500,15 @@ async def _run_crawl(args: argparse.Namespace) -> int:
     config.max_concurrency = args.max_workers or args.concurrency
     config.default_open_crawl_limit = args.max_pages
     config.max_pages = args.max_pages
+
+    if config.circuit_breaker_enabled:
+        print(
+            "Circuit breaker: enabled "
+            f"(threshold={config.circuit_breaker_failure_threshold}, "
+            f"recovery={config.circuit_breaker_recovery_seconds}s)"
+        )
+    else:
+        print("Circuit breaker: disabled")
 
     store = _store_from_args(args)
     await store.initialize()
@@ -605,6 +754,32 @@ async def _run_compact_crawl(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_generate_sitemap(args: argparse.Namespace) -> int:
+    from .sitemap_generate import fetch_indexable_urls, write_sitemap
+
+    store = _store_from_args(args)
+    await store.initialize()
+    try:
+        urls = await fetch_indexable_urls(store)
+    finally:
+        await store.close()
+
+    if not urls:
+        print("No indexable, canonical, 200-OK URLs found — nothing to write.", file=sys.stderr)
+        return 1
+
+    written = write_sitemap(
+        urls,
+        args.output,
+        base_url=getattr(args, "base_url", None),
+        max_urls_per_file=args.max_urls_per_file,
+    )
+    print(f"Wrote {len(urls)} URLs to {len(written)} file(s):")
+    for path in written:
+        print(f"  {path}")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crawler-cli",
@@ -688,6 +863,28 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_confirm_args(compact_parser)
     _add_postgres_args(compact_parser)
 
+    sitemap_parser = subparsers.add_parser(
+        "generate-sitemap",
+        help="Generate sitemap.xml from indexable, canonical, 200-OK URLs in a crawl",
+    )
+    sitemap_parser.add_argument(
+        "-o",
+        "--output",
+        default="sitemap.xml",
+        help="Output path for the sitemap (default: sitemap.xml)",
+    )
+    sitemap_parser.add_argument(
+        "--base-url",
+        help="Base URL used to build child <loc>s when the sitemap is split into an index",
+    )
+    sitemap_parser.add_argument(
+        "--max-urls-per-file",
+        type=int,
+        default=50_000,
+        help="Split into a sitemap index above this many URLs (default 50000)",
+    )
+    _add_postgres_args(sitemap_parser)
+
     return parser
 
 
@@ -701,6 +898,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "compact-html",
         "delete-crawl",
         "compact-crawl",
+        "generate-sitemap",
     }:
         return argv
     if "://" in argv[0]:
@@ -722,6 +920,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_delete_crawl(args)
     if command == "compact-crawl":
         return await _run_compact_crawl(args)
+    if command == "generate-sitemap":
+        return await _run_generate_sitemap(args)
     print(f"Unknown command: {command}", file=sys.stderr)
     return 2
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -7,6 +8,41 @@ from .auth import AuthConfig
 
 
 BackendName = Literal["aiohttp", "curl_cffi", "playwright"]
+
+# Circuit-breaker defaults, shared between CrawlConfig and the CLI's env-var
+# fallback resolution in __main__._build_config. Threshold was raised from 3 to
+# 15 (ticket 039 notes) so healthy-but-slow sites don't trip the breaker and
+# silently discard work.
+CB_ENABLED_DEFAULT = True
+CB_THRESHOLD_DEFAULT = 15
+CB_RECOVERY_SECONDS_DEFAULT = 30.0
+
+
+def _env_bool(name: str) -> bool | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _env_float(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 @dataclass(slots=True)
@@ -21,6 +57,10 @@ class CrawlConfig:
     verify_ssl: bool = True
     max_response_bytes: int = 5_000_000
     playwright_network_idle_timeout_seconds: float = 5.0
+    playwright_wait_for_selector: str = ""
+    """If set, the Playwright backend waits for this CSS selector to appear
+    before snapshotting the DOM (ticket 031). Times out gracefully."""
+    playwright_wait_for_selector_timeout_seconds: float = 10.0
     playwright_cdp_endpoint: str = ""
     memory_high_watermark_percent: float = 85.0
     memory_recovery_watermark_percent: float = 70.0
@@ -33,15 +73,27 @@ class CrawlConfig:
     enable_content_hashing: bool = False
     compress_html: bool = True
     store_html: bool = True
-    circuit_breaker_enabled: bool = True
-    circuit_breaker_failure_threshold: int = 15
-    circuit_breaker_recovery_seconds: float = 30.0
+    circuit_breaker_enabled: bool = CB_ENABLED_DEFAULT
+    circuit_breaker_failure_threshold: int = CB_THRESHOLD_DEFAULT
+    circuit_breaker_recovery_seconds: float = CB_RECOVERY_SECONDS_DEFAULT
     seed_from_archive: bool = False
     archive_timeout_seconds: float = 10.0
     archive_max_urls: int = 250
     frontier_max_retries: int = 3
     frontier_retry_base_delay_seconds: float = 2.0
     request_headers: dict[str, str] = field(default_factory=dict)
+    proxy: str = ""
+    """Proxy URL routed through every backend, e.g. ``http://host:8080`` or
+    ``socks5://host:1080``. Credentials may be embedded (``http://user:pass@host``)
+    or supplied separately via ``proxy_auth`` (ticket 027)."""
+    proxy_auth: str = ""
+    """Optional ``user:password`` for the proxy when not embedded in ``proxy``."""
+    cookies: dict[str, str] = field(default_factory=dict)
+    """Session cookies injected as a ``Cookie`` header on every request (ticket 028)."""
+    extraction_rules: list = field(default_factory=list)
+    """Custom data extraction rules (``ExtractionRule``) evaluated per HTML page;
+    results land in ``CrawlResult.custom_data`` and the ``custom_data`` JSONB
+    column (ticket 026). Typed as ``list`` to avoid a config→extract import cycle."""
     cms_detection: bool = False
     analytics_detection: bool = False
     analytics_expected_ids: list[str] = field(default_factory=list)

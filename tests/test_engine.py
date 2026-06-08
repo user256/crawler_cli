@@ -117,6 +117,37 @@ class FakeStore:
         return queued, pending, done
 
 
+class TimedBackend:
+    async def fetch(self, url: str) -> FetchResponse:
+        return FetchResponse(
+            url=url,
+            requested_url=url,
+            status=200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><title>t</title></html>",
+            text="<html><title>t</title></html>",
+            ttfb_seconds=0.012,
+            elapsed_seconds=0.034,
+        )
+
+
+@pytest.mark.asyncio
+async def test_crawl_propagates_timing_metrics():
+    engine = CrawlEngine(CrawlConfig(respect_robots_txt=False))
+    engine.backend = TimedBackend()
+
+    result = await engine.crawl("https://example.com/")
+
+    assert result.ttfb_seconds == 0.012
+    assert result.total_duration_seconds == 0.034
+
+    from crawler_cli.serialization import serialize_crawl_result
+
+    payload = serialize_crawl_result(result)
+    assert payload["ttfb_seconds"] == 0.012
+    assert payload["total_duration_seconds"] == 0.034
+
+
 @pytest.mark.asyncio
 async def test_crawl_respects_robots_txt_disallow():
     engine = CrawlEngine(CrawlConfig())

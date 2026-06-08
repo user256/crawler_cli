@@ -185,6 +185,15 @@ SCHEMA_STATEMENTS = [
     ALTER TABLE content ADD COLUMN IF NOT EXISTS content_hash_simhash BIGINT
     """,
     """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS ttfb_seconds DOUBLE PRECISION
+    """,
+    """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS total_duration_seconds DOUBLE PRECISION
+    """,
+    """
+    ALTER TABLE content ADD COLUMN IF NOT EXISTS custom_data JSONB
+    """,
+    """
     ALTER TABLE frontier ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0
     """,
     """
@@ -994,18 +1003,24 @@ class AsyncpgStore:
                 # so we know the fetch was attempted and where it landed
                 await conn.execute(
                     """
-                    INSERT INTO page_metadata (url_id, initial_status_code, final_status_code, final_url_id, fetched_at)
-                    VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::INTEGER)
+                    INSERT INTO page_metadata
+                        (url_id, initial_status_code, final_status_code, final_url_id,
+                         fetched_at, ttfb_seconds, total_duration_seconds)
+                    VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::INTEGER, $5, $6)
                     ON CONFLICT (url_id) DO UPDATE
                     SET initial_status_code = EXCLUDED.initial_status_code,
                         final_status_code = EXCLUDED.final_status_code,
                         final_url_id = EXCLUDED.final_url_id,
-                        fetched_at = EXCLUDED.fetched_at
+                        fetched_at = EXCLUDED.fetched_at,
+                        ttfb_seconds = EXCLUDED.ttfb_seconds,
+                        total_duration_seconds = EXCLUDED.total_duration_seconds
                     """,
                     requested_url_id,
                     result.status,
                     result.status,
                     final_url_id,
+                    result.ttfb_seconds,
+                    result.total_duration_seconds,
                 )
 
                 if result.extracted is None:
@@ -1079,8 +1094,8 @@ class AsyncpgStore:
                     """
                     INSERT INTO content (
                         url_id, title, meta_description_id, h1_tags, h2_tags, word_count, html_lang_id, content_length
-                        , content_hash_sha256, content_hash_simhash
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        , content_hash_sha256, content_hash_simhash, custom_data
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
                     ON CONFLICT (url_id) DO UPDATE
                     SET title = EXCLUDED.title,
                         meta_description_id = EXCLUDED.meta_description_id,
@@ -1090,7 +1105,8 @@ class AsyncpgStore:
                         html_lang_id = EXCLUDED.html_lang_id,
                         content_length = EXCLUDED.content_length,
                         content_hash_sha256 = EXCLUDED.content_hash_sha256,
-                        content_hash_simhash = EXCLUDED.content_hash_simhash
+                        content_hash_simhash = EXCLUDED.content_hash_simhash,
+                        custom_data = EXCLUDED.custom_data
                     """,
                     content_url_id,
                     result.extracted.title,
@@ -1102,6 +1118,7 @@ class AsyncpgStore:
                     len(result.raw_html or ""),
                     result.content_hash_sha256,
                     simhash_to_signed(result.content_hash_simhash),
+                    json.dumps(result.custom_data) if result.custom_data else None,
                 )
 
                 await self._persist_directives(conn, content_url_id, result)

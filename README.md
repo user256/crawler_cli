@@ -62,6 +62,12 @@ For tests:
 pip install -e ".[test]"
 ```
 
+With the HTTP API:
+
+```bash
+pip install -e ".[api]"
+```
+
 ## GuardGeese Monitoring
 
 `crawler_cli` exposes a small bridge for GuardGeese-style monitoring without running `CrawlEngine`, the CLI, or PostgreSQL persistence:
@@ -139,6 +145,45 @@ crawler-cli --csv-file urls.csv --auth-type basic --auth-username admin --auth-p
 
 Page HTML is **gzip-compressed by default** in `pages.html_compressed`. Use `--no-html-compression` only for debugging. Legacy uncompressed rows can be migrated with `compact-html`.
 
+#### Advanced crawl options
+
+```bash
+# Tune the per-host circuit breaker (or disable it). Also via env vars
+# CRAWLER_CLI_CB_THRESHOLD / CRAWLER_CLI_CB_RECOVERY_SECONDS / CRAWLER_CLI_CB_ENABLED.
+crawler-cli https://example.com --circuit-breaker-threshold 25 --circuit-breaker-recovery-seconds 60
+crawler-cli https://example.com --no-circuit-breaker
+
+# Route every backend through a proxy (HTTP or SOCKS); credentials may be
+# embedded in the URL or passed separately.
+crawler-cli https://example.com --proxy socks5://127.0.0.1:1080 --proxy-auth user:pass
+
+# Inject session cookies to crawl behind a login wall. --cookies-file accepts a
+# dev-tools/storageState JSON export or a Netscape cookies.txt.
+crawler-cli https://example.com --cookie "session=abc; csrf=xyz"
+crawler-cli https://example.com --cookies-file cookies.json
+
+# JS (Playwright) wait conditions for SPAs that hydrate asynchronously.
+crawler-cli https://example.com --js --wait-for-selector "div.app-ready"
+crawler-cli https://example.com --js --wait-for-network-idle 8
+
+# Custom data extraction (CSS / XPath / regex) into content.custom_data (JSONB).
+crawler-cli https://example.com --extraction-rules rules.json
+```
+
+Per-page timing (TTFB + total duration) is recorded automatically in `page_metadata`
+for the aiohttp and Playwright backends. `extraction_rules.json` looks like:
+
+```json
+{
+  "rules": [
+    {"name": "price",   "type": "css",   "selector": ".price", "attr": "text"},
+    {"name": "sku",     "type": "xpath", "selector": "//*[@id='sku']/text()"},
+    {"name": "authors", "type": "css",   "selector": "a.author", "multiple": true},
+    {"name": "phone",   "type": "regex", "pattern": "\\+?\\d[\\d ]{7,}\\d"}
+  ]
+}
+```
+
 ### 2. Generate Embeddings
 
 Generate vector embeddings for the crawled pages using the OpenAI API:
@@ -173,7 +218,22 @@ crawler-cli compact-crawl --postgres-dsn ... --backfill-hashes --confirm crawler
 
 Run `generate-embeddings` **before** `compact-crawl` if you need vectors — compact removes HTML required for embedding generation.
 
+### 5. Generate a Sitemap
+
+Generate a clean `sitemap.xml` from a completed crawl (indexable, self-canonical, 200-OK URLs). Splits into a sitemap index above 50,000 URLs:
+
+```bash
+crawler-cli generate-sitemap --postgres-dsn ... -o sitemap.xml --base-url https://example.com
+```
+
 Connection to PostgreSQL can be configured via environment variables (`CRAWLER_CLI_POSTGRES_*` or `PostgreSQLCrawler_POSTGRES_*`) or CLI flags (`--postgres-dsn`, `--postgres-host`, etc.). CLI flags override env vars.
+
+## HTTP API
+
+The HTTP API is a **separate project**, `crawler_api`, which depends on `crawler_cli` and
+wraps its engine in a Dockerized, token-authenticated FastAPI service. It lives in its own
+repository (sibling `crawler_api/`) and is **not** part of this package. See that repo's
+README and tickets for API endpoints, auth, and deployment.
 
 ## Package Layout
 

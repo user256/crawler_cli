@@ -56,6 +56,20 @@ class CrawlReports:
             min_outlinks,
         )
 
+    async def slowest_pages(self, limit: int = 50) -> list[dict[str, object]]:
+        """Pages ranked by total fetch duration (ticket 029 perf metrics)."""
+        return await self._fetch(
+            """
+            SELECT u.url, pm.ttfb_seconds, pm.total_duration_seconds, pm.final_status_code
+            FROM page_metadata pm
+            JOIN urls u ON u.id = pm.url_id
+            WHERE pm.total_duration_seconds IS NOT NULL
+            ORDER BY pm.total_duration_seconds DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+
     async def as_json(self) -> str:
         payload = {
             "orphans": await self.orphan_pages(),

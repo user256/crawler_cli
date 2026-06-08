@@ -21,6 +21,8 @@ class StubPage:
         self.default_timeout: int | None = None
         self.navigation_timeout: int | None = None
         self.network_idle_timeout: int | None = None
+        self.waited_selector: str | None = None
+        self.waited_selector_timeout: int | None = None
         self.closed = False
 
     def set_default_timeout(self, timeout_ms: int) -> None:
@@ -38,6 +40,10 @@ class StubPage:
     async def wait_for_load_state(self, state: str, *, timeout: int) -> None:
         assert state == "networkidle"
         self.network_idle_timeout = timeout
+
+    async def wait_for_selector(self, selector: str, *, timeout: int) -> None:
+        self.waited_selector = selector
+        self.waited_selector_timeout = timeout
 
     async def content(self) -> str:
         return f"<html><body>{self.url}</body></html>"
@@ -118,6 +124,39 @@ async def test_playwright_backend_recycles_context_after_request_cap():
     await backend.close()
 
     assert backend.contexts[1].closed is True
+
+
+@pytest.mark.asyncio
+async def test_playwright_backend_waits_for_selector():
+    backend = StubPlaywrightBackend(
+        CrawlConfig(
+            backend="playwright",
+            timeout_seconds=1.0,
+            playwright_network_idle_timeout_seconds=0.0,
+            playwright_wait_for_selector="div.app-ready",
+            playwright_wait_for_selector_timeout_seconds=3.0,
+        )
+    )
+    await backend.fetch("https://example.com/spa")
+    page = backend.contexts[0].pages[0]
+    assert page.waited_selector == "div.app-ready"
+    assert page.waited_selector_timeout == 3000
+    await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_playwright_backend_skips_selector_wait_when_unset():
+    backend = StubPlaywrightBackend(
+        CrawlConfig(
+            backend="playwright",
+            timeout_seconds=1.0,
+            playwright_network_idle_timeout_seconds=0.0,
+        )
+    )
+    await backend.fetch("https://example.com/")
+    page = backend.contexts[0].pages[0]
+    assert page.waited_selector is None
+    await backend.close()
 
 
 @pytest.mark.asyncio
