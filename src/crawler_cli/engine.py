@@ -440,6 +440,13 @@ class CrawlEngine:
             return job
         limit = max_urls if max_urls is not None else self.config.default_open_crawl_limit
         results: list[CrawlResult] = []
+        # Open the JSONL output file early so results stream out incrementally
+        # rather than buffering the whole crawl in RAM (ticket-059).
+        _jsonl_fh = None
+        if save_to:
+            _out_path = Path(save_to)
+            _out_path.parent.mkdir(parents=True, exist_ok=True)
+            _jsonl_fh = _out_path.open("w", encoding="utf-8")
         self._log_browser_runtime()
         await self.store.save_metadata(
             "crawl_open",
@@ -484,6 +491,7 @@ class CrawlEngine:
             done: set[asyncio.Task],
         ) -> None:
             nonlocal session_crawled
+            nonlocal _jsonl_fh
             discovered_to_enqueue: list[tuple[str, int, str | None, float]] = []
             out_of_scope_discovered: list[str] = []
             done_urls: list[str] = []
@@ -523,6 +531,13 @@ class CrawlEngine:
                             discovered_to_enqueue.append((href, depth + 1, url, self._priority_score(href, depth + 1)))
                         else:
                             out_of_scope_discovered.append(href)
+                # Stream the result to disk immediately while data is still
+                # present, then release bulk fields to bound RSS (ticket-059).
+                if _jsonl_fh is not None:
+                    _jsonl_fh.write(json.dumps(serialize_crawl_result(result), ensure_ascii=False) + "\n")
+                result.raw_html = None
+                result.extracted = None
+                result.discovered_links = []
 
             if out_of_scope_discovered:
                 await self._record_out_of_scope_urls(
@@ -585,10 +600,26 @@ class CrawlEngine:
                 results=results if limit <= 0 else results[:limit],
                 saved_to=save_to,
             )
-            if save_to:
-                await self._save_results(job, save_to)
+            if _jsonl_fh is not None:
+                # Append a summary record as the last line so tooling can
+                # detect a complete crawl and read aggregate counts without
+                # re-scanning all result lines (ticket-059).
+                summary = {
+                    "__type": "summary",
+                    "mode": job.mode,
+                    "seed_urls": job.seed_urls,
+                    "crawled_count": job.crawled_count,
+                    "blocked_count": job.blocked_count,
+                    "persist_error_count": job.persist_error_count,
+                    "saved_to": save_to,
+                }
+                _jsonl_fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
+                _jsonl_fh.close()
+                _jsonl_fh = None
             return job
         finally:
+            if _jsonl_fh is not None:
+                _jsonl_fh.close()
             await self.close()
 
     async def close(self) -> None:

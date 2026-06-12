@@ -28,7 +28,7 @@ def test_extract_links_returns_anchor_text_and_xpath():
 def test_extract_links_same_host_only_drops_external():
     html = '<html><body><a href="https://external.com/page">ext</a><a href="/local">local</a></body></html>'
     links = extract_links(html, "https://example.com/", same_host_only=True)
-    hrefs = {l.href for l in links}
+    hrefs = {lnk.href for lnk in links}
     assert "https://external.com/page" not in hrefs
     assert "https://example.com/local" in hrefs
 
@@ -47,7 +47,7 @@ def test_extract_links_allowed_hosts_admits_extra_host():
         same_host_only=True,
         allowed_hosts={"blog.example.com"},
     )
-    hrefs = {l.href for l in links}
+    hrefs = {lnk.href for lnk in links}
     assert "https://blog.example.com/post" in hrefs
     assert "https://example.com/local" in hrefs
     assert "https://external.com/nope" not in hrefs
@@ -61,7 +61,7 @@ def test_extract_links_no_host_filter_returns_all():
         '</body></html>'
     )
     links = extract_links(html, "https://a.com/", same_host_only=False)
-    hrefs = {l.href for l in links}
+    hrefs = {lnk.href for lnk in links}
     assert "https://a.com/" in hrefs
     assert "https://b.com/" in hrefs
 

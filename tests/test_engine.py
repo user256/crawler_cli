@@ -192,9 +192,13 @@ async def test_open_crawl_is_bounded_and_saves_output(tmp_path):
     assert len(job.results) == 3
     assert output_path.exists()
 
-    payload = json.loads(output_path.read_text(encoding="utf-8"))
-    assert payload["mode"] == "open"
-    assert payload["crawled_count"] == 3
+    # open crawls now produce JSONL: one result per line, final line is summary
+    lines = [json.loads(ln) for ln in output_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    summary = next(ln for ln in lines if ln.get("__type") == "summary")
+    assert summary["mode"] == "open"
+    assert summary["crawled_count"] == 3
+    result_lines = [ln for ln in lines if ln.get("__type") != "summary"]
+    assert len(result_lines) == 3
     assert store.saved_metadata["crawl_open"]["max_urls"] == 3
 
 
