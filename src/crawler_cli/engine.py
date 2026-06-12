@@ -15,13 +15,17 @@ from .custom_extract import CustomExtractor
 from .detection import CMSDetector, AnalyticsDetector
 from .extract import extract_links, extract_page_data, parse_html
 from .hashing import sha256_hash, simhash64
-from .models import BrowserRuntime, CrawlJobResult, CrawlResult
+from .models import BrowserRuntime, CrawlJobResult, CrawlResult, DiscoveredLink, ExtractedContent
 from .persistence import AsyncpgStore
 from .robots import RobotsPolicyCache
 from .serialization import serialize_crawl_job, serialize_crawl_result
 from .sitemap import SitemapParser, discover_sitemap_paths
 
 logger = logging.getLogger(__name__)
+
+# Pages larger than this are parsed via asyncio.to_thread so the event loop
+# stays responsive (tickets 060/069). ~256 KB of HTML.
+_PARSE_OFFLOAD_CHARS = 262_144
 
 
 def _linux_memory_usage_percent() -> float | None:
@@ -79,6 +83,12 @@ class CrawlEngine:
         )
         self._effective_worker_limit = max(1, config.max_concurrency)
         self._stop_requested: bool = False
+        if 0 < config.per_host_concurrency < config.max_concurrency:
+            logger.info(
+                "Per-host cap %d is below max workers %d — single-host crawls are limited to "
+                "%d concurrent fetches (adjust with --per-host-concurrency)",
+                config.per_host_concurrency, config.max_concurrency, config.per_host_concurrency,
+            )
 
     def request_stop(self) -> None:
         """Signal the crawl loop to drain in-flight work and exit cleanly."""
@@ -93,6 +103,24 @@ class CrawlEngine:
                 "Circuit breaker OPEN for %s after %d failures (last trigger: %s)",
                 host, circuit.failure_count, trigger,
             )
+
+    def _parse_and_extract(
+        self, html: str, url: str, headers: dict[str, str]
+    ) -> tuple[ExtractedContent, list[DiscoveredLink]]:
+        """Parse once and run both extraction passes on the shared soup.
+
+        Synchronous on purpose: called inline for small pages and via
+        asyncio.to_thread for large ones (tickets 060/069)."""
+        soup = parse_html(html)
+        extracted = extract_page_data(html, url, headers, soup=soup)
+        discovered_links = extract_links(
+            html,
+            url,
+            same_host_only=self.config.same_host_only,
+            allowed_hosts=set(self.config.allowed_hosts) if self.config.allowed_hosts else None,
+            soup=soup,
+        )
+        return extracted, discovered_links
 
     def _host_semaphore(self, host: str) -> asyncio.Semaphore | None:
         """Return a per-host concurrency semaphore, or None when unlimited."""
@@ -155,26 +183,26 @@ class CrawlEngine:
                 raw_html = None
                 content_hash_sha256 = None
                 content_hash_simhash = None
-                discovered_links = []
+                discovered_links: list[DiscoveredLink] = []
                 detected_cms = None
                 detected_analytics = None
                 custom_data = None
                 if content_type and "html" in content_type.lower():
                     raw_html = response.text
-                    # Parse once and share the soup across all extraction
-                    # steps to avoid redundant parses (ticket-060).
-                    _soup = parse_html(response.text)
-                    extracted = extract_page_data(response.text, response.url, response.headers, soup=_soup)
+                    # Large documents are parsed in a worker thread so a
+                    # multi-MB page can't stall every in-flight fetch on the
+                    # event loop (tickets 060/069).
+                    if len(response.text) > _PARSE_OFFLOAD_CHARS:
+                        extracted, discovered_links = await asyncio.to_thread(
+                            self._parse_and_extract, response.text, response.url, response.headers
+                        )
+                    else:
+                        extracted, discovered_links = self._parse_and_extract(
+                            response.text, response.url, response.headers
+                        )
                     if self.config.enable_content_hashing:
                         content_hash_sha256 = sha256_hash(response.text)
                         content_hash_simhash = simhash64(response.text)
-                    discovered_links = extract_links(
-                        response.text,
-                        response.url,
-                        same_host_only=self.config.same_host_only,
-                        allowed_hosts=set(self.config.allowed_hosts) if self.config.allowed_hosts else None,
-                        soup=_soup,
-                    )
 
                     # Perform CMS detection if enabled and this is HTML content
                     if self._cms_detector is not None:
@@ -273,12 +301,15 @@ class CrawlEngine:
         pending_indices = list(range(len(url_list)))
 
         while pending_indices or in_flight:
-            fill_n = max(0, self._current_worker_limit() - len(in_flight))
-            while fill_n > 0 and pending_indices:
-                idx = pending_indices.pop(0)
-                task = asyncio.create_task(self.crawl(url_list[idx]))
-                in_flight[task] = idx
-                fill_n -= 1
+            # Honour request_stop(): drain in-flight, schedule nothing new
+            # (ticket-069, parity with crawl_open's ticket-064 behaviour).
+            if not self._stop_requested:
+                fill_n = max(0, self._current_worker_limit() - len(in_flight))
+                while fill_n > 0 and pending_indices:
+                    idx = pending_indices.pop(0)
+                    task = asyncio.create_task(self.crawl(url_list[idx]))
+                    in_flight[task] = idx
+                    fill_n -= 1
 
             if not in_flight:
                 break
@@ -290,14 +321,25 @@ class CrawlEngine:
 
         results = [r for r in ordered if r is not None]
         if save_to:
-            await self._save_results(CrawlJobResult(mode="list", seed_urls=url_list, results=results), save_to)
+            await self._save_results(
+                CrawlJobResult(
+                    mode="list", seed_urls=url_list, results=results, interrupted=self._stop_requested
+                ),
+                save_to,
+            )
         return results
 
     async def crawl_list(self, urls: Iterable[str], *, save_to: str | None = None) -> CrawlJobResult:
         seed_urls = list(urls)
         self._log_browser_runtime()
         results = await self.crawl_many(seed_urls, save_to=None)
-        job = CrawlJobResult(mode="list", seed_urls=seed_urls, results=results, saved_to=save_to)
+        job = CrawlJobResult(
+            mode="list",
+            seed_urls=seed_urls,
+            results=results,
+            saved_to=save_to,
+            interrupted=self._stop_requested,
+        )
         if save_to:
             await self._save_results(job, save_to)
         return job
@@ -570,10 +612,12 @@ class CrawlEngine:
                             out_of_scope_discovered.append(href)
                 # Release bulk fields once links are consumed and the result
                 # is already streamed to disk; Postgres has the full content
-                # so holding it in RAM serves nothing (ticket-059).
-                result.raw_html = None
-                result.extracted = None
-                result.discovered_links = []
+                # so holding it in RAM serves nothing (ticket-059).  Library
+                # callers can opt out via keep_html_in_results (ticket-069).
+                if not self.config.keep_html_in_results:
+                    result.raw_html = None
+                    result.extracted = None
+                    result.discovered_links = []
 
             if out_of_scope_discovered:
                 await self._record_out_of_scope_urls(

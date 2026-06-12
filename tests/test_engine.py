@@ -400,6 +400,87 @@ async def test_unlimited_open_crawl_follows_discovered_links():
 
 
 @pytest.mark.asyncio
+async def test_large_page_parses_via_thread_offload():
+    """Pages above the offload threshold must still extract correctly (ticket-069)."""
+    filler = "<p>" + ("word " * 60_000) + "</p>"  # well over 256 KB
+    html = f"<html><head><title>Big</title></head><body><a href='/next'>n</a>{filler}</body></html>"
+    assert len(html) > 262_144
+    engine = CrawlEngine(CrawlConfig(respect_robots_txt=False))
+    engine.backend = FakeBackend({"https://example.com/": html})
+
+    result = await engine.crawl("https://example.com/")
+
+    assert result.extracted is not None
+    assert result.extracted.title == "Big"
+    assert any(link.href == "https://example.com/next" for link in result.discovered_links)
+
+
+@pytest.mark.asyncio
+async def test_keep_html_in_results_retains_raw_html():
+    """keep_html_in_results=True must skip the post-persist strip (ticket-069)."""
+    pages = {"https://example.com/": "<html><title>kept</title></html>"}
+    store = FakeStore()
+    engine = CrawlEngine(
+        CrawlConfig(
+            max_concurrency=1,
+            default_open_crawl_limit=1,
+            discover_sitemaps=False,
+            keep_html_in_results=True,
+        ),
+        store=store,
+    )
+    engine.backend = FakeBackend(pages)
+    engine._robots = FakeRobots()
+
+    job = await engine.crawl_open(["https://example.com/"], max_urls=1)
+
+    assert job.results[0].raw_html is not None
+    assert job.results[0].extracted is not None
+
+
+@pytest.mark.asyncio
+async def test_default_open_crawl_strips_raw_html():
+    """Default behaviour releases bulk fields after persist (ticket-059)."""
+    pages = {"https://example.com/": "<html><title>stripped</title></html>"}
+    store = FakeStore()
+    engine = CrawlEngine(
+        CrawlConfig(max_concurrency=1, default_open_crawl_limit=1, discover_sitemaps=False),
+        store=store,
+    )
+    engine.backend = FakeBackend(pages)
+    engine._robots = FakeRobots()
+
+    job = await engine.crawl_open(["https://example.com/"], max_urls=1)
+
+    assert job.results[0].raw_html is None
+
+
+@pytest.mark.asyncio
+async def test_request_stop_drains_crawl_many():
+    """request_stop() during a list crawl returns partial results (ticket-069)."""
+    pages = {f"https://example.com/{i}": f"<html><body>{i}</body></html>" for i in range(5)}
+    engine = CrawlEngine(CrawlConfig(max_concurrency=1, respect_robots_txt=False))
+
+    class StoppingBackend(FakeBackend):
+        def __init__(self, pages, engine_ref):
+            super().__init__(pages)
+            self.engine_ref = engine_ref
+
+        async def fetch(self, url: str):
+            self.engine_ref.request_stop()
+            return await super().fetch(url)
+
+    engine.backend = StoppingBackend(pages, engine)
+
+    results = await engine.crawl_many(list(pages.keys()))
+
+    # concurrency=1 and stop set during the first fetch → only 1 completes
+    assert len(results) == 1
+    job = await engine.crawl_list([])  # empty list still reports interrupted flag
+    assert job.interrupted is True
+
+
+@pytest.mark.asyncio
 async def test_open_crawl_jsonl_includes_skipped_results(tmp_path):
     """Robots-blocked results must appear in the JSONL file (ticket-068).
 

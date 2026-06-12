@@ -127,6 +127,10 @@ class CrawlConfig:
     per_host_concurrency: int = 4
     """Maximum simultaneous requests to any single host (0 = unlimited).
     Prevents the full worker pool bursting against one origin (ticket-063)."""
+    keep_html_in_results: bool = False
+    """Retain raw_html/extracted/discovered_links on results after persist
+    during open crawls.  Off by default so long crawls stay memory-bounded
+    (ticket-059); library callers that read job.results directly can opt in."""
 
     @staticmethod
     def _url_path(url: str) -> str:
