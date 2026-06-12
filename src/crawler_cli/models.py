@@ -28,6 +28,8 @@ class FetchResponse:
     """Time to first byte: request send → first response byte (ticket 029)."""
     elapsed_seconds: float | None = None
     """Total fetch duration: request send → full body received (ticket 029)."""
+    body_truncated: bool = False
+    """True when the response body was capped at max_response_bytes during streaming."""
 
 
 @dataclass(slots=True)
@@ -102,6 +104,9 @@ class CrawlJobResult:
     seed_urls: list[str]
     results: list[CrawlResult]
     saved_to: str | None = None
+    retry_attempts: int = 0
+    """Total transient-error attempts that were retried and do not appear in
+    *results* (ticket-062).  Surfaced in the CLI summary."""
 
     @property
     def crawled_count(self) -> int:
@@ -110,6 +115,10 @@ class CrawlJobResult:
     @property
     def blocked_count(self) -> int:
         return sum(1 for result in self.results if result.skip_reason == "robots_txt_disallow")
+
+    @property
+    def persist_error_count(self) -> int:
+        return sum(1 for result in self.results if result.persist_error is not None)
 
 
 @dataclass(slots=True)

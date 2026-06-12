@@ -88,37 +88,33 @@ class CrawlEngine:
                 host, circuit.failure_count, trigger,
             )
 
+    def _skip_result(self, url: str, reason: str, *, allowed_by_robots: bool | None = None) -> CrawlResult:
+        return CrawlResult(
+            requested_url=url,
+            final_url=url,
+            status=0,
+            headers={},
+            content_type=None,
+            fetch_backend=self.config.backend,
+            extracted=None,
+            raw_html=None,
+            allowed_by_robots=(
+                allowed_by_robots
+                if allowed_by_robots is not None
+                else (True if self.config.respect_robots_txt else None)
+            ),
+            skip_reason=reason,
+        )
+
     async def crawl(self, url: str) -> CrawlResult:
         async with self._semaphore:
             try:
                 if not self.config.should_crawl_url(url):
-                    return CrawlResult(
-                        requested_url=url,
-                        final_url=url,
-                        status=0,
-                        headers={},
-                        content_type=None,
-                        fetch_backend=self.config.backend,
-                        extracted=None,
-                        raw_html=None,
-                        allowed_by_robots=True if self.config.respect_robots_txt else None,
-                        skip_reason=f"path_out_of_scope:{self.config.path_skip_detail(url)}",
-                    )
+                    return self._skip_result(url, f"path_out_of_scope:{self.config.path_skip_detail(url)}")
                 if self.config.respect_robots_txt:
                     allowed = await self._robots.is_allowed(url)
                     if not allowed:
-                        return CrawlResult(
-                            requested_url=url,
-                            final_url=url,
-                            status=0,
-                            headers={},
-                            content_type=None,
-                            fetch_backend=self.config.backend,
-                            extracted=None,
-                            raw_html=None,
-                            allowed_by_robots=False,
-                            skip_reason="robots_txt_disallow",
-                        )
+                        return self._skip_result(url, "robots_txt_disallow", allowed_by_robots=False)
                     if self.config.honor_robots_crawl_delay:
                         await self._wait_for_host_delay(url)
                 await self._rate_limiter.wait()
@@ -126,18 +122,7 @@ class CrawlEngine:
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)
                     if not circuit.should_allow():
-                        return CrawlResult(
-                            requested_url=url,
-                            final_url=url,
-                            status=0,
-                            headers={},
-                            content_type=None,
-                            fetch_backend=self.config.backend,
-                            extracted=None,
-                            raw_html=None,
-                            allowed_by_robots=True if self.config.respect_robots_txt else None,
-                            skip_reason="circuit_breaker_open",
-                        )
+                        return self._skip_result(url, "circuit_breaker_open")
                 response = await self.backend.fetch(url)
                 # Case-insensitive header lookup (Playwright returns lowercase keys)
                 headers_lower = {k.lower(): v for k, v in response.headers.items()}
@@ -211,18 +196,7 @@ class CrawlEngine:
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)
                     self._record_breaker_failure(circuit, host, f"fetch_error:{type(exc).__name__}")
-                return CrawlResult(
-                    requested_url=url,
-                    final_url=url,
-                    status=0,
-                    headers={},
-                    content_type=None,
-                    fetch_backend=self.config.backend,
-                    extracted=None,
-                    raw_html=None,
-                    allowed_by_robots=True if self.config.respect_robots_txt else None,
-                    skip_reason=f"fetch_error:{type(exc).__name__}",
-                )
+                return self._skip_result(url, f"fetch_error:{type(exc).__name__}")
             # Persist OUTSIDE the fetch try-block: a database error must never
             # masquerade as a fetch error or discard a successfully-fetched page.
             if self.store is not None:
@@ -509,6 +483,7 @@ class CrawlEngine:
                 logger.info("Resumed crawl: reset %d pending URLs to queued", reset_count)
 
         session_crawled = 0
+        session_retry_attempts = 0
         # in_flight maps task → (url, depth, parent_url, retry_count)
         in_flight: dict[asyncio.Task, tuple[str, int, str | None, int]] = {}
 
@@ -516,6 +491,7 @@ class CrawlEngine:
             done: set[asyncio.Task],
         ) -> None:
             nonlocal session_crawled
+            nonlocal session_retry_attempts
             nonlocal _jsonl_fh
             discovered_to_enqueue: list[tuple[str, int, str | None, float]] = []
             out_of_scope_discovered: list[str] = []
@@ -525,16 +501,21 @@ class CrawlEngine:
                 item = in_flight.pop(task)
                 url, depth, _parent_url, retry_count = item
                 result: CrawlResult = task.result()
-                results.append(result)
-                session_crawled += 1
 
                 transient_error = result.status in {429, 500, 502, 503, 504} or (
                     result.skip_reason is not None and "Timeout" in result.skip_reason
                 )
                 if transient_error and retry_count < self.config.frontier_max_retries:
+                    # Don't count this attempt in results or budget — it will
+                    # be retried and the final outcome will be counted then
+                    # (ticket-062).
+                    session_retry_attempts += 1
                     delay = self.config.frontier_retry_base_delay_seconds * (2**retry_count)
                     await self.store.frontier_mark_retry(url, retry_count + 1, delay)
                     continue
+
+                results.append(result)
+                session_crawled += 1
                 done_urls.append(url)
                 if result.skip_reason is not None:
                     continue
@@ -624,6 +605,7 @@ class CrawlEngine:
                 seed_urls=seeds,
                 results=results if limit <= 0 else results[:limit],
                 saved_to=save_to,
+                retry_attempts=session_retry_attempts,
             )
             if _jsonl_fh is not None:
                 # Append a summary record as the last line so tooling can
@@ -636,6 +618,7 @@ class CrawlEngine:
                     "crawled_count": job.crawled_count,
                     "blocked_count": job.blocked_count,
                     "persist_error_count": job.persist_error_count,
+                    "retry_attempts": job.retry_attempts,
                     "saved_to": save_to,
                 }
                 _jsonl_fh.write(json.dumps(summary, ensure_ascii=False) + "\n")

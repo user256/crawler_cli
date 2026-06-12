@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote as _urlquote
 
 from .archive import audit_archive_urls
 from .auth import AuthConfig
@@ -26,6 +28,8 @@ from .engine import CrawlEngine
 from .persistence import AsyncpgStore, database_name_from_dsn
 from .reports import CrawlReports
 
+logger = logging.getLogger(__name__)
+
 
 def _env_or_default(prefix: str, key: str, default: str | None = None) -> str | None:
     for p in (prefix, "CRAWLER_CLI", "PostgreSQLCrawler"):
@@ -43,7 +47,10 @@ def _build_dsn(args: argparse.Namespace) -> str:
     user = args.postgres_user or _env_or_default("CRAWLER_CLI", "POSTGRES_USER", "crawler")
     password = args.postgres_password or _env_or_default("CRAWLER_CLI", "POSTGRES_PASSWORD", "")
     dbname = args.postgres_db or _env_or_default("CRAWLER_CLI", "POSTGRES_DB", "crawler")
-    return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+    # Percent-encode credentials so special chars (@, :, /, #) don't break the DSN.
+    safe_user = _urlquote(user, safe="")
+    safe_password = _urlquote(password, safe="")
+    return f"postgresql://{safe_user}:{safe_password}@{host}:{port}/{dbname}"
 
 
 def _build_auth(args: argparse.Namespace) -> AuthConfig | None:
@@ -232,10 +239,21 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         # CLI --cookie pairs override file values on name collision.
         cookies.update(parse_cookie_pairs(args.cookies))
 
+    # --max-workers and --concurrency are aliases; explicit flag wins over default.
+    _concurrency = args.max_workers or args.concurrency or 15
+
+    curl_impersonate = getattr(args, "curl_impersonate", "") or ""
+    # When impersonating, the curl_cffi profile supplies the UA; only override
+    # it if the operator explicitly passed --custom-ua.
+    if curl_impersonate and curl_impersonate != "none" and not args.custom_ua:
+        _user_agent = ""
+    else:
+        _user_agent = args.custom_ua or "crawler_cli/0.1"
+
     return CrawlConfig(
         backend=backend,  # type: ignore[arg-type]
-        user_agent=args.custom_ua or "crawler_cli/0.1",
-        max_concurrency=args.concurrency,
+        user_agent=_user_agent,
+        max_concurrency=_concurrency,
         max_requests_per_context=args.max_requests_per_context,
         max_pages=args.max_pages,
         timeout_seconds=args.timeout,
@@ -281,6 +299,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         obscura_workers=getattr(args, "obscura_workers", 1),
         obscura_managed=not getattr(args, "obscura_unmanaged", False),
         obscura_stealth=obscura_stealth,
+        curl_impersonate=curl_impersonate,
     )
 
 
@@ -303,8 +322,18 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         default=[],
         help="Additional seed URL. Repeat to crawl multiple hosts in one run.",
     )
-    parser.add_argument("--max-workers", type=int, default=15, help="Max concurrent workers")
-    parser.add_argument("--concurrency", type=int, default=10, help="Max concurrent requests")
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Max concurrent workers (default 15). Alias: --concurrency.",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="Alias for --max-workers.",
+    )
     parser.add_argument("--max-pages", type=int, default=0, help="Max URLs to crawl (0 = unlimited)")
     parser.add_argument("--timeout", type=float, default=30.0, help="Per-request timeout in seconds")
     parser.add_argument("--js", action="store_true", help="Use Playwright (JS-enabled) backend")
@@ -355,6 +384,14 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         help="Restore worker concurrency once system memory usage drops to this percent",
     )
     parser.add_argument("--http-backend", choices=["aiohttp", "curl_cffi"], help="HTTP backend")
+    parser.add_argument(
+        "--impersonate",
+        dest="curl_impersonate",
+        default="",
+        metavar="TARGET",
+        help="curl_cffi only: browser fingerprint to impersonate (e.g. chrome, safari, firefox). "
+        "Pass 'none' to disable. When set, the User-Agent is not overridden unless --custom-ua is also given.",
+    )
     parser.add_argument("--custom-ua", "--user-agent", dest="custom_ua", help="Custom User-Agent")
     parser.add_argument("--ignore-robots", action="store_true", help="Ignore robots.txt")
     parser.add_argument("--offsite", action="store_true", help="Follow off-site links")
@@ -495,20 +532,18 @@ async def _run_crawl(args: argparse.Namespace) -> int:
         args.url = load_urls_from_csv(args.csv_file, column=args.csv_column)[0]
         seeds = _collect_seed_urls(args)
 
-    dsn = _build_dsn(args)
     config = _build_config(args)
-    config.max_concurrency = args.max_workers or args.concurrency
     config.default_open_crawl_limit = args.max_pages
     config.max_pages = args.max_pages
 
     if config.circuit_breaker_enabled:
-        print(
-            "Circuit breaker: enabled "
-            f"(threshold={config.circuit_breaker_failure_threshold}, "
-            f"recovery={config.circuit_breaker_recovery_seconds}s)"
+        logger.info(
+            "Circuit breaker: enabled (threshold=%d, recovery=%.1fs)",
+            config.circuit_breaker_failure_threshold,
+            config.circuit_breaker_recovery_seconds,
         )
     else:
-        print("Circuit breaker: disabled")
+        logger.info("Circuit breaker: disabled")
 
     store = _store_from_args(args)
     await store.initialize()
@@ -519,7 +554,16 @@ async def _run_crawl(args: argparse.Namespace) -> int:
             job = await engine.crawl_list(config.csv_urls, save_to=args.save_to)
         else:
             job = await engine.crawl_open(seeds, save_to=args.save_to)
-        print(f"Crawl complete: {job.crawled_count} crawled, {job.blocked_count} blocked by robots")
+        persist_errors = job.persist_error_count
+        summary = (
+            f"Crawl complete: {job.crawled_count} crawled, "
+            f"{job.blocked_count} blocked by robots"
+        )
+        if job.retry_attempts:
+            summary += f", {job.retry_attempts} transient retries"
+        if persist_errors:
+            summary += f", {persist_errors} persist failures (check WARNING logs)"
+        print(summary)
 
         if args.archive_org_check and seeds:
             seen_domains: set[str] = set()
@@ -530,10 +574,10 @@ async def _run_crawl(args: argparse.Namespace) -> int:
                 seen_domains.add(domain)
                 audit = await audit_archive_urls(domain, store, config, output_dir=args.output_dir)
                 print(f"Archive audit [{domain}]: {audit.archive_url_count} historical URLs")
-                print(f"  Missing: {len(audit.missing_urls)}")
-                print(f"  Legacy issues: {len(audit.legacy_issues)}")
+                logger.info("  Missing: %d", len(audit.missing_urls))
+                logger.info("  Legacy issues: %d", len(audit.legacy_issues))
                 if args.output_dir:
-                    print(f"  CSVs written to {args.output_dir}")
+                    logger.info("  CSVs written to %s", args.output_dir)
     finally:
         await engine.close()
         await store.close()
@@ -785,6 +829,17 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="crawler-cli",
         description="Async SEO crawler with PostgreSQL persistence",
     )
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable DEBUG logging (shows frontier/robots/breaker detail)",
+    )
+    verbosity.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Suppress INFO logs; only show warnings, errors, and final summary",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     crawl_parser = subparsers.add_parser("crawl", help="Run a crawl")
@@ -888,6 +943,22 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_BARE_DOMAIN_RE = None  # compiled lazily
+
+
+def _looks_like_hostname(token: str) -> bool:
+    """Return True if *token* looks like a bare hostname or host:port."""
+    import re
+
+    global _BARE_DOMAIN_RE
+    if _BARE_DOMAIN_RE is None:
+        # matches e.g. example.com, example.com/path, localhost, 192.168.1.1:8080
+        _BARE_DOMAIN_RE = re.compile(
+            r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,}|:\d+)"
+        )
+    return bool(_BARE_DOMAIN_RE.match(token))
+
+
 def _normalize_argv(argv: list[str]) -> list[str]:
     if not argv:
         return ["crawl"]
@@ -903,6 +974,8 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         return argv
     if "://" in argv[0]:
         return ["crawl", *argv]
+    if _looks_like_hostname(argv[0]):
+        return ["crawl", f"https://{argv[0]}", *argv[1:]]
     return argv
 
 
@@ -932,6 +1005,21 @@ def main() -> None:
     args = parser.parse_args(argv)
     if args.command in {None, "crawl"} and not getattr(args, "command", None):
         args.command = "crawl"
+
+    # Configure logging once, here in __main__ only (library code never calls
+    # basicConfig so it can be used as a library without noise).
+    if getattr(args, "verbose", False):
+        level = logging.DEBUG
+    elif getattr(args, "quiet", False):
+        level = logging.WARNING
+    else:
+        level = logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     try:
         sys.exit(asyncio.run(_dispatch(args)))
     except KeyboardInterrupt:

@@ -111,5 +111,6 @@ def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> 
         "saved_to": job.saved_to if saved_to is None else saved_to,
         "crawled_count": job.crawled_count,
         "blocked_count": job.blocked_count,
+        "retry_attempts": job.retry_attempts,
         "results": [serialize_crawl_result(result) for result in job.results],
     }
