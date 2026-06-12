@@ -181,9 +181,32 @@ def _anchor_text_for_link(anchor: Tag, href: str) -> str | None:
     return anchor_text or None
 
 
-def extract_links(html: str, base_url: str, *, same_host_only: bool = True) -> list[DiscoveredLink]:
+def extract_links(
+    html: str,
+    base_url: str,
+    *,
+    same_host_only: bool = True,
+    allowed_hosts: set[str] | None = None,
+) -> list[DiscoveredLink]:
+    """Return all http(s) links found in *html*.
+
+    Host filtering is intentionally minimal here so the engine remains the
+    single scope authority (ticket-058).  Pass ``allowed_hosts`` to retain
+    links to specific extra hosts; ``same_host_only=True`` with no
+    ``allowed_hosts`` reproduces the legacy behaviour.
+    """
     soup = BeautifulSoup(html, "html.parser")
     base_host = urlparse(base_url).netloc.lower()
+    # Build the effective host allowlist:
+    # - same_host_only=False → no host filter at all (effective_allowed=None)
+    # - same_host_only=True, no allowed_hosts → only the base host
+    # - same_host_only=True, allowed_hosts given → base host + the extra set
+    if not same_host_only:
+        effective_allowed: set[str] | None = None
+    elif allowed_hosts:
+        effective_allowed = {base_host} | {h.lower() for h in allowed_hosts}
+    else:
+        effective_allowed = {base_host}
     links: list[DiscoveredLink] = []
     seen: set[str] = set()
     for anchor in soup.find_all("a", href=True):
@@ -192,7 +215,8 @@ def extract_links(html: str, base_url: str, *, same_host_only: bool = True) -> l
         parsed = urlparse(original_href)
         if parsed.scheme not in {"http", "https"}:
             continue
-        if same_host_only and parsed.netloc.lower() != base_host:
+        link_host = parsed.netloc.lower()
+        if effective_allowed is not None and link_host not in effective_allowed:
             continue
         normalized = parsed._replace(fragment="").geturl()
         if normalized in seen:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import urlparse
@@ -14,11 +15,13 @@ from .custom_extract import CustomExtractor
 from .detection import CMSDetector, AnalyticsDetector
 from .extract import extract_links, extract_page_data
 from .hashing import sha256_hash, simhash64
-from .models import BrowserRuntime, CrawlJobResult, CrawlResult, SitemapDocument
+from .models import BrowserRuntime, CrawlJobResult, CrawlResult
 from .persistence import AsyncpgStore
 from .robots import RobotsPolicyCache
 from .serialization import serialize_crawl_job, serialize_crawl_result
 from .sitemap import SitemapParser, discover_sitemap_paths
+
+logger = logging.getLogger(__name__)
 
 
 def _linux_memory_usage_percent() -> float | None:
@@ -80,9 +83,9 @@ class CrawlEngine:
         was_open = circuit.state == CircuitState.OPEN
         circuit.record_failure()
         if not was_open and circuit.state == CircuitState.OPEN:
-            print(
-                f"Circuit breaker OPEN for {host} after {circuit.failure_count} "
-                f"failures (last trigger: {trigger})"
+            logger.warning(
+                "Circuit breaker OPEN for %s after %d failures (last trigger: %s)",
+                host, circuit.failure_count, trigger,
             )
 
     async def crawl(self, url: str) -> CrawlResult:
@@ -157,12 +160,13 @@ class CrawlEngine:
                         response.text,
                         response.url,
                         same_host_only=self.config.same_host_only,
+                        allowed_hosts=set(self.config.allowed_hosts) if self.config.allowed_hosts else None,
                     )
-                    
+
                     # Perform CMS detection if enabled and this is HTML content
                     if self._cms_detector is not None:
                         detected_cms = self._cms_detector.detect(response)
-                    
+
                     # Perform analytics detection if enabled and this is HTML content
                     if self._analytics_detector is not None:
                         detected_analytics = self._analytics_detector.detect(response)
@@ -238,10 +242,18 @@ class CrawlEngine:
             except (asyncpg.DeadlockDetectedError, asyncpg.SerializationError) as exc:
                 if attempt + 1 >= max_attempts:
                     result.persist_error = type(exc).__name__
+                    logger.warning(
+                        "Persist failed for %s after %d attempts: %s — page data retained",
+                        result.final_url, max_attempts, result.persist_error,
+                    )
                     return
                 await asyncio.sleep(0.05 * (2**attempt))
             except Exception as exc:  # noqa: BLE001 - persistence must not lose the page
                 result.persist_error = type(exc).__name__
+                logger.warning(
+                    "Persist failed for %s: %s — page data retained in results",
+                    result.final_url, result.persist_error,
+                )
                 return
 
     async def crawl_many(self, urls: Iterable[str], *, save_to: str | None = None) -> list[CrawlResult]:
@@ -276,7 +288,6 @@ class CrawlEngine:
         sitemap_urls: list[str] = []
         parser = SitemapParser()
         for seed in seeds:
-            host = urlparse(seed).netloc.lower()
             # 1. robots.txt sitemap directives
             robots_sitemaps = await self._robots.sitemaps(seed)
             for sm in robots_sitemaps:
@@ -341,10 +352,14 @@ class CrawlEngine:
                 source="sitemap",
                 source_detail=None,
             )
-            # Also record source detail per URL
-            for url, sm_url in all_page_urls:
-                if self.config.should_crawl_url(url):
-                    await self.store.record_source_by_url(url, "sitemap", detail=sm_url)
+            # Record source detail for all in-scope URLs in one bulk call.
+            in_scope_pairs = [
+                (url, sm_url)
+                for url, sm_url in all_page_urls
+                if self.config.should_crawl_url(url)
+            ]
+            if in_scope_pairs:
+                await self.store.record_sources_bulk(in_scope_pairs, source="sitemap")
 
         # Persist hreflang from sitemap
         for page_url, links in hreflang_data:
@@ -382,15 +397,15 @@ class CrawlEngine:
     def _log_browser_runtime(self) -> None:
         runtime = self._build_browser_runtime()
         if runtime is None:
-            print("JS backend: none (HTTP backend)")
+            logger.info("JS backend: none (HTTP backend)")
             return
-        print(f"JS backend: {runtime.provider}")
+        logger.info("JS backend: %s", runtime.provider)
         if runtime.cdp_endpoint:
-            print(f"CDP endpoint: {runtime.cdp_endpoint}")
+            logger.info("CDP endpoint: %s", runtime.cdp_endpoint)
         if runtime.provider == "obscura":
             stealth = "unknown" if runtime.stealth is None else ("enabled" if runtime.stealth else "disabled")
-            print(f"Stealth: {stealth}")
-            print(f"Managed process: {'yes' if runtime.managed else 'no'}")
+            logger.info("Stealth: %s", stealth)
+            logger.info("Managed process: %s", "yes" if runtime.managed else "no")
 
     async def crawl_open(
         self,
@@ -459,94 +474,109 @@ class CrawlEngine:
             # Resume: reset stale pending items back to queued
             reset_count = await self.store.frontier_reset_all_pending_to_queued()
             if reset_count:
-                print(f"[crawler] Resumed crawl: reset {reset_count} pending URLs to queued")
+                logger.info("Resumed crawl: reset %d pending URLs to queued", reset_count)
 
         session_crawled = 0
-        try:
-            while True:
-                if limit > 0:
-                    remaining = limit - session_crawled
-                    if remaining <= 0:
-                        break
-                    batch_size = min(self._current_worker_limit(), remaining)
-                else:
-                    batch_size = self._current_worker_limit()
+        # in_flight maps task → (url, depth, parent_url, retry_count)
+        in_flight: dict[asyncio.Task, tuple[str, int, str | None, int]] = {}
 
-                frontier_batch = await self.store.frontier_next_batch(batch_size)
-                if not frontier_batch:
-                    break
+        async def _flush_completed(
+            done: set[asyncio.Task],
+        ) -> None:
+            nonlocal session_crawled
+            discovered_to_enqueue: list[tuple[str, int, str | None, float]] = []
+            out_of_scope_discovered: list[str] = []
+            done_urls: list[str] = []
 
-                fetch_batch: list[tuple[str, int, str | None, int]] = []
-                path_skipped: list[str] = []
-                for item in frontier_batch:
-                    url = item[0]
-                    if self.config.should_crawl_url(url):
-                        fetch_batch.append(item)
+            for task in done:
+                item = in_flight.pop(task)
+                url, depth, _parent_url, retry_count = item
+                result: CrawlResult = task.result()
+                results.append(result)
+                session_crawled += 1
+
+                transient_error = result.status in {429, 500, 502, 503, 504} or (
+                    result.skip_reason is not None and "Timeout" in result.skip_reason
+                )
+                if transient_error and retry_count < self.config.frontier_max_retries:
+                    delay = self.config.frontier_retry_base_delay_seconds * (2**retry_count)
+                    await self.store.frontier_mark_retry(url, retry_count + 1, delay)
+                    continue
+                done_urls.append(url)
+                if result.skip_reason is not None:
+                    continue
+                for link in result.discovered_links:
+                    if self.config.same_host_only and not self.config.is_host_allowed(link.href, seeds):
+                        continue
+                    if self.config.should_crawl_url(link.href):
+                        discovered_to_enqueue.append(
+                            (link.href, depth + 1, url, self._priority_score(link.href, depth + 1))
+                        )
                     else:
-                        path_skipped.append(url)
-                if path_skipped:
-                    await self._record_out_of_scope_urls(
-                        path_skipped,
-                        source="link",
-                        detail="path_out_of_scope",
-                    )
-
-                batch_results = await asyncio.gather(*(self.crawl(url) for url, _, _, _ in fetch_batch))
-                results.extend(batch_results)
-                session_crawled += len(batch_results)
-                # Pages are persisted inside crawl() via _persist_with_retry; no
-                # second persist here (it doubled the write load and deadlock risk).
-
-                discovered_to_enqueue: list[tuple[str, int, str | None, float]] = []
-                out_of_scope_discovered: list[str] = []
-                done_urls: list[str] = list(path_skipped)
-                for (url, depth, _parent_url, retry_count), result in zip(fetch_batch, batch_results):
-                    transient_error = result.status in {429, 500, 502, 503, 504} or (
-                        result.skip_reason is not None and "Timeout" in result.skip_reason
-                    )
-                    if transient_error and retry_count < self.config.frontier_max_retries:
-                        delay = self.config.frontier_retry_base_delay_seconds * (2**retry_count)
-                        await self.store.frontier_mark_retry(url, retry_count + 1, delay)
-                        continue
-                    done_urls.append(url)
-                    if result.skip_reason is not None:
-                        continue
-                    for link in result.discovered_links:
-                        if self.config.same_host_only and not self.config.is_host_allowed(link.href, seeds):
+                        out_of_scope_discovered.append(link.href)
+                if result.extracted is not None:
+                    for hl in result.extracted.hreflang_links:
+                        href = hl.href
+                        if self.config.same_host_only and not self.config.is_host_allowed(href, seeds):
                             continue
-                        if self.config.should_crawl_url(link.href):
-                            discovered_to_enqueue.append(
-                                (link.href, depth + 1, url, self._priority_score(link.href, depth + 1))
-                            )
+                        if self.config.should_crawl_url(href):
+                            discovered_to_enqueue.append((href, depth + 1, url, self._priority_score(href, depth + 1)))
                         else:
-                            out_of_scope_discovered.append(link.href)
-                    # Also enqueue hreflang targets so language variants are crawled
-                    if result.extracted is not None:
-                        for hl in result.extracted.hreflang_links:
-                            href = hl.href
-                            if self.config.same_host_only and not self.config.is_host_allowed(href, seeds):
-                                continue
-                            if self.config.should_crawl_url(href):
-                                discovered_to_enqueue.append((href, depth + 1, url, self._priority_score(href, depth + 1)))
-                            else:
-                                out_of_scope_discovered.append(href)
-                if out_of_scope_discovered:
-                    await self._record_out_of_scope_urls(
-                        list(dict.fromkeys(out_of_scope_discovered)),
-                        source="link",
-                        detail="path_out_of_scope",
-                    )
-                if discovered_to_enqueue:
+                            out_of_scope_discovered.append(href)
+
+            if out_of_scope_discovered:
+                await self._record_out_of_scope_urls(
+                    list(dict.fromkeys(out_of_scope_discovered)),
+                    source="link",
+                    detail="path_out_of_scope",
+                )
+            if discovered_to_enqueue:
+                if limit <= 0:
+                    await self.store.enqueue_frontier(discovered_to_enqueue, source="link")
+                else:
                     queued_count, pending_count, done_count = await self.store.frontier_stats()
                     remaining_frontier_budget = max(0, limit - (queued_count + pending_count + done_count))
                     if remaining_frontier_budget > 0:
                         await self.store.enqueue_frontier(
-                            discovered_to_enqueue[:remaining_frontier_budget],
-                            source="link",
+                            discovered_to_enqueue[:remaining_frontier_budget], source="link"
                         )
-                    discovered_to_enqueue = []
-
+            if done_urls:
                 await self.store.frontier_mark_done(done_urls)
+
+        try:
+            while True:
+                # How many more slots can we fill?
+                worker_limit = self._current_worker_limit()
+                if limit > 0:
+                    remaining = limit - session_crawled - len(in_flight)
+                    if remaining <= 0 and not in_flight:
+                        break
+                    fill_n = max(0, min(worker_limit - len(in_flight), remaining if remaining > 0 else 0))
+                else:
+                    fill_n = max(0, worker_limit - len(in_flight))
+
+                if fill_n > 0:
+                    frontier_batch = await self.store.frontier_next_batch(fill_n)
+                    path_skipped: list[str] = []
+                    for item in frontier_batch:
+                        url = item[0]
+                        if self.config.should_crawl_url(url):
+                            task = asyncio.create_task(self.crawl(url))
+                            in_flight[task] = item
+                        else:
+                            path_skipped.append(url)
+                    if path_skipped:
+                        await self._record_out_of_scope_urls(
+                            path_skipped, source="link", detail="path_out_of_scope"
+                        )
+
+                if not in_flight:
+                    # Nothing queued and nothing running — crawl is complete.
+                    break
+
+                # Wait for at least one task to finish before refilling.
+                done, _ = await asyncio.wait(set(in_flight.keys()), return_when=asyncio.FIRST_COMPLETED)
+                await _flush_completed(done)
 
             # limit == 0 means "unlimited"; results[:0] would wrongly drop everything.
             job = CrawlJobResult(
@@ -606,9 +636,8 @@ class CrawlEngine:
         if not urls or self.store is None:
             return
         unique_urls = list(dict.fromkeys(urls))
-        for url in unique_urls:
-            skip_detail = self.config.path_skip_detail(url) or detail
-            await self.store.record_source_by_url(url, source, detail=skip_detail)
+        pairs = [(url, self.config.path_skip_detail(url) or detail) for url in unique_urls]
+        await self.store.record_sources_bulk(pairs, source=source)
         await self.store.frontier_mark_done(unique_urls)
 
     async def _save_results(self, job: CrawlJobResult, save_to: str) -> None:
