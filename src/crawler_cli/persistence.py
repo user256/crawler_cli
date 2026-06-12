@@ -4,6 +4,7 @@ import asyncpg
 import json
 import time
 from collections.abc import Sequence
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from .compression import compress_html, decompress_html, is_compressed
@@ -1423,7 +1424,12 @@ class AsyncpgStore:
                 parsed_obj = json.loads(parsed_raw) if isinstance(parsed_raw, str) else parsed_raw
             else:
                 parsed_obj = {}
-            content_hash = schema_data.get("content_hash") or create_schema_content_hash(parsed_obj)
+            # parsed_obj may be a dict or (for JSON-LD arrays) a list at
+            # runtime; create_schema_content_hash normalises both.  The cast
+            # documents that rather than narrowing behaviour (ticket-070).
+            content_hash = schema_data.get("content_hash") or create_schema_content_hash(
+                cast("dict[str, Any]", parsed_obj)
+            )
             existing = await conn.fetchrow(
                 "SELECT id FROM schema_instances WHERE content_hash = $1",
                 content_hash,

@@ -45,13 +45,16 @@ markers = [
 ignore_missing_imports = true
 no_strict_optional = true
 
+# Blanket-ignored modules: the noise here is third-party typing
+# (BeautifulSoup AttributeValueList unions, curl_cffi overloads), not our
+# logic.  persistence.py was removed from this list in ticket-070 — its SQL
+# correctness matters too much for a blanket ignore.
 [[tool.mypy.overrides]]
 module = [
     "crawler_cli.schema",
     "crawler_cli.extract",
     "crawler_cli.detection.analytics",
     "crawler_cli.backends",
-    "crawler_cli.persistence",
 ]
 ignore_errors = true
 
