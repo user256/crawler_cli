@@ -300,6 +300,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         obscura_managed=not getattr(args, "obscura_unmanaged", False),
         obscura_stealth=obscura_stealth,
         curl_impersonate=curl_impersonate,
+        per_host_concurrency=getattr(args, "per_host_concurrency", 4),
     )
 
 
@@ -333,6 +334,12 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help="Alias for --max-workers.",
+    )
+    parser.add_argument(
+        "--per-host-concurrency",
+        type=int,
+        default=4,
+        help="Max simultaneous requests to any single host (0 = unlimited, default 4).",
     )
     parser.add_argument("--max-pages", type=int, default=0, help="Max URLs to crawl (0 = unlimited)")
     parser.add_argument("--timeout", type=float, default=30.0, help="Per-request timeout in seconds")

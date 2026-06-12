@@ -67,6 +67,7 @@ class CrawlEngine:
         self._robots = RobotsPolicyCache(config)
         self._host_delays: dict[str, asyncio.Lock] = {}
         self._host_last_fetch: dict[str, float] = {}
+        self._host_semaphores: dict[str, asyncio.Semaphore] = {}
         self._circuit_breakers = CircuitBreakerRegistry(
             failure_threshold=config.circuit_breaker_failure_threshold,
             recovery_timeout_seconds=config.circuit_breaker_recovery_seconds,
@@ -87,6 +88,15 @@ class CrawlEngine:
                 "Circuit breaker OPEN for %s after %d failures (last trigger: %s)",
                 host, circuit.failure_count, trigger,
             )
+
+    def _host_semaphore(self, host: str) -> asyncio.Semaphore | None:
+        """Return a per-host concurrency semaphore, or None when unlimited."""
+        limit = self.config.per_host_concurrency
+        if limit <= 0:
+            return None
+        if host not in self._host_semaphores:
+            self._host_semaphores[host] = asyncio.Semaphore(limit)
+        return self._host_semaphores[host]
 
     def _skip_result(self, url: str, reason: str, *, allowed_by_robots: bool | None = None) -> CrawlResult:
         return CrawlResult(
@@ -123,7 +133,16 @@ class CrawlEngine:
                     circuit = self._circuit_breakers.for_host(host)
                     if not circuit.should_allow():
                         return self._skip_result(url, "circuit_breaker_open")
-                response = await self.backend.fetch(url)
+                # Per-host concurrency cap: acquired after skip-checks so
+                # rejected requests don't hold slots (ticket-063).
+                _host_sem = self._host_semaphore(host)
+                if _host_sem is not None:
+                    await _host_sem.acquire()
+                try:
+                    response = await self.backend.fetch(url)
+                finally:
+                    if _host_sem is not None:
+                        _host_sem.release()
                 # Case-insensitive header lookup (Playwright returns lowercase keys)
                 headers_lower = {k.lower(): v for k, v in response.headers.items()}
                 content_type = headers_lower.get("content-type")

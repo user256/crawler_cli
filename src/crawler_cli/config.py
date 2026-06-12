@@ -102,7 +102,7 @@ class CrawlConfig:
     sitemap_max_depth: int = 3
     skip_sitemaps: bool = False
     allowed_hosts: list[str] = field(default_factory=list)
-    """Additional hosts to crawl beyond the seed host(s). 
+    """Additional hosts to crawl beyond the seed host(s).
     When empty and same_host_only=True, only the seed host is crawled.
     When populated, these hosts are also allowed (in addition to seeds).
     """
@@ -121,6 +121,12 @@ class CrawlConfig:
     obscura_workers: int = 1
     obscura_managed: bool = True
     obscura_stealth: bool | None = None
+    curl_impersonate: str = ""
+    """curl_cffi impersonation target, e.g. ``chrome``, ``safari``, ``firefox``.
+    Empty string or ``none`` disables impersonation (ticket 053)."""
+    per_host_concurrency: int = 4
+    """Maximum simultaneous requests to any single host (0 = unlimited).
+    Prevents the full worker pool bursting against one origin (ticket-063)."""
 
     @staticmethod
     def _url_path(url: str) -> str:
