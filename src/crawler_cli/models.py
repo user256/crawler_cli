@@ -107,6 +107,8 @@ class CrawlJobResult:
     retry_attempts: int = 0
     """Total transient-error attempts that were retried and do not appear in
     *results* (ticket-062).  Surfaced in the CLI summary."""
+    interrupted: bool = False
+    """True when the crawl was stopped early via a signal (ticket-064)."""
 
     @property
     def crawled_count(self) -> int:

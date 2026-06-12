@@ -556,14 +556,36 @@ async def _run_crawl(args: argparse.Namespace) -> int:
     await store.initialize()
     engine = CrawlEngine(config, store=store)
 
+    # Install SIGINT/SIGTERM handlers: first signal requests a clean drain,
+    # second signal cancels hard (ticket-064).  Handlers are removed on exit.
+    import signal as _signal
+
+    _sig_count = 0
+
+    def _stop_handler(signum: int, _frame: object) -> None:
+        nonlocal _sig_count
+        _sig_count += 1
+        if _sig_count == 1:
+            logger.warning("Interrupt received — draining in-flight work, press again to force quit")
+            engine.request_stop()
+        else:
+            raise KeyboardInterrupt
+
+    _orig_sigint = _signal.signal(_signal.SIGINT, _stop_handler)
+    _orig_sigterm = _signal.signal(_signal.SIGTERM, _stop_handler)
+
+    _exit_code = 0
     try:
         if config.csv_urls and not config.csv_seed_mode:
             job = await engine.crawl_list(config.csv_urls, save_to=args.save_to)
         else:
             job = await engine.crawl_open(seeds, save_to=args.save_to)
+        if job.interrupted:
+            _exit_code = 130
         persist_errors = job.persist_error_count
+        label = "Crawl interrupted" if job.interrupted else "Crawl complete"
         summary = (
-            f"Crawl complete: {job.crawled_count} crawled, "
+            f"{label}: {job.crawled_count} crawled, "
             f"{job.blocked_count} blocked by robots"
         )
         if job.retry_attempts:
@@ -586,9 +608,11 @@ async def _run_crawl(args: argparse.Namespace) -> int:
                 if args.output_dir:
                     logger.info("  CSVs written to %s", args.output_dir)
     finally:
+        _signal.signal(_signal.SIGINT, _orig_sigint)
+        _signal.signal(_signal.SIGTERM, _orig_sigterm)
         await engine.close()
         await store.close()
-    return 0
+    return _exit_code
 
 
 async def _run_embeddings(args: argparse.Namespace) -> int:

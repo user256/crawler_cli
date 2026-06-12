@@ -78,6 +78,11 @@ class CrawlEngine:
             CustomExtractor(config.extraction_rules) if config.extraction_rules else None
         )
         self._effective_worker_limit = max(1, config.max_concurrency)
+        self._stop_requested: bool = False
+
+    def request_stop(self) -> None:
+        """Signal the crawl loop to drain in-flight work and exit cleanly."""
+        self._stop_requested = True
 
     def _record_breaker_failure(self, circuit: CircuitBreaker, host: str, trigger: str) -> None:
         """Record a failure and log the trigger if it opens the breaker."""
@@ -583,8 +588,19 @@ class CrawlEngine:
             if done_urls:
                 await self.store.frontier_mark_done(done_urls)
 
+        interrupted = False
         try:
             while True:
+                # Stop flag set externally (e.g. SIGINT handler in __main__):
+                # drain in-flight work but don't pick up new URLs (ticket-064).
+                if self._stop_requested:
+                    interrupted = True
+                    if not in_flight:
+                        break
+                    done, _ = await asyncio.wait(set(in_flight.keys()), return_when=asyncio.FIRST_COMPLETED)
+                    await _flush_completed(done)
+                    continue
+
                 # How many more slots can we fill?
                 worker_limit = self._current_worker_limit()
                 if limit > 0:
@@ -625,7 +641,10 @@ class CrawlEngine:
                 results=results if limit <= 0 else results[:limit],
                 saved_to=save_to,
                 retry_attempts=session_retry_attempts,
+                interrupted=interrupted,
             )
+            if interrupted:
+                logger.warning("Crawl interrupted: %d URLs crawled before stop", session_crawled)
             if _jsonl_fh is not None:
                 # Append a summary record as the last line so tooling can
                 # detect a complete crawl and read aggregate counts without
@@ -638,6 +657,7 @@ class CrawlEngine:
                     "blocked_count": job.blocked_count,
                     "persist_error_count": job.persist_error_count,
                     "retry_attempts": job.retry_attempts,
+                    "interrupted": job.interrupted,
                     "saved_to": save_to,
                 }
                 _jsonl_fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
