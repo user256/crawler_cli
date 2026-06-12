@@ -261,15 +261,36 @@ class CrawlEngine:
                 return
 
     async def crawl_many(self, urls: Iterable[str], *, save_to: str | None = None) -> list[CrawlResult]:
+        """Crawl *urls* with a continuous worker pool (ticket-061).
+
+        Results are returned in input order regardless of completion order.
+        The worker limit shrinks under memory pressure via _current_worker_limit().
+        """
         url_list = list(urls)
-        results: list[CrawlResult] = []
-        cursor = 0
-        while cursor < len(url_list):
-            batch_size = min(self._current_worker_limit(), len(url_list) - cursor)
-            batch_urls = url_list[cursor : cursor + batch_size]
-            tasks = [asyncio.create_task(self.crawl(url)) for url in batch_urls]
-            results.extend(await asyncio.gather(*tasks))
-            cursor += batch_size
+        if not url_list:
+            return []
+        # Slot results by original index to preserve input order.
+        ordered: list[CrawlResult | None] = [None] * len(url_list)
+        in_flight: dict[asyncio.Task, int] = {}  # task → url_list index
+        pending_indices = list(range(len(url_list)))
+
+        while pending_indices or in_flight:
+            fill_n = max(0, self._current_worker_limit() - len(in_flight))
+            while fill_n > 0 and pending_indices:
+                idx = pending_indices.pop(0)
+                task = asyncio.create_task(self.crawl(url_list[idx]))
+                in_flight[task] = idx
+                fill_n -= 1
+
+            if not in_flight:
+                break
+
+            done, _ = await asyncio.wait(set(in_flight.keys()), return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                idx = in_flight.pop(task)
+                ordered[idx] = task.result()
+
+        results = [r for r in ordered if r is not None]
         if save_to:
             await self._save_results(CrawlJobResult(mode="list", seed_urls=url_list, results=results), save_to)
         return results
