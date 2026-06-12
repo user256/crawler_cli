@@ -13,7 +13,7 @@ from .circuit_breaker import CircuitBreaker, CircuitBreakerRegistry, CircuitStat
 from .config import CrawlConfig
 from .custom_extract import CustomExtractor
 from .detection import CMSDetector, AnalyticsDetector
-from .extract import extract_links, extract_page_data
+from .extract import extract_links, extract_page_data, parse_html
 from .hashing import sha256_hash, simhash64
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult
 from .persistence import AsyncpgStore
@@ -152,7 +152,10 @@ class CrawlEngine:
                 custom_data = None
                 if content_type and "html" in content_type.lower():
                     raw_html = response.text
-                    extracted = extract_page_data(response.text, response.url, response.headers)
+                    # Parse once and share the soup across all extraction
+                    # steps to avoid redundant parses (ticket-060).
+                    _soup = parse_html(response.text)
+                    extracted = extract_page_data(response.text, response.url, response.headers, soup=_soup)
                     if self.config.enable_content_hashing:
                         content_hash_sha256 = sha256_hash(response.text)
                         content_hash_simhash = simhash64(response.text)
@@ -161,6 +164,7 @@ class CrawlEngine:
                         response.url,
                         same_host_only=self.config.same_host_only,
                         allowed_hosts=set(self.config.allowed_hosts) if self.config.allowed_hosts else None,
+                        soup=_soup,
                     )
 
                     # Perform CMS detection if enabled and this is HTML content

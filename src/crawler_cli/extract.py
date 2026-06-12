@@ -7,7 +7,17 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup, Tag
 
 from .models import DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
-from .schema import extract_schema_data
+from .schema import _PARSER, extract_schema_data
+
+
+def parse_html(html: str) -> BeautifulSoup:
+    """Parse *html* with the fastest available parser (lxml if installed).
+
+    Call once per page and pass the result to ``extract_page_data`` and
+    ``extract_links`` via their ``soup=`` parameter to avoid duplicate parses
+    (ticket-060).
+    """
+    return BeautifulSoup(html, _PARSER)
 
 
 def _header_map(headers: dict[str, str]) -> dict[str, str]:
@@ -68,8 +78,19 @@ def _extract_header_hreflang(headers: dict[str, str], base_url: str) -> list[Hre
     return hreflangs
 
 
-def extract_page_data(html: str, base_url: str, headers: dict[str, str]) -> ExtractedContent:
-    soup = BeautifulSoup(html, "html.parser")
+def extract_page_data(
+    html: str,
+    base_url: str,
+    headers: dict[str, str],
+    *,
+    soup: BeautifulSoup | None = None,
+) -> ExtractedContent:
+    """Extract SEO metadata from *html*.
+
+    Pass a pre-parsed *soup* to avoid a redundant parse (ticket-060).
+    """
+    if soup is None:
+        soup = BeautifulSoup(html, _PARSER)
     header_values = _header_map(headers)
 
     title = soup.title.string.strip() if soup.title and soup.title.string else None
@@ -140,7 +161,7 @@ def extract_page_data(html: str, base_url: str, headers: dict[str, str]) -> Extr
                 }
             ),
         },
-        schema_data=extract_schema_data(html, base_url),
+        schema_data=extract_schema_data(html, base_url, soup=soup),
     )
 
 
@@ -187,15 +208,16 @@ def extract_links(
     *,
     same_host_only: bool = True,
     allowed_hosts: set[str] | None = None,
+    soup: BeautifulSoup | None = None,
 ) -> list[DiscoveredLink]:
     """Return all http(s) links found in *html*.
 
-    Host filtering is intentionally minimal here so the engine remains the
-    single scope authority (ticket-058).  Pass ``allowed_hosts`` to retain
-    links to specific extra hosts; ``same_host_only=True`` with no
-    ``allowed_hosts`` reproduces the legacy behaviour.
+    Pass a pre-parsed *soup* to avoid a redundant parse when the caller has
+    already parsed the document (ticket-060).  Host filtering is kept minimal
+    here so the engine remains the single scope authority (ticket-058).
     """
-    soup = BeautifulSoup(html, "html.parser")
+    if soup is None:
+        soup = BeautifulSoup(html, _PARSER)
     base_host = urlparse(base_url).netloc.lower()
     # Build the effective host allowlist:
     # - same_host_only=False → no host filter at all (effective_allowed=None)
