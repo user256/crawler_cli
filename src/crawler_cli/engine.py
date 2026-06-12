@@ -308,7 +308,7 @@ class CrawlEngine:
         limit: int,
     ) -> list[tuple[str, int, str | None, float]]:
         """Fetch robots.txt + well-known sitemaps, parse them, enqueue URLs."""
-        sitemap_urls: list[str] = []
+        sitemap_urls: list[tuple[str, str]] = []
         parser = SitemapParser()
         for seed in seeds:
             # 1. robots.txt sitemap directives
@@ -352,9 +352,11 @@ class CrawlEngine:
             fetch_limit = max(1, self._current_worker_limit())
             next_level: list[tuple[str, str, int]] = []
 
+            from .models import FetchResponse as _FetchResponse
+
             async def _fetch_one(
                 sm_url: str, source_kind: str, depth: int
-            ) -> tuple[str, str, int, object]:
+            ) -> tuple[str, str, int, _FetchResponse | None]:
                 try:
                     response = await self.backend.fetch(sm_url)
                     return (sm_url, source_kind, depth, response)
@@ -413,6 +415,8 @@ class CrawlEngine:
         # Persist hreflang from sitemap in one bulk call (ticket-065).
         if hreflang_data and self.store is not None:
             await self.store.persist_sitemap_hreflang_bulk(hreflang_data)
+
+        return frontier_data
 
     def _log_browser_runtime(self) -> None:
         runtime = self._build_browser_runtime()

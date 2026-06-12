@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncpg
 import json
 import time
+from collections.abc import Sequence
 from urllib.parse import urlparse
 
 from .compression import compress_html, decompress_html, is_compressed
@@ -668,7 +669,7 @@ class AsyncpgStore:
 
     async def enqueue_frontier(
         self,
-        frontier_data: list[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
+        frontier_data: Sequence[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
         *,
         source: str | None = None,
         source_detail: str | None = None,

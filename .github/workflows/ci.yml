@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    name: "Test (Python ${{ matrix.python-version }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e ".[test]"
+
+      - name: Install Playwright browsers
+        run: python -m playwright install chromium --with-deps
+        continue-on-error: true
+
+      - name: Run tests with coverage
+        run: pytest -x -q --tb=short
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: .coverage
+
+  integration:
+    name: "Integration tests (Postgres)"
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: crawler
+          POSTGRES_PASSWORD: crawler
+          POSTGRES_DB: crawler_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crawler"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e ".[test]"
+
+      - name: Run integration tests
+        env:
+          CRAWLER_CLI_TEST_DSN: "postgresql://crawler:crawler@localhost:5432/crawler_test"
+        run: pytest -x -q --tb=short -m integration
+
+  lint:
+    name: "Lint & typecheck"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install lint tools
+        run: pip install -e ".[test]" ruff mypy
+
+      - name: ruff lint
+        run: ruff check src/ tests/
+
+      - name: ruff format check
+        run: ruff format --check src/ tests/
+
+      - name: mypy
+        run: mypy src/crawler_cli
