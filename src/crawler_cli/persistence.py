@@ -926,6 +926,86 @@ class AsyncpgStore:
                 detail,
             )
 
+    async def record_sources_bulk(
+        self,
+        url_detail_pairs: list[tuple[str, str | None]],
+        source: str,
+    ) -> None:
+        """Bulk-record url_sources rows using a single connection and executemany.
+
+        *url_detail_pairs* is a list of (url, detail_or_None).  Duplicate
+        (url_id, source, detail_key) combos are silently skipped via ON CONFLICT.
+        """
+        if not url_detail_pairs:
+            return
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            urls = [u for u, _ in url_detail_pairs]
+            url_id_map = await self._bulk_get_or_create_urls(conn, urls)
+            rows = [
+                (url_id_map[url], source, detail)
+                for url, detail in url_detail_pairs
+                if url in url_id_map
+            ]
+            if rows:
+                await conn.executemany(
+                    """
+                    INSERT INTO url_sources (url_id, source, detail)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (url_id, source, detail_key) DO NOTHING
+                    """,
+                    rows,
+                )
+
+    async def persist_sitemap_hreflang_bulk(
+        self,
+        page_hreflang_pairs: list[tuple[str, list]],
+    ) -> None:
+        """Persist sitemap-derived hreflang rows in a single bulk operation.
+
+        *page_hreflang_pairs* is a list of (page_url, hreflang_links) where
+        each hreflang_links item has .hreflang (language code) and .href.
+        Uses bulk upserts to avoid N+1 round-trips (ticket-065).
+        """
+        if not page_hreflang_pairs:
+            return
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            # Collect all distinct URLs and language codes for bulk upsert.
+            page_urls = [u for u, _ in page_hreflang_pairs]
+            href_urls = [link.href for _, links in page_hreflang_pairs for link in links]
+            lang_codes = [link.hreflang for _, links in page_hreflang_pairs for link in links]
+
+            all_urls = list(dict.fromkeys(page_urls + href_urls))
+            url_id_map = await self._bulk_get_or_create_urls(conn, all_urls)
+            lang_id_map = await self._bulk_get_or_create_lookups(
+                conn, "hreflang_languages", "language_code", list(dict.fromkeys(lang_codes))
+            )
+
+            rows = []
+            for page_url, links in page_hreflang_pairs:
+                page_url_id = url_id_map.get(page_url)
+                if page_url_id is None:
+                    continue
+                for link in links:
+                    href_url_id = url_id_map.get(link.href)
+                    lang_id = lang_id_map.get(link.hreflang)
+                    if href_url_id is None or lang_id is None:
+                        continue
+                    rows.append((page_url_id, lang_id, href_url_id))
+
+            if rows:
+                await conn.executemany(
+                    """
+                    INSERT INTO hreflang_sitemap (url_id, hreflang_id, href_url_id)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    rows,
+                )
+
     async def urls_with_source(self, source: str) -> list[str]:
         await self.connect()
         assert self.pool is not None
@@ -981,11 +1061,11 @@ class AsyncpgStore:
 
     async def persist(self, result: CrawlResult) -> None:
         """Persist crawl result to database.
-        
+
         Always stores page_metadata so we know the URL was fetched and what
         status it returned. Only stores content/extracted data when extraction
         succeeded (extracted is not None).
-        
+
         IMPORTANT: When the final URL differs from the requested URL (e.g., JS
         redirect in Playwright), extracted data (canonical, hreflang, robots,
         content) is stored against the FINAL URL — the URL that actually served

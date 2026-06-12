@@ -126,6 +126,9 @@ class FakeStore:
     ) -> None:
         return None
 
+    async def persist_sitemap_hreflang_bulk(self, page_hreflang_pairs: list) -> None:
+        return None
+
 
 class TimedBackend:
     async def fetch(self, url: str) -> FetchResponse:

@@ -331,31 +331,57 @@ class CrawlEngine:
         all_page_urls: list[tuple[str, str]] = []  # (url, detail=sitemap_url)
         hreflang_data: list[tuple[str, list]] = []  # (sitemap_url, hreflang_links)
 
-        # BFS over sitemap indexes
-        to_fetch = [(sm_url, source_kind, 0) for sm_url, source_kind in unique_sitemaps]
+        # BFS over sitemap indexes — fetch each level's shards concurrently
+        # rather than one at a time to speed up large sitemap hierarchies
+        # (ticket-065).
+        current_level = [(sm_url, source_kind, 0) for sm_url, source_kind in unique_sitemaps]
         fetched: set[str] = set()
-        while to_fetch:
-            sm_url, source_kind, depth = to_fetch.pop(0)
-            if sm_url in fetched:
-                continue
-            if depth > self.config.sitemap_max_depth:
-                continue
-            fetched.add(sm_url)
-            try:
-                response = await self.backend.fetch(sm_url)
-                if response.status != 200:
-                    continue
-                doc = parser.parse(sm_url, response.body, response.headers.get("Content-Type"))
-                if doc.kind == "sitemap_index":
-                    for child in doc.children:
-                        to_fetch.append((child, source_kind, depth + 1))
-                else:
-                    for su in doc.urls[:self.config.sitemap_max_urls]:
-                        all_page_urls.append((su.loc, sm_url))
-                        if su.hreflang_links:
-                            hreflang_data.append((su.loc, su.hreflang_links))
-            except Exception:
-                continue
+        while current_level:
+            # Filter out already-fetched or too-deep items.
+            to_fetch_now = [
+                (sm_url, source_kind, depth)
+                for sm_url, source_kind, depth in current_level
+                if sm_url not in fetched and depth <= self.config.sitemap_max_depth
+            ]
+            for sm_url, _, _ in to_fetch_now:
+                fetched.add(sm_url)
+            if not to_fetch_now:
+                break
+
+            # Fetch all shards at this BFS level concurrently.
+            fetch_limit = max(1, self._current_worker_limit())
+            next_level: list[tuple[str, str, int]] = []
+
+            async def _fetch_one(
+                sm_url: str, source_kind: str, depth: int
+            ) -> tuple[str, str, int, object]:
+                try:
+                    response = await self.backend.fetch(sm_url)
+                    return (sm_url, source_kind, depth, response)
+                except Exception:
+                    return (sm_url, source_kind, depth, None)
+
+            # Process in bounded batches to respect worker limit.
+            for i in range(0, len(to_fetch_now), fetch_limit):
+                batch = to_fetch_now[i : i + fetch_limit]
+                batch_results = await asyncio.gather(
+                    *[_fetch_one(sm_url, sk, depth) for sm_url, sk, depth in batch]
+                )
+                for sm_url, source_kind, depth, response in batch_results:
+                    if response is None or response.status != 200:
+                        continue
+                    doc = parser.parse(sm_url, response.body, response.headers.get("Content-Type"))
+                    if doc.kind == "sitemap_index":
+                        for child in doc.children:
+                            if child not in fetched:
+                                next_level.append((child, source_kind, depth + 1))
+                    else:
+                        for su in doc.urls[:self.config.sitemap_max_urls]:
+                            all_page_urls.append((su.loc, sm_url))
+                            if su.hreflang_links:
+                                hreflang_data.append((su.loc, su.hreflang_links))
+
+            current_level = next_level
 
         # Enqueue and persist hreflang
         frontier_data: list[tuple[str, int, str | None, float]] = []
@@ -384,38 +410,9 @@ class CrawlEngine:
             if in_scope_pairs:
                 await self.store.record_sources_bulk(in_scope_pairs, source="sitemap")
 
-        # Persist hreflang from sitemap
-        for page_url, links in hreflang_data:
-            # We need to persist into hreflang_sitemap table via the store
-            # Reuse existing persist logic by creating a minimal CrawlResult
-            if self.store is not None:
-                await self._persist_sitemap_hreflang(page_url, links)
-
-        return frontier_data
-
-    async def _persist_sitemap_hreflang(self, url: str, links: list) -> None:
-        """Write sitemap-derived hreflang rows directly."""
-        await self.store.connect()
-        assert self.store.pool is not None
-        async with self.store.pool.acquire() as conn:
-            url_id = await self.store._get_or_create_url(conn, url)
-            for link in links:
-                hreflang_id = await self.store._get_or_create_lookup(
-                    conn, "hreflang_languages", "language_code", link.hreflang
-                )
-                href_url_id = await self.store._get_or_create_url(
-                    conn, link.href, classification="network", is_from_hreflang=True
-                )
-                await conn.execute(
-                    """
-                    INSERT INTO hreflang_sitemap (url_id, hreflang_id, href_url_id)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT DO NOTHING
-                    """,
-                    url_id,
-                    hreflang_id,
-                    href_url_id,
-                )
+        # Persist hreflang from sitemap in one bulk call (ticket-065).
+        if hreflang_data and self.store is not None:
+            await self.store.persist_sitemap_hreflang_bulk(hreflang_data)
 
     def _log_browser_runtime(self) -> None:
         runtime = self._build_browser_runtime()

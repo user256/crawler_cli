@@ -95,6 +95,15 @@ class FakeStore:
         done = sum(1 for s in self.frontier.values() if s["status"] == "done")
         return queued, pending, done
 
+    async def record_source_by_url(self, url: str, source: str, detail: str | None = None) -> None:
+        return None
+
+    async def record_sources_bulk(self, url_detail_pairs: list, source: str) -> None:
+        return None
+
+    async def persist_sitemap_hreflang_bulk(self, page_hreflang_pairs: list) -> None:
+        return None
+
 
 class TrackingStore(FakeStore):
     def __init__(self) -> None:
@@ -103,6 +112,14 @@ class TrackingStore(FakeStore):
 
     async def record_source_by_url(self, url: str, source: str, detail: str | None = None) -> None:
         self.recorded.append((url, source, detail))
+
+    async def record_sources_bulk(
+        self,
+        url_detail_pairs: list[tuple[str, str | None]],
+        source: str,
+    ) -> None:
+        for url, detail in url_detail_pairs:
+            self.recorded.append((url, source, detail))
 
 
 @pytest.mark.asyncio
