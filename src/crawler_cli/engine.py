@@ -542,6 +542,12 @@ class CrawlEngine:
                 results.append(result)
                 session_crawled += 1
                 done_urls.append(url)
+                # Stream every appended result — including skips — so the
+                # JSONL file is a complete record and its summary counts
+                # reconcile with its lines (ticket-068).  Retried attempts
+                # never reach this point and stay out of the file.
+                if _jsonl_fh is not None:
+                    _jsonl_fh.write(json.dumps(serialize_crawl_result(result), ensure_ascii=False) + "\n")
                 if result.skip_reason is not None:
                     continue
                 for link in result.discovered_links:
@@ -562,10 +568,9 @@ class CrawlEngine:
                             discovered_to_enqueue.append((href, depth + 1, url, self._priority_score(href, depth + 1)))
                         else:
                             out_of_scope_discovered.append(href)
-                # Stream the result to disk immediately while data is still
-                # present, then release bulk fields to bound RSS (ticket-059).
-                if _jsonl_fh is not None:
-                    _jsonl_fh.write(json.dumps(serialize_crawl_result(result), ensure_ascii=False) + "\n")
+                # Release bulk fields once links are consumed and the result
+                # is already streamed to disk; Postgres has the full content
+                # so holding it in RAM serves nothing (ticket-059).
                 result.raw_html = None
                 result.extracted = None
                 result.discovered_links = []

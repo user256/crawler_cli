@@ -400,6 +400,45 @@ async def test_unlimited_open_crawl_follows_discovered_links():
 
 
 @pytest.mark.asyncio
+async def test_open_crawl_jsonl_includes_skipped_results(tmp_path):
+    """Robots-blocked results must appear in the JSONL file (ticket-068).
+
+    The summary line's blocked_count must reconcile with the actual lines.
+    """
+    pages = {
+        "https://example.com/": "<html><body>ok</body></html>",
+        "https://example.com/blocked": "<html><body>never fetched</body></html>",
+    }
+    store = FakeStore()
+    store.frontier["https://example.com/blocked"] = {
+        "depth": 0,
+        "parent_url": None,
+        "status": "queued",
+        "priority_score": 0.0,
+        "retry_count": 0,
+        "retry_at": 0,
+    }
+    engine = CrawlEngine(
+        CrawlConfig(max_concurrency=2, default_open_crawl_limit=2, discover_sitemaps=False),
+        store=store,
+    )
+    engine.backend = FakeBackend(pages)
+    engine._robots = FakeRobots(disallowed={"https://example.com/blocked"})
+
+    output_path = tmp_path / "crawl.jsonl"
+    job = await engine.crawl_open(["https://example.com/"], max_urls=2, save_to=str(output_path))
+
+    lines = [json.loads(ln) for ln in output_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    summary = next(ln for ln in lines if ln.get("__type") == "summary")
+    result_lines = [ln for ln in lines if ln.get("__type") != "summary"]
+
+    assert len(result_lines) == len(job.results), "every result must be a JSONL line"
+    blocked_lines = [ln for ln in result_lines if ln["skip_reason"] == "robots_txt_disallow"]
+    assert len(blocked_lines) == 1, "blocked result missing from JSONL file"
+    assert summary["blocked_count"] == len(blocked_lines)
+
+
+@pytest.mark.asyncio
 async def test_open_crawl_allowed_hosts_enqueues_cross_host_links():
     """allowed_hosts must reach the engine's scope check, not be silenced by extract_links.
 
