@@ -88,6 +88,17 @@ class CrawlConfig:
     or supplied separately via ``proxy_auth`` (ticket 027)."""
     proxy_auth: str = ""
     """Optional ``user:password`` for the proxy when not embedded in ``proxy``."""
+    proxies: list[str] = field(default_factory=list)
+    """Pool of proxy URLs to rotate across (ticket 045). When non-empty this
+    takes precedence over the single ``proxy`` for the HTTP backends. Each
+    entry may carry embedded credentials; ``proxy_auth`` is not applied to
+    pool entries."""
+    proxy_rotation: str = "round-robin"
+    """``round-robin`` (per request) or ``per-host`` (sticky per target host)."""
+    proxy_max_failures: int = 3
+    """Consecutive failures before a pool proxy is put on cooldown."""
+    proxy_cooldown_seconds: float = 60.0
+    """How long an evicted pool proxy stays out of rotation."""
     cookies: dict[str, str] = field(default_factory=dict)
     """Session cookies injected as a ``Cookie`` header on every request (ticket 028).
     Used as a fallback when ``scoped_cookies`` is empty."""

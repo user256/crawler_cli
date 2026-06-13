@@ -5,6 +5,7 @@ import contextlib
 import os
 import signal
 import ssl
+import sys
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -15,6 +16,7 @@ from curl_cffi.requests import AsyncSession
 from .config import CrawlConfig
 from .cookies import build_cookie_header, build_scoped_cookie_header
 from .models import FetchResponse
+from .proxy_pool import ProxyPool
 
 # Content-type prefixes that are never HTML/XML and should not be fully
 # downloaded. The list is intentionally conservative: only clearly binary
@@ -121,6 +123,29 @@ def _decode_body(body: bytes, content_type: str | None) -> str:
 class FetchBackend(ABC):
     def __init__(self, config: CrawlConfig) -> None:
         self.config = config
+        self._proxy_pool: ProxyPool | None = None
+        if config.proxies:
+            self._proxy_pool = ProxyPool(
+                proxies=list(config.proxies),
+                rotation=config.proxy_rotation,
+                max_failures=config.proxy_max_failures,
+                cooldown_seconds=config.proxy_cooldown_seconds,
+            )
+
+    def _select_proxy(self, url: str) -> str | None:
+        """Pick a proxy for *url*: from the pool if configured, else the single
+        ``proxy`` (ticket 027/045)."""
+        if self._proxy_pool is not None:
+            return self._proxy_pool.select(url)
+        return _proxy_url(self.config)
+
+    def _report_proxy(self, proxy: str | None, *, ok: bool) -> None:
+        if self._proxy_pool is None or proxy is None:
+            return
+        if ok:
+            self._proxy_pool.report_success(proxy)
+        else:
+            self._proxy_pool.report_failure(proxy)
 
     @abstractmethod
     async def fetch(self, url: str) -> FetchResponse:
@@ -163,16 +188,22 @@ class AiohttpBackend(FetchBackend):
         session = await self._get_session()
         headers = _request_headers(self.config, url)
         auth = _basic_auth(self.config, url)
-        proxy = _proxy_url(self.config)
+        proxy = self._select_proxy(url)
         started = time.monotonic()
-        async with session.get(
-            url,
-            headers=headers,
-            allow_redirects=self.config.follow_redirects,
-            ssl=self._get_ssl_context(),
-            auth=auth,
-            proxy=proxy,
-        ) as response:
+        try:
+            response_cm = session.get(
+                url,
+                headers=headers,
+                allow_redirects=self.config.follow_redirects,
+                ssl=self._get_ssl_context(),
+                auth=auth,
+                proxy=proxy,
+            )
+            response = await response_cm.__aenter__()
+        except Exception:
+            self._report_proxy(proxy, ok=False)
+            raise
+        try:
             # Response headers are available here, before the body is read,
             # so this is a good proxy for time-to-first-byte.
             ttfb = time.monotonic() - started
@@ -200,7 +231,7 @@ class AiohttpBackend(FetchBackend):
                 body = b"".join(chunks)
 
             elapsed = time.monotonic() - started
-            return FetchResponse(
+            result = FetchResponse(
                 url=str(response.url),
                 requested_url=url,
                 status=response.status,
@@ -211,6 +242,14 @@ class AiohttpBackend(FetchBackend):
                 elapsed_seconds=elapsed,
                 body_truncated=truncated,
             )
+        except Exception:
+            await response_cm.__aexit__(*sys.exc_info())
+            self._report_proxy(proxy, ok=False)
+            raise
+        else:
+            await response_cm.__aexit__(None, None, None)
+            self._report_proxy(proxy, ok=True)
+            return result
 
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
@@ -228,7 +267,9 @@ class CurlCffiBackend(FetchBackend):
             session_kwargs: dict[str, object] = {
                 "verify": self.config.verify_ssl,
             }
-            if self.config.proxy:
+            # When a proxy pool is active the proxy is chosen per request, so
+            # don't bind a session-level proxy (ticket 045).
+            if self.config.proxy and self._proxy_pool is None:
                 session_kwargs["proxy"] = self.config.proxy
                 if self.config.proxy_auth:
                     session_kwargs["proxy_auth"] = tuple(self.config.proxy_auth.split(":", 1))
@@ -244,20 +285,31 @@ class CurlCffiBackend(FetchBackend):
         if self.config.auth and self.config.auth.applies_to(url):
             auth = self.config.auth.basic_credentials()
         cap = self.config.max_response_bytes
+        # Per-request proxy only when a pool is active; otherwise the session's
+        # single proxy is already bound in _get_session.
+        request_proxy = self._proxy_pool.select(url) if self._proxy_pool is not None else None
+        get_kwargs: dict[str, object] = {}
+        if request_proxy is not None:
+            get_kwargs["proxy"] = request_proxy
         started = time.monotonic()
         # Stream the response so we can record time-to-first-byte (the moment
         # the first body chunk arrives) without relying on curl's
         # STARTTRANSFER_TIME handle lookup, which is version-fragile on the
         # pooled AsyncSession handle (ticket 047). This also lets us honour the
         # byte cap and content-type gate the same way the aiohttp backend does.
-        response = await session.get(
-            url,
-            headers=headers,
-            auth=auth,
-            timeout=self.config.timeout_seconds,
-            allow_redirects=self.config.follow_redirects,
-            stream=True,
-        )
+        try:
+            response = await session.get(
+                url,
+                headers=headers,
+                auth=auth,
+                timeout=self.config.timeout_seconds,
+                allow_redirects=self.config.follow_redirects,
+                stream=True,
+                **get_kwargs,
+            )
+        except Exception:
+            self._report_proxy(request_proxy, ok=False)
+            raise
         try:
             header_map = dict(response.headers)
             ct = header_map.get("Content-Type")
@@ -286,9 +338,13 @@ class CurlCffiBackend(FetchBackend):
                 chunks.append(chunk)
                 total += len(chunk)
             body = b"".join(chunks)
+        except Exception:
+            self._report_proxy(request_proxy, ok=False)
+            raise
         finally:
             with contextlib.suppress(Exception):
                 await response.aclose()
+        self._report_proxy(request_proxy, ok=True)
         elapsed = time.monotonic() - started
         return FetchResponse(
             url=str(response.url),
@@ -389,9 +445,17 @@ class PlaywrightBackend(FetchBackend):
         # Obscura handles its own proxy via the obscura binary's --proxy flag;
         # only apply the generic proxy to plain Playwright contexts (ticket 027).
         if not self.config.obscura_enabled:
-            proxy_setting = _playwright_proxy(self.config)
-            if proxy_setting is not None:
-                context_kwargs["proxy"] = proxy_setting
+            # Proxy is a per-context setting in Playwright, so pool rotation is
+            # at context granularity, not per request (ticket 045): one proxy is
+            # picked when a context is created and reused until it recycles.
+            if self._proxy_pool is not None:
+                pooled = self._proxy_pool.select("")
+                if pooled is not None:
+                    context_kwargs["proxy"] = {"server": pooled}
+            else:
+                proxy_setting = _playwright_proxy(self.config)
+                if proxy_setting is not None:
+                    context_kwargs["proxy"] = proxy_setting
         auth = self.config.auth
         if auth and auth.enabled and auth.basic_credentials():
             user, password = auth.basic_credentials()  # type: ignore[misc]

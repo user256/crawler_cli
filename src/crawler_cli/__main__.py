@@ -257,6 +257,14 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
             # CLI --cookie pairs override file values on name collision.
             cookies.update(parse_cookie_pairs(args.cookies))
 
+    # Proxy pool (ticket 045): one URL per line, blanks and #comments skipped.
+    proxies: list[str] = []
+    if getattr(args, "proxy_file", None):
+        for line in Path(args.proxy_file).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                proxies.append(line)
+
     # --max-workers and --concurrency are aliases; explicit flag wins over default.
     _concurrency = args.max_workers or args.concurrency or 15
 
@@ -293,6 +301,10 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         scoped_cookies=scoped_cookies,
         proxy=getattr(args, "proxy", "") or "",
         proxy_auth=getattr(args, "proxy_auth", "") or "",
+        proxies=proxies,
+        proxy_rotation=getattr(args, "proxy_rotation", "round-robin"),
+        proxy_max_failures=getattr(args, "proxy_max_failures", 3),
+        proxy_cooldown_seconds=getattr(args, "proxy_cooldown_seconds", 60.0),
         extraction_rules=extraction_rules,
         discover_sitemaps=not args.skip_sitemaps,
         allowed_hosts=allowed_hosts,
@@ -525,6 +537,31 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "--proxy-auth",
         metavar="USER:PASSWORD",
         help="Proxy credentials when not embedded in --proxy.",
+    )
+    proxy.add_argument(
+        "--proxy-file",
+        help="File with one proxy URL per line; rotated across requests "
+        "(ticket 045). Takes precedence over --proxy.",
+    )
+    proxy.add_argument(
+        "--proxy-rotation",
+        choices=["round-robin", "per-host"],
+        default="round-robin",
+        help="Pool rotation strategy: round-robin (per request) or per-host "
+        "(sticky per target host). Default round-robin.",
+    )
+    proxy.add_argument(
+        "--proxy-max-failures",
+        type=int,
+        default=3,
+        help="Consecutive failures before a pool proxy is put on cooldown (default 3).",
+    )
+    proxy.add_argument(
+        "--proxy-cooldown",
+        type=float,
+        default=60.0,
+        dest="proxy_cooldown_seconds",
+        help="Seconds an evicted pool proxy stays out of rotation (default 60).",
     )
     cookies = parser.add_argument_group("Session cookies")
     cookies.add_argument(
