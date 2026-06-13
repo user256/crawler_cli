@@ -89,7 +89,13 @@ class CrawlConfig:
     proxy_auth: str = ""
     """Optional ``user:password`` for the proxy when not embedded in ``proxy``."""
     cookies: dict[str, str] = field(default_factory=dict)
-    """Session cookies injected as a ``Cookie`` header on every request (ticket 028)."""
+    """Session cookies injected as a ``Cookie`` header on every request (ticket 028).
+    Used as a fallback when ``scoped_cookies`` is empty."""
+    scoped_cookies: list = field(default_factory=list)
+    """Cookies (``cookies.Cookie``) with domain/path attributes retained; when
+    non-empty the backends select per-request only the cookies matching the
+    target URL (ticket 048). Typed as ``list`` to avoid a config→cookies import
+    cycle."""
     extraction_rules: list = field(default_factory=list)
     """Custom data extraction rules (``ExtractionRule``) evaluated per HTML page;
     results land in ``CrawlResult.custom_data`` and the ``custom_data`` JSONB

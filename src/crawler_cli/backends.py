@@ -13,7 +13,7 @@ import aiohttp
 from curl_cffi.requests import AsyncSession
 
 from .config import CrawlConfig
-from .cookies import build_cookie_header
+from .cookies import build_cookie_header, build_scoped_cookie_header
 from .models import FetchResponse
 
 # Content-type prefixes that are never HTML/XML and should not be fully
@@ -52,9 +52,16 @@ def _is_skippable_content_type(content_type: str | None) -> bool:
 
 def _request_headers(config: CrawlConfig, url: str) -> dict[str, str]:
     headers = {"User-Agent": config.user_agent, **config.request_headers}
-    if config.cookies:
-        existing = headers.get("Cookie")
+    # Scoped cookies (ticket 048) take precedence and are filtered to the
+    # target URL's domain/path; otherwise fall back to the flat all-hosts map
+    # (ticket 028).
+    cookie_value = ""
+    if config.scoped_cookies:
+        cookie_value = build_scoped_cookie_header(config.scoped_cookies, url)
+    elif config.cookies:
         cookie_value = build_cookie_header(config.cookies)
+    if cookie_value:
+        existing = headers.get("Cookie")
         headers["Cookie"] = f"{existing}; {cookie_value}" if existing else cookie_value
     if config.auth and config.auth.applies_to(url):
         headers.update(config.auth.auth_headers())
@@ -366,7 +373,11 @@ class PlaywrightBackend(FetchBackend):
 
     def _context_kwargs(self) -> dict[str, object]:
         extra_headers: dict[str, str] = dict(self.config.request_headers)
-        if self.config.cookies:
+        # Scoped cookies (ticket 048) are added to the browser's cookie jar via
+        # context.add_cookies (see _create_context_locked) so Chromium enforces
+        # domain/path matching itself. Only the legacy flat map is injected as a
+        # blanket Cookie header here (ticket 028).
+        if not self.config.scoped_cookies and self.config.cookies:
             existing = extra_headers.get("Cookie")
             cookie_value = build_cookie_header(self.config.cookies)
             extra_headers["Cookie"] = f"{existing}; {cookie_value}" if existing else cookie_value
@@ -392,11 +403,39 @@ class PlaywrightBackend(FetchBackend):
             }
         return context_kwargs
 
+    def _playwright_cookie_payload(self) -> list[dict[str, object]]:
+        """Convert scoped Cookie objects to Playwright add_cookies entries.
+
+        Playwright requires either a ``url`` or an explicit ``domain``+``path``.
+        Cookies without a domain (the ``--cookie name=value`` form) are skipped
+        here because Chromium cannot scope them; those callers should use the
+        flat-map header path instead.
+        """
+        payload: list[dict[str, object]] = []
+        for cookie in self.config.scoped_cookies:
+            if not cookie.domain:
+                continue
+            payload.append(
+                {
+                    "name": cookie.name,
+                    "value": cookie.value,
+                    "domain": cookie.domain,
+                    "path": cookie.path or "/",
+                    "secure": cookie.secure,
+                    "httpOnly": cookie.httponly,
+                }
+            )
+        return payload
+
     async def _create_context_locked(self) -> None:
         assert self._browser is not None
         self._context = await self._browser.new_context(**self._context_kwargs())
         self._context_request_count = 0
         self._context_recycle_requested = False
+        cookie_payload = self._playwright_cookie_payload()
+        if cookie_payload:
+            with contextlib.suppress(Exception):
+                await self._context.add_cookies(cookie_payload)
 
     async def _recycle_context_locked(self) -> None:
         old_context = self._context

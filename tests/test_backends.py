@@ -56,11 +56,15 @@ class StubContext:
     def __init__(self) -> None:
         self.pages: list[StubPage] = []
         self.closed = False
+        self.added_cookies: list[dict] = []
 
     async def new_page(self) -> StubPage:
         page = StubPage()
         self.pages.append(page)
         return page
+
+    async def add_cookies(self, cookies: list[dict]) -> None:
+        self.added_cookies.extend(cookies)
 
     async def close(self) -> None:
         self.closed = True
@@ -76,6 +80,9 @@ class StubPlaywrightBackend(PlaywrightBackend):
         self.contexts.append(self._context)
         self._context_request_count = 0
         self._context_recycle_requested = False
+        cookie_payload = self._playwright_cookie_payload()
+        if cookie_payload:
+            await self._context.add_cookies(cookie_payload)
 
     async def _ensure_started(self):
         if self._browser is not None:
@@ -250,6 +257,30 @@ async def test_playwright_backend_skips_selector_wait_when_unset():
     await backend.fetch("https://example.com/")
     page = backend.contexts[0].pages[0]
     assert page.waited_selector is None
+    await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_playwright_backend_adds_scoped_cookies_to_jar():
+    from crawler_cli.cookies import Cookie
+
+    backend = StubPlaywrightBackend(
+        CrawlConfig(
+            backend="playwright",
+            timeout_seconds=1.0,
+            playwright_network_idle_timeout_seconds=0.0,
+            scoped_cookies=[
+                Cookie(name="a", value="1", domain="example.com", path="/", secure=True),
+                Cookie(name="hostonly", value="2"),  # no domain → skipped for jar
+            ],
+        )
+    )
+    await backend.fetch("https://example.com/")
+    added = backend.contexts[0].added_cookies
+    names = {c["name"] for c in added}
+    assert names == {"a"}, "host-less cookie must not go into the browser jar"
+    assert added[0]["domain"] == "example.com"
+    assert added[0]["secure"] is True
     await backend.close()
 
 

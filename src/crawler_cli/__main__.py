@@ -21,7 +21,12 @@ from .config import (
     _env_float,
     _env_int,
 )
-from .cookies import load_cookies_file, parse_cookie_pairs
+from .cookies import (
+    load_cookies_file,
+    load_scoped_cookies_file,
+    parse_cookie_pairs,
+    scoped_cookies_from_pairs,
+)
 from .csv_urls import load_urls_from_csv
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine
@@ -232,12 +237,25 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
 
         extraction_rules = load_extraction_rules(args.extraction_rules)
 
+    # Cookies: a cookies-file carries domain/path attributes, so it produces
+    # scoped cookies that are matched per-request (ticket 048). CLI --cookie
+    # pairs have no domain and are kept as all-host cookies so the original
+    # single-host login-wall behaviour (ticket 028) is preserved. Passing
+    # --no-cookie-scoping forces the legacy flat all-hosts map even for files.
     cookies: dict[str, str] = {}
+    scoped_cookies: list = []
+    use_scoping = not getattr(args, "no_cookie_scoping", False)
     if getattr(args, "cookies_file", None):
-        cookies.update(load_cookies_file(args.cookies_file))
+        if use_scoping:
+            scoped_cookies.extend(load_scoped_cookies_file(args.cookies_file))
+        else:
+            cookies.update(load_cookies_file(args.cookies_file))
     if getattr(args, "cookies", None):
-        # CLI --cookie pairs override file values on name collision.
-        cookies.update(parse_cookie_pairs(args.cookies))
+        if use_scoping:
+            scoped_cookies.extend(scoped_cookies_from_pairs(args.cookies))
+        else:
+            # CLI --cookie pairs override file values on name collision.
+            cookies.update(parse_cookie_pairs(args.cookies))
 
     # --max-workers and --concurrency are aliases; explicit flag wins over default.
     _concurrency = args.max_workers or args.concurrency or 15
@@ -272,6 +290,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         seed_from_archive=args.archive_org_check,
         request_headers=headers,
         cookies=cookies,
+        scoped_cookies=scoped_cookies,
         proxy=getattr(args, "proxy", "") or "",
         proxy_auth=getattr(args, "proxy_auth", "") or "",
         extraction_rules=extraction_rules,
@@ -520,7 +539,14 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     cookies.add_argument(
         "--cookies-file",
         help="Load cookies from a JSON (dev-tools / storageState) or Netscape "
-        "cookies.txt file.",
+        "cookies.txt file. Domain/path attributes are honoured per-request "
+        "(see --no-cookie-scoping).",
+    )
+    cookies.add_argument(
+        "--no-cookie-scoping",
+        action="store_true",
+        help="Send all cookies to every host as one flat Cookie header, "
+        "ignoring their domain/path attributes (legacy ticket-028 behaviour).",
     )
     auth = parser.add_argument_group("HTTP authentication")
     auth.add_argument("--auth-type", choices=["basic", "digest", "bearer"], help="Authentication type")
