@@ -16,6 +16,39 @@ from .config import CrawlConfig
 from .cookies import build_cookie_header
 from .models import FetchResponse
 
+# Content-type prefixes that are never HTML/XML and should not be fully
+# downloaded. The list is intentionally conservative: only clearly binary
+# or non-parseable types. Sitemaps and feeds (text/xml, application/xml,
+# application/rss+xml, application/atom+xml) are NOT excluded here because
+# the engine parses them. application/xhtml+xml is HTML so also kept.
+_SKIP_CONTENT_TYPES = frozenset(
+    [
+        "image/",
+        "audio/",
+        "video/",
+        "font/",
+        "application/pdf",
+        "application/zip",
+        "application/x-zip",
+        "application/octet-stream",
+        "application/x-tar",
+        "application/x-gzip",
+        "application/gzip",
+        "application/vnd.ms-",
+        "application/vnd.openxmlformats",
+    ]
+)
+# Sniff buffer: read only this many bytes for non-parseable types.
+_SNIFF_BYTES = 256
+
+
+def _is_skippable_content_type(content_type: str | None) -> bool:
+    """Return True if the content-type is clearly non-HTML/XML and need not be fully read."""
+    if not content_type:
+        return False
+    ct_lower = content_type.lower().split(";", 1)[0].strip()
+    return any(ct_lower.startswith(skip) for skip in _SKIP_CONTENT_TYPES)
+
 
 def _request_headers(config: CrawlConfig, url: str) -> dict[str, str]:
     headers = {"User-Agent": config.user_agent, **config.request_headers}
@@ -91,85 +124,182 @@ class FetchBackend(ABC):
 
 
 class AiohttpBackend(FetchBackend):
-    async def fetch(self, url: str) -> FetchResponse:
-        timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
-        ssl_context = None
-        if not self.config.verify_ssl:
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
+    def __init__(self, config: CrawlConfig) -> None:
+        super().__init__(config)
+        self._session: aiohttp.ClientSession | None = None
+        self._ssl_context: ssl.SSLContext | None = None
 
+    def _get_ssl_context(self) -> ssl.SSLContext | None:
+        if not self.config.verify_ssl:
+            if self._ssl_context is None:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                self._ssl_context = ctx
+            return self._ssl_context
+        return None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
+            connector = aiohttp.TCPConnector(
+                limit=max(self.config.max_concurrency, 10),
+                ssl=self._get_ssl_context(),
+            )
+            self._session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+            )
+        return self._session
+
+    async def fetch(self, url: str) -> FetchResponse:
+        session = await self._get_session()
         headers = _request_headers(self.config, url)
         auth = _basic_auth(self.config, url)
         proxy = _proxy_url(self.config)
         started = time.monotonic()
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            async with session.get(
-                url,
-                allow_redirects=self.config.follow_redirects,
-                ssl=ssl_context,
-                auth=auth,
-                proxy=proxy,
-            ) as response:
-                # Response headers are available here, before the body is read,
-                # so this is a good proxy for time-to-first-byte.
-                ttfb = time.monotonic() - started
-                body = await response.read()
-                elapsed = time.monotonic() - started
-                if len(body) > self.config.max_response_bytes:
-                    body = body[: self.config.max_response_bytes]
-                header_map = dict(response.headers)
-                return FetchResponse(
-                    url=str(response.url),
-                    requested_url=url,
-                    status=response.status,
-                    headers=header_map,
-                    body=body,
-                    text=_decode_body(body, header_map.get("Content-Type")),
-                    ttfb_seconds=ttfb,
-                    elapsed_seconds=elapsed,
-                )
+        async with session.get(
+            url,
+            headers=headers,
+            allow_redirects=self.config.follow_redirects,
+            ssl=self._get_ssl_context(),
+            auth=auth,
+            proxy=proxy,
+        ) as response:
+            # Response headers are available here, before the body is read,
+            # so this is a good proxy for time-to-first-byte.
+            ttfb = time.monotonic() - started
+            header_map = dict(response.headers)
+            ct = header_map.get("Content-Type")
+            cap = self.config.max_response_bytes
+            truncated = False
+
+            if _is_skippable_content_type(ct):
+                # Non-parseable type: read only a small sniff buffer.
+                body = await response.content.read(_SNIFF_BYTES)
+            else:
+                # Stream in chunks, stopping as soon as we hit the cap.
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.content.iter_chunked(65536):
+                    remaining = cap - total
+                    if len(chunk) >= remaining:
+                        chunks.append(chunk[:remaining])
+                        total += remaining
+                        truncated = True
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                body = b"".join(chunks)
+
+            elapsed = time.monotonic() - started
+            return FetchResponse(
+                url=str(response.url),
+                requested_url=url,
+                status=response.status,
+                headers=header_map,
+                body=body,
+                text=_decode_body(body, ct),
+                ttfb_seconds=ttfb,
+                elapsed_seconds=elapsed,
+                body_truncated=truncated,
+            )
+
+    async def close(self) -> None:
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+            self._session = None
 
 
 class CurlCffiBackend(FetchBackend):
+    def __init__(self, config: CrawlConfig) -> None:
+        super().__init__(config)
+        self._session: AsyncSession | None = None
+
+    async def _get_session(self) -> AsyncSession:
+        if self._session is None:
+            session_kwargs: dict[str, object] = {
+                "verify": self.config.verify_ssl,
+            }
+            if self.config.proxy:
+                session_kwargs["proxy"] = self.config.proxy
+                if self.config.proxy_auth:
+                    session_kwargs["proxy_auth"] = tuple(self.config.proxy_auth.split(":", 1))
+            if self.config.curl_impersonate and self.config.curl_impersonate != "none":
+                session_kwargs["impersonate"] = self.config.curl_impersonate
+            self._session = AsyncSession(**session_kwargs)
+        return self._session
+
     async def fetch(self, url: str) -> FetchResponse:
+        session = await self._get_session()
         headers = _request_headers(self.config, url)
         auth = None
         if self.config.auth and self.config.auth.applies_to(url):
             auth = self.config.auth.basic_credentials()
-        get_kwargs: dict[str, object] = {}
-        if self.config.proxy:
-            get_kwargs["proxy"] = self.config.proxy
-            if self.config.proxy_auth:
-                get_kwargs["proxy_auth"] = tuple(self.config.proxy_auth.split(":", 1))
+        cap = self.config.max_response_bytes
         started = time.monotonic()
-        async with AsyncSession() as session:
-            response = await session.get(
-                url,
-                headers=headers,
-                auth=auth,
-                timeout=self.config.timeout_seconds,
-                allow_redirects=self.config.follow_redirects,
-                verify=self.config.verify_ssl,
-                **get_kwargs,
-            )
+        # Stream the response so we can record time-to-first-byte (the moment
+        # the first body chunk arrives) without relying on curl's
+        # STARTTRANSFER_TIME handle lookup, which is version-fragile on the
+        # pooled AsyncSession handle (ticket 047). This also lets us honour the
+        # byte cap and content-type gate the same way the aiohttp backend does.
+        response = await session.get(
+            url,
+            headers=headers,
+            auth=auth,
+            timeout=self.config.timeout_seconds,
+            allow_redirects=self.config.follow_redirects,
+            stream=True,
+        )
+        try:
+            header_map = dict(response.headers)
+            ct = header_map.get("Content-Type")
+            ttfb: float | None = None
+            truncated = False
+            chunks: list[bytes] = []
+            total = 0
+            skippable = _is_skippable_content_type(ct)
+            async for chunk in response.aiter_content():
+                if ttfb is None:
+                    ttfb = time.monotonic() - started
+                if not chunk:
+                    continue
+                if skippable:
+                    # Non-parseable type: keep only a small sniff buffer, then
+                    # stop pulling the rest of the payload.
+                    chunks.append(chunk[:_SNIFF_BYTES])
+                    truncated = total + len(chunk) > _SNIFF_BYTES
+                    break
+                remaining = cap - total
+                if len(chunk) >= remaining:
+                    chunks.append(chunk[:remaining])
+                    total += remaining
+                    truncated = True
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            body = b"".join(chunks)
+        finally:
+            with contextlib.suppress(Exception):
+                await response.aclose()
         elapsed = time.monotonic() - started
-        body = response.content[: self.config.max_response_bytes]
-        header_map = dict(response.headers)
-        # curl_cffi's AsyncSession returns only after the full body is read, and
-        # its pooled curl handle makes a precise STARTTRANSFER_TIME (TTFB) lookup
-        # unreliable across versions, so we record total duration only and leave
-        # ttfb_seconds None. See DECISIONS-2026-06-07.md (ticket 029).
         return FetchResponse(
             url=str(response.url),
             requested_url=url,
             status=response.status_code,
             headers=header_map,
             body=body,
-            text=_decode_body(body, header_map.get("Content-Type")),
-            ttfb_seconds=None,
+            text=_decode_body(body, ct),
+            ttfb_seconds=ttfb,
             elapsed_seconds=elapsed,
+            body_truncated=truncated,
         )
+
+    async def close(self) -> None:
+        if self._session is not None:
+            with contextlib.suppress(Exception):
+                await self._session.close()
+            self._session = None
 
 
 def _linux_descendant_pids(root_pid: int) -> set[int]:

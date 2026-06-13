@@ -5,7 +5,7 @@ import types
 
 import pytest
 
-from crawler_cli.backends import PlaywrightBackend
+from crawler_cli.backends import CurlCffiBackend, PlaywrightBackend
 from crawler_cli.config import CrawlConfig
 
 
@@ -94,6 +94,100 @@ class EnsureStartedBackend(PlaywrightBackend):
         self._context_request_count = 0
         self._context_recycle_requested = False
         self.created_context = True
+
+
+class StubCurlStreamResponse:
+    """Mimics a curl_cffi streaming Response: aiter_content yields chunks."""
+
+    def __init__(self, chunks: list[bytes], headers: dict[str, str], *, status: int = 200,
+                 chunk_delay: float = 0.0) -> None:
+        self._chunks = chunks
+        self.headers = headers
+        self.status_code = status
+        self.url = "https://example.com/"
+        self.closed = False
+        self._chunk_delay = chunk_delay
+
+    async def aiter_content(self):
+        import asyncio
+        for chunk in self._chunks:
+            if self._chunk_delay:
+                await asyncio.sleep(self._chunk_delay)
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class StubCurlSession:
+    def __init__(self, response: StubCurlStreamResponse) -> None:
+        self._response = response
+        self.get_kwargs: dict | None = None
+
+    async def get(self, url: str, **kwargs):
+        self.get_kwargs = kwargs
+        self._response.url = url
+        return self._response
+
+    async def close(self) -> None:
+        return None
+
+
+def _curl_backend_with(response: StubCurlStreamResponse, **config_kwargs) -> CurlCffiBackend:
+    backend = CurlCffiBackend(CrawlConfig(backend="curl_cffi", **config_kwargs))
+    backend._session = StubCurlSession(response)  # type: ignore[assignment]
+    return backend
+
+
+@pytest.mark.asyncio
+async def test_curl_cffi_reports_ttfb_below_total():
+    response = StubCurlStreamResponse(
+        [b"<html>", b"<body>hi</body>", b"</html>"],
+        {"Content-Type": "text/html; charset=utf-8"},
+        chunk_delay=0.01,
+    )
+    backend = _curl_backend_with(response)
+
+    result = await backend.fetch("https://example.com/")
+
+    assert result.status == 200
+    assert result.text == "<html><body>hi</body></html>"
+    assert result.ttfb_seconds is not None
+    assert result.elapsed_seconds is not None
+    assert result.ttfb_seconds < result.elapsed_seconds
+    assert response.closed is True
+    # streaming must be requested
+    assert backend._session.get_kwargs["stream"] is True  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_curl_cffi_caps_body_at_max_response_bytes():
+    big = b"x" * 10_000
+    response = StubCurlStreamResponse(
+        [big, big, big],
+        {"Content-Type": "text/html"},
+    )
+    backend = _curl_backend_with(response, max_response_bytes=5_000)
+
+    result = await backend.fetch("https://example.com/")
+
+    assert len(result.body) == 5_000
+    assert result.body_truncated is True
+
+
+@pytest.mark.asyncio
+async def test_curl_cffi_skips_binary_content_type():
+    response = StubCurlStreamResponse(
+        [b"%PDF-1.7" + b"\x00" * 100_000],
+        {"Content-Type": "application/pdf"},
+    )
+    backend = _curl_backend_with(response)
+
+    result = await backend.fetch("https://example.com/doc.pdf")
+
+    # only a sniff buffer is retained, not the whole payload
+    assert len(result.body) <= 256
+    assert result.body_truncated is True
 
 
 @pytest.mark.asyncio
