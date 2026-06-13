@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
 
-from crawler_cli.detection.analytics import AnalyticsDetector, AnalyticsHit
+from crawler_cli.detection.analytics import AnalyticsDetector
 from crawler_cli.models import FetchResponse
 
 

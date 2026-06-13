@@ -5,7 +5,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Literal
 
-from .backends import build_backend
 from .config import CrawlConfig
 from .engine import CrawlEngine
 from .extract import extract_links

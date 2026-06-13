@@ -1,4 +1,3 @@
-import pytest
 
 from crawler_cli.auth import AuthConfig
 from crawler_cli.backends import _request_headers

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
 
-from crawler_cli.detection.cms import CMSDetector, CMSDetectionResult
+from crawler_cli.detection.cms import CMSDetector
 from crawler_cli.models import FetchResponse
 
 
@@ -31,7 +30,7 @@ class TestCMSDetector:
             body=b"<html><body>Plain HTML site</body></html>",
             text="<html><body>Plain HTML site</body></html>",
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name is None
         assert result.confidence == 0.0
@@ -55,7 +54,7 @@ class TestCMSDetector:
             body=html.encode(),
             text=html,
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name == "wordpress"
         assert result.confidence > 0.2
@@ -80,7 +79,7 @@ class TestCMSDetector:
             body=html.encode(),
             text=html,
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name == "wordpress"
         assert result.confidence > 0.1
@@ -99,7 +98,7 @@ class TestCMSDetector:
             body=b"<html><body>Shopify site</body></html>",
             text="<html><body>Shopify site</body></html>",
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name == "shopify"
         assert result.confidence > 0.1
@@ -126,7 +125,7 @@ class TestCMSDetector:
             body=html.encode(),
             text=html,
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name == "shopify"
         assert result.confidence > 0.1
@@ -145,7 +144,7 @@ class TestCMSDetector:
             body=b"<html><body>Drupal site</body></html>",
             text="<html><body>Drupal site</body></html>",
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name == "drupal"
         assert result.confidence > 0.2
@@ -168,7 +167,7 @@ class TestCMSDetector:
             body=html.encode(),
             text=html,
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name == "drupal"
         assert result.confidence > 0.1
@@ -192,7 +191,7 @@ class TestCMSDetector:
             body=html.encode(),
             text=html,
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name == "joomla"
         assert result.confidence > 0.2
@@ -218,7 +217,7 @@ class TestCMSDetector:
             body=html.encode(),
             text=html,
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name == "squarespace"
         assert result.confidence > 0.2
@@ -244,7 +243,7 @@ class TestCMSDetector:
             body=html.encode(),
             text=html,
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name == "wix"
         assert result.confidence > 0.2
@@ -276,7 +275,7 @@ class TestCMSDetector:
             body=html.encode(),
             text=html,
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name == "wordpress"
         assert 0.0 <= result.confidence <= 1.0
@@ -303,7 +302,7 @@ class TestCMSDetector:
             body=html.encode(),
             text=html,
         )
-        
+
         result = self.detector.detect(response)
         # Should detect one of them (WordPress has higher weight for meta generator)
         assert result.cms_name in ["wordpress", "shopify"]
@@ -328,7 +327,7 @@ class TestCMSDetector:
             body=html.encode(),
             text=html,
         )
-        
+
         result = self.detector.detect(response)
         assert result.cms_name == "wordpress"
         assert result.confidence > 0.0
