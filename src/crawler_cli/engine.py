@@ -236,6 +236,9 @@ class CrawlEngine:
                     ttfb_seconds=response.ttfb_seconds,
                     total_duration_seconds=response.elapsed_seconds,
                     custom_data=custom_data,
+                    lcp_ms=response.lcp_ms,
+                    cls=response.cls,
+                    inp_ms=response.inp_ms,
                 )
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)

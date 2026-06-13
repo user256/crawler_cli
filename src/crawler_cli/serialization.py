@@ -76,6 +76,9 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
         "persist_error": result.persist_error,
         "ttfb_seconds": result.ttfb_seconds,
         "total_duration_seconds": result.total_duration_seconds,
+        "lcp_ms": result.lcp_ms,
+        "cls": result.cls,
+        "inp_ms": result.inp_ms,
         "custom_data": result.custom_data,
         "detected_cms": None
         if result.detected_cms is None

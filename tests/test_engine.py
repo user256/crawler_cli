@@ -162,6 +162,26 @@ async def test_crawl_propagates_timing_metrics():
 
 
 @pytest.mark.asyncio
+async def test_crawl_web_vitals_null_on_http_backend():
+    """HTTP backends can't measure CWV, so the fields stay null (ticket 046)."""
+    engine = CrawlEngine(CrawlConfig(respect_robots_txt=False))
+    engine.backend = TimedBackend()
+
+    result = await engine.crawl("https://example.com/")
+
+    assert result.lcp_ms is None
+    assert result.cls is None
+    assert result.inp_ms is None
+
+    from crawler_cli.serialization import serialize_crawl_result
+
+    payload = serialize_crawl_result(result)
+    assert payload["lcp_ms"] is None
+    assert payload["cls"] is None
+    assert payload["inp_ms"] is None
+
+
+@pytest.mark.asyncio
 async def test_crawl_respects_robots_txt_disallow():
     engine = CrawlEngine(CrawlConfig())
     engine.backend = FakeBackend({"https://example.com/": "<html></html>"})

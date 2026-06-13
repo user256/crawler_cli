@@ -229,6 +229,16 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
             )
             sys.exit(2)
 
+    # Core Web Vitals need an in-page PerformanceObserver, so they're only
+    # measurable on the Playwright backend (ticket 046). Warn rather than fail:
+    # the columns simply stay null on HTTP backends.
+    if getattr(args, "collect_web_vitals", False) and backend != "playwright":
+        logger.warning(
+            "--web-vitals requires the JS backend (--js or --obscura); "
+            "Core Web Vitals will not be collected on the %s backend.",
+            backend,
+        )
+
     cb_enabled, cb_threshold, cb_recovery = _resolve_circuit_breaker(args)
 
     extraction_rules: list = []
@@ -291,6 +301,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         playwright_wait_for_selector=getattr(args, "wait_for_selector", "") or "",
         playwright_wait_for_selector_timeout_seconds=getattr(args, "wait_for_selector_timeout", 10.0),
         playwright_cdp_endpoint=getattr(args, "playwright_cdp_endpoint", "") or "",
+        collect_web_vitals=getattr(args, "collect_web_vitals", False),
         memory_high_watermark_percent=args.memory_high_watermark,
         memory_recovery_watermark_percent=args.memory_recovery_watermark,
         respect_robots_txt=not args.ignore_robots,
@@ -408,6 +419,13 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         metavar="SECONDS",
         help="JS backend only: override the network-idle settle timeout in seconds "
         "(alias for --playwright-network-idle-timeout; 0 disables the idle wait)",
+    )
+    parser.add_argument(
+        "--web-vitals",
+        action="store_true",
+        dest="collect_web_vitals",
+        help="JS backend only: capture lab Core Web Vitals (LCP/CLS/INP) per page "
+        "via a PerformanceObserver shim (ticket 046). No effect on HTTP backends.",
     )
     parser.add_argument(
         "--memory-high-watermark",

@@ -30,6 +30,12 @@ class FetchResponse:
     """Total fetch duration: request send → full body received (ticket 029)."""
     body_truncated: bool = False
     """True when the response body was capped at max_response_bytes during streaming."""
+    lcp_ms: float | None = None
+    """Largest Contentful Paint in ms — lab metric, Playwright only (ticket 046)."""
+    cls: float | None = None
+    """Cumulative Layout Shift (unitless) — lab metric, Playwright only (ticket 046)."""
+    inp_ms: float | None = None
+    """Interaction to Next Paint in ms — lab metric, Playwright only (ticket 046)."""
 
 
 @dataclass(slots=True)
@@ -96,6 +102,12 @@ class CrawlResult:
     ttfb_seconds: float | None = None
     total_duration_seconds: float | None = None
     custom_data: dict[str, Any] | None = None
+    lcp_ms: float | None = None
+    """Largest Contentful Paint in ms — lab metric, Playwright only (ticket 046)."""
+    cls: float | None = None
+    """Cumulative Layout Shift (unitless) — lab metric, Playwright only (ticket 046)."""
+    inp_ms: float | None = None
+    """Interaction to Next Paint in ms — lab metric, Playwright only (ticket 046)."""
 
 
 @dataclass(slots=True)

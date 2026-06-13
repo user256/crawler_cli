@@ -99,6 +99,34 @@ async def test_record_sources_bulk_deduplicates(store: AsyncpgStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_web_vitals_round_trip(store: AsyncpgStore) -> None:
+    """CWV columns persist and read back via the worst_cwv_pages report (ticket 046)."""
+    from crawler_cli.reports import CrawlReports
+
+    result = CrawlResult(
+        requested_url="https://example.com/slow",
+        final_url="https://example.com/slow",
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="playwright",
+        extracted=None,
+        raw_html="<html></html>",
+        lcp_ms=2500.0,
+        cls=0.12,
+        inp_ms=190.0,
+    )
+    await store.persist(result)
+
+    rows = await CrawlReports(store).worst_cwv_pages(limit=10)
+    by_url = {r["url"]: r for r in rows}
+    assert "https://example.com/slow" in by_url
+    assert by_url["https://example.com/slow"]["lcp_ms"] == 2500.0
+    assert by_url["https://example.com/slow"]["cls"] == 0.12
+    assert by_url["https://example.com/slow"]["inp_ms"] == 190.0
+
+
+@pytest.mark.asyncio
 async def test_truncate_only_touches_crawl_tables(store: AsyncpgStore) -> None:
     """truncate_crawl_tables must not drop tables that don't belong to it."""
     await store.enqueue_frontier([("https://example.com/", 0, None)], source="seed")

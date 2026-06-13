@@ -16,6 +16,8 @@ class StubResponse:
 
 
 class StubPage:
+    cwv_payload: dict | None = None
+
     def __init__(self) -> None:
         self.url = ""
         self.default_timeout: int | None = None
@@ -24,6 +26,9 @@ class StubPage:
         self.waited_selector: str | None = None
         self.waited_selector_timeout: int | None = None
         self.closed = False
+
+    async def evaluate(self, _script: str):
+        return self.cwv_payload
 
     def set_default_timeout(self, timeout_ms: int) -> None:
         self.default_timeout = timeout_ms
@@ -65,6 +70,10 @@ class StubContext:
 
     async def add_cookies(self, cookies: list[dict]) -> None:
         self.added_cookies.extend(cookies)
+
+    async def add_init_script(self, script: str) -> None:
+        self.init_scripts = getattr(self, "init_scripts", [])
+        self.init_scripts.append(script)
 
     async def close(self) -> None:
         self.closed = True
@@ -257,6 +266,65 @@ async def test_playwright_backend_skips_selector_wait_when_unset():
     await backend.fetch("https://example.com/")
     page = backend.contexts[0].pages[0]
     assert page.waited_selector is None
+    await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_playwright_backend_collects_web_vitals():
+    StubPage.cwv_payload = {"lcp": 1234.5, "cls": 0.07, "inp": 88.0}
+    try:
+        backend = StubPlaywrightBackend(
+            CrawlConfig(
+                backend="playwright",
+                timeout_seconds=1.0,
+                playwright_network_idle_timeout_seconds=0.0,
+                collect_web_vitals=True,
+            )
+        )
+        result = await backend.fetch("https://example.com/")
+        assert result.lcp_ms == 1234.5
+        assert result.cls == 0.07
+        assert result.inp_ms == 88.0
+        await backend.close()
+    finally:
+        StubPage.cwv_payload = None
+
+
+@pytest.mark.asyncio
+async def test_playwright_backend_web_vitals_null_when_disabled():
+    StubPage.cwv_payload = {"lcp": 999.0, "cls": 0.5, "inp": 10.0}
+    try:
+        backend = StubPlaywrightBackend(
+            CrawlConfig(
+                backend="playwright",
+                timeout_seconds=1.0,
+                playwright_network_idle_timeout_seconds=0.0,
+                collect_web_vitals=False,
+            )
+        )
+        result = await backend.fetch("https://example.com/")
+        # disabled → not read, all null even though the page would report values
+        assert result.lcp_ms is None
+        assert result.cls is None
+        assert result.inp_ms is None
+        await backend.close()
+    finally:
+        StubPage.cwv_payload = None
+
+
+@pytest.mark.asyncio
+async def test_playwright_backend_web_vitals_tolerate_missing_payload():
+    StubPage.cwv_payload = None  # shim never ran / page returned null
+    backend = StubPlaywrightBackend(
+        CrawlConfig(
+            backend="playwright",
+            timeout_seconds=1.0,
+            playwright_network_idle_timeout_seconds=0.0,
+            collect_web_vitals=True,
+        )
+    )
+    result = await backend.fetch("https://example.com/")
+    assert result.lcp_ms is None and result.cls is None and result.inp_ms is None
     await backend.close()
 
 

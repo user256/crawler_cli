@@ -43,6 +43,40 @@ _SKIP_CONTENT_TYPES = frozenset(
 # Sniff buffer: read only this many bytes for non-parseable types.
 _SNIFF_BYTES = 256
 
+# PerformanceObserver shim injected before page scripts run (ticket 046). It
+# accumulates the latest LCP, summed CLS, and worst INP into window.__cwv so
+# the backend can read lab Core Web Vitals after the page settles. LCP/CLS use
+# buffered entries; INP is approximated from event-timing durations (real INP
+# needs interaction — these are lab values, documented as such).
+_WEB_VITALS_SHIM = """
+(() => {
+  if (window.__cwv) return;
+  window.__cwv = { lcp: null, cls: 0, inp: null };
+  try {
+    new PerformanceObserver((list) => {
+      const entries = list.getEntries();
+      const last = entries[entries.length - 1];
+      if (last) window.__cwv.lcp = last.renderTime || last.loadTime || last.startTime;
+    }).observe({ type: 'largest-contentful-paint', buffered: true });
+  } catch (e) {}
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (!entry.hadRecentInput) window.__cwv.cls += entry.value;
+      }
+    }).observe({ type: 'layout-shift', buffered: true });
+  } catch (e) {}
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        const d = entry.duration;
+        if (window.__cwv.inp === null || d > window.__cwv.inp) window.__cwv.inp = d;
+      }
+    }).observe({ type: 'event', buffered: true, durationThreshold: 16 });
+  } catch (e) {}
+})();
+"""
+
 
 def _is_skippable_content_type(content_type: str | None) -> bool:
     """Return True if the content-type is clearly non-HTML/XML and need not be fully read."""
@@ -500,6 +534,28 @@ class PlaywrightBackend(FetchBackend):
         if cookie_payload:
             with contextlib.suppress(Exception):
                 await self._context.add_cookies(cookie_payload)
+        if self.config.collect_web_vitals:
+            # Inject before any page script so the observers capture from load
+            # (ticket 046). Suppressed: a CDP browser may reject init scripts.
+            with contextlib.suppress(Exception):
+                await self._context.add_init_script(_WEB_VITALS_SHIM)
+
+    async def _read_web_vitals(self, page) -> tuple[float | None, float | None, float | None]:
+        """Read accumulated lab CWV from the injected shim (ticket 046)."""
+        try:
+            data = await page.evaluate("() => window.__cwv || null")
+        except Exception:
+            return None, None, None
+        if not isinstance(data, dict):
+            return None, None, None
+        lcp = data.get("lcp")
+        cls = data.get("cls")
+        inp = data.get("inp")
+        return (
+            float(lcp) if isinstance(lcp, (int, float)) else None,
+            float(cls) if isinstance(cls, (int, float)) else None,
+            float(inp) if isinstance(inp, (int, float)) else None,
+        )
 
     async def _recycle_context_locked(self) -> None:
         old_context = self._context
@@ -682,6 +738,9 @@ class PlaywrightBackend(FetchBackend):
                         timeout=sel_timeout + 1.0,
                     )
             html = await asyncio.wait_for(page.content(), timeout=self.config.timeout_seconds + 1.0)
+            lcp_ms = cls = inp_ms = None
+            if self.config.collect_web_vitals:
+                lcp_ms, cls, inp_ms = await self._read_web_vitals(page)
             elapsed = time.monotonic() - started
             header_map = dict(response.headers) if response else {}
             body = html.encode("utf-8")[: self.config.max_response_bytes]
@@ -694,6 +753,9 @@ class PlaywrightBackend(FetchBackend):
                 text=html,
                 ttfb_seconds=ttfb,
                 elapsed_seconds=elapsed,
+                lcp_ms=lcp_ms,
+                cls=cls,
+                inp_ms=inp_ms,
             )
         finally:
             if page is not None:

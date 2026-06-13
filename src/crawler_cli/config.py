@@ -62,6 +62,9 @@ class CrawlConfig:
     before snapshotting the DOM (ticket 031). Times out gracefully."""
     playwright_wait_for_selector_timeout_seconds: float = 10.0
     playwright_cdp_endpoint: str = ""
+    collect_web_vitals: bool = False
+    """Capture lab Core Web Vitals (LCP/CLS/INP) via a PerformanceObserver shim
+    on the Playwright backend (ticket 046). No effect on HTTP backends."""
     memory_high_watermark_percent: float = 85.0
     memory_recovery_watermark_percent: float = 70.0
     respect_robots_txt: bool = True

@@ -193,6 +193,15 @@ SCHEMA_STATEMENTS = [
     ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS total_duration_seconds DOUBLE PRECISION
     """,
     """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS lcp_ms DOUBLE PRECISION
+    """,
+    """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS cls DOUBLE PRECISION
+    """,
+    """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS inp_ms DOUBLE PRECISION
+    """,
+    """
     ALTER TABLE content ADD COLUMN IF NOT EXISTS custom_data JSONB
     """,
     """
@@ -1087,15 +1096,18 @@ class AsyncpgStore:
                     """
                     INSERT INTO page_metadata
                         (url_id, initial_status_code, final_status_code, final_url_id,
-                         fetched_at, ttfb_seconds, total_duration_seconds)
-                    VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::INTEGER, $5, $6)
+                         fetched_at, ttfb_seconds, total_duration_seconds, lcp_ms, cls, inp_ms)
+                    VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::INTEGER, $5, $6, $7, $8, $9)
                     ON CONFLICT (url_id) DO UPDATE
                     SET initial_status_code = EXCLUDED.initial_status_code,
                         final_status_code = EXCLUDED.final_status_code,
                         final_url_id = EXCLUDED.final_url_id,
                         fetched_at = EXCLUDED.fetched_at,
                         ttfb_seconds = EXCLUDED.ttfb_seconds,
-                        total_duration_seconds = EXCLUDED.total_duration_seconds
+                        total_duration_seconds = EXCLUDED.total_duration_seconds,
+                        lcp_ms = EXCLUDED.lcp_ms,
+                        cls = EXCLUDED.cls,
+                        inp_ms = EXCLUDED.inp_ms
                     """,
                     requested_url_id,
                     result.status,
@@ -1103,6 +1115,9 @@ class AsyncpgStore:
                     final_url_id,
                     result.ttfb_seconds,
                     result.total_duration_seconds,
+                    result.lcp_ms,
+                    result.cls,
+                    result.inp_ms,
                 )
 
                 if result.extracted is None:
