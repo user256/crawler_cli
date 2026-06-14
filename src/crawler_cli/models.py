@@ -96,6 +96,10 @@ class CrawlResult:
     allowed_by_robots: bool | None = None
     skip_reason: str | None = None
     persist_error: str | None = None
+    challenge: str | None = None
+    """Bot-challenge vendor (cloudflare/datadome/...) if this response was an
+    anti-bot interstitial rather than real content (ticket 074). Set means the
+    page is blocked, not crawled."""
     detected_cms: "CMSDetectionResult | None" = None
     detected_analytics: "AnalyticsDetectionResult | None" = None
     browser_runtime: BrowserRuntime | None = None
@@ -133,6 +137,11 @@ class CrawlJobResult:
     @property
     def persist_error_count(self) -> int:
         return sum(1 for result in self.results if result.persist_error is not None)
+
+    @property
+    def challenge_blocked_count(self) -> int:
+        """Pages that were anti-bot interstitials, not real content (ticket 074)."""
+        return sum(1 for result in self.results if result.challenge is not None)
 
 
 @dataclass(slots=True)

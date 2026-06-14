@@ -74,6 +74,7 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
         "allowed_by_robots": result.allowed_by_robots,
         "skip_reason": result.skip_reason,
         "persist_error": result.persist_error,
+        "challenge": result.challenge,
         "ttfb_seconds": result.ttfb_seconds,
         "total_duration_seconds": result.total_duration_seconds,
         "lcp_ms": result.lcp_ms,
