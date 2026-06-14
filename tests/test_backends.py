@@ -156,6 +156,56 @@ def _curl_backend_with(response: StubCurlStreamResponse, **config_kwargs) -> Cur
 
 
 @pytest.mark.asyncio
+async def test_fetch_resilient_retries_gateway_on_failure():
+    # Gateway mode: a status-0 (connection) failure is retried through the same
+    # endpoint until a non-zero status, up to proxy_gateway_max_retries.
+    fail = StubCurlStreamResponse([], {"Content-Type": "text/html"}, status=0)
+    ok = StubCurlStreamResponse([b"<html>ok</html>"], {"Content-Type": "text/html"}, status=200)
+    backend = CurlCffiBackend(
+        CrawlConfig(backend="curl_cffi", proxy="http://gw:8000",
+                    proxy_mode="gateway", proxy_gateway_max_retries=3)
+    )
+
+    seq = [fail, fail, ok]
+
+    class _SeqSession:
+        async def get(self, url, **kwargs):
+            seq[0].url = url
+            return seq.pop(0)
+
+        async def close(self):
+            return None
+
+    backend._session = _SeqSession()  # type: ignore[assignment]
+    result = await backend.fetch_resilient("https://x.test/")
+    assert result.status == 200
+    assert seq == []  # consumed exactly fail, fail, ok
+
+
+@pytest.mark.asyncio
+async def test_fetch_resilient_does_not_retry_non_gateway():
+    # List mode (or no proxy): fetch_resilient is a single fetch; the pool's own
+    # eviction handles bad proxies, not retry-in-place.
+    fail = StubCurlStreamResponse([], {"Content-Type": "text/html"}, status=0)
+    backend = CurlCffiBackend(CrawlConfig(backend="curl_cffi"))
+    calls = {"n": 0}
+
+    class _CountSession:
+        async def get(self, url, **kwargs):
+            calls["n"] += 1
+            fail.url = url
+            return fail
+
+        async def close(self):
+            return None
+
+    backend._session = _CountSession()  # type: ignore[assignment]
+    result = await backend.fetch_resilient("https://x.test/")
+    assert result.status == 0
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
 async def test_curl_cffi_reports_ttfb_below_total():
     response = StubCurlStreamResponse(
         [b"<html>", b"<body>hi</body>", b"</html>"],
@@ -204,6 +254,68 @@ async def test_curl_cffi_skips_binary_content_type():
     # only a sniff buffer is retained, not the whole payload
     assert len(result.body) <= 256
     assert result.body_truncated is True
+
+
+def test_playwright_proxy_setting_from_gateway():
+    backend = PlaywrightBackend(
+        CrawlConfig(backend="playwright", proxy="http://user:pass@gw:8000", proxy_mode="gateway")
+    )
+    setting = backend._playwright_proxy_setting()
+    assert setting == {"server": "http://gw:8000", "username": "user", "password": "pass"}
+
+
+def test_playwright_proxy_setting_from_list():
+    backend = PlaywrightBackend(
+        CrawlConfig(backend="playwright", proxies=["http://a.proxy:3128"], proxy_mode="list")
+    )
+    setting = backend._playwright_proxy_setting()
+    assert setting["server"] == "http://a.proxy:3128"
+
+
+def test_playwright_proxy_setting_none_without_proxy():
+    backend = PlaywrightBackend(CrawlConfig(backend="playwright"))
+    assert backend._playwright_proxy_setting() is None
+
+
+@pytest.mark.asyncio
+async def test_managed_obscura_argv_includes_gateway_proxy(monkeypatch):
+    # Obscura managed spawn should pick up the general gateway proxy when no
+    # explicit --obscura-proxy is set (ticket 073).
+    import asyncio as _asyncio
+
+    spawned = {}
+
+    class _Proc:
+        returncode = None
+        stderr = None
+        def terminate(self): self.returncode = 0
+        async def wait(self): return 0
+
+    async def _fake_exec(*argv, **kwargs):
+        spawned["argv"] = list(argv)
+        return _Proc()
+
+    class _FakeBrowser:
+        async def close(self): pass
+
+    class _FakeChromium:
+        async def connect_over_cdp(self, endpoint): return _FakeBrowser()
+
+    class _FakePW:
+        chromium = _FakeChromium()
+        async def stop(self): pass
+
+    monkeypatch.setattr(_asyncio, "create_subprocess_exec", _fake_exec)
+    backend = PlaywrightBackend(
+        CrawlConfig(backend="playwright", obscura_enabled=True, obscura_managed=True,
+                    obscura_stealth=True, proxy="http://user:pass@gw:8000", proxy_mode="gateway")
+    )
+    backend._playwright = _FakePW()
+    await backend._start_managed_obscura()
+    argv = spawned["argv"]
+    assert "--proxy" in argv
+    assert "http://user:pass@gw:8000" in argv
+    assert "--stealth" in argv
 
 
 @pytest.mark.asyncio

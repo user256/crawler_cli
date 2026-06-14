@@ -9,6 +9,7 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
+from urllib.parse import urlparse
 
 import aiohttp
 from curl_cffi.requests import AsyncSession
@@ -154,17 +155,33 @@ def _decode_body(body: bytes, content_type: str | None) -> str:
         return body.decode("utf-8", errors="replace")
 
 
+def build_proxy_pool(config: CrawlConfig) -> "ProxyPool | None":
+    """Build a ProxyPool from config, honouring gateway vs list mode.
+
+    Gateway mode (ticket 072): the single ``proxy`` endpoint (with ``proxy_auth``
+    folded in) is the one rotating-gateway URL. List mode (ticket 045): the
+    ``proxies`` list. Returns None when no proxy is configured.
+    """
+    if config.proxy_mode == "gateway":
+        endpoint = _proxy_url(config)
+        if not endpoint:
+            return None
+        return ProxyPool(proxies=[endpoint], mode="gateway")
+    if config.proxies:
+        return ProxyPool(
+            proxies=list(config.proxies),
+            mode="list",
+            rotation=config.proxy_rotation,
+            max_failures=config.proxy_max_failures,
+            cooldown_seconds=config.proxy_cooldown_seconds,
+        )
+    return None
+
+
 class FetchBackend(ABC):
     def __init__(self, config: CrawlConfig) -> None:
         self.config = config
-        self._proxy_pool: ProxyPool | None = None
-        if config.proxies:
-            self._proxy_pool = ProxyPool(
-                proxies=list(config.proxies),
-                rotation=config.proxy_rotation,
-                max_failures=config.proxy_max_failures,
-                cooldown_seconds=config.proxy_cooldown_seconds,
-            )
+        self._proxy_pool: ProxyPool | None = build_proxy_pool(config)
 
     def _select_proxy(self, url: str) -> str | None:
         """Pick a proxy for *url*: from the pool if configured, else the single
@@ -184,6 +201,26 @@ class FetchBackend(ABC):
     @abstractmethod
     async def fetch(self, url: str) -> FetchResponse:
         raise NotImplementedError
+
+    async def fetch_resilient(self, url: str) -> FetchResponse:
+        """fetch() with gateway retry-on-failure (ticket 072).
+
+        In gateway mode a failed fetch (status 0, i.e. connection/proxy error)
+        is retried through the same endpoint up to ``proxy_gateway_max_retries``
+        times — each retry gets a fresh server-side exit IP. In list mode (or no
+        proxy) this is a plain single fetch; the list pool's own eviction handles
+        bad proxies. Non-zero HTTP statuses (incl. 403/blocks) are returned as-is
+        for the engine's challenge handling (ticket 074), not retried here.
+        """
+        if self._proxy_pool is None or not self._proxy_pool.is_gateway:
+            return await self.fetch(url)
+        attempts = max(1, self.config.proxy_gateway_max_retries + 1)
+        result = await self.fetch(url)
+        for _ in range(attempts - 1):
+            if result.status != 0:
+                return result
+            result = await self.fetch(url)
+        return result
 
     async def close(self) -> None:
         return None
@@ -461,6 +498,29 @@ class PlaywrightBackend(FetchBackend):
     def _timeout_ms(seconds: float) -> int:
         return max(1, int(seconds * 1000))
 
+    def _playwright_proxy_setting(self) -> dict[str, str] | None:
+        """Build Playwright's proxy dict (server + optional user/pass) from the
+        pool (gateway or list) or the single configured proxy (ticket 073).
+
+        Playwright wants credentials split out, so embedded ``user:pass@`` in a
+        pooled URL is parsed into username/password.
+        """
+        if self._proxy_pool is not None:
+            selected = self._proxy_pool.select("")
+            if not selected:
+                return None
+            parsed = urlparse(selected)
+            setting: dict[str, str] = {
+                "server": f"{parsed.scheme}://{parsed.hostname}"
+                + (f":{parsed.port}" if parsed.port else "")
+            }
+            if parsed.username:
+                setting["username"] = parsed.username
+            if parsed.password:
+                setting["password"] = parsed.password
+            return setting
+        return _playwright_proxy(self.config)
+
     def _context_kwargs(self) -> dict[str, object]:
         extra_headers: dict[str, str] = dict(self.config.request_headers)
         # Scoped cookies (ticket 048) are added to the browser's cookie jar via
@@ -479,17 +539,14 @@ class PlaywrightBackend(FetchBackend):
         # Obscura handles its own proxy via the obscura binary's --proxy flag;
         # only apply the generic proxy to plain Playwright contexts (ticket 027).
         if not self.config.obscura_enabled:
-            # Proxy is a per-context setting in Playwright, so pool rotation is
-            # at context granularity, not per request (ticket 045): one proxy is
-            # picked when a context is created and reused until it recycles.
-            if self._proxy_pool is not None:
-                pooled = self._proxy_pool.select("")
-                if pooled is not None:
-                    context_kwargs["proxy"] = {"server": pooled}
-            else:
-                proxy_setting = _playwright_proxy(self.config)
-                if proxy_setting is not None:
-                    context_kwargs["proxy"] = proxy_setting
+            # Proxy is a per-context setting in Playwright. In GATEWAY mode this
+            # is fine — the single endpoint goes on the context and the gateway
+            # rotates the exit IP server-side per request, so a reused context
+            # still gets rotating IPs (ticket 073). In LIST mode rotation is at
+            # context granularity (one proxy per context, re-picked on recycle).
+            proxy_setting = self._playwright_proxy_setting()
+            if proxy_setting is not None:
+                context_kwargs["proxy"] = proxy_setting
         auth = self.config.auth
         if auth and auth.enabled and auth.basic_credentials():
             user, password = auth.basic_credentials()  # type: ignore[misc]
@@ -582,8 +639,14 @@ class PlaywrightBackend(FetchBackend):
             "--workers",
             str(self.config.obscura_workers),
         ]
-        if self.config.obscura_proxy:
-            argv.extend(["--proxy", self.config.obscura_proxy])
+        # Prefer the explicit obscura_proxy; otherwise fall back to the general
+        # proxy pool/gateway so `--proxy <gateway>` works with --obscura too
+        # (ticket 073). Gateway rotates the IP server-side per request.
+        obscura_proxy = self.config.obscura_proxy
+        if not obscura_proxy and self._proxy_pool is not None:
+            obscura_proxy = self._proxy_pool.select("") or ""
+        if obscura_proxy:
+            argv.extend(["--proxy", obscura_proxy])
         effective_stealth = self.config.obscura_stealth
         if effective_stealth is None and not self.config.analytics_detection:
             effective_stealth = True

@@ -275,6 +275,12 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
             if line and not line.startswith("#"):
                 proxies.append(line)
 
+    # Resolve proxy mode (ticket 072): explicit flag wins; otherwise default to
+    # gateway when only a single --proxy is given (no list), else list.
+    _proxy_mode = getattr(args, "proxy_mode", None)
+    if _proxy_mode is None:
+        _proxy_mode = "gateway" if (getattr(args, "proxy", "") and not proxies) else "list"
+
     # --max-workers and --concurrency are aliases; explicit flag wins over default.
     _concurrency = args.max_workers or args.concurrency or 15
 
@@ -313,9 +319,13 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         proxy=getattr(args, "proxy", "") or "",
         proxy_auth=getattr(args, "proxy_auth", "") or "",
         proxies=proxies,
+        proxy_mode=_proxy_mode,
         proxy_rotation=getattr(args, "proxy_rotation", "round-robin"),
         proxy_max_failures=getattr(args, "proxy_max_failures", 3),
         proxy_cooldown_seconds=getattr(args, "proxy_cooldown_seconds", 60.0),
+        proxy_gateway_max_retries=getattr(args, "proxy_gateway_max_retries", 2),
+        detect_challenges=not getattr(args, "no_challenge_detection", False),
+        challenge_escalate_to_browser=not getattr(args, "no_challenge_escalation", False),
         extraction_rules=extraction_rules,
         discover_sitemaps=not args.skip_sitemaps,
         allowed_hosts=allowed_hosts,
@@ -426,6 +436,18 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         dest="collect_web_vitals",
         help="JS backend only: capture lab Core Web Vitals (LCP/CLS/INP) per page "
         "via a PerformanceObserver shim (ticket 046). No effect on HTTP backends.",
+    )
+    parser.add_argument(
+        "--no-challenge-detection",
+        action="store_true",
+        help="Disable bot-challenge (Cloudflare/Datadome/...) detection (ticket 074). "
+        "By default challenges are detected and not stored as content.",
+    )
+    parser.add_argument(
+        "--no-challenge-escalation",
+        action="store_true",
+        help="Detect challenges but do not escalate HTTP fetches to the browser "
+        "backend; just record them as blocked (ticket 074).",
     )
     parser.add_argument(
         "--memory-high-watermark",
@@ -558,15 +580,32 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     proxy.add_argument(
         "--proxy-file",
-        help="File with one proxy URL per line; rotated across requests "
-        "(ticket 045). Takes precedence over --proxy.",
+        help="File with one proxy URL per line; rotated across requests in list "
+        "mode (ticket 045). Takes precedence over --proxy.",
+    )
+    proxy.add_argument(
+        "--proxy-mode",
+        choices=["list", "gateway"],
+        default=None,
+        help="'gateway' = a single residential rotating-gateway endpoint (set "
+        "via --proxy) whose IP rotates server-side per request; never evicted, "
+        "retried on failure (ticket 072). 'list' = client-side pool from "
+        "--proxy-file/--proxy (ticket 045). Default: gateway when only --proxy "
+        "is set, else list.",
+    )
+    proxy.add_argument(
+        "--proxy-gateway-max-retries",
+        type=int,
+        default=2,
+        help="gateway mode: extra retries through the gateway on a failed fetch "
+        "(each retry gets a fresh exit IP). Default 2.",
     )
     proxy.add_argument(
         "--proxy-rotation",
         choices=["round-robin", "per-host"],
         default="round-robin",
-        help="Pool rotation strategy: round-robin (per request) or per-host "
-        "(sticky per target host). Default round-robin.",
+        help="list mode: rotation strategy: round-robin (per request) or "
+        "per-host (sticky per target host). Default round-robin.",
     )
     proxy.add_argument(
         "--proxy-max-failures",
@@ -671,6 +710,8 @@ async def _run_crawl(args: argparse.Namespace) -> int:
         )
         if job.retry_attempts:
             summary += f", {job.retry_attempts} transient retries"
+        if job.challenge_blocked_count:
+            summary += f", {job.challenge_blocked_count} blocked by bot-challenge"
         if persist_errors:
             summary += f", {persist_errors} persist failures (check WARNING logs)"
         print(summary)

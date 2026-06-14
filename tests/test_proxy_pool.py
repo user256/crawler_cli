@@ -81,6 +81,71 @@ def test_unknown_rotation_raises():
         ProxyPool(["http://a:1"], rotation="nope")
 
 
+# --- ticket 072: gateway mode ---
+
+def test_gateway_always_returns_endpoint():
+    pool = ProxyPool(["http://gw:8000"], mode="gateway")
+    assert pool.is_gateway is True
+    picks = {pool.select(f"https://{h}.test/") for h in ("a", "b", "c")}
+    assert picks == {"http://gw:8000"}
+
+
+def test_gateway_never_evicts_on_failure():
+    pool = ProxyPool(["http://gw:8000"], mode="gateway", max_failures=1)
+    for _ in range(10):
+        pool.report_failure("http://gw:8000")
+    # still served — the gateway rotates server-side, benching it would stall us
+    assert pool.select("https://x.test/") == "http://gw:8000"
+
+
+def test_gateway_requires_single_endpoint():
+    with pytest.raises(ValueError):
+        ProxyPool(["http://a:1", "http://b:1"], mode="gateway")
+
+
+def test_unknown_mode_raises():
+    with pytest.raises(ValueError):
+        ProxyPool(["http://a:1"], mode="nope")
+
+
+def test_build_proxy_pool_gateway_from_single_proxy():
+    from crawler_cli.backends import build_proxy_pool
+
+    config = CrawlConfig(proxy="http://user:pass@gw:8000", proxy_mode="gateway")
+    pool = build_proxy_pool(config)
+    assert pool is not None and pool.is_gateway
+    assert pool.select("https://x.test/") == "http://user:pass@gw:8000"
+
+
+def test_build_proxy_pool_list_mode():
+    from crawler_cli.backends import build_proxy_pool
+
+    config = CrawlConfig(proxies=["http://a:1", "http://b:1"], proxy_mode="list")
+    pool = build_proxy_pool(config)
+    assert pool is not None and not pool.is_gateway
+    assert pool.size == 2
+
+
+def test_cli_defaults_to_gateway_for_single_proxy():
+    from crawler_cli.__main__ import _build_config, _build_parser
+
+    args = _build_parser().parse_args(
+        ["crawl", "https://x.com", "--proxy", "http://user:pass@gw:8000"]
+    )
+    config = _build_config(args)
+    assert config.proxy_mode == "gateway"
+
+
+def test_cli_explicit_proxy_mode_list_with_single_proxy():
+    from crawler_cli.__main__ import _build_config, _build_parser
+
+    args = _build_parser().parse_args(
+        ["crawl", "https://x.com", "--proxy", "http://gw:8000", "--proxy-mode", "list"]
+    )
+    config = _build_config(args)
+    assert config.proxy_mode == "list"
+
+
 def test_cli_wires_proxy_pool(tmp_path):
     from crawler_cli.__main__ import _build_config, _build_parser
 

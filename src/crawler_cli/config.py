@@ -92,16 +92,32 @@ class CrawlConfig:
     proxy_auth: str = ""
     """Optional ``user:password`` for the proxy when not embedded in ``proxy``."""
     proxies: list[str] = field(default_factory=list)
-    """Pool of proxy URLs to rotate across (ticket 045). When non-empty this
-    takes precedence over the single ``proxy`` for the HTTP backends. Each
-    entry may carry embedded credentials; ``proxy_auth`` is not applied to
-    pool entries."""
+    """Pool of proxy URLs to rotate across in ``list`` mode (ticket 045). When
+    non-empty this takes precedence over the single ``proxy`` for the HTTP
+    backends. Each entry may carry embedded credentials; ``proxy_auth`` is not
+    applied to pool entries."""
+    proxy_mode: str = "list"
+    """``list`` (client-side pool of distinct proxies, ticket 045) or
+    ``gateway`` (a single residential rotating-gateway endpoint whose exit IP
+    rotates server-side per request, ticket 072). In ``gateway`` mode the single
+    ``proxy`` endpoint is used, never evicted, and retried on failure."""
     proxy_rotation: str = "round-robin"
-    """``round-robin`` (per request) or ``per-host`` (sticky per target host)."""
+    """list mode only: ``round-robin`` (per request) or ``per-host`` (sticky)."""
     proxy_max_failures: int = 3
-    """Consecutive failures before a pool proxy is put on cooldown."""
+    """list mode only: consecutive failures before a pool proxy is put on cooldown."""
     proxy_cooldown_seconds: float = 60.0
-    """How long an evicted pool proxy stays out of rotation."""
+    """list mode only: how long an evicted pool proxy stays out of rotation."""
+    proxy_gateway_max_retries: int = 2
+    """gateway mode: extra retries through the gateway on a failed fetch (each
+    retry gets a fresh server-side exit IP)."""
+    detect_challenges: bool = True
+    """Detect bot-challenge interstitials (Cloudflare/Datadome/...) and treat
+    them as blocked rather than content (ticket 074)."""
+    challenge_escalate_to_browser: bool = True
+    """On a challenge from an HTTP backend, escalate the fetch to the
+    Playwright/Obscura browser backend through a fresh IP (ticket 074)."""
+    challenge_max_escalations: int = 1
+    """Max browser escalations per URL before recording it as blocked."""
     cookies: dict[str, str] = field(default_factory=dict)
     """Session cookies injected as a ``Cookie`` header on every request (ticket 028).
     Used as a fallback when ``scoped_cookies`` is empty."""

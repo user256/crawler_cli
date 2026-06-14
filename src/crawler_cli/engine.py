@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import Iterable
@@ -8,7 +9,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .archive import discover_historical_urls
-from .backends import RateLimiter, build_backend
+from .backends import PlaywrightBackend, RateLimiter, build_backend
+from .challenge import detect_challenge
 from .circuit_breaker import CircuitBreaker, CircuitBreakerRegistry, CircuitState
 from .config import CrawlConfig
 from .custom_extract import CustomExtractor
@@ -83,6 +85,9 @@ class CrawlEngine:
         )
         self._effective_worker_limit = max(1, config.max_concurrency)
         self._stop_requested: bool = False
+        # Lazily-built browser backend used to escalate challenged HTTP fetches
+        # (ticket 074). Only created when an escalation actually happens.
+        self._challenge_backend: PlaywrightBackend | None = None
         if 0 < config.per_host_concurrency < config.max_concurrency:
             logger.info(
                 "Per-host cap %d is below max workers %d — single-host crawls are limited to "
@@ -93,6 +98,55 @@ class CrawlEngine:
     def request_stop(self) -> None:
         """Signal the crawl loop to drain in-flight work and exit cleanly."""
         self._stop_requested = True
+
+    def _is_browser_backend(self, backend: object) -> bool:
+        return isinstance(backend, PlaywrightBackend)
+
+    async def _get_challenge_backend(self) -> PlaywrightBackend:
+        """Lazily build a Playwright/Obscura backend for challenge escalation."""
+        if self._challenge_backend is None:
+            # Force a browser backend regardless of the configured one. Honour
+            # Obscura if the operator configured it; otherwise plain Playwright.
+            import dataclasses
+
+            browser_config = dataclasses.replace(self.config, backend="playwright")
+            self._challenge_backend = PlaywrightBackend(browser_config)
+        return self._challenge_backend
+
+    async def _handle_challenge(self, url: str, response):
+        """Detect a bot-challenge interstitial and, if configured, escalate the
+        fetch to the browser backend through a fresh IP (ticket 074).
+
+        Returns (response, challenge_kind). When escalation succeeds the returned
+        response is the browser's; when it still fails (or escalation is off /
+        the active backend is already a browser) the original response is
+        returned with the detected challenge kind recorded.
+        """
+        kind = detect_challenge(response.status, response.headers, response.text)
+        if kind is None:
+            return response, None
+
+        # Already a browser backend, or escalation disabled → just flag it.
+        if self._is_browser_backend(self.backend) or not self.config.challenge_escalate_to_browser:
+            logger.warning("Bot challenge (%s) on %s — recorded as blocked", kind, url)
+            return response, kind
+
+        logger.info("Bot challenge (%s) on %s — escalating to browser", kind, url)
+        backend = await self._get_challenge_backend()
+        for _ in range(max(1, self.config.challenge_max_escalations)):
+            try:
+                escalated = await backend.fetch_resilient(url)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Challenge escalation fetch failed for %s: %s", url, type(exc).__name__)
+                break
+            esc_kind = detect_challenge(escalated.status, escalated.headers, escalated.text)
+            if esc_kind is None and escalated.status and escalated.status < 400:
+                logger.info("Challenge cleared for %s via browser escalation", url)
+                return escalated, None
+            response = escalated
+            kind = esc_kind or kind
+        logger.warning("Bot challenge (%s) persisted on %s after escalation — blocked", kind, url)
+        return response, kind
 
     def _record_breaker_failure(self, circuit: CircuitBreaker, host: str, trigger: str) -> None:
         """Record a failure and log the trigger if it opens the breaker."""
@@ -172,10 +226,22 @@ class CrawlEngine:
                 if _host_sem is not None:
                     await _host_sem.acquire()
                 try:
-                    response = await self.backend.fetch(url)
+                    # Prefer the gateway-retry wrapper (ticket 072); fall back to
+                    # plain fetch for backends that don't implement it (test fakes,
+                    # external backends).
+                    fetch_resilient = getattr(self.backend, "fetch_resilient", None)
+                    if fetch_resilient is not None:
+                        response = await fetch_resilient(url)
+                    else:
+                        response = await self.backend.fetch(url)
                 finally:
                     if _host_sem is not None:
                         _host_sem.release()
+
+                # Bot-challenge detection + escalate-to-browser (ticket 074).
+                challenge_kind = None
+                if self.config.detect_challenges:
+                    response, challenge_kind = await self._handle_challenge(url, response)
                 # Case-insensitive header lookup (Playwright returns lowercase keys)
                 headers_lower = {k.lower(): v for k, v in response.headers.items()}
                 content_type = headers_lower.get("content-type")
@@ -230,6 +296,7 @@ class CrawlEngine:
                     content_hash_simhash=content_hash_simhash,
                     discovered_links=discovered_links,
                     allowed_by_robots=True if self.config.respect_robots_txt else None,
+                    challenge=challenge_kind,
                     detected_cms=detected_cms,
                     detected_analytics=detected_analytics,
                     browser_runtime=browser_runtime,
@@ -723,6 +790,11 @@ class CrawlEngine:
             await self.close()
 
     async def close(self) -> None:
+        # Tear down the lazily-built challenge-escalation backend too (ticket 074).
+        if self._challenge_backend is not None:
+            with contextlib.suppress(Exception):
+                await self._challenge_backend.close()
+            self._challenge_backend = None
         close = getattr(self.backend, "close", None)
         if close is None:
             return
