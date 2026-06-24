@@ -682,7 +682,7 @@ class AsyncpgStore:
         )
         return {str(r["val"]): int(r["id"]) for r in rows}
 
-    async def _retry_on_deadlock(self, op, *args, _attempts: int = 5, **kwargs):
+    async def _retry_on_deadlock(self, op, *args, _attempts: int = 8, **kwargs):
         """Run an async store operation, retrying on Postgres deadlock /
         serialization failures with exponential backoff.
 
@@ -737,14 +737,13 @@ class AsyncpgStore:
                     if parent_url:
                         urls_to_resolve.append(parent_url)
 
-                # Resolve URLs in a deterministic (sorted) order. Concurrent
-                # enqueue_frontier transactions otherwise lock overlapping `urls`
-                # rows in different orders and deadlock (asyncpg DeadlockDetected);
-                # sorting makes every transaction acquire row locks in the same
-                # order, which is the standard Postgres deadlock-avoidance fix.
-                url_to_id: dict[str, int] = {}
-                for url in sorted(dict.fromkeys(urls_to_resolve)):
-                    url_to_id[url] = await self._get_or_create_url(conn, url)
+                # Resolve all URLs in ONE sorted, set-based statement rather than
+                # a loop of individual INSERT ... ON CONFLICT upserts. The loop
+                # form holds row locks across many statements and still deadlocks
+                # under heavy concurrency (overlapping facet URLs from multiple
+                # workers); _bulk_get_or_create_urls sorts internally and resolves
+                # them in a single round-trip, which removes the interleaving.
+                url_to_id = await self._bulk_get_or_create_urls(conn, urls_to_resolve)
 
                 child_ids = [url_to_id[item[0]] for item in frontier_data]
                 existing_rows = await conn.fetch(

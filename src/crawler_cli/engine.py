@@ -707,15 +707,27 @@ class CrawlEngine:
                     detail="path_out_of_scope",
                 )
             if discovered_to_enqueue:
-                if limit <= 0:
-                    await self.store.enqueue_frontier(discovered_to_enqueue, source="link")
-                else:
-                    queued_count, pending_count, done_count = await self.store.frontier_stats()
-                    remaining_frontier_budget = max(0, limit - (queued_count + pending_count + done_count))
-                    if remaining_frontier_budget > 0:
-                        await self.store.enqueue_frontier(
-                            discovered_to_enqueue[:remaining_frontier_budget], source="link"
-                        )
+                # Enqueuing discovered links must never crash the crawl. Under heavy
+                # concurrency the urls/frontier upserts can still exhaust the
+                # deadlock retries; if so, log and continue — these links will be
+                # rediscovered when sibling pages are crawled (the page itself is
+                # already persisted and marked done below).
+                try:
+                    if limit <= 0:
+                        await self.store.enqueue_frontier(discovered_to_enqueue, source="link")
+                    else:
+                        queued_count, pending_count, done_count = await self.store.frontier_stats()
+                        remaining_frontier_budget = max(0, limit - (queued_count + pending_count + done_count))
+                        if remaining_frontier_budget > 0:
+                            await self.store.enqueue_frontier(
+                                discovered_to_enqueue[:remaining_frontier_budget], source="link"
+                            )
+                except Exception as exc:  # noqa: BLE001 - link enqueue is best-effort
+                    logger.warning(
+                        "Failed to enqueue %d discovered links (%s) — they will be "
+                        "rediscovered from sibling pages",
+                        len(discovered_to_enqueue), type(exc).__name__,
+                    )
             if done_urls:
                 await self.store.frontier_mark_done(done_urls)
 
