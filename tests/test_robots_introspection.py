@@ -44,6 +44,27 @@ async def test_check_no_match_defaults_allowed():
     assert decision.matched_rule is None
 
 
+def test_question_mark_is_literal_not_single_char_wildcard():
+    """'?' in a robots rule is literal (RFC 9309), not fnmatch's single-char
+    wildcard. The common Magento rule "Disallow: /*?" must only block URLs that
+    actually contain a query string, not every path."""
+    rules = _RobotsRules("example.com", "User-agent: *\nDisallow: /*?\nAllow: /*?p=\n")
+    # Paths without a '?' are allowed.
+    assert rules.check("/cladding/", "*").allowed is True
+    assert rules.check("/cladding/cedar/tgv", "*").allowed is True
+    # Paths with a '?' are blocked...
+    assert rules.check("/cladding/?foo=1", "*").allowed is False
+    # ...unless an Allow override matches (longer rule wins).
+    assert rules.check("/cladding/?p=2", "*").allowed is True
+
+
+def test_dollar_anchors_end_of_path():
+    rules = _RobotsRules("example.com", "User-agent: *\nDisallow: /*.php$\n")
+    assert rules.check("/index.php", "*").allowed is False
+    # The '$' anchors the end, so a trailing query string means no match.
+    assert rules.check("/index.php?x=1", "*").allowed is True
+
+
 # ---------------------------------------------------------------------------
 # Longest-match precedence (RFC 9309 §2.2.2)
 # ---------------------------------------------------------------------------

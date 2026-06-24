@@ -16,6 +16,7 @@ from .config import (
     CB_ENABLED_DEFAULT,
     CB_RECOVERY_SECONDS_DEFAULT,
     CB_THRESHOLD_DEFAULT,
+    MAX_RESPONSE_BYTES_DEFAULT,
     CrawlConfig,
     _env_bool,
     _env_float,
@@ -217,6 +218,18 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     obscura_enabled = getattr(args, "obscura", False)
     obscura_stealth = _resolve_obscura_stealth(args)
 
+    # Resolve the obscura binary: an explicit --obscura-binary wins, otherwise
+    # auto-discover (install dir from `install-obscura`, OBSCURA_BINARY env,
+    # PATH, sibling checkout). Falls back to the bare name so the spawn still
+    # produces a clear "not found" error if nothing is installed.
+    obscura_binary = getattr(args, "obscura_binary", None)
+    if obscura_enabled:
+        from .obscura_install import find_obscura_binary
+
+        obscura_binary = find_obscura_binary(obscura_binary) or (obscura_binary or "obscura")
+    else:
+        obscura_binary = obscura_binary or "obscura"
+
     if obscura_enabled:
         backend = "playwright"
         args.js = True
@@ -298,6 +311,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         max_concurrency=_concurrency,
         max_requests_per_context=args.max_requests_per_context,
         max_pages=args.max_pages,
+        max_response_bytes=getattr(args, "max_response_bytes", MAX_RESPONSE_BYTES_DEFAULT),
         timeout_seconds=args.timeout,
         playwright_network_idle_timeout_seconds=(
             args.wait_for_network_idle
@@ -344,13 +358,14 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         compress_html=not getattr(args, "no_html_compression", False),
         store_html=not getattr(args, "no_store_html", False),
         obscura_enabled=obscura_enabled,
-        obscura_binary=getattr(args, "obscura_binary", "obscura"),
+        obscura_binary=obscura_binary,
         obscura_host=getattr(args, "obscura_host", "127.0.0.1"),
         obscura_port=getattr(args, "obscura_port", 9222),
         obscura_proxy=getattr(args, "obscura_proxy", ""),
         obscura_workers=getattr(args, "obscura_workers", 1),
         obscura_managed=not getattr(args, "obscura_unmanaged", False),
         obscura_stealth=obscura_stealth,
+        obscura_fetch_subprocess=getattr(args, "obscura_fetch", False),
         curl_impersonate=curl_impersonate,
         per_host_concurrency=getattr(args, "per_host_concurrency", 4),
     )
@@ -394,6 +409,16 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         help="Max simultaneous requests to any single host (0 = unlimited, default 4).",
     )
     parser.add_argument("--max-pages", type=int, default=0, help="Max URLs to crawl (0 = unlimited)")
+    parser.add_argument(
+        "--max-response-bytes",
+        type=int,
+        default=MAX_RESPONSE_BYTES_DEFAULT,
+        help=(
+            "Max bytes read per response before truncation (default "
+            f"{MAX_RESPONSE_BYTES_DEFAULT}). Raise it for sites with very "
+            "large sitemaps so they parse intact; lower it to cap downloads."
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=30.0, help="Per-request timeout in seconds")
     parser.add_argument("--js", action="store_true", help="Use Playwright (JS-enabled) backend")
     parser.add_argument(
@@ -542,6 +567,16 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         default=argparse.SUPPRESS,
         help="Connect to an already-running Obscura instance; do not spawn/kill it",
+    )
+    obscura.add_argument(
+        "--obscura-fetch",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=(
+            "Fetch via the one-shot 'obscura fetch' subprocess per request "
+            "instead of a persistent CDP browser connection. More robust where "
+            "connect_over_cdp/goto can hang; no obscura serve / port needed."
+        ),
     )
     parser.add_argument("--output-dir", type=Path, help="Directory for CSV/JSON output")
     parser.add_argument("--save-to", help="Path to save crawl JSON results")
@@ -1093,6 +1128,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_postgres_args(sitemap_parser)
 
+    install_parser = subparsers.add_parser(
+        "install-obscura",
+        help="Download the prebuilt Obscura browser binary for this platform",
+    )
+    install_parser.add_argument(
+        "--obscura-version",
+        default=None,
+        help="Obscura release tag to install (default: the version pinned in crawler_cli)",
+    )
+    install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reinstall even if Obscura is already present",
+    )
+
     return parser
 
 
@@ -1132,8 +1182,22 @@ def _normalize_argv(argv: list[str]) -> list[str]:
     return argv
 
 
+def _run_install_obscura(args: argparse.Namespace) -> int:
+    from .obscura_install import DEFAULT_OBSCURA_VERSION, install_obscura
+
+    version = getattr(args, "obscura_version", None) or DEFAULT_OBSCURA_VERSION
+    try:
+        install_obscura(version, force=getattr(args, "force", False), log=print)
+    except Exception as exc:  # noqa: BLE001 - surface a clean CLI error
+        print(f"Error installing Obscura: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 async def _dispatch(args: argparse.Namespace) -> int:
     command = args.command or "crawl"
+    if command == "install-obscura":
+        return _run_install_obscura(args)
     if command == "crawl":
         return await _run_crawl(args)
     if command == "generate-embeddings":

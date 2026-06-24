@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import fnmatch
+import re
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from email.utils import parsedate_to_datetime
 from typing import Optional
 from urllib.parse import urlparse
@@ -11,6 +12,22 @@ from urllib.parse import urlparse
 import aiohttp
 
 from .config import CrawlConfig
+
+
+@lru_cache(maxsize=2048)
+def _robots_pattern(rule: str) -> re.Pattern[str]:
+    """Compile a robots.txt path rule into a regex per RFC 9309.
+
+    Only '*' (any sequence) and a trailing '$' (end-of-path anchor) are special;
+    every other character is matched literally. The pattern is left-anchored
+    because robots rules match a path prefix.
+    """
+    anchored_end = rule.endswith("$")
+    body = rule[:-1] if anchored_end else rule
+    # Escape literals, then turn the escaped '*' back into a wildcard.
+    regex = re.escape(body).replace(r"\*", ".*")
+    regex = "^" + regex + ("$" if anchored_end else "")
+    return re.compile(regex)
 
 
 def calculate_cache_ttl(headers: dict[str, str], default_ttl: int = 3600) -> int:
@@ -181,8 +198,14 @@ class _RobotsRules:
             return False
         if rule == "/":
             return True
-        if "*" in rule or "?" in rule:
-            return fnmatch.fnmatchcase(path, rule)
+        # RFC 9309 wildcard matching: '*' matches any sequence, a trailing '$'
+        # anchors the end of the path. Every other character — including '?' —
+        # is LITERAL. (Do not use fnmatch: there '?' means "one char" and
+        # '[...]' are classes, which over-match robots patterns. e.g. the common
+        # Magento rule "Disallow: /*?" must only block URLs containing '?', not
+        # every path.)
+        if "*" in rule or rule.endswith("$"):
+            return _robots_pattern(rule).match(path) is not None
         return path.startswith(rule)
 
 

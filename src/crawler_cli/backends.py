@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import signal
 import ssl
@@ -485,6 +486,14 @@ class PlaywrightBackend(FetchBackend):
         self._playwright = None
         self._browser = None
         self._context = None
+        # True when we connected to an external CDP browser (Obscura or an
+        # explicit CDP endpoint) rather than launching Chromium ourselves. CDP
+        # servers like Obscura expose a single default BrowserContext and do not
+        # fully back additional contexts created via new_context(), so we must
+        # reuse contexts()[0] and never close it (see Obscura's Use-with-
+        # Playwright guide). _owns_context tracks whether we may close it.
+        self._cdp_connected = False
+        self._owns_context = True
         self._lock = asyncio.Lock()
         self._context_request_count = 0
         self._context_recycle_requested = False
@@ -584,7 +593,21 @@ class PlaywrightBackend(FetchBackend):
 
     async def _create_context_locked(self) -> None:
         assert self._browser is not None
-        self._context = await self._browser.new_context(**self._context_kwargs())
+        if self._cdp_connected:
+            # Reuse the CDP server's default context rather than allocating a new
+            # one. Obscura's docs prescribe `browser.contexts()[0] || newContext()`;
+            # calling new_context() against Obscura yields a context whose pages
+            # never navigate, which surfaces as "0 crawled" / connect wedges.
+            existing = self._browser.contexts
+            if existing:
+                self._context = existing[0]
+                self._owns_context = False
+            else:
+                self._context = await self._browser.new_context(**self._context_kwargs())
+                self._owns_context = True
+        else:
+            self._context = await self._browser.new_context(**self._context_kwargs())
+            self._owns_context = True
         self._context_request_count = 0
         self._context_recycle_requested = False
         cookie_payload = self._playwright_cookie_payload()
@@ -616,10 +639,14 @@ class PlaywrightBackend(FetchBackend):
 
     async def _recycle_context_locked(self) -> None:
         old_context = self._context
+        owned = self._owns_context
         self._context = None
         self._context_request_count = 0
         self._context_recycle_requested = False
-        if old_context is not None:
+        # Never close a context we borrowed from a CDP server (Obscura's single
+        # default context) — closing it would tear down the only context the
+        # server has. Only close contexts we created ourselves.
+        if old_context is not None and owned:
             with contextlib.suppress(Exception):
                 await old_context.close()
         if self._browser is not None:
@@ -724,14 +751,17 @@ class PlaywrightBackend(FetchBackend):
                 self._browser = await self._playwright.chromium.connect_over_cdp(
                     self._obscura_cdp_endpoint()
                 )
+                self._cdp_connected = True
                 self._tracked_browser_pids = set()
             elif self.config.playwright_cdp_endpoint:
                 self._browser = await self._playwright.chromium.connect_over_cdp(
                     self.config.playwright_cdp_endpoint
                 )
+                self._cdp_connected = True
                 self._tracked_browser_pids = set()
             else:
                 self._browser = await self._playwright.chromium.launch(headless=True)
+                self._cdp_connected = False
                 self._tracked_browser_pids = _browser_like_descendants(os.getpid()) - self._baseline_browser_pids
             await self._create_context_locked()
         except Exception:
@@ -859,8 +889,12 @@ class PlaywrightBackend(FetchBackend):
     async def close(self) -> None:
         try:
             if self._context:
-                with contextlib.suppress(Exception):
-                    await self._context.close()
+                # Don't close a context borrowed from a CDP server (Obscura's
+                # single default context); just drop our reference. browser.close()
+                # below detaches the CDP connection and leaves the server intact.
+                if self._owns_context:
+                    with contextlib.suppress(Exception):
+                        await self._context.close()
                 self._context = None
             if self._browser:
                 with contextlib.suppress(Exception):
@@ -881,7 +915,140 @@ class PlaywrightBackend(FetchBackend):
             self._obscura_stderr.clear()
 
 
+# Eval expression run on the rendered page to return the final URL and full
+# serialized DOM in one JSON payload, so a single `obscura fetch` yields both.
+_OBSCURA_FETCH_EVAL = (
+    "JSON.stringify({u:location.href,h:document.documentElement.outerHTML})"
+)
+# URL suffixes / markers that should be fetched as the raw HTTP body (sitemaps,
+# feeds, plain text) rather than a rendered DOM. `obscura fetch --dump original`
+# streams the verbatim response body, which is what the sitemap parser expects.
+_OBSCURA_RAW_SUFFIXES = (".xml", ".xml.gz", ".gz", ".txt", ".rss", ".atom")
+
+
+class ObscuraFetchBackend(FetchBackend):
+    """Fetch via Obscura's one-shot ``obscura fetch`` subprocess (no CDP).
+
+    Each request spawns the ``obscura`` binary, which renders the page in a
+    stealth browser and prints the result. This trades per-request process
+    spawn cost for robustness: it sidesteps the persistent CDP session
+    (``connect_over_cdp``/``page.goto``) that can hang indefinitely in some
+    sandboxes. Honours ``obscura_stealth`` and ``obscura_proxy``.
+    """
+
+    def __init__(self, config: CrawlConfig) -> None:
+        super().__init__(config)
+        self._binary = config.obscura_binary or "obscura"
+        # Stealth defaults on for resilience unless explicitly disabled.
+        self._stealth = config.obscura_stealth is not False
+
+    def _is_raw_url(self, url: str) -> bool:
+        path = urlparse(url).path.lower()
+        if any(path.endswith(suffix) for suffix in _OBSCURA_RAW_SUFFIXES):
+            return True
+        return "sitemap" in path
+
+    def _build_argv(self, url: str, *, raw: bool) -> list[str]:
+        argv = [self._binary, "fetch"]
+        if self._stealth:
+            argv.append("--stealth")
+        if self.config.obscura_proxy:
+            argv.extend(["--proxy", self.config.obscura_proxy])
+        elif self._proxy_pool is not None:
+            proxy = self._proxy_pool.select(url)
+            if proxy:
+                argv.extend(["--proxy", proxy])
+        if self.config.user_agent:
+            argv.extend(["--user-agent", self.config.user_agent])
+        # Per-fetch timeout (whole-page) — keep below our own wait_for budget.
+        argv.extend(["--timeout", str(max(5, int(self.config.timeout_seconds)))])
+        if raw:
+            argv.extend(["--dump", "original", url])
+        else:
+            argv.extend(["--eval", _OBSCURA_FETCH_EVAL, url])
+        return argv
+
+    async def fetch(self, url: str) -> FetchResponse:
+        raw = self._is_raw_url(url)
+        argv = self._build_argv(url, raw=raw)
+        started = time.monotonic()
+        # Hard cap so a stuck subprocess can't wedge the crawl. The binary also
+        # has its own --timeout; this is a belt-and-braces parent-side bound.
+        deadline = self.config.timeout_seconds + 15.0
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=deadline)
+        except asyncio.TimeoutError:
+            if proc is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+            return self._error_response(url, started, "obscura fetch timed out")
+        except Exception as exc:  # noqa: BLE001 - surface as a status-0 fetch
+            return self._error_response(url, started, f"{type(exc).__name__}: {exc}")
+
+        elapsed = time.monotonic() - started
+        if proc.returncode != 0 or not stdout:
+            detail = (stderr or b"").decode("utf-8", "replace")[:200]
+            return self._error_response(url, started, f"exit {proc.returncode}: {detail}")
+
+        cap = self.config.max_response_bytes
+        if raw:
+            body = stdout[:cap]
+            final_url = url
+            content_type = "application/xml" if url.lower().rstrip("/").endswith(
+                (".xml", ".gz", ".rss", ".atom")
+            ) else "text/plain"
+            text = _decode_body(body, content_type)
+        else:
+            try:
+                payload = json.loads(stdout.decode("utf-8", "replace"))
+                html = payload.get("h") or ""
+                final_url = payload.get("u") or url
+            except (ValueError, AttributeError):
+                # Fall back to treating stdout as raw HTML if eval JSON parsing fails.
+                html = stdout.decode("utf-8", "replace")
+                final_url = url
+            text = html[: cap]
+            body = text.encode("utf-8")
+            content_type = "text/html; charset=utf-8"
+
+        return FetchResponse(
+            url=final_url,
+            requested_url=url,
+            status=200,
+            headers={"content-type": content_type},
+            body=body,
+            text=text,
+            ttfb_seconds=elapsed,
+            elapsed_seconds=elapsed,
+            body_truncated=len(body) >= cap,
+        )
+
+    @staticmethod
+    def _error_response(url: str, started: float, _detail: str) -> FetchResponse:
+        elapsed = time.monotonic() - started
+        return FetchResponse(
+            url=url,
+            requested_url=url,
+            status=0,
+            headers={},
+            body=b"",
+            text="",
+            ttfb_seconds=elapsed,
+            elapsed_seconds=elapsed,
+        )
+
+
 def build_backend(config: CrawlConfig) -> FetchBackend:
+    if config.obscura_enabled and config.obscura_fetch_subprocess:
+        return ObscuraFetchBackend(config)
     if config.backend == "aiohttp":
         return AiohttpBackend(config)
     if config.backend == "curl_cffi":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import asyncpg
 import json
 import time
@@ -632,7 +633,11 @@ class AsyncpgStore:
     async def _bulk_get_or_create_urls(self, conn: asyncpg.Connection, urls: list[str]) -> dict[str, int]:
         if not urls:
             return {}
-        unique_urls = list(set(urls))
+        # Sorted (not just deduped) so the INSERT acquires `urls` row locks in a
+        # stable order across concurrent transactions — prevents deadlocks when
+        # multiple workers bulk-resolve overlapping URL sets (e.g. sitemap +
+        # link discovery enqueueing the same catalog).
+        unique_urls = sorted(set(urls))
         rows = await conn.fetch(
             """
             WITH input_urls AS (
@@ -677,6 +682,23 @@ class AsyncpgStore:
         )
         return {str(r["val"]): int(r["id"]) for r in rows}
 
+    async def _retry_on_deadlock(self, op, *args, _attempts: int = 5, **kwargs):
+        """Run an async store operation, retrying on Postgres deadlock /
+        serialization failures with exponential backoff.
+
+        Concurrent crawl workers upserting overlapping `urls` / `frontier` rows
+        can deadlock even with deterministic lock ordering. Every wrapped op is
+        a single self-contained transaction whose statements are idempotent
+        (ON CONFLICT DO NOTHING / DO UPDATE), so re-running it is safe.
+        """
+        for attempt in range(_attempts):
+            try:
+                return await op(*args, **kwargs)
+            except (asyncpg.DeadlockDetectedError, asyncpg.SerializationError):
+                if attempt + 1 >= _attempts:
+                    raise
+                await asyncio.sleep(0.05 * (2**attempt))
+
     async def enqueue_frontier(
         self,
         frontier_data: Sequence[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
@@ -690,6 +712,21 @@ class AsyncpgStore:
 
         await self.connect()
         assert self.pool is not None
+        return await self._retry_on_deadlock(
+            self._enqueue_frontier_once,
+            frontier_data,
+            source=source,
+            source_detail=source_detail,
+        )
+
+    async def _enqueue_frontier_once(
+        self,
+        frontier_data: Sequence[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
+        *,
+        source: str | None = None,
+        source_detail: str | None = None,
+    ) -> int:
+        assert self.pool is not None
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 urls_to_resolve: list[str] = []
@@ -700,8 +737,13 @@ class AsyncpgStore:
                     if parent_url:
                         urls_to_resolve.append(parent_url)
 
+                # Resolve URLs in a deterministic (sorted) order. Concurrent
+                # enqueue_frontier transactions otherwise lock overlapping `urls`
+                # rows in different orders and deadlock (asyncpg DeadlockDetected);
+                # sorting makes every transaction acquire row locks in the same
+                # order, which is the standard Postgres deadlock-avoidance fix.
                 url_to_id: dict[str, int] = {}
-                for url in dict.fromkeys(urls_to_resolve):
+                for url in sorted(dict.fromkeys(urls_to_resolve)):
                     url_to_id[url] = await self._get_or_create_url(conn, url)
 
                 child_ids = [url_to_id[item[0]] for item in frontier_data]
@@ -951,6 +993,14 @@ class AsyncpgStore:
             return
         await self.connect()
         assert self.pool is not None
+        await self._retry_on_deadlock(self._record_sources_bulk_once, url_detail_pairs, source)
+
+    async def _record_sources_bulk_once(
+        self,
+        url_detail_pairs: list[tuple[str, str | None]],
+        source: str,
+    ) -> None:
+        assert self.pool is not None
         async with self.pool.acquire() as conn:
             urls = [u for u, _ in url_detail_pairs]
             url_id_map = await self._bulk_get_or_create_urls(conn, urls)
@@ -959,6 +1009,9 @@ class AsyncpgStore:
                 for url, detail in url_detail_pairs
                 if url in url_id_map
             ]
+            # Sort by url_id so concurrent inserts lock url_sources rows in a
+            # consistent order (deadlock avoidance).
+            rows.sort(key=lambda r: r[0])
             if rows:
                 await conn.executemany(
                     """
@@ -1085,8 +1138,29 @@ class AsyncpgStore:
         """
         await self.connect()
         assert self.pool is not None
+        await self._retry_on_deadlock(self._persist_once, result)
+
+    async def _persist_once(self, result: CrawlResult) -> None:
+        assert self.pool is not None
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # Pre-touch every `urls` row this transaction will create/update,
+                # in sorted order, BEFORE doing per-URL work. This makes concurrent
+                # persist() transactions acquire the shared `urls` row locks in the
+                # same order, which is what prevents the DeadlockDetectedError seen
+                # under multi-worker crawls (the later _get_or_create_url calls then
+                # just re-lock rows this transaction already holds).
+                prelock_urls = [result.requested_url, result.final_url]
+                if result.extracted is not None:
+                    if result.extracted.canonical:
+                        prelock_urls.append(result.extracted.canonical)
+                    if result.extracted.x_canonical:
+                        prelock_urls.append(result.extracted.x_canonical)
+                    prelock_urls.extend(
+                        link.href for link in result.extracted.hreflang_links if link.href
+                    )
+                await self._bulk_get_or_create_urls(conn, prelock_urls)
+
                 requested_url_id = await self._get_or_create_url(conn, result.requested_url)
                 final_url_id = await self._get_or_create_url(conn, result.final_url)
 

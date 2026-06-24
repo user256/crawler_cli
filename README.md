@@ -162,6 +162,11 @@ crawler-cli https://example.com --proxy socks5://127.0.0.1:1080 --proxy-auth use
 crawler-cli https://example.com --cookie "session=abc; csrf=xyz"
 crawler-cli https://example.com --cookies-file cookies.json
 
+# Raise the per-response byte cap so very large sitemaps parse intact
+# (default 25 MB). Some Magento/WooCommerce sitemaps exceed the old 5 MB cap
+# and would otherwise be truncated mid-XML and skipped.
+crawler-cli https://example.com --max-response-bytes 50000000
+
 # JS (Playwright) wait conditions for SPAs that hydrate asynchronously.
 crawler-cli https://example.com --js --wait-for-selector "div.app-ready"
 crawler-cli https://example.com --js --wait-for-network-idle 8
@@ -366,6 +371,43 @@ For long JS-enabled crawls, `max_requests_per_context` recycles Playwright conte
 
 `crawler_cli` can use [Obscura](https://github.com/user256/obscura) as its JS rendering backend. Obscura runs as a stealth CDP server that is harder for anti-bot systems to detect.
 
+### Installing the Obscura binary
+
+Obscura is a **native binary**, not a Python dependency, so it can't ship inside the
+`crawler_cli` wheel. The easiest way to get it (Playwright-style):
+
+```bash
+crawler-cli install-obscura
+```
+
+This downloads the prebuilt Obscura release for your OS/architecture from GitHub and
+unpacks `obscura` + `obscura-worker` into `~/.local/share/crawler_cli/obscura/`.
+`--obscura` then finds it automatically — no `--obscura-binary` needed. Pin a version
+with `--obscura-version vX.Y.Z` or re-fetch with `--force`.
+
+**Binary resolution order** (first hit wins), so any of these work:
+
+1. `--obscura-binary <path>` (explicit override)
+2. `OBSCURA_BINARY` environment variable
+3. the `install-obscura` install dir (above)
+4. `obscura` on `PATH`
+5. a sibling source checkout at `../obscura/target/release/obscura`
+
+If none resolve, `--obscura` fails with a clear "binary not found" error.
+
+**Building from source instead** (Rust toolchain required) — useful for development or
+unsupported platforms:
+
+```bash
+cd ../obscura            # sibling checkout of github.com/h4ckf0r0day/obscura
+cargo build --release    # produces target/release/{obscura,obscura-worker}
+ln -sf "$PWD/target/release/obscura"        ~/.local/bin/obscura
+ln -sf "$PWD/target/release/obscura-worker" ~/.local/bin/obscura-worker   # needed for multi-worker serve / scrape
+```
+
+The Obscura `serve` subcommand must accept `--port`, `--workers`, `--stealth`, and
+`--proxy`, and `fetch` must support `--dump`/`--eval`/`--stealth`, which current releases do.
+
 ### Managed mode (default)
 
 Pass `--obscura` and `crawler_cli` will start `obscura serve` automatically, connect over CDP, and terminate the process when the crawl finishes:
@@ -385,6 +427,33 @@ crawler-cli https://www.example.com --obscura --obscura-unmanaged
 ```
 
 In unmanaged mode, `crawler_cli` can only report the stealth state if you explicitly supplied `--obscura-stealth` or `--no-obscura-stealth`. Otherwise the connected server is treated as `stealth: unknown` in logs and saved crawl JSON.
+
+### One-shot fetch mode (`--obscura-fetch`)
+
+By default `--obscura` drives a **persistent CDP browser** (`connect_over_cdp` +
+`page.goto`). In some sandboxed/headless environments that long-lived CDP session
+can hang on connect or navigation. `--obscura-fetch` is a more robust alternative:
+each request shells out to the one-shot `obscura fetch` subprocess, which renders
+the page in a stealth browser and returns the HTML. No `obscura serve` process or
+port is involved.
+
+```bash
+# Each page is a separate `obscura fetch` — no persistent CDP, no port.
+crawler-cli https://www.example.com --obscura --obscura-fetch
+```
+
+Trade-offs:
+
+- **More robust**: no persistent CDP session to hang; a stuck fetch is bounded by
+  `--timeout` and killed without wedging the crawl.
+- **Safe concurrency**: each fetch is its own process, so `--max-workers` /
+  `--per-host-concurrency` > 1 work without the shared-V8-isolate corruption that
+  affects concurrent `page.content()` over a single `obscura serve`.
+- **Slower per page**: pays a process-spawn per request.
+- Sitemaps and other XML/feed/`.txt` URLs are fetched with `obscura fetch --dump
+  original` (raw HTTP body); HTML pages use `--eval` to return the rendered DOM and
+  final (post-redirect) URL together. HTTP status is reported as `200` on success
+  and `0` on fetch failure (Obscura does not surface the raw status code here).
 
 ### Stealth policy
 

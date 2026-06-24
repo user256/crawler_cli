@@ -17,6 +17,11 @@ CB_ENABLED_DEFAULT = True
 CB_THRESHOLD_DEFAULT = 15
 CB_RECOVERY_SECONDS_DEFAULT = 30.0
 
+# 25 MB: large enough to hold real-world Magento/WooCommerce sitemaps
+# (often >5 MB) so they parse intact, while still capping runaway downloads.
+# Overridable per run via the --max-response-bytes CLI flag.
+MAX_RESPONSE_BYTES_DEFAULT = 25_000_000
+
 
 def _env_bool(name: str) -> bool | None:
     raw = os.getenv(name)
@@ -55,7 +60,7 @@ class CrawlConfig:
     rate_limit_per_second: float = 5.0
     follow_redirects: bool = True
     verify_ssl: bool = True
-    max_response_bytes: int = 5_000_000
+    max_response_bytes: int = MAX_RESPONSE_BYTES_DEFAULT
     playwright_network_idle_timeout_seconds: float = 5.0
     playwright_wait_for_selector: str = ""
     """If set, the Playwright backend waits for this CSS selector to appear
@@ -157,6 +162,13 @@ class CrawlConfig:
     obscura_workers: int = 1
     obscura_managed: bool = True
     obscura_stealth: bool | None = None
+    obscura_fetch_subprocess: bool = False
+    """Use Obscura's one-shot ``obscura fetch`` subprocess per request instead of
+    a persistent CDP browser connection. Each fetch shells out to the binary,
+    which renders the page and returns HTML. Slower per page (process spawn) but
+    avoids the persistent-CDP session (connect_over_cdp/goto) hanging seen in
+    some sandboxes. Implies a browser/JS render; honours obscura_stealth and
+    obscura_proxy. Selected via --obscura-fetch on the CLI."""
     curl_impersonate: str = ""
     """curl_cffi impersonation target, e.g. ``chrome``, ``safari``, ``firefox``.
     Empty string or ``none`` disables impersonation (ticket 053)."""

@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .archive import discover_historical_urls
-from .backends import PlaywrightBackend, RateLimiter, build_backend
+from .backends import ObscuraFetchBackend, PlaywrightBackend, RateLimiter, build_backend
 from .challenge import detect_challenge
 from .circuit_breaker import CircuitBreaker, CircuitBreakerRegistry, CircuitState
 from .config import CrawlConfig
@@ -100,7 +100,9 @@ class CrawlEngine:
         self._stop_requested = True
 
     def _is_browser_backend(self, backend: object) -> bool:
-        return isinstance(backend, PlaywrightBackend)
+        # Both render JS in a real browser, so a bot-challenge seen through
+        # either is already "as good as it gets" — don't escalate further.
+        return isinstance(backend, (PlaywrightBackend, ObscuraFetchBackend))
 
     async def _get_challenge_backend(self) -> PlaywrightBackend:
         """Lazily build a Playwright/Obscura backend for challenge escalation."""
@@ -315,6 +317,7 @@ class CrawlEngine:
                         circuit.record_success()
             except Exception as exc:
                 host = urlparse(url).netloc.lower()
+                logger.warning("fetch_error for %s: %s: %s", url, type(exc).__name__, exc)
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)
                     self._record_breaker_failure(circuit, host, f"fetch_error:{type(exc).__name__}")
@@ -484,7 +487,15 @@ class CrawlEngine:
                 for sm_url, source_kind, depth, response in batch_results:
                     if response is None or response.status != 200:
                         continue
-                    doc = parser.parse(sm_url, response.body, response.headers.get("Content-Type"))
+                    try:
+                        doc = parser.parse(
+                            sm_url, response.body, response.headers.get("Content-Type")
+                        )
+                    except Exception as exc:
+                        # A single malformed/truncated sitemap must not abort the
+                        # whole crawl; skip it and continue with the others.
+                        logger.warning("Skipping unparseable sitemap %s: %s", sm_url, exc)
+                        continue
                     if doc.kind == "sitemap_index":
                         for child in doc.children:
                             if child not in fetched:

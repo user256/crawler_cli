@@ -449,3 +449,61 @@ def test_run_compare_loads_old_json_without_browser_runtime():
 
         code = asyncio.run(_run_compare(args))
         assert code == 0
+
+
+# ---------------------------------------------------------------------------
+# Obscura binary discovery + installer (obscura_install.py)
+# ---------------------------------------------------------------------------
+
+def test_asset_matrix_covers_common_platforms():
+    from crawler_cli.obscura_install import _ASSET_MATRIX
+
+    assert _ASSET_MATRIX[("linux", "x86_64")] == "obscura-x86_64-linux"
+    assert _ASSET_MATRIX[("linux", "aarch64")] == "obscura-aarch64-linux"
+    assert _ASSET_MATRIX[("darwin", "arm64")] == "obscura-aarch64-macos"
+    assert _ASSET_MATRIX[("darwin", "x86_64")] == "obscura-x86_64-macos"
+    assert _ASSET_MATRIX[("windows", "amd64")] == "obscura-x86_64-windows"
+
+
+def test_asset_for_host_raises_on_unknown(monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    monkeypatch.setattr(oi.platform, "system", lambda: "Plan9")
+    monkeypatch.setattr(oi.platform, "machine", lambda: "sparc")
+    with pytest.raises(RuntimeError):
+        oi._asset_for_host()
+
+
+def test_find_obscura_prefers_explicit_existing_path(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    fake = tmp_path / "obscura"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.delenv("OBSCURA_BINARY", raising=False)
+    assert oi.find_obscura_binary(str(fake)) == str(fake.resolve())
+
+
+def test_find_obscura_uses_env_var(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    fake = tmp_path / "obscura"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("OBSCURA_BINARY", str(fake))
+    assert oi.find_obscura_binary(None) == str(fake.resolve())
+
+
+def test_find_obscura_uses_install_dir(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    instdir = tmp_path / "inst"
+    instdir.mkdir()
+    fake = instdir / "obscura"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.delenv("OBSCURA_BINARY", raising=False)
+    monkeypatch.setattr(oi, "install_dir", lambda: instdir)
+    # Make PATH lookups miss so the install dir is what resolves.
+    monkeypatch.setattr(oi.shutil, "which", lambda _name: None)
+    assert oi.find_obscura_binary(None) == str(fake)
