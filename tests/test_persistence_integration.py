@@ -221,6 +221,46 @@ async def test_signature_embedding_hash_gating_round_trip(store: AsyncpgStore) -
 
 
 @pytest.mark.asyncio
+async def test_hreflang_identity_round_trip(store: AsyncpgStore) -> None:
+    """build_and_store_identity groups crawler-captured hreflang edges (ticket 078)."""
+    from crawler_cli.hreflang_groups import build_and_store_identity
+
+    def _page(url: str, alt: str, alt_code: str, lang: str) -> CrawlResult:
+        return CrawlResult(
+            requested_url=url,
+            final_url=url,
+            status=200,
+            headers={"content-type": "text/html"},
+            content_type="text/html",
+            fetch_backend="aiohttp",
+            extracted=ExtractedContent(
+                title="t",
+                meta_description="m",
+                meta_robots=RobotsDirectives(),
+                x_robots_tag=RobotsDirectives(),
+                canonical=None,
+                x_canonical=None,
+                hreflang_links=[HreflangLink(hreflang=alt_code, href=alt, source="html_head")],
+                html_lang=lang,
+                headings={"h1": ["h"], "h2": []},
+                text="body",
+                word_count=120,
+                metadata={},
+            ),
+            raw_html="<html></html>",
+        )
+
+    await store.persist(_page("https://hf.example/en", "https://hf.example/fr", "fr", "en"))
+    await store.persist(_page("https://hf.example/fr", "https://hf.example/en", "en", "fr"))
+
+    result = await build_and_store_identity(store)
+    assert result.groups == 1
+    summary = await store.hreflang_group_summary()
+    assert summary["groups"] == 1
+    assert summary["grouped_urls"] >= 2
+
+
+@pytest.mark.asyncio
 async def test_truncate_only_touches_crawl_tables(store: AsyncpgStore) -> None:
     """truncate_crawl_tables must not drop tables that don't belong to it."""
     await store.enqueue_frontier([("https://example.com/", 0, None)], source="seed")
