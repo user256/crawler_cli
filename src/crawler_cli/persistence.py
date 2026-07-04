@@ -2356,6 +2356,71 @@ class AsyncpgStore:
             for r in rows
         ]
 
+    async def fetch_analysis_rows(self) -> list[dict[str, Any]]:
+        """Load every fetched page with the fields the intent-overlap analysis
+        needs, including its embedding vector (ticket 079)."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT u.id AS url_id, u.url AS url, u.kind AS kind,
+                       u.norm_url AS norm_url, u.hreflang_group AS hreflang_group,
+                       u.resolved_hreflang_code AS hreflang_code,
+                       vu.url AS variant_of,
+                       pm.final_status_code AS status,
+                       c.title AS title, c.h1_tags AS h1, c.word_count AS word_count,
+                       ix.overall_indexable AS overall_indexable,
+                       s.signal_confidence AS signal_confidence,
+                       s.extraction_method AS extraction_method,
+                       e.embedding_json AS embedding_json, e.model AS embedding_model,
+                       canu.url AS canonical_url
+                FROM urls u
+                JOIN page_metadata pm ON pm.url_id = u.id
+                LEFT JOIN urls vu ON vu.id = u.variant_of_id
+                LEFT JOIN content c ON c.url_id = u.id
+                LEFT JOIN indexability ix ON ix.url_id = u.id
+                LEFT JOIN intent_signatures s ON s.url_id = u.id
+                LEFT JOIN page_embeddings e ON e.url_id = u.id
+                LEFT JOIN LATERAL (
+                    SELECT cu.canonical_url_id
+                    FROM canonical_urls cu
+                    WHERE cu.url_id = u.id
+                    ORDER BY cu.id
+                    LIMIT 1
+                ) can ON TRUE
+                LEFT JOIN urls canu ON canu.id = can.canonical_url_id
+                """
+            )
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            embedding = None
+            raw = r["embedding_json"]
+            if raw is not None:
+                embedding = json.loads(raw) if isinstance(raw, str) else raw
+            out.append(
+                {
+                    "url_id": int(r["url_id"]),
+                    "url": str(r["url"]),
+                    "kind": r["kind"],
+                    "norm_url": r["norm_url"],
+                    "hreflang_group": r["hreflang_group"],
+                    "hreflang_code": r["hreflang_code"],
+                    "variant_of": r["variant_of"],
+                    "status": r["status"],
+                    "title": r["title"],
+                    "h1": r["h1"],
+                    "word_count": r["word_count"],
+                    "overall_indexable": r["overall_indexable"],
+                    "signal_confidence": r["signal_confidence"],
+                    "extraction_method": r["extraction_method"],
+                    "embedding": embedding,
+                    "embedding_model": r["embedding_model"],
+                    "canonical_url": r["canonical_url"],
+                }
+            )
+        return out
+
     async def hreflang_group_summary(self) -> dict[str, int]:
         """Counts of groups and grouped URLs (ticket 078)."""
         await self.connect()

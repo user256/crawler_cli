@@ -1071,6 +1071,60 @@ async def _run_hreflang_groups(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_intent_overlap(args: argparse.Namespace) -> int:
+    from .embeddings import MixedModelError
+    from .intent_overlap import run_intent_overlap
+
+    run_args = {
+        "threshold": args.threshold,
+        "dup_threshold": args.dup_threshold,
+        "hreflang_mode": args.hreflang_mode,
+        "primary_lang": args.primary_lang,
+        "lang_split": not args.no_lang_split,
+        "linkage": args.linkage,
+        "out": args.out,
+        "fail_on": args.fail_on,
+    }
+
+    store = _store_from_args(args)
+    await store.initialize()
+    try:
+        run = await run_intent_overlap(
+            store,
+            out_dir=args.out,
+            threshold=args.threshold,
+            dup_threshold=args.dup_threshold,
+            hreflang_mode=args.hreflang_mode,
+            primary_lang=args.primary_lang,
+            lang_split=not args.no_lang_split,
+            linkage=args.linkage,
+            fail_on=args.fail_on,
+            run_args=run_args,
+        )
+    except MixedModelError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        await store.close()
+
+    s = run.result.summary
+    tp = s.get("threshold_percentile")
+    tnote = f" (threshold {args.threshold} ~ p{tp:.0f} of NN similarity)" if tp is not None else ""
+    print(
+        f"intent-overlap: {s.get('embedded', 0)} embedded pages, "
+        f"{s.get('overlap_pairs', 0)} pairs, {s.get('clusters', 0)} clusters, "
+        f"{s.get('duplicate_pages', 0)} duplicate pages "
+        f"({s.get('suppressed_pairs', 0)} intra-hreflang pairs suppressed){tnote}"
+    )
+    print(f"Reports written to {args.out}/ ({len(run.written)} files)")
+    if run.exit_code:
+        print(
+            f"--fail-on {args.fail_on}: findings present (exit {run.exit_code})",
+            file=sys.stderr,
+        )
+    return run.exit_code
+
+
 def _load_saved_crawl(path: Path) -> "CrawlJobResult":
     from .models import (
         BrowserRuntime,
@@ -1450,6 +1504,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_postgres_args(hreflang_parser)
 
+    io_parser = subparsers.add_parser(
+        "intent-overlap",
+        help="Analyse intent overlap / de-canonicalisation risk over a crawled + embedded site",
+    )
+    io_parser.add_argument("--threshold", type=float, default=0.85, help="Overlap threshold (default 0.85)")
+    io_parser.add_argument(
+        "--dup-threshold", type=float, default=0.92, help="Duplicate / decanonicalisation threshold (default 0.92)"
+    )
+    io_parser.add_argument(
+        "--hreflang-mode",
+        choices=("suppress", "primary-only", "off"),
+        default="suppress",
+        help="suppress: skip intra-group pairs (default); primary-only: one page per group; off",
+    )
+    io_parser.add_argument("--primary-lang", default="en", help="Preferred language for primary-only mode")
+    io_parser.add_argument("--no-lang-split", action="store_true", help="Compare across languages too")
+    io_parser.add_argument(
+        "--linkage", choices=("single", "complete"), default="single", help="Clustering linkage (default single)"
+    )
+    io_parser.add_argument("--out", default="./out", help="Output directory for CSV reports")
+    io_parser.add_argument(
+        "--fail-on",
+        choices=("duplicate", "overlap"),
+        default=None,
+        help="Exit non-zero when findings at this level exist (CI gating)",
+    )
+    _add_postgres_args(io_parser)
+
     cmp_parser = subparsers.add_parser("compare", help="Compare two saved crawl JSON files")
     cmp_parser.add_argument("baseline_json", help="Baseline crawl JSON path")
     cmp_parser.add_argument("candidate_json", help="Candidate crawl JSON path")
@@ -1614,6 +1696,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_backfill_signatures(args)
     if command == "hreflang-groups":
         return await _run_hreflang_groups(args)
+    if command == "intent-overlap":
+        return await _run_intent_overlap(args)
     if command == "compare":
         return await _run_compare(args)
     if command == "compact-html":
