@@ -1106,6 +1106,9 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
         "linkage": args.linkage,
         "out": args.out,
         "fail_on": args.fail_on,
+        "ann": args.ann,
+        "ann_min_pages": args.ann_min_pages,
+        "ann_k": args.ann_k,
     }
 
     store = _store_from_args(args)
@@ -1121,9 +1124,16 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
             lang_split=not args.no_lang_split,
             linkage=args.linkage,
             fail_on=args.fail_on,
+            use_ann=args.ann,
+            ann_min_pages=args.ann_min_pages,
+            ann_k=args.ann_k,
             run_args=run_args,
         )
     except MixedModelError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    except RuntimeError as exc:
+        # e.g. hnswlib missing for --ann, or numpy missing for analysis.
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     finally:
@@ -1550,8 +1560,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--fail-on",
         choices=("duplicate", "overlap"),
         default=None,
-        help="Exit non-zero when findings at this level exist (CI gating)",
+        help="Exit non-zero when duplicate/overlap pairs exist (CI gating)",
     )
+    io_parser.add_argument(
+        "--ann",
+        action="store_true",
+        help="Use hnswlib ANN pair search above --ann-min-pages (needs the [ann] extra)",
+    )
+    io_parser.add_argument("--ann-min-pages", type=int, default=10000, help="Page count before ANN activates")
+    io_parser.add_argument("--ann-k", type=int, default=128, help="hnswlib k neighbours")
     _add_postgres_args(io_parser)
 
     cmp_parser = subparsers.add_parser("compare", help="Compare two saved crawl JSON files")
