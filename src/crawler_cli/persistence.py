@@ -358,6 +358,21 @@ SCHEMA_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_page_embeddings_model ON page_embeddings(model)
     """,
     """
+    CREATE TABLE IF NOT EXISTS intent_signatures (
+        url_id INTEGER PRIMARY KEY,
+        main_text_compressed BYTEA,
+        extraction_method TEXT,
+        signal_confidence TEXT,
+        signature_hash TEXT,
+        signature_model_input TEXT,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (url_id) REFERENCES urls (id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_intent_signatures_hash ON intent_signatures(signature_hash)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS crawl_comparison_sessions (
         id SERIAL PRIMARY KEY,
         baseline_label TEXT NOT NULL,
@@ -574,6 +589,7 @@ CRAWL_TABLES: tuple[str, ...] = (
     "page_schema_references",
     "internal_links",
     "page_embeddings",
+    "intent_signatures",
     "crawl_comparison_urls",
     "robots_directives",
     "canonical_urls",
@@ -622,7 +638,7 @@ class MemoryStore:
     """Lightweight frontier store for local crawls that do not need Postgres."""
 
     def __init__(self) -> None:
-        self.frontier: dict[str, dict[str, object]] = {}
+        self.frontier: dict[str, dict[str, Any]] = {}
         self.saved_metadata: dict[str, dict[str, object]] = {}
         self.sources: dict[str, set[tuple[str, str | None]]] = {}
 
@@ -2044,6 +2060,91 @@ class AsyncpgStore:
                 json.dumps(embedding),
                 model,
                 text_length,
+            )
+
+    async def fetch_pages_for_signatures(
+        self,
+        *,
+        urls: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return stored HTML pages joined with title/h1/meta for signature
+        computation (ticket 076)."""
+        await self.connect()
+        assert self.pool is not None
+        base_query = """
+            SELECT p.url_id, u.url, p.html_compressed,
+                   c.title, c.h1_tags AS h1, md.description AS meta_description
+            FROM pages p
+            JOIN urls u ON u.id = p.url_id
+            LEFT JOIN content c ON c.url_id = p.url_id
+            LEFT JOIN meta_descriptions md ON md.id = c.meta_description_id
+            WHERE p.html_compressed IS NOT NULL
+        """
+        async with self.pool.acquire() as conn:
+            if urls:
+                rows = await conn.fetch(base_query + " AND u.url = ANY($1::text[])", urls)
+            else:
+                rows = await conn.fetch(base_query)
+        return [
+            {
+                "url_id": int(row["url_id"]),
+                "url": str(row["url"]),
+                "html": decompress_html(bytes(row["html_compressed"])),
+                "title": row["title"],
+                "h1": row["h1"],
+                "meta_description": row["meta_description"],
+            }
+            for row in rows
+        ]
+
+    async def existing_signature_hashes(self) -> dict[int, str]:
+        """Map url_id -> stored signature_hash (ticket 076 gating)."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT url_id, signature_hash FROM intent_signatures WHERE signature_hash IS NOT NULL"
+            )
+        return {int(row["url_id"]): str(row["signature_hash"]) for row in rows}
+
+    async def store_intent_signatures_bulk(self, rows: list[dict[str, Any]]) -> None:
+        """Upsert intent-signature rows (ticket 076).
+
+        Each row carries ``url_id``, ``main_text`` (compressed on write),
+        ``extraction_method``, ``signal_confidence``, ``signature_hash`` and
+        ``signature_model_input`` provenance.
+        """
+        if not rows:
+            return
+        await self.connect()
+        assert self.pool is not None
+        batch = [
+            (
+                int(r["url_id"]),
+                compress_html(r["main_text"]) if r.get("main_text") else None,
+                r.get("extraction_method"),
+                r.get("signal_confidence"),
+                r.get("signature_hash"),
+                r.get("signature_model_input"),
+            )
+            for r in rows
+        ]
+        async with self.pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO intent_signatures
+                    (url_id, main_text_compressed, extraction_method, signal_confidence,
+                     signature_hash, signature_model_input, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                ON CONFLICT (url_id) DO UPDATE
+                SET main_text_compressed = EXCLUDED.main_text_compressed,
+                    extraction_method = EXCLUDED.extraction_method,
+                    signal_confidence = EXCLUDED.signal_confidence,
+                    signature_hash = EXCLUDED.signature_hash,
+                    signature_model_input = EXCLUDED.signature_model_input,
+                    updated_at = NOW()
+                """,
+                batch,
             )
 
     async def persist_comparison_session(

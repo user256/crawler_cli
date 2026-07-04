@@ -129,6 +129,50 @@ async def test_web_vitals_round_trip(store: AsyncpgStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_intent_signature_backfill_round_trip(store: AsyncpgStore) -> None:
+    """backfill_intent_signatures persists signatures and re-runs write zero (ticket 076)."""
+    from crawler_cli.intent_signature import backfill_intent_signatures
+
+    body = "<article><p>" + ("Real widget content here. " * 40) + "</p></article>"
+    result = CrawlResult(
+        requested_url="https://sig.example/a",
+        final_url="https://sig.example/a",
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=ExtractedContent(
+            title="Alpha Widgets | Sig Example",
+            meta_description="Best widgets around",
+            meta_robots=RobotsDirectives(),
+            x_robots_tag=RobotsDirectives(),
+            canonical=None,
+            x_canonical=None,
+            hreflang_links=[],
+            html_lang="en",
+            headings={"h1": ["Alpha Widgets"], "h2": []},
+            text="Alpha Widgets body",
+            word_count=200,
+            metadata={},
+        ),
+        raw_html=f"<html><head><title>Alpha Widgets | Sig Example</title></head><body>{body}</body></html>",
+    )
+    await store.persist(result)
+
+    first = await backfill_intent_signatures(store)
+    assert first.processed == 1
+    assert first.updated == 1
+
+    hashes = await store.existing_signature_hashes()
+    assert len(hashes) == 1
+
+    # Re-run on unchanged crawl rewrites zero hashes (ticket-114 zero-re-embed).
+    second = await backfill_intent_signatures(store)
+    assert second.updated == 0
+    assert second.unchanged == 1
+
+
+@pytest.mark.asyncio
 async def test_truncate_only_touches_crawl_tables(store: AsyncpgStore) -> None:
     """truncate_crawl_tables must not drop tables that don't belong to it."""
     await store.enqueue_frontier([("https://example.com/", 0, None)], source="seed")
