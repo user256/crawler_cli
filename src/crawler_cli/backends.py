@@ -89,7 +89,8 @@ def _is_skippable_content_type(content_type: str | None) -> bool:
 
 
 def _request_headers(config: CrawlConfig, url: str) -> dict[str, str]:
-    headers = {"User-Agent": config.user_agent, **config.request_headers}
+    # Per-domain User-Agent override (ticket 080); falls back to config.user_agent.
+    headers = {"User-Agent": config.user_agent_for(url), **config.request_headers}
     # Scoped cookies (ticket 048) take precedence and are filtered to the
     # target URL's domain/path; otherwise fall back to the flat all-hosts map
     # (ticket 028).
@@ -850,6 +851,11 @@ class PlaywrightBackend(FetchBackend):
         page = None
         try:
             page = await context.new_page()
+            # Per-domain User-Agent override (ticket 080). The context carries the
+            # default UA; a per-page extra header swaps the sent User-Agent for
+            # this domain without recycling the shared context.
+            if self.config.ua_map:
+                await page.set_extra_http_headers({"User-Agent": self.config.user_agent_for(url)})
             timeout_ms = self._timeout_ms(self.config.timeout_seconds)
             page.set_default_timeout(timeout_ms)
             page.set_default_navigation_timeout(timeout_ms)
@@ -1013,8 +1019,9 @@ class ObscuraFetchBackend(FetchBackend):
             proxy = self._proxy_pool.select(url)
             if proxy:
                 argv.extend(["--proxy", proxy])
-        if self.config.user_agent:
-            argv.extend(["--user-agent", self.config.user_agent])
+        ua = self.config.user_agent_for(url)
+        if ua:
+            argv.extend(["--user-agent", ua])
         # Per-fetch timeout (whole-page) — keep below our own wait_for budget.
         argv.extend(["--timeout", str(max(5, int(self.config.timeout_seconds)))])
         if raw:

@@ -85,6 +85,8 @@ class CrawlEngine:
         )
         self._effective_worker_limit = max(1, config.max_concurrency)
         self._stop_requested: bool = False
+        # Count of URLs skipped at enqueue time by --refresh-days (ticket 080).
+        self._refresh_skipped: int = 0
         # Lazily-built browser backend used to escalate challenged HTTP fetches
         # (ticket 074). Only created when an escalation actually happens.
         self._challenge_backend: PlaywrightBackend | None = None
@@ -402,6 +404,32 @@ class CrawlEngine:
             )
         return results
 
+    async def _enqueue_frontier(
+        self,
+        frontier_data: list,
+        *,
+        source: str | None = None,
+        source_detail: str | None = None,
+    ) -> int:
+        """Enqueue frontier rows, applying the --refresh-days staleness filter
+        (ticket 080). URLs already fetched successfully within the window are
+        dropped and counted, so a periodic re-run only refetches what aged out.
+        """
+        if self.config.refresh_days > 0 and frontier_data and self.store is not None:
+            import time as _time
+
+            cutoff = int(_time.time()) - self.config.refresh_days * 86400
+            fresh = await self.store.urls_fetched_since([item[0] for item in frontier_data], cutoff)
+            if fresh:
+                before = len(frontier_data)
+                frontier_data = [item for item in frontier_data if item[0] not in fresh]
+                self._refresh_skipped += before - len(frontier_data)
+        if not frontier_data or self.store is None:
+            return 0
+        return await self.store.enqueue_frontier(
+            frontier_data, source=source, source_detail=source_detail
+        )
+
     async def crawl_list(self, urls: Iterable[str], *, save_to: str | None = None) -> CrawlJobResult:
         seed_urls = list(urls)
         self._log_browser_runtime()
@@ -521,7 +549,7 @@ class CrawlEngine:
             await self._record_out_of_scope_urls(out_of_scope, source="sitemap", detail="path_out_of_scope")
 
         if frontier_data:
-            await self.store.enqueue_frontier(
+            await self._enqueue_frontier(
                 frontier_data,
                 source="sitemap",
                 source_detail=None,
@@ -621,7 +649,7 @@ class CrawlEngine:
             if seed_skip:
                 await self._record_out_of_scope_urls(seed_skip, source="seed", detail="path_out_of_scope")
             if seed_enqueue:
-                await self.store.enqueue_frontier(seed_enqueue, source="seed")
+                await self._enqueue_frontier(seed_enqueue, source="seed")
             if self.config.discover_sitemaps and not self.config.skip_sitemaps:
                 await self._discover_and_enqueue_sitemaps(seeds, limit)
         else:
@@ -714,12 +742,12 @@ class CrawlEngine:
                 # already persisted and marked done below).
                 try:
                     if limit <= 0:
-                        await self.store.enqueue_frontier(discovered_to_enqueue, source="link")
+                        await self._enqueue_frontier(discovered_to_enqueue, source="link")
                     else:
                         queued_count, pending_count, done_count = await self.store.frontier_stats()
                         remaining_frontier_budget = max(0, limit - (queued_count + pending_count + done_count))
                         if remaining_frontier_budget > 0:
-                            await self.store.enqueue_frontier(
+                            await self._enqueue_frontier(
                                 discovered_to_enqueue[:remaining_frontier_budget], source="link"
                             )
                 except Exception as exc:  # noqa: BLE001 - link enqueue is best-effort
@@ -785,6 +813,7 @@ class CrawlEngine:
                 saved_to=save_to,
                 retry_attempts=session_retry_attempts,
                 interrupted=interrupted,
+                refresh_skipped_count=self._refresh_skipped,
             )
             if interrupted:
                 logger.warning("Crawl interrupted: %d URLs crawled before stop", session_crawled)

@@ -54,6 +54,15 @@ def _env_float(name: str) -> float | None:
 class CrawlConfig:
     backend: BackendName = "aiohttp"
     user_agent: str = "crawler_cli/0.1"
+    ua_map: dict[str, str] = field(default_factory=dict)
+    """Per-domain user agents (ticket 080). Keys are bare registrable domains;
+    a host matches its own domain and any subdomain (``www.casino.org`` matches
+    ``casino.org``). ``user_agent`` is the fallback. Threaded through every
+    backend as a per-request User-Agent override."""
+    refresh_days: int = 0
+    """Staleness window in days (ticket 080). When > 0, URLs already fetched
+    successfully (HTTP 200) within this window are skipped at enqueue time so a
+    periodic re-run only refetches what has aged out. 0 refetches everything."""
     timeout_seconds: float = 30.0
     max_concurrency: int = 10
     max_requests_per_context: int = 50
@@ -212,6 +221,21 @@ class CrawlConfig:
             return False
         return True
 
+    def user_agent_for(self, url: str) -> str:
+        """Resolve the User-Agent for *url* (ticket 080). A host matches a
+        ``ua_map`` domain if it equals it or is a subdomain of it; otherwise the
+        default ``user_agent`` is used (intent_overlap.py make_ua_resolver:274)."""
+        if not self.ua_map:
+            return self.user_agent
+        from urllib.parse import urlparse
+
+        # hostname (not netloc) so an explicit port never defeats the match.
+        host = (urlparse(url).hostname or "").lower()
+        for domain, ua in self.ua_map.items():
+            if host == domain or host.endswith("." + domain):
+                return ua
+        return self.user_agent
+
     def path_skip_detail(self, url: str) -> str:
         if self.is_path_excluded(url):
             return "path_exclude"
@@ -232,3 +256,15 @@ class CrawlConfig:
         if self.rate_limit_per_second <= 0:
             return 0.0
         return 1.0 / self.rate_limit_per_second
+
+
+def parse_ua_map(specs: list[str]) -> dict[str, str]:
+    """Parse ``--ua DOMAIN=UA`` specs into a domain->user-agent map (ticket 080,
+    intent_overlap.py parse_ua_map:286). Raises ValueError on a malformed spec."""
+    ua_map: dict[str, str] = {}
+    for spec in specs:
+        domain, sep, ua = spec.partition("=")
+        if not sep or not domain.strip() or not ua.strip():
+            raise ValueError(f'--ua expects DOMAIN="User Agent", got {spec!r}')
+        ua_map[domain.strip().lower()] = ua.strip()
+    return ua_map

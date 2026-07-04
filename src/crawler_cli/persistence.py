@@ -820,6 +820,10 @@ class MemoryStore:
     ) -> None:
         return None
 
+    async def urls_fetched_since(self, urls: list[str], cutoff_epoch: int) -> set[str]:
+        # MemoryStore keeps no fetch history, so nothing is ever "fresh".
+        return set()
+
     async def frontier_stats(self) -> tuple[int, int, int]:
         queued = sum(1 for state in self.frontier.values() if state["status"] == "queued")
         pending = sum(1 for state in self.frontier.values() if state["status"] == "pending")
@@ -1351,6 +1355,30 @@ class AsyncpgStore:
                     """,
                     rows,
                 )
+
+    async def urls_fetched_since(self, urls: list[str], cutoff_epoch: int) -> set[str]:
+        """Return the subset of *urls* already fetched successfully (HTTP 200)
+        at or after *cutoff_epoch* — the staleness filter for --refresh-days
+        (ticket 080)."""
+        if not urls:
+            return set()
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT u.url
+                FROM urls u
+                JOIN page_metadata pm ON pm.url_id = u.id
+                WHERE u.url = ANY($1::text[])
+                  AND pm.final_status_code = 200
+                  AND pm.fetched_at IS NOT NULL
+                  AND pm.fetched_at >= $2
+                """,
+                urls,
+                cutoff_epoch,
+            )
+        return {str(row["url"]) for row in rows}
 
     async def urls_with_source(self, source: str) -> list[str]:
         await self.connect()

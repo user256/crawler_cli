@@ -131,6 +131,9 @@ class CrawlJobResult:
     *results* (ticket-062).  Surfaced in the CLI summary."""
     interrupted: bool = False
     """True when the crawl was stopped early via a signal (ticket-064)."""
+    refresh_skipped_count: int = 0
+    """URLs skipped at enqueue time because they were fetched within the
+    --refresh-days window (ticket 080). Surfaced in the CLI summary."""
 
     @property
     def crawled_count(self) -> int:
