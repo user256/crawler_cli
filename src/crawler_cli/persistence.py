@@ -358,6 +358,12 @@ SCHEMA_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_page_embeddings_model ON page_embeddings(model)
     """,
     """
+    ALTER TABLE page_embeddings ADD COLUMN IF NOT EXISTS signature_hash TEXT
+    """,
+    """
+    ALTER TABLE page_embeddings ADD COLUMN IF NOT EXISTS dim INTEGER
+    """,
+    """
     CREATE TABLE IF NOT EXISTS intent_signatures (
         url_id INTEGER PRIMARY KEY,
         main_text_compressed BYTEA,
@@ -2042,25 +2048,80 @@ class AsyncpgStore:
         *,
         model: str,
         text_length: int,
+        signature_hash: str | None = None,
     ) -> None:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO page_embeddings (url_id, embedding_json, model, text_length)
-                VALUES ($1, $2::jsonb, $3, $4)
+                INSERT INTO page_embeddings
+                    (url_id, embedding_json, model, text_length, signature_hash, dim)
+                VALUES ($1, $2::jsonb, $3, $4, $5, $6)
                 ON CONFLICT (url_id) DO UPDATE
                 SET embedding_json = EXCLUDED.embedding_json,
                     model = EXCLUDED.model,
                     text_length = EXCLUDED.text_length,
+                    signature_hash = EXCLUDED.signature_hash,
+                    dim = EXCLUDED.dim,
                     created_at = CURRENT_TIMESTAMP
                 """,
                 url_id,
                 json.dumps(embedding),
                 model,
                 text_length,
+                signature_hash,
+                len(embedding),
             )
+
+    async def fetch_signature_rows_for_embeddings(
+        self,
+        *,
+        urls: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return intent-signature rows joined with any existing embedding, for
+        hash-gated signature embedding (ticket 077).
+
+        Each row carries the signature input text, its current ``signature_hash``,
+        and the ``signature_hash``/``model`` recorded on the last embedding so
+        the caller can skip unchanged pages.
+        """
+        await self.connect()
+        assert self.pool is not None
+        base_query = """
+            SELECT s.url_id, u.url, s.signature_model_input AS text,
+                   s.signature_hash,
+                   e.signature_hash AS embedded_hash, e.model AS embedded_model
+            FROM intent_signatures s
+            JOIN urls u ON u.id = s.url_id
+            LEFT JOIN page_embeddings e ON e.url_id = s.url_id
+            WHERE s.signature_model_input IS NOT NULL
+        """
+        async with self.pool.acquire() as conn:
+            if urls:
+                rows = await conn.fetch(base_query + " AND u.url = ANY($1::text[])", urls)
+            else:
+                rows = await conn.fetch(base_query)
+        return [
+            {
+                "url_id": int(row["url_id"]),
+                "url": str(row["url"]),
+                "text": row["text"],
+                "signature_hash": row["signature_hash"],
+                "embedded_hash": row["embedded_hash"],
+                "embedded_model": row["embedded_model"],
+            }
+            for row in rows
+        ]
+
+    async def embedding_models(self) -> list[str]:
+        """Distinct embedding models present in page_embeddings (mixed-model
+        guard support, ticket 077 / enforced in 079)."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT DISTINCT model FROM page_embeddings ORDER BY model")
+        return [str(row["model"]) for row in rows]
 
     async def fetch_pages_for_signatures(
         self,

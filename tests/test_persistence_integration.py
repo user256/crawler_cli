@@ -173,6 +173,54 @@ async def test_intent_signature_backfill_round_trip(store: AsyncpgStore) -> None
 
 
 @pytest.mark.asyncio
+async def test_signature_embedding_hash_gating_round_trip(store: AsyncpgStore) -> None:
+    """Local signature embedding gates on signature_hash+model via the real DB join (ticket 077)."""
+    from crawler_cli.intent_signature import backfill_intent_signatures
+    from crawler_cli.embeddings import generate_signature_embeddings_for_store
+
+    body = "<article><p>" + ("Widget review copy here. " * 40) + "</p></article>"
+    result = CrawlResult(
+        requested_url="https://emb.example/a",
+        final_url="https://emb.example/a",
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=ExtractedContent(
+            title="Widgets",
+            meta_description="md",
+            meta_robots=RobotsDirectives(),
+            x_robots_tag=RobotsDirectives(),
+            canonical=None,
+            x_canonical=None,
+            hreflang_links=[],
+            html_lang="en",
+            headings={"h1": ["Widgets"], "h2": []},
+            text="body",
+            word_count=200,
+            metadata={},
+        ),
+        raw_html=f"<html><head><title>Widgets</title></head><body>{body}</body></html>",
+    )
+    await store.persist(result)
+    await backfill_intent_signatures(store)
+
+    def fake_encoder(texts):
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+    first = await generate_signature_embeddings_for_store(store, model="local-test", encoder=fake_encoder)
+    assert first.processed == 1
+
+    # Vector stored with signature_hash + dim.
+    assert await store.embedding_models() == ["local-test"]
+
+    # Unchanged crawl -> zero re-embeds (hash gating through the DB join).
+    second = await generate_signature_embeddings_for_store(store, model="local-test", encoder=fake_encoder)
+    assert second.processed == 0
+    assert second.skipped == 1
+
+
+@pytest.mark.asyncio
 async def test_truncate_only_touches_crawl_tables(store: AsyncpgStore) -> None:
     """truncate_crawl_tables must not drop tables that don't belong to it."""
     await store.enqueue_frontier([("https://example.com/", 0, None)], source="seed")

@@ -26,6 +26,14 @@ playwright = [
 intent = [
   "trafilatura>=1.8",
 ]
+# Local (no-API-key, multilingual) embeddings for the intent-overlap flow
+# (ticket 077). torch comes transitively with sentence-transformers. numpy is
+# also used by the ticket 079 analysis. Imported lazily with an error naming
+# this extra.
+embeddings-local = [
+  "sentence-transformers>=2.2",
+  "numpy>=1.24",
+]
 test = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",
