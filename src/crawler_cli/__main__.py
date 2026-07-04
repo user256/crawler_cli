@@ -31,7 +31,7 @@ from .cookies import (
 from .csv_urls import load_urls_from_csv
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine
-from .persistence import AsyncpgStore, database_name_from_dsn
+from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .reports import CrawlReports
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,10 @@ def _env_or_default(prefix: str, key: str, default: str | None = None) -> str | 
 def _build_dsn(args: argparse.Namespace) -> str:
     if getattr(args, "postgres_dsn", None):
         return args.postgres_dsn
+    for prefix in ("CRAWLER_CLI", "PostgreSQLCrawler"):
+        dsn = os.environ.get(f"{prefix}_POSTGRES_DSN")
+        if dsn:
+            return dsn
     host = args.postgres_host or _env_or_default("CRAWLER_CLI", "POSTGRES_HOST", "localhost")
     port = args.postgres_port or _env_or_default("CRAWLER_CLI", "POSTGRES_PORT", "5432")
     user = args.postgres_user or _env_or_default("CRAWLER_CLI", "POSTGRES_USER", "crawler")
@@ -94,6 +98,27 @@ def _store_from_args(args: argparse.Namespace) -> AsyncpgStore:
         compress_html=compress_html,
         store_html=store_html,
     )
+
+
+def _postgres_config_supplied(args: argparse.Namespace) -> bool:
+    if getattr(args, "postgres_dsn", None):
+        return True
+    arg_names = (
+        "postgres_host",
+        "postgres_port",
+        "postgres_user",
+        "postgres_password",
+        "postgres_db",
+    )
+    if any(getattr(args, name, None) for name in arg_names):
+        return True
+    for prefix in ("CRAWLER_CLI", "PostgreSQLCrawler"):
+        if os.environ.get(f"{prefix}_POSTGRES_DSN"):
+            return True
+        for key in ("POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"):
+            if f"{prefix}_{key}" in os.environ:
+                return True
+    return False
 
 
 def _add_confirm_args(parser: argparse.ArgumentParser) -> None:
@@ -154,9 +179,75 @@ def _validate_obscura_args(args: argparse.Namespace) -> None:
         print("Error: --obscura-stealth and --no-obscura-stealth are mutually exclusive", file=sys.stderr)
         sys.exit(2)
 
-    if has_obscura and getattr(args, "playwright_cdp_endpoint", None):
-        print("Error: --playwright-cdp-endpoint and --obscura are mutually exclusive", file=sys.stderr)
+    if has_obscura and any(
+        (
+            getattr(args, "playwright_cdp_endpoint", None),
+            getattr(args, "playwright_cdp_host", None),
+            getattr(args, "playwright_cdp_port", None),
+            getattr(args, "playwright_channel", None),
+            getattr(args, "playwright_executable_path", None),
+            getattr(args, "playwright_user_data_dir", None),
+            getattr(args, "playwright_profile_directory", None),
+        )
+    ):
+        print("Error: --obscura cannot be combined with Playwright CDP/profile launch flags", file=sys.stderr)
         sys.exit(2)
+
+
+def _validate_playwright_args(args: argparse.Namespace) -> None:
+    channel = getattr(args, "playwright_channel", None)
+    executable_path = getattr(args, "playwright_executable_path", None)
+    user_data_dir = getattr(args, "playwright_user_data_dir", None)
+    profile_directory = getattr(args, "playwright_profile_directory", None)
+    cdp_endpoint = getattr(args, "playwright_cdp_endpoint", None)
+    cdp_host = getattr(args, "playwright_cdp_host", None)
+    cdp_port = getattr(args, "playwright_cdp_port", None)
+
+    if channel and executable_path:
+        print(
+            "Error: --playwright-channel and --playwright-executable-path are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if profile_directory and not user_data_dir:
+        print(
+            "Error: --playwright-profile-directory requires --playwright-user-data-dir",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if cdp_host and cdp_port is None:
+        print(
+            "Error: --playwright-cdp-host requires --playwright-cdp-port",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if cdp_endpoint and any((cdp_host, cdp_port)):
+        print(
+            "Error: --playwright-cdp-endpoint cannot be combined with --playwright-cdp-host/--playwright-cdp-port",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if (cdp_endpoint or cdp_port is not None) and any((channel, executable_path, user_data_dir, profile_directory)):
+        print(
+            "Error: --playwright-cdp-endpoint cannot be combined with local Playwright launch/profile flags",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _resolve_playwright_cdp_endpoint(args: argparse.Namespace) -> str:
+    endpoint = getattr(args, "playwright_cdp_endpoint", "") or ""
+    if endpoint:
+        return endpoint
+    cdp_port = getattr(args, "playwright_cdp_port", None)
+    if cdp_port is None:
+        return ""
+    cdp_host = getattr(args, "playwright_cdp_host", None) or "127.0.0.1"
+    return f"http://{cdp_host}:{cdp_port}"
 
 
 def _resolve_obscura_stealth(args: argparse.Namespace) -> bool | None:
@@ -200,7 +291,16 @@ def _resolve_circuit_breaker(args: argparse.Namespace) -> tuple[bool, int, float
 
 def _build_config(args: argparse.Namespace) -> CrawlConfig:
     _validate_obscura_args(args)
-    backend: str = "playwright" if args.js else (args.http_backend or "aiohttp")
+    _validate_playwright_args(args)
+    playwright_cdp_endpoint = _resolve_playwright_cdp_endpoint(args)
+    wants_playwright = bool(
+        args.js
+        or playwright_cdp_endpoint
+        or getattr(args, "playwright_channel", None)
+        or getattr(args, "playwright_executable_path", None)
+        or getattr(args, "playwright_user_data_dir", None)
+    )
+    backend: str = "playwright" if wants_playwright else (args.http_backend or "aiohttp")
     headers: dict[str, str] = {}
     if args.custom_ua:
         headers["User-Agent"] = args.custom_ua
@@ -305,6 +405,16 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     else:
         _user_agent = args.custom_ua or "crawler_cli/0.1"
 
+    user_data_dir = getattr(args, "playwright_user_data_dir", "") or ""
+    if user_data_dir:
+        user_data_dir = str(Path(user_data_dir).expanduser())
+    executable_path = getattr(args, "playwright_executable_path", "") or ""
+    if executable_path:
+        executable_path = str(Path(executable_path).expanduser())
+    using_real_profile = bool(user_data_dir)
+    headed = getattr(args, "headed", False)
+    playwright_headless = False if using_real_profile and not headed else not headed
+
     return CrawlConfig(
         backend=backend,  # type: ignore[arg-type]
         user_agent=_user_agent,
@@ -320,7 +430,12 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         ),
         playwright_wait_for_selector=getattr(args, "wait_for_selector", "") or "",
         playwright_wait_for_selector_timeout_seconds=getattr(args, "wait_for_selector_timeout", 10.0),
-        playwright_cdp_endpoint=getattr(args, "playwright_cdp_endpoint", "") or "",
+        playwright_cdp_endpoint=playwright_cdp_endpoint,
+        playwright_browser_channel=getattr(args, "playwright_channel", "") or "",
+        playwright_executable_path=executable_path,
+        playwright_user_data_dir=user_data_dir,
+        playwright_profile_directory=getattr(args, "playwright_profile_directory", "") or "",
+        playwright_headless=playwright_headless,
         collect_web_vitals=getattr(args, "collect_web_vitals", False),
         memory_high_watermark_percent=args.memory_high_watermark,
         memory_recovery_watermark_percent=args.memory_recovery_watermark,
@@ -422,6 +537,11 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--timeout", type=float, default=30.0, help="Per-request timeout in seconds")
     parser.add_argument("--js", action="store_true", help="Use Playwright (JS-enabled) backend")
     parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="Launch the Playwright browser headed instead of headless",
+    )
+    parser.add_argument(
         "--max-requests-per-context",
         type=int,
         default=50,
@@ -435,7 +555,32 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--playwright-cdp-endpoint",
-        help="Connect Playwright to an existing CDP browser such as Obscura",
+        help="Connect Playwright to an existing CDP browser such as Obscura or a locally launched Chrome/Edge",
+    )
+    parser.add_argument(
+        "--playwright-cdp-host",
+        help="CDP host for an already-running Chrome/Edge launched with --remote-debugging-port (default 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--playwright-cdp-port",
+        type=int,
+        help="CDP port for an already-running Chrome/Edge launched with --remote-debugging-port",
+    )
+    parser.add_argument(
+        "--playwright-channel",
+        help="Launch a branded browser channel with Playwright, e.g. chrome or msedge",
+    )
+    parser.add_argument(
+        "--playwright-executable-path",
+        help="Launch this Chrome/Edge/Chromium executable with Playwright",
+    )
+    parser.add_argument(
+        "--playwright-user-data-dir",
+        help="Launch a persistent Playwright browser against this Chromium user-data directory",
+    )
+    parser.add_argument(
+        "--playwright-profile-directory",
+        help="Profile directory inside --playwright-user-data-dir, e.g. Default or 'Profile 1'",
     )
     parser.add_argument(
         "--wait-for-selector",
@@ -707,8 +852,15 @@ async def _run_crawl(args: argparse.Namespace) -> int:
     else:
         logger.info("Circuit breaker: disabled")
 
-    store = _store_from_args(args)
-    await store.initialize()
+    if args.archive_org_check and not _postgres_config_supplied(args):
+        print("Error: --archive-org-check requires PostgreSQL configuration", file=sys.stderr)
+        return 2
+
+    if _postgres_config_supplied(args):
+        store: AsyncpgStore | MemoryStore | None = _store_from_args(args)
+        await store.initialize()
+    else:
+        store = MemoryStore()
     engine = CrawlEngine(config, store=store)
 
     # Install SIGINT/SIGTERM handlers: first signal requests a clean drain,
@@ -807,51 +959,143 @@ async def _run_embeddings(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_saved_crawl(path: Path) -> "CrawlJobResult":
+    from .models import (
+        BrowserRuntime,
+        CrawlJobResult,
+        CrawlResult,
+        DiscoveredLink,
+        ExtractedContent,
+        HreflangLink,
+        RobotsDirectives,
+    )
+
+    def _load_browser_runtime(payload: dict[str, object] | None) -> BrowserRuntime | None:
+        if not payload:
+            return None
+        return BrowserRuntime(
+            provider=str(payload.get("provider", "chromium")),  # type: ignore[arg-type]
+            cdp_endpoint=payload.get("cdp_endpoint"),  # type: ignore[arg-type]
+            managed=payload.get("managed"),  # type: ignore[arg-type]
+            stealth=payload.get("stealth"),  # type: ignore[arg-type]
+            persistent=payload.get("persistent"),  # type: ignore[arg-type]
+            channel=payload.get("channel"),  # type: ignore[arg-type]
+            executable_path=payload.get("executable_path"),  # type: ignore[arg-type]
+            user_data_dir=payload.get("user_data_dir"),  # type: ignore[arg-type]
+            profile_directory=payload.get("profile_directory"),  # type: ignore[arg-type]
+            headless=payload.get("headless"),  # type: ignore[arg-type]
+        )
+
+    def _load_extracted(payload: dict[str, object] | None) -> ExtractedContent | None:
+        if not payload:
+            return None
+        hreflang_links = [
+            HreflangLink(
+                hreflang=str(link.get("hreflang", "")),
+                href=str(link.get("href", "")),
+                source=str(link.get("source", "html_head")),  # type: ignore[arg-type]
+            )
+            for link in payload.get("hreflang_links", []) or []
+            if isinstance(link, dict)
+        ]
+        return ExtractedContent(
+            title=payload.get("title"),  # type: ignore[arg-type]
+            meta_description=payload.get("meta_description"),  # type: ignore[arg-type]
+            meta_robots=RobotsDirectives(raw=list(payload.get("meta_robots", []) or [])),
+            x_robots_tag=RobotsDirectives(raw=list(payload.get("x_robots_tag", []) or [])),
+            canonical=payload.get("canonical"),  # type: ignore[arg-type]
+            x_canonical=payload.get("x_canonical"),  # type: ignore[arg-type]
+            hreflang_links=hreflang_links,
+            html_lang=payload.get("html_lang"),  # type: ignore[arg-type]
+            headings=dict(payload.get("headings", {}) or {}),
+            text=str(payload.get("text", "")),
+            word_count=int(payload.get("word_count", 0) or 0),
+            metadata=dict(payload.get("metadata", {}) or {}),
+            schema_data=list(payload.get("schema_data", []) or []),
+        )
+
+    def _load_discovered_links(payload: object) -> list[DiscoveredLink]:
+        links: list[DiscoveredLink] = []
+        for item in payload or []:
+            if not isinstance(item, dict):
+                continue
+            links.append(
+                DiscoveredLink(
+                    href=str(item.get("href", "")),
+                    anchor_text=item.get("anchor_text"),  # type: ignore[arg-type]
+                    xpath=str(item.get("xpath", "")),
+                    is_image=bool(item.get("is_image", False)),
+                    fragment=item.get("fragment"),  # type: ignore[arg-type]
+                    url_parameters=item.get("url_parameters"),  # type: ignore[arg-type]
+                    original_href=item.get("original_href"),  # type: ignore[arg-type]
+                )
+            )
+        return links
+
+    def _load_result(item: dict[str, object]) -> CrawlResult:
+        return CrawlResult(
+            requested_url=str(item["requested_url"]),
+            final_url=str(item["final_url"]),
+            status=int(item["status"]),
+            headers=dict(item.get("headers", {}) or {}),
+            content_type=item.get("content_type"),  # type: ignore[arg-type]
+            fetch_backend=str(item.get("fetch_backend", "aiohttp")),
+            extracted=_load_extracted(item.get("extracted")),  # type: ignore[arg-type]
+            raw_html=item.get("raw_html"),  # type: ignore[arg-type]
+            content_hash_sha256=item.get("content_hash_sha256"),  # type: ignore[arg-type]
+            content_hash_simhash=item.get("content_hash_simhash"),  # type: ignore[arg-type]
+            discovered_links=_load_discovered_links(item.get("discovered_links")),
+            allowed_by_robots=item.get("allowed_by_robots"),  # type: ignore[arg-type]
+            skip_reason=item.get("skip_reason"),  # type: ignore[arg-type]
+            persist_error=item.get("persist_error"),  # type: ignore[arg-type]
+            challenge=item.get("challenge"),  # type: ignore[arg-type]
+            browser_runtime=_load_browser_runtime(item.get("browser_runtime")),  # type: ignore[arg-type]
+            ttfb_seconds=item.get("ttfb_seconds"),  # type: ignore[arg-type]
+            total_duration_seconds=item.get("total_duration_seconds"),  # type: ignore[arg-type]
+            custom_data=item.get("custom_data"),  # type: ignore[arg-type]
+            lcp_ms=item.get("lcp_ms"),  # type: ignore[arg-type]
+            cls=item.get("cls"),  # type: ignore[arg-type]
+            inp_ms=item.get("inp_ms"),  # type: ignore[arg-type]
+        )
+
+    raw_text = path.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        lines = [json.loads(line) for line in raw_text.splitlines() if line.strip()]
+        summary = next((line for line in lines if line.get("__type") == "summary"), {})
+        results = [_load_result(line) for line in lines if line.get("__type") != "summary"]
+        return CrawlJobResult(
+            mode=str(summary.get("mode", "open")),  # type: ignore[arg-type]
+            seed_urls=list(summary.get("seed_urls", []) or []),
+            results=results,
+            saved_to=summary.get("saved_to"),  # type: ignore[arg-type]
+            retry_attempts=int(summary.get("retry_attempts", 0) or 0),
+            interrupted=bool(summary.get("interrupted", False)),
+        )
+
+    if isinstance(payload, dict) and "results" in payload:
+        return CrawlJobResult(
+            mode=str(payload.get("mode", "list")),  # type: ignore[arg-type]
+            seed_urls=list(payload.get("seed_urls", []) or []),
+            results=[_load_result(item) for item in payload.get("results", []) or [] if isinstance(item, dict)],
+            saved_to=payload.get("saved_to"),  # type: ignore[arg-type]
+            retry_attempts=int(payload.get("retry_attempts", 0) or 0),
+            interrupted=bool(payload.get("interrupted", False)),
+        )
+
+    raise ValueError(f"Unsupported crawl artifact format: {path}")
+
+
 async def _run_compare(args: argparse.Namespace) -> int:
     baseline_path = Path(args.baseline_json)
     candidate_path = Path(args.candidate_json)
-    baseline_job = json.loads(baseline_path.read_text(encoding="utf-8"))
-    candidate_job = json.loads(candidate_path.read_text(encoding="utf-8"))
-
-    from .models import CrawlJobResult, CrawlResult
-
-    def _load_results(payload: dict) -> list[CrawlResult]:
-        results = []
-        for item in payload.get("results", []):
-            browser_runtime = None
-            br = item.get("browser_runtime")
-            if br:
-                from .models import BrowserRuntime
-
-                browser_runtime = BrowserRuntime(
-                    provider=br.get("provider", "chromium"),
-                    cdp_endpoint=br.get("cdp_endpoint"),
-                    managed=br.get("managed"),
-                    stealth=br.get("stealth"),
-                )
-            results.append(
-                CrawlResult(
-                    requested_url=item["requested_url"],
-                    final_url=item["final_url"],
-                    status=item["status"],
-                    headers=item.get("headers", {}),
-                    content_type=item.get("content_type"),
-                    fetch_backend=item.get("fetch_backend", "aiohttp"),
-                    extracted=None,
-                    raw_html=item.get("raw_html"),
-                    content_hash_sha256=item.get("content_hash_sha256"),
-                    content_hash_simhash=item.get("content_hash_simhash"),
-                    discovered_links=[],
-                    detected_cms=None,
-                    detected_analytics=None,
-                    browser_runtime=browser_runtime,
-                )
-            )
-        return results
+    baseline_job = _load_saved_crawl(baseline_path)
+    candidate_job = _load_saved_crawl(candidate_path)
 
     diff = compare_deep(
-        CrawlJobResult(mode="list", seed_urls=[], results=_load_results(baseline_job)),
-        CrawlJobResult(mode="list", seed_urls=[], results=_load_results(candidate_job)),
+        baseline_job,
+        candidate_job,
         compare_links=args.compare_links,
     )
 

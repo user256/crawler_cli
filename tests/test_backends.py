@@ -79,6 +79,22 @@ class StubContext:
         self.closed = True
 
 
+class PersistentStubContext:
+    def __init__(self) -> None:
+        self.closed = False
+        self.added_cookies: list[dict] = []
+        self.init_scripts: list[str] = []
+
+    async def add_cookies(self, cookies: list[dict]) -> None:
+        self.added_cookies.extend(cookies)
+
+    async def add_init_script(self, script: str) -> None:
+        self.init_scripts.append(script)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class StubPlaywrightBackend(PlaywrightBackend):
     def __init__(self, config: CrawlConfig) -> None:
         super().__init__(config)
@@ -509,3 +525,74 @@ async def test_playwright_backend_can_connect_to_existing_cdp_endpoint(monkeypat
     assert fake_playwright.chromium.connected_endpoint == "http://127.0.0.1:9222"
     assert fake_playwright.chromium.launch_called is False
     assert backend.created_context is True
+
+
+@pytest.mark.asyncio
+async def test_playwright_backend_can_launch_persistent_profile(monkeypatch):
+    persistent_context = PersistentStubContext()
+
+    class FakeChromium:
+        def __init__(self) -> None:
+            self.connected_endpoint: str | None = None
+            self.launch_called = False
+            self.persistent_user_data_dir: str | None = None
+            self.persistent_kwargs: dict[str, object] | None = None
+
+        async def connect_over_cdp(self, endpoint: str):
+            self.connected_endpoint = endpoint
+            return object()
+
+        async def launch(self, **kwargs):
+            self.launch_called = True
+            return object()
+
+        async def launch_persistent_context(self, user_data_dir: str, **kwargs):
+            self.persistent_user_data_dir = user_data_dir
+            self.persistent_kwargs = kwargs
+            return persistent_context
+
+    class FakePlaywright:
+        def __init__(self) -> None:
+            self.chromium = FakeChromium()
+
+        async def start(self):
+            return self
+
+        async def stop(self) -> None:
+            return None
+
+    fake_playwright = FakePlaywright()
+    async_api_module = types.ModuleType("playwright.async_api")
+    async_api_module.async_playwright = lambda: fake_playwright
+    playwright_module = types.ModuleType("playwright")
+    playwright_module.async_api = async_api_module
+    monkeypatch.setitem(sys.modules, "playwright", playwright_module)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", async_api_module)
+
+    backend = PlaywrightBackend(
+        CrawlConfig(
+            backend="playwright",
+            playwright_browser_channel="msedge",
+            playwright_user_data_dir="/tmp/edge-user-data",
+            playwright_profile_directory="Profile 7",
+            playwright_headless=False,
+        )
+    )
+
+    await backend._ensure_started()
+
+    assert fake_playwright.chromium.connected_endpoint is None
+    assert fake_playwright.chromium.launch_called is False
+    assert fake_playwright.chromium.persistent_user_data_dir == "/tmp/edge-user-data"
+    assert fake_playwright.chromium.persistent_kwargs == {
+        "user_agent": "crawler_cli/0.1",
+        "ignore_https_errors": False,
+        "extra_http_headers": {},
+        "headless": False,
+        "channel": "msedge",
+        "args": ["--profile-directory=Profile 7"],
+    }
+
+    await backend.close()
+
+    assert persistent_context.closed is True

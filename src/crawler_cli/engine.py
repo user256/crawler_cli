@@ -18,7 +18,7 @@ from .detection import CMSDetector, AnalyticsDetector
 from .extract import extract_links, extract_page_data, parse_html
 from .hashing import sha256_hash, simhash64
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, DiscoveredLink, ExtractedContent
-from .persistence import AsyncpgStore
+from .persistence import AsyncpgStore, MemoryStore
 from .robots import RobotsPolicyCache
 from .serialization import serialize_crawl_job, serialize_crawl_result
 from .sitemap import SitemapParser, discover_sitemap_paths
@@ -64,7 +64,7 @@ def _archive_seed_target(seed: str) -> str | None:
 
 
 class CrawlEngine:
-    def __init__(self, config: CrawlConfig, store: AsyncpgStore | None = None) -> None:
+    def __init__(self, config: CrawlConfig, store: AsyncpgStore | MemoryStore | None = None) -> None:
         self.config = config
         self.backend = build_backend(config)
         self.store = store
@@ -562,7 +562,7 @@ class CrawlEngine:
         save_to: str | None = None,
     ) -> CrawlJobResult:
         if self.store is None:
-            raise RuntimeError("crawl_open requires an AsyncpgStore for resumable DB-driven frontier management")
+            raise RuntimeError("crawl_open requires a frontier store")
         if self.config.csv_urls and not self.config.csv_seed_mode:
             return await self.crawl_list(self.config.csv_urls, save_to=save_to)
         seeds = list(seed_urls)
@@ -914,12 +914,24 @@ class CrawlEngine:
                 cdp_endpoint=self.config.playwright_cdp_endpoint,
                 managed=None,
                 stealth=None,
+                persistent=None,
+                channel=None,
+                executable_path=None,
+                user_data_dir=None,
+                profile_directory=None,
+                headless=None,
             )
         return BrowserRuntime(
             provider="chromium",
             cdp_endpoint=None,
             managed=None,
             stealth=None,
+            persistent=bool(self.config.playwright_user_data_dir),
+            channel=self.config.playwright_browser_channel or None,
+            executable_path=self.config.playwright_executable_path or None,
+            user_data_dir=self.config.playwright_user_data_dir or None,
+            profile_directory=self.config.playwright_profile_directory or None,
+            headless=self.config.playwright_headless,
         )
 
     def _result_to_dict(self, result: CrawlResult) -> dict[str, object]:

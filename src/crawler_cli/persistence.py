@@ -428,6 +428,80 @@ SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_page_analytics_hits_page_vendor_id ON page_analytics_hits(page_id, vendor_id, identifier)
     """,
+    """
+    DELETE FROM robots_directives a
+    USING robots_directives b
+    WHERE a.ctid < b.ctid
+      AND a.url_id = b.url_id
+      AND a.source = b.source
+      AND a.directive_id = b.directive_id
+      AND a.value IS NOT DISTINCT FROM b.value
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_robots_directives_fact
+    ON robots_directives(url_id, source, directive_id, value)
+    """,
+    """
+    DELETE FROM canonical_urls a
+    USING canonical_urls b
+    WHERE a.ctid < b.ctid
+      AND a.url_id = b.url_id
+      AND a.canonical_url_id = b.canonical_url_id
+      AND a.source = b.source
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_canonical_urls_fact
+    ON canonical_urls(url_id, canonical_url_id, source)
+    """,
+    """
+    DELETE FROM hreflang_http_header a
+    USING hreflang_http_header b
+    WHERE a.ctid < b.ctid
+      AND a.url_id = b.url_id
+      AND a.hreflang_id = b.hreflang_id
+      AND a.href_url_id = b.href_url_id
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_hreflang_http_header_fact
+    ON hreflang_http_header(url_id, hreflang_id, href_url_id)
+    """,
+    """
+    DELETE FROM hreflang_html_head a
+    USING hreflang_html_head b
+    WHERE a.ctid < b.ctid
+      AND a.url_id = b.url_id
+      AND a.hreflang_id = b.hreflang_id
+      AND a.href_url_id = b.href_url_id
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_hreflang_html_head_fact
+    ON hreflang_html_head(url_id, hreflang_id, href_url_id)
+    """,
+    """
+    DELETE FROM hreflang_sitemap a
+    USING hreflang_sitemap b
+    WHERE a.ctid < b.ctid
+      AND a.url_id = b.url_id
+      AND a.hreflang_id = b.hreflang_id
+      AND a.href_url_id = b.href_url_id
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_hreflang_sitemap_fact
+    ON hreflang_sitemap(url_id, hreflang_id, href_url_id)
+    """,
+    """
+    DELETE FROM page_analytics_hits a
+    USING page_analytics_hits b
+    WHERE a.ctid < b.ctid
+      AND a.page_id = b.page_id
+      AND a.vendor_id = b.vendor_id
+      AND a.evidence_type = b.evidence_type
+      AND a.identifier IS NOT DISTINCT FROM b.identifier
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_page_analytics_hits_fact
+    ON page_analytics_hits(page_id, vendor_id, evidence_type, COALESCE(identifier, ''))
+    """,
 ]
 
 COMPARISON_VIEW_STATEMENTS = [
@@ -542,6 +616,172 @@ def encode_html_for_storage(text: str, *, compress: bool) -> bytes | None:
     if compress:
         return compress_html(text)
     return text.encode("utf-8")
+
+
+class MemoryStore:
+    """Lightweight frontier store for local crawls that do not need Postgres."""
+
+    def __init__(self) -> None:
+        self.frontier: dict[str, dict[str, object]] = {}
+        self.saved_metadata: dict[str, dict[str, object]] = {}
+        self.sources: dict[str, set[tuple[str, str | None]]] = {}
+
+    async def connect(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def initialize(self) -> None:
+        return None
+
+    async def save_metadata(self, key: str, value: dict[str, object]) -> None:
+        self.saved_metadata[key] = value
+
+    async def persist(self, result: CrawlResult) -> None:
+        return None
+
+    async def enqueue_frontier(
+        self,
+        frontier_data: Sequence[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
+        *,
+        source: str | None = None,
+        source_detail: str | None = None,
+    ) -> int:
+        inserted = 0
+        current_time = int(time.time())
+        for item in frontier_data:
+            url, depth, parent_url = item[0], item[1], item[2]
+            priority_score = float(item[3]) if len(item) > 3 and item[3] is not None else 0.0
+            if url in self.frontier:
+                continue
+            self.frontier[url] = {
+                "depth": depth,
+                "parent_url": parent_url,
+                "status": "queued",
+                "enqueued_at": current_time,
+                "updated_at": current_time,
+                "priority_score": priority_score,
+                "reset_count": 0,
+                "retry_count": 0,
+                "retry_at": 0,
+            }
+            if source:
+                await self.record_source_by_url(url, source, source_detail)
+            inserted += 1
+        return inserted
+
+    async def frontier_next_batch(self, batch_size: int) -> list[tuple[str, int, str | None, int]]:
+        now = int(time.time())
+        rows: list[tuple[str, int, str | None, int, float, int]] = []
+        for url, state in self.frontier.items():
+            if state["status"] != "queued" or int(state.get("retry_at", 0)) > now:
+                continue
+            rows.append(
+                (
+                    url,
+                    int(state["depth"]),
+                    cast(str | None, state.get("parent_url")),
+                    int(state.get("retry_count", 0)),
+                    float(state.get("priority_score", 0.0)),
+                    int(state.get("enqueued_at", 0)),
+                )
+            )
+        rows.sort(key=lambda row: (-row[4], row[5], row[0]))
+        batch = rows[:batch_size]
+        for url, *_ in batch:
+            self.frontier[url]["status"] = "pending"
+            self.frontier[url]["updated_at"] = now
+        return [(url, depth, parent_url, retry_count) for url, depth, parent_url, retry_count, _, _ in batch]
+
+    async def frontier_mark_retry(self, url: str, retry_count: int, delay_seconds: float) -> None:
+        state = self.frontier.setdefault(
+            url,
+            {
+                "depth": 0,
+                "parent_url": None,
+                "status": "queued",
+                "enqueued_at": int(time.time()),
+                "updated_at": int(time.time()),
+                "priority_score": 0.0,
+                "reset_count": 0,
+                "retry_count": 0,
+                "retry_at": 0,
+            },
+        )
+        state["status"] = "queued"
+        state["retry_count"] = retry_count
+        state["retry_at"] = int(time.time() + max(0.0, delay_seconds))
+        state["updated_at"] = int(time.time())
+
+    async def frontier_mark_done(self, urls: list[str]) -> None:
+        current_time = int(time.time())
+        for url in urls:
+            state = self.frontier.setdefault(
+                url,
+                {
+                    "depth": 0,
+                    "parent_url": None,
+                    "status": "done",
+                    "enqueued_at": current_time,
+                    "updated_at": current_time,
+                    "priority_score": 0.0,
+                    "reset_count": 0,
+                    "retry_count": 0,
+                    "retry_at": 0,
+                },
+            )
+            state["status"] = "done"
+            state["updated_at"] = current_time
+            state["retry_count"] = 0
+            state["retry_at"] = 0
+
+    async def frontier_reset_pending_to_queued(self, urls: list[str]) -> None:
+        current_time = int(time.time())
+        for url in urls:
+            state = self.frontier.get(url)
+            if state is None or state["status"] != "pending":
+                continue
+            state["status"] = "queued"
+            state["updated_at"] = current_time
+
+    async def frontier_reset_all_pending_to_queued(self) -> int:
+        reset = 0
+        current_time = int(time.time())
+        for state in self.frontier.values():
+            if state["status"] != "pending":
+                continue
+            state["status"] = "queued"
+            state["updated_at"] = current_time
+            state["reset_count"] = int(state.get("reset_count", 0)) + 1
+            reset += 1
+        return reset
+
+    async def record_source(self, url_id: int, source: str, detail: str | None = None) -> None:
+        return None
+
+    async def record_source_by_url(self, url: str, source: str, detail: str | None = None) -> None:
+        self.sources.setdefault(url, set()).add((source, detail))
+
+    async def record_sources_bulk(
+        self,
+        url_detail_pairs: list[tuple[str, str | None]],
+        source: str,
+    ) -> None:
+        for url, detail in url_detail_pairs:
+            await self.record_source_by_url(url, source, detail)
+
+    async def persist_sitemap_hreflang_bulk(
+        self,
+        page_hreflang_pairs: list[tuple[str, list]],
+    ) -> None:
+        return None
+
+    async def frontier_stats(self) -> tuple[int, int, int]:
+        queued = sum(1 for state in self.frontier.values() if state["status"] == "queued")
+        pending = sum(1 for state in self.frontier.values() if state["status"] == "pending")
+        done = sum(1 for state in self.frontier.values() if state["status"] == "done")
+        return queued, pending, done
 
 
 class AsyncpgStore:
@@ -1139,6 +1379,24 @@ class AsyncpgStore:
         assert self.pool is not None
         await self._retry_on_deadlock(self._persist_once, result)
 
+    async def _clear_page_snapshot(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        url_id: int,
+        page_id: int | None,
+    ) -> None:
+        await conn.execute("DELETE FROM robots_directives WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM canonical_urls WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM hreflang_http_header WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM hreflang_html_head WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM hreflang_sitemap WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM page_schema_references WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM schema_data WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM internal_links WHERE source_url_id = $1", url_id)
+        if page_id is not None:
+            await conn.execute("DELETE FROM page_analytics_hits WHERE page_id = $1", page_id)
+
     async def _persist_once(self, result: CrawlResult) -> None:
         assert self.pool is not None
         async with self.pool.acquire() as conn:
@@ -1240,6 +1498,11 @@ class AsyncpgStore:
                     content_url_id,
                     json.dumps(result.headers, sort_keys=True),
                     html_blob,
+                )
+                await self._clear_page_snapshot(
+                    conn,
+                    url_id=content_url_id,
+                    page_id=int(page_id) if page_id is not None else None,
                 )
 
                 meta_description_id = None

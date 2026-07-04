@@ -11,6 +11,12 @@ def serialize_browser_runtime(runtime: BrowserRuntime) -> dict[str, object]:
         "cdp_endpoint": runtime.cdp_endpoint,
         "managed": runtime.managed,
         "stealth": runtime.stealth,
+        "persistent": runtime.persistent,
+        "channel": runtime.channel,
+        "executable_path": runtime.executable_path,
+        "user_data_dir": runtime.user_data_dir,
+        "profile_directory": runtime.profile_directory,
+        "headless": runtime.headless,
     }
 
 

@@ -261,6 +261,7 @@ def test_engine_browser_runtime_for_obscura():
     assert runtime.cdp_endpoint == "http://127.0.0.1:9222"
     assert runtime.managed is True
     assert runtime.stealth is True  # default when analytics off
+    assert runtime.persistent is None
 
 
 def test_engine_browser_runtime_for_unmanaged_obscura_without_explicit_stealth():
@@ -290,6 +291,7 @@ def test_engine_browser_runtime_for_cdp():
     assert runtime.cdp_endpoint == "http://127.0.0.1:9222"
     assert runtime.managed is None
     assert runtime.stealth is None
+    assert runtime.persistent is None
 
 
 def test_engine_browser_runtime_for_chromium():
@@ -299,6 +301,27 @@ def test_engine_browser_runtime_for_chromium():
     assert runtime is not None
     assert runtime.provider == "chromium"
     assert runtime.cdp_endpoint is None
+    assert runtime.persistent is False
+    assert runtime.headless is True
+
+
+def test_engine_browser_runtime_for_persistent_profile_launch():
+    config = CrawlConfig(
+        backend="playwright",
+        playwright_browser_channel="msedge",
+        playwright_user_data_dir="/tmp/edge-user-data",
+        playwright_profile_directory="Profile 5",
+        playwright_headless=False,
+    )
+    engine = CrawlEngine(config)
+    runtime = engine._build_browser_runtime()
+    assert runtime is not None
+    assert runtime.provider == "chromium"
+    assert runtime.persistent is True
+    assert runtime.channel == "msedge"
+    assert runtime.user_data_dir == "/tmp/edge-user-data"
+    assert runtime.profile_directory == "Profile 5"
+    assert runtime.headless is False
 
 
 def test_engine_browser_runtime_none_for_http():
@@ -333,6 +356,12 @@ def test_result_to_dict_includes_browser_runtime():
         "cdp_endpoint": "http://127.0.0.1:9222",
         "managed": True,
         "stealth": True,
+        "persistent": None,
+        "channel": None,
+        "executable_path": None,
+        "user_data_dir": None,
+        "profile_directory": None,
+        "headless": None,
     }
 
 
@@ -449,6 +478,147 @@ def test_run_compare_loads_old_json_without_browser_runtime():
 
         code = asyncio.run(_run_compare(args))
         assert code == 0
+
+
+def test_run_compare_accepts_open_crawl_jsonl_and_preserves_deep_diff_fields():
+    """Regression: compare must accept crawl_open JSONL and retain metadata/links."""
+    from crawler_cli.__main__ import _run_compare
+
+    import json
+    from pathlib import Path
+
+    baseline_lines = [
+        {
+            "requested_url": "https://example.com/page",
+            "final_url": "https://example.com/page",
+            "status": 200,
+            "headers": {},
+            "fetch_backend": "aiohttp",
+            "raw_html": "<html></html>",
+            "content_hash_sha256": "aaa",
+            "discovered_links": [
+                {
+                    "href": "https://example.com/a",
+                    "anchor_text": "A",
+                    "xpath": "/html/body/a[1]",
+                    "is_image": False,
+                    "fragment": None,
+                    "url_parameters": None,
+                    "original_href": "https://example.com/a",
+                }
+            ],
+            "extracted": {
+                "title": "Old title",
+                "meta_description": "Old meta",
+                "meta_robots": [],
+                "x_robots_tag": [],
+                "canonical": "https://example.com/page",
+                "x_canonical": None,
+                "hreflang_links": [],
+                "html_lang": "en",
+                "headings": {"h1": ["Old H1"], "h2": []},
+                "text": "old text",
+                "word_count": 100,
+                "metadata": {},
+                "schema_data": [{"type": "Article", "format": "json-ld", "is_valid": True}],
+            },
+        },
+        {
+            "__type": "summary",
+            "mode": "open",
+            "seed_urls": ["https://example.com/"],
+            "crawled_count": 1,
+            "blocked_count": 0,
+            "persist_error_count": 0,
+            "retry_attempts": 0,
+            "interrupted": False,
+            "saved_to": "baseline.jsonl",
+        },
+    ]
+    candidate_lines = [
+        {
+            "requested_url": "https://example.com/page",
+            "final_url": "https://example.com/page",
+            "status": 200,
+            "headers": {},
+            "fetch_backend": "aiohttp",
+            "raw_html": "<html></html>",
+            "content_hash_sha256": "bbb",
+            "discovered_links": [
+                {
+                    "href": "https://example.com/b",
+                    "anchor_text": "B",
+                    "xpath": "/html/body/a[2]",
+                    "is_image": False,
+                    "fragment": None,
+                    "url_parameters": None,
+                    "original_href": "https://example.com/b",
+                }
+            ],
+            "extracted": {
+                "title": "New title",
+                "meta_description": "New meta",
+                "meta_robots": [],
+                "x_robots_tag": [],
+                "canonical": "https://example.com/page",
+                "x_canonical": None,
+                "hreflang_links": [],
+                "html_lang": "en",
+                "headings": {"h1": ["New H1"], "h2": []},
+                "text": "new text",
+                "word_count": 120,
+                "metadata": {},
+                "schema_data": [{"type": "Product", "format": "json-ld", "is_valid": True}],
+            },
+        },
+        {
+            "__type": "summary",
+            "mode": "open",
+            "seed_urls": ["https://example.com/"],
+            "crawled_count": 1,
+            "blocked_count": 0,
+            "persist_error_count": 0,
+            "retry_attempts": 0,
+            "interrupted": False,
+            "saved_to": "candidate.jsonl",
+        },
+    ]
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base_path = Path(tmp) / "baseline.jsonl"
+        cand_path = Path(tmp) / "candidate.jsonl"
+        out_path = Path(tmp) / "compare_rows.json"
+        base_path.write_text("\n".join(json.dumps(line) for line in baseline_lines) + "\n", encoding="utf-8")
+        cand_path.write_text("\n".join(json.dumps(line) for line in candidate_lines) + "\n", encoding="utf-8")
+
+        args = argparse.Namespace(
+            baseline_json=str(base_path),
+            candidate_json=str(cand_path),
+            baseline_label="base",
+            candidate_label="cand",
+            compare_links=True,
+            output=str(out_path),
+            persist=False,
+        )
+
+        code = asyncio.run(_run_compare(args))
+        assert code == 0
+
+        rows = json.loads(out_path.read_text(encoding="utf-8"))
+        assert rows[0]["baseline_title"] == "Old title"
+        assert rows[0]["candidate_title"] == "New title"
+        assert rows[0]["baseline_h1"] == "Old H1"
+        assert rows[0]["candidate_h1"] == "New H1"
+        assert rows[0]["baseline_meta_description"] == "Old meta"
+        assert rows[0]["candidate_meta_description"] == "New meta"
+        assert rows[0]["baseline_word_count"] == 100
+        assert rows[0]["candidate_word_count"] == 120
+        assert rows[0]["baseline_schema_types"] == ["Article"]
+        assert rows[0]["candidate_schema_types"] == ["Product"]
+        assert rows[0]["links_added"][0]["href"] == "https://example.com/b"
+        assert rows[0]["links_removed"][0]["href"] == "https://example.com/a"
 
 
 # ---------------------------------------------------------------------------

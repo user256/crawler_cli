@@ -114,6 +114,9 @@ crawler-cli https://www.example.com \
   --memory-high-watermark 85 \
   --archive-org-check --custom-ua "...Googlebot..."
 
+# Attach to an already-running Edge/Chrome launched with --remote-debugging-port
+crawler-cli https://www.example.com --playwright-cdp-port 9222
+
 # Crawl with Obscura (managed — starts/stops automatically)
 crawler-cli https://www.example.com --obscura
 
@@ -366,6 +369,49 @@ engine = CrawlEngine(config)
 ```
 
 For long JS-enabled crawls, `max_requests_per_context` recycles Playwright contexts before they bloat, and the engine will temporarily reduce batch concurrency if system memory usage crosses `memory_high_watermark_percent`.
+
+### Drive Real Chrome or Edge Profiles
+
+For sites that only behave correctly in a real signed-in browser profile, launch
+Playwright against Chrome/Edge directly instead of the bundled Chromium:
+
+```bash
+crawler-cli https://example.com \
+  --playwright-channel msedge \
+  --playwright-user-data-dir "$HOME/.config/microsoft-edge" \
+  --playwright-profile-directory "Default"
+```
+
+You can also point at an explicit browser binary with
+`--playwright-executable-path /path/to/chrome`. When a real user-data dir is
+used, `crawler_cli` defaults that Playwright launch to headed mode so the
+profile behaves like a normal browser session. If the profile is already open in
+another Chrome/Edge process, Chromium may refuse to start because the profile is
+locked.
+
+### Attach To Existing Edge Or Chrome
+
+If you already launched a real browser yourself with remote debugging enabled,
+`crawler_cli` can attach to it over CDP instead of launching another browser.
+
+```bash
+microsoft-edge --remote-debugging-port=9222
+
+crawler-cli https://example.com --playwright-cdp-port 9222
+```
+
+Equivalent explicit form:
+
+```bash
+crawler-cli https://example.com \
+  --playwright-cdp-endpoint http://127.0.0.1:9222
+```
+
+Use `--playwright-cdp-host` if the debugging browser is bound somewhere other
+than `127.0.0.1`. CDP attach flags are mutually exclusive with `--obscura` and
+with the local Playwright launch/profile flags (`--playwright-channel`,
+`--playwright-executable-path`, `--playwright-user-data-dir`,
+`--playwright-profile-directory`).
 
 ## Obscura Browser Backend
 

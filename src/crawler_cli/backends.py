@@ -486,6 +486,7 @@ class PlaywrightBackend(FetchBackend):
         self._playwright = None
         self._browser = None
         self._context = None
+        self._persistent_context = False
         # True when we connected to an external CDP browser (Obscura or an
         # explicit CDP endpoint) rather than launching Chromium ourselves. CDP
         # servers like Obscura expose a single default BrowserContext and do not
@@ -529,6 +530,22 @@ class PlaywrightBackend(FetchBackend):
                 setting["password"] = parsed.password
             return setting
         return _playwright_proxy(self.config)
+
+    def _uses_persistent_profile(self) -> bool:
+        return bool(self.config.playwright_user_data_dir)
+
+    def _persistent_context_launch_kwargs(self) -> dict[str, object]:
+        launch_kwargs = self._context_kwargs()
+        launch_kwargs["headless"] = self.config.playwright_headless
+        if self.config.playwright_browser_channel:
+            launch_kwargs["channel"] = self.config.playwright_browser_channel
+        if self.config.playwright_executable_path:
+            launch_kwargs["executable_path"] = self.config.playwright_executable_path
+        if self.config.playwright_profile_directory:
+            launch_kwargs["args"] = [
+                f"--profile-directory={self.config.playwright_profile_directory}"
+            ]
+        return launch_kwargs
 
     def _context_kwargs(self) -> dict[str, object]:
         extra_headers: dict[str, str] = dict(self.config.request_headers)
@@ -591,6 +608,20 @@ class PlaywrightBackend(FetchBackend):
             )
         return payload
 
+    async def _initialize_context_locked(self) -> None:
+        assert self._context is not None
+        self._context_request_count = 0
+        self._context_recycle_requested = False
+        cookie_payload = self._playwright_cookie_payload()
+        if cookie_payload:
+            with contextlib.suppress(Exception):
+                await self._context.add_cookies(cookie_payload)
+        if self.config.collect_web_vitals:
+            # Inject before any page script so the observers capture from load
+            # (ticket 046). Suppressed: a CDP browser may reject init scripts.
+            with contextlib.suppress(Exception):
+                await self._context.add_init_script(_WEB_VITALS_SHIM)
+
     async def _create_context_locked(self) -> None:
         assert self._browser is not None
         if self._cdp_connected:
@@ -608,17 +639,7 @@ class PlaywrightBackend(FetchBackend):
         else:
             self._context = await self._browser.new_context(**self._context_kwargs())
             self._owns_context = True
-        self._context_request_count = 0
-        self._context_recycle_requested = False
-        cookie_payload = self._playwright_cookie_payload()
-        if cookie_payload:
-            with contextlib.suppress(Exception):
-                await self._context.add_cookies(cookie_payload)
-        if self.config.collect_web_vitals:
-            # Inject before any page script so the observers capture from load
-            # (ticket 046). Suppressed: a CDP browser may reject init scripts.
-            with contextlib.suppress(Exception):
-                await self._context.add_init_script(_WEB_VITALS_SHIM)
+        await self._initialize_context_locked()
 
     async def _read_web_vitals(self, page) -> tuple[float | None, float | None, float | None]:
         """Read accumulated lab CWV from the injected shim (ticket 046)."""
@@ -638,6 +659,10 @@ class PlaywrightBackend(FetchBackend):
         )
 
     async def _recycle_context_locked(self) -> None:
+        if self._persistent_context:
+            self._context_request_count = 0
+            self._context_recycle_requested = False
+            return
         old_context = self._context
         owned = self._owns_context
         self._context = None
@@ -736,7 +761,7 @@ class PlaywrightBackend(FetchBackend):
             self._managed_obscura_proc = None
 
     async def _ensure_started(self) -> None:
-        if self._browser is not None:
+        if self._browser is not None or self._context is not None:
             return
         try:
             from playwright.async_api import async_playwright
@@ -752,19 +777,45 @@ class PlaywrightBackend(FetchBackend):
                     self._obscura_cdp_endpoint()
                 )
                 self._cdp_connected = True
+                self._persistent_context = False
                 self._tracked_browser_pids = set()
             elif self.config.playwright_cdp_endpoint:
                 self._browser = await self._playwright.chromium.connect_over_cdp(
                     self.config.playwright_cdp_endpoint
                 )
                 self._cdp_connected = True
+                self._persistent_context = False
                 self._tracked_browser_pids = set()
-            else:
-                self._browser = await self._playwright.chromium.launch(headless=True)
+            elif self._uses_persistent_profile():
+                self._context = await self._playwright.chromium.launch_persistent_context(
+                    self.config.playwright_user_data_dir,
+                    **self._persistent_context_launch_kwargs(),
+                )
+                self._browser = None
                 self._cdp_connected = False
+                self._persistent_context = True
+                self._owns_context = True
+                self._tracked_browser_pids = (
+                    _browser_like_descendants(os.getpid()) - self._baseline_browser_pids
+                )
+                await self._initialize_context_locked()
+            else:
+                launch_kwargs: dict[str, object] = {"headless": self.config.playwright_headless}
+                if self.config.playwright_browser_channel:
+                    launch_kwargs["channel"] = self.config.playwright_browser_channel
+                if self.config.playwright_executable_path:
+                    launch_kwargs["executable_path"] = self.config.playwright_executable_path
+                self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+                self._cdp_connected = False
+                self._persistent_context = False
                 self._tracked_browser_pids = _browser_like_descendants(os.getpid()) - self._baseline_browser_pids
-            await self._create_context_locked()
+            if not self._persistent_context:
+                await self._create_context_locked()
         except Exception:
+            if self._context is not None:
+                with contextlib.suppress(Exception):
+                    await self._context.close()
+                self._context = None
             if self._browser is not None:
                 with contextlib.suppress(Exception):
                     await self._browser.close()
@@ -776,6 +827,7 @@ class PlaywrightBackend(FetchBackend):
             await self._terminate_managed_obscura()
             self._tracked_browser_pids.clear()
             self._baseline_browser_pids.clear()
+            self._persistent_context = False
             raise
 
     async def fetch(self, url: str) -> FetchResponse:
@@ -788,6 +840,8 @@ class PlaywrightBackend(FetchBackend):
             self._active_pages += 1
             self._context_request_count += 1
             if (
+                not self._persistent_context
+                and
                 self.config.max_requests_per_context > 0
                 and self._context_request_count >= self.config.max_requests_per_context
             ):
@@ -912,6 +966,7 @@ class PlaywrightBackend(FetchBackend):
             self._context_request_count = 0
             self._context_recycle_requested = False
             self._active_pages = 0
+            self._persistent_context = False
             self._obscura_stderr.clear()
 
 

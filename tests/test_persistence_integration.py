@@ -17,6 +17,8 @@ import os
 import pytest
 import pytest_asyncio
 
+from crawler_cli.detection.analytics import AnalyticsDetectionResult, AnalyticsHit
+from crawler_cli.models import DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
 from crawler_cli.models import CrawlResult
 from crawler_cli.persistence import AsyncpgStore
 
@@ -133,3 +135,218 @@ async def test_truncate_only_touches_crawl_tables(store: AsyncpgStore) -> None:
     await store.truncate_crawl_tables()
     queued, pending, done = await store.frontier_stats()
     assert queued == 0 and pending == 0 and done == 0
+
+
+@pytest.mark.asyncio
+async def test_persist_recrawl_replaces_page_scoped_facts(store: AsyncpgStore) -> None:
+    first = CrawlResult(
+        requested_url="https://example.com/page",
+        final_url="https://example.com/page",
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=ExtractedContent(
+            title="First",
+            meta_description="First description",
+            meta_robots=RobotsDirectives(raw=["index", "follow"]),
+            x_robots_tag=RobotsDirectives(raw=["max-snippet:50"]),
+            canonical="https://example.com/first-canonical",
+            x_canonical="https://example.com/first-header-canonical",
+            hreflang_links=[
+                HreflangLink("en-gb", "https://example.com/uk", "html_head"),
+                HreflangLink("en-us", "https://example.com/us", "http_header"),
+            ],
+            html_lang="en",
+            headings={"h1": ["First H1"], "h2": ["First H2"]},
+            text="first page",
+            word_count=2,
+            metadata={},
+            schema_data=[
+                {
+                    "type": "Article",
+                    "format": "json-ld",
+                    "raw_data": '{"@type":"Article","headline":"First"}',
+                    "parsed_data": {"@type": "Article", "headline": "First"},
+                    "position": 0,
+                    "is_valid": True,
+                    "validation_errors": [],
+                    "severity": "info",
+                }
+            ],
+        ),
+        raw_html="<html><head><title>First</title></head><body>first</body></html>",
+        discovered_links=[
+            DiscoveredLink(
+                href="https://example.com/linked-a",
+                anchor_text="Link A",
+                xpath="/html/body/a[1]",
+                is_image=False,
+            )
+        ],
+        detected_analytics=AnalyticsDetectionResult(
+            hits=[
+                AnalyticsHit(
+                    vendor="gtm",
+                    category="tag_manager",
+                    identifier="GTM-ONE",
+                    evidence_type="script_src",
+                    evidence_snippet="googletagmanager one",
+                    confidence=1.0,
+                )
+            ]
+        ),
+    )
+    second = CrawlResult(
+        requested_url="https://example.com/page",
+        final_url="https://example.com/page",
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=ExtractedContent(
+            title="Second",
+            meta_description="Second description",
+            meta_robots=RobotsDirectives(raw=["noindex"]),
+            x_robots_tag=RobotsDirectives(raw=[]),
+            canonical="https://example.com/second-canonical",
+            x_canonical=None,
+            hreflang_links=[
+                HreflangLink("fr-fr", "https://example.com/fr", "html_head"),
+            ],
+            html_lang="fr",
+            headings={"h1": ["Second H1"], "h2": []},
+            text="second page",
+            word_count=2,
+            metadata={},
+            schema_data=[],
+        ),
+        raw_html="<html><head><title>Second</title></head><body>second</body></html>",
+        discovered_links=[
+            DiscoveredLink(
+                href="https://example.com/linked-b",
+                anchor_text="Link B",
+                xpath="/html/body/a[2]",
+                is_image=False,
+            )
+        ],
+        detected_analytics=AnalyticsDetectionResult(
+            hits=[
+                AnalyticsHit(
+                    vendor="ga4",
+                    category="analytics",
+                    identifier="G-SECOND",
+                    evidence_type="script_src",
+                    evidence_snippet="googletagmanager second",
+                    confidence=1.0,
+                )
+            ]
+        ),
+    )
+
+    await store.persist(first)
+    await store.persist(second)
+
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        counts = {
+            "robots_directives": await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM robots_directives rd
+                JOIN urls u ON u.id = rd.url_id
+                WHERE u.url = $1
+                """,
+                "https://example.com/page",
+            ),
+            "canonical_urls": await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM canonical_urls cu
+                JOIN urls u ON u.id = cu.url_id
+                WHERE u.url = $1
+                """,
+                "https://example.com/page",
+            ),
+            "hreflang_html_head": await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM hreflang_html_head hh
+                JOIN urls u ON u.id = hh.url_id
+                WHERE u.url = $1
+                """,
+                "https://example.com/page",
+            ),
+            "hreflang_http_header": await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM hreflang_http_header hh
+                JOIN urls u ON u.id = hh.url_id
+                WHERE u.url = $1
+                """,
+                "https://example.com/page",
+            ),
+            "schema_data": await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM schema_data sd
+                JOIN urls u ON u.id = sd.url_id
+                WHERE u.url = $1
+                """,
+                "https://example.com/page",
+            ),
+            "page_schema_references": await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM page_schema_references psr
+                JOIN urls u ON u.id = psr.url_id
+                WHERE u.url = $1
+                """,
+                "https://example.com/page",
+            ),
+            "internal_links": await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM internal_links il
+                JOIN urls u ON u.id = il.source_url_id
+                WHERE u.url = $1
+                """,
+                "https://example.com/page",
+            ),
+            "page_analytics_hits": await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM page_analytics_hits pah
+                JOIN pages p ON p.id = pah.page_id
+                JOIN urls u ON u.id = p.url_id
+                WHERE u.url = $1
+                """,
+                "https://example.com/page",
+            ),
+        }
+        canonical_target = await conn.fetchval(
+            """
+            SELECT target.url
+            FROM canonical_urls cu
+            JOIN urls source ON source.id = cu.url_id
+            JOIN urls target ON target.id = cu.canonical_url_id
+            WHERE source.url = $1 AND cu.source = 'html_head'
+            """,
+            "https://example.com/page",
+        )
+        analytics_vendor = await conn.fetchval(
+            """
+            SELECT av.vendor
+            FROM page_analytics_hits pah
+            JOIN analytics_vendors av ON av.id = pah.vendor_id
+            JOIN pages p ON p.id = pah.page_id
+            JOIN urls u ON u.id = p.url_id
+            WHERE u.url = $1
+            """,
+            "https://example.com/page",
+        )
+
+    assert counts == {
+        "robots_directives": 1,
+        "canonical_urls": 1,
+        "hreflang_html_head": 1,
+        "hreflang_http_header": 0,
+        "schema_data": 0,
+        "page_schema_references": 0,
+        "internal_links": 1,
+        "page_analytics_hits": 1,
+    }
+    assert canonical_target == "https://example.com/second-canonical"
+    assert analytics_vendor == "ga4"

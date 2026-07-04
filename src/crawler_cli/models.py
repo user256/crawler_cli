@@ -14,6 +14,12 @@ class BrowserRuntime:
     cdp_endpoint: str | None = None
     managed: bool | None = None
     stealth: bool | None = None
+    persistent: bool | None = None
+    channel: str | None = None
+    executable_path: str | None = None
+    user_data_dir: str | None = None
+    profile_directory: str | None = None
+    headless: bool | None = None
 
 
 @dataclass(slots=True)
