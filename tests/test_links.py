@@ -25,6 +25,47 @@ def test_extract_links_returns_anchor_text_and_xpath():
     assert image_link.anchor_text.startswith("[IMG:")
 
 
+def test_extract_links_same_host_only_drops_external():
+    html = '<html><body><a href="https://external.com/page">ext</a><a href="/local">local</a></body></html>'
+    links = extract_links(html, "https://example.com/", same_host_only=True)
+    hrefs = {lnk.href for lnk in links}
+    assert "https://external.com/page" not in hrefs
+    assert "https://example.com/local" in hrefs
+
+
+def test_extract_links_allowed_hosts_admits_extra_host():
+    html = (
+        '<html><body>'
+        '<a href="https://blog.example.com/post">blog</a>'
+        '<a href="https://external.com/nope">nope</a>'
+        '<a href="/local">local</a>'
+        '</body></html>'
+    )
+    links = extract_links(
+        html,
+        "https://example.com/",
+        same_host_only=True,
+        allowed_hosts={"blog.example.com"},
+    )
+    hrefs = {lnk.href for lnk in links}
+    assert "https://blog.example.com/post" in hrefs
+    assert "https://example.com/local" in hrefs
+    assert "https://external.com/nope" not in hrefs
+
+
+def test_extract_links_no_host_filter_returns_all():
+    html = (
+        '<html><body>'
+        '<a href="https://a.com/">a</a>'
+        '<a href="https://b.com/">b</a>'
+        '</body></html>'
+    )
+    links = extract_links(html, "https://a.com/", same_host_only=False)
+    hrefs = {lnk.href for lnk in links}
+    assert "https://a.com/" in hrefs
+    assert "https://b.com/" in hrefs
+
+
 def test_generate_xpath_disambiguates_siblings():
     html = "<div><a href='/a'>A</a><a href='/b'>B</a></div>"
     soup = BeautifulSoup(html, "html.parser")

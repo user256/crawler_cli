@@ -21,3 +21,7 @@ tickets/
 .agents/
 .codex/
 AGENTS.md
+
+# test / build artifacts
+.coverage
+*.whl

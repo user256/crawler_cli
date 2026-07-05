@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
 
 from crawler_cli.detection.analytics import AnalyticsDetector
 from crawler_cli.models import FetchResponse

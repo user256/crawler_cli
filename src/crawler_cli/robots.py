@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import fnmatch
+import re
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from email.utils import parsedate_to_datetime
 from typing import Optional
 from urllib.parse import urlparse
@@ -11,6 +12,22 @@ from urllib.parse import urlparse
 import aiohttp
 
 from .config import CrawlConfig
+
+
+@lru_cache(maxsize=2048)
+def _robots_pattern(rule: str) -> re.Pattern[str]:
+    """Compile a robots.txt path rule into a regex per RFC 9309.
+
+    Only '*' (any sequence) and a trailing '$' (end-of-path anchor) are special;
+    every other character is matched literally. The pattern is left-anchored
+    because robots rules match a path prefix.
+    """
+    anchored_end = rule.endswith("$")
+    body = rule[:-1] if anchored_end else rule
+    # Escape literals, then turn the escaped '*' back into a wildcard.
+    regex = re.escape(body).replace(r"\*", ".*")
+    regex = "^" + regex + ("$" if anchored_end else "")
+    return re.compile(regex)
 
 
 def calculate_cache_ttl(headers: dict[str, str], default_ttl: int = 3600) -> int:
@@ -62,11 +79,15 @@ class RobotsDecision:
 
 
 class _RobotsRules:
-    """Minimal robots.txt parser that exposes matched rules."""
+    """Minimal robots.txt parser that exposes matched rules.
 
-    def __init__(self, domain: str, content: str) -> None:
+    Implements RFC 9309 longest-match precedence with Allow tie-break and
+    case-insensitive product-token user-agent matching.
+    """
+
+    def __init__(self, domain: str, content: str, *, scheme: str = "https") -> None:
         self.domain = domain
-        self.source_url = f"https://{domain}/robots.txt"
+        self.source_url = f"{scheme}://{domain}/robots.txt"
         self._groups: dict[str, list[tuple[str, str]]] = {}
         self._crawl_delays: dict[str, float] = {}
         self._sitemaps: list[str] = []
@@ -93,40 +114,98 @@ class _RobotsRules:
         if not self._groups:
             self._groups["*"] = []
 
+    def _matching_group_key(self, user_agent: str) -> str | None:
+        """Return the most-specific group key for *user_agent*.
+
+        Matching order (per RFC 9309):
+        1. Exact case-insensitive match on the full token.
+        2. Case-insensitive prefix/product-token match (e.g. group
+           ``crawler_cli`` matches UA ``crawler_cli/0.1``).
+        3. The catch-all ``*`` group.
+        Returns None if no group applies.
+        """
+        ua_lower = user_agent.lower()
+        # Exact match first (case-insensitive)
+        for key in self._groups:
+            if key.lower() == ua_lower:
+                return key
+        # Product-token match: UA starts with the group token (case-insensitive)
+        for key in self._groups:
+            if key == "*":
+                continue
+            token = key.lower()
+            if ua_lower == token or ua_lower.startswith(token + "/") or ua_lower.startswith(token + " "):
+                return key
+        # Wildcard fallback
+        if "*" in self._groups:
+            return "*"
+        return None
+
     def check(self, path: str, user_agent: str) -> RobotsDecision:
-        uas = [user_agent, "*"] if user_agent != "*" else ["*"]
-        matched_rule: str | None = None
-        matched_ua: str | None = None
-        allowed = True
-        for ua in uas:
-            rules = self._groups.get(ua, [])
-            for rule_type, rule_path in rules:
-                if self._match(path, rule_path):
-                    matched_rule = f"{rule_type.capitalize()}: {rule_path}"
-                    matched_ua = ua
-                    if rule_type == "allow":
-                        allowed = True
-                    elif rule_type == "disallow":
-                        allowed = False
+        """Return the allow/disallow decision for *path* using longest-match
+        precedence with Allow tie-break (RFC 9309 §2.2.2).
+
+        The most specific (longest rule pattern) matching rule wins.  When two
+        rules of equal specificity conflict, Allow beats Disallow.
+        """
+        group_key = self._matching_group_key(user_agent)
+        rules = self._groups.get(group_key, []) if group_key else []
+
+        best_len = -1
+        best_type: str | None = None
+        best_rule: str | None = None
+        best_ua: str | None = group_key
+
+        for rule_type, rule_path in rules:
+            if not self._match(path, rule_path):
+                continue
+            rule_len = len(rule_path)
+            if rule_len > best_len:
+                best_len = rule_len
+                best_type = rule_type
+                best_rule = rule_path
+            elif rule_len == best_len and rule_type == "allow" and best_type == "disallow":
+                # Equal specificity: Allow wins.
+                best_type = rule_type
+                best_rule = rule_path
+
+        if best_type is None:
+            return RobotsDecision(
+                allowed=True,
+                matched_rule=None,
+                matched_user_agent=None,
+                source_url=self.source_url,
+            )
         return RobotsDecision(
-            allowed=allowed,
-            matched_rule=matched_rule,
-            matched_user_agent=matched_ua,
+            allowed=(best_type == "allow"),
+            matched_rule=f"{best_type.capitalize()}: {best_rule}",
+            matched_user_agent=best_ua,
             source_url=self.source_url,
         )
 
     def crawl_delay(self, user_agent: str) -> float | None:
-        return self._crawl_delays.get(user_agent) or self._crawl_delays.get("*")
+        group_key = self._matching_group_key(user_agent)
+        if group_key and group_key in self._crawl_delays:
+            return self._crawl_delays[group_key]
+        return None
 
     def sitemaps(self) -> list[str]:
         return list(self._sitemaps)
 
     @staticmethod
     def _match(path: str, rule: str) -> bool:
+        if not rule:
+            return False
         if rule == "/":
             return True
-        if "*" in rule or "?" in rule:
-            return fnmatch.fnmatchcase(path, rule)
+        # RFC 9309 wildcard matching: '*' matches any sequence, a trailing '$'
+        # anchors the end of the path. Every other character — including '?' —
+        # is LITERAL. (Do not use fnmatch: there '?' means "one char" and
+        # '[...]' are classes, which over-match robots patterns. e.g. the common
+        # Magento rule "Disallow: /*?" must only block URLs containing '?', not
+        # every path.)
+        if "*" in rule or rule.endswith("$"):
+            return _robots_pattern(rule).match(path) is not None
         return path.startswith(rule)
 
 
@@ -191,16 +270,17 @@ class RobotsPolicyCache:
             cached = self.cache.get_rules(domain)
             if cached is not None:
                 return cached
-            return await self._fetch_and_parse(domain)
+            return await self._fetch_and_parse(url)
 
     async def check(self, url: str) -> RobotsDecision:
-        domain = urlparse(url).netloc.lower()
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
         if self.cache.is_failed(domain):
             return RobotsDecision(
                 allowed=True,
                 matched_rule=None,
                 matched_user_agent=None,
-                source_url=f"https://{domain}/robots.txt",
+                source_url=f"{parsed.scheme}://{domain}/robots.txt",
             )
 
         rules = await self.get_rules(url)
@@ -209,10 +289,10 @@ class RobotsPolicyCache:
                 allowed=True,
                 matched_rule=None,
                 matched_user_agent=None,
-                source_url=f"https://{domain}/robots.txt",
+                source_url=f"{parsed.scheme}://{domain}/robots.txt",
             )
 
-        path = urlparse(url).path or "/"
+        path = parsed.path or "/"
         return rules.check(path, self.config.user_agent)
 
     async def is_allowed(self, url: str) -> bool:
@@ -230,33 +310,55 @@ class RobotsPolicyCache:
             return []
         return rules.sitemaps()
 
-    async def _fetch_robots_txt(self, domain: str) -> tuple[str | None, dict[str, str]]:
-        robots_url = f"https://{domain}/robots.txt"
+    async def _fetch_robots_txt(self, url: str) -> tuple[str | None, dict[str, str], int]:
+        """Fetch robots.txt for the scheme+netloc of *url*.
+
+        Returns (content_or_None, response_headers, http_status).
+        Uses the same scheme/host as the crawled URL so http:// sites
+        are fetched over http, not https.
+        """
+        parsed = urlparse(url)
+        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+        req_headers = {"User-Agent": self.config.user_agent, **self.config.request_headers}
+        proxy = self.config.proxy or None
         try:
             timeout = aiohttp.ClientTimeout(total=min(self.config.timeout_seconds, 10.0))
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(
                     robots_url,
-                    headers={"User-Agent": self.config.user_agent, **self.config.request_headers},
+                    headers=req_headers,
                     ssl=self.config.verify_ssl,
+                    proxy=proxy or None,
+                    allow_redirects=True,
                 ) as response:
                     headers = dict(response.headers)
-                    if response.status == 200:
-                        return await response.text(errors="ignore"), headers
-                    if response.status >= 500:
-                        return None, headers
-                    return None, headers
+                    status = response.status
+                    if status == 200:
+                        return await response.text(errors="ignore"), headers, status
+                    return None, headers, status
         except Exception:
-            return None, {}
+            return None, {}, 0
 
-    async def _fetch_and_parse(self, domain: str) -> _RobotsRules | None:
-        robots_content, headers = await self._fetch_robots_txt(domain)
+    async def _fetch_and_parse(self, url: str) -> _RobotsRules | None:
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        robots_content, headers, status = await self._fetch_robots_txt(url)
+
         if robots_content is None:
-            self.cache.mark_failed(domain)
+            if status >= 500 or status == 0:
+                # Server error / network failure: conservative — treat as fully
+                # disallowed for this session so we don't crawl an unreachable
+                # site, but don't cache so a later retry can succeed.
+                self.cache.mark_failed(domain)
+            # 4xx (including 404): allow-all per RFC 9309; cache a permissive ruleset.
+            elif 400 <= status < 500:
+                rules = _RobotsRules(domain, "")
+                self.cache.set_rules(domain, rules, headers)
+                return rules
             return None
 
         try:
-            rules = _RobotsRules(domain, robots_content)
+            rules = _RobotsRules(domain, robots_content, scheme=parsed.scheme)
             self.cache.set_rules(domain, rules, headers)
             return rules
         except Exception:

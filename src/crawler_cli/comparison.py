@@ -203,8 +203,6 @@ def compare_deep(
 
 
 def comparison_rows(diff: DeepCrawlDiff) -> list[dict[str, object]]:
-    missing_paths = {_path_of(url) for url in diff.missing_urls}
-    new_paths = {_path_of(url) for url in diff.new_urls}
     paths = sorted(
         set(diff.baseline_urls_by_path)
         | set(diff.candidate_urls_by_path)

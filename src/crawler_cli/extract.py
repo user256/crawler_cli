@@ -7,7 +7,17 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup, Tag
 
 from .models import DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
-from .schema import extract_schema_data
+from .schema import _PARSER, extract_schema_data
+
+
+def parse_html(html: str) -> BeautifulSoup:
+    """Parse *html* with the fastest available parser (lxml if installed).
+
+    Call once per page and pass the result to ``extract_page_data`` and
+    ``extract_links`` via their ``soup=`` parameter to avoid duplicate parses
+    (ticket-060).
+    """
+    return BeautifulSoup(html, _PARSER)
 
 
 def _header_map(headers: dict[str, str]) -> dict[str, str]:
@@ -68,8 +78,19 @@ def _extract_header_hreflang(headers: dict[str, str], base_url: str) -> list[Hre
     return hreflangs
 
 
-def extract_page_data(html: str, base_url: str, headers: dict[str, str]) -> ExtractedContent:
-    soup = BeautifulSoup(html, "html.parser")
+def extract_page_data(
+    html: str,
+    base_url: str,
+    headers: dict[str, str],
+    *,
+    soup: BeautifulSoup | None = None,
+) -> ExtractedContent:
+    """Extract SEO metadata from *html*.
+
+    Pass a pre-parsed *soup* to avoid a redundant parse (ticket-060).
+    """
+    if soup is None:
+        soup = BeautifulSoup(html, _PARSER)
     header_values = _header_map(headers)
 
     title = soup.title.string.strip() if soup.title and soup.title.string else None
@@ -140,7 +161,7 @@ def extract_page_data(html: str, base_url: str, headers: dict[str, str]) -> Extr
                 }
             ),
         },
-        schema_data=extract_schema_data(html, base_url),
+        schema_data=extract_schema_data(html, base_url, soup=soup),
     )
 
 
@@ -181,9 +202,33 @@ def _anchor_text_for_link(anchor: Tag, href: str) -> str | None:
     return anchor_text or None
 
 
-def extract_links(html: str, base_url: str, *, same_host_only: bool = True) -> list[DiscoveredLink]:
-    soup = BeautifulSoup(html, "html.parser")
+def extract_links(
+    html: str,
+    base_url: str,
+    *,
+    same_host_only: bool = True,
+    allowed_hosts: set[str] | None = None,
+    soup: BeautifulSoup | None = None,
+) -> list[DiscoveredLink]:
+    """Return all http(s) links found in *html*.
+
+    Pass a pre-parsed *soup* to avoid a redundant parse when the caller has
+    already parsed the document (ticket-060).  Host filtering is kept minimal
+    here so the engine remains the single scope authority (ticket-058).
+    """
+    if soup is None:
+        soup = BeautifulSoup(html, _PARSER)
     base_host = urlparse(base_url).netloc.lower()
+    # Build the effective host allowlist:
+    # - same_host_only=False → no host filter at all (effective_allowed=None)
+    # - same_host_only=True, no allowed_hosts → only the base host
+    # - same_host_only=True, allowed_hosts given → base host + the extra set
+    if not same_host_only:
+        effective_allowed: set[str] | None = None
+    elif allowed_hosts:
+        effective_allowed = {base_host} | {h.lower() for h in allowed_hosts}
+    else:
+        effective_allowed = {base_host}
     links: list[DiscoveredLink] = []
     seen: set[str] = set()
     for anchor in soup.find_all("a", href=True):
@@ -192,7 +237,8 @@ def extract_links(html: str, base_url: str, *, same_host_only: bool = True) -> l
         parsed = urlparse(original_href)
         if parsed.scheme not in {"http", "https"}:
             continue
-        if same_host_only and parsed.netloc.lower() != base_host:
+        link_host = parsed.netloc.lower()
+        if effective_allowed is not None and link_host not in effective_allowed:
             continue
         normalized = parsed._replace(fragment="").geturl()
         if normalized in seen:

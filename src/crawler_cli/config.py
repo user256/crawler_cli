@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -7,6 +8,46 @@ from .auth import AuthConfig
 
 
 BackendName = Literal["aiohttp", "curl_cffi", "playwright"]
+
+# Circuit-breaker defaults, shared between CrawlConfig and the CLI's env-var
+# fallback resolution in __main__._build_config. Threshold was raised from 3 to
+# 15 (ticket 039 notes) so healthy-but-slow sites don't trip the breaker and
+# silently discard work.
+CB_ENABLED_DEFAULT = True
+CB_THRESHOLD_DEFAULT = 15
+CB_RECOVERY_SECONDS_DEFAULT = 30.0
+
+# 25 MB: large enough to hold real-world Magento/WooCommerce sitemaps
+# (often >5 MB) so they parse intact, while still capping runaway downloads.
+# Overridable per run via the --max-response-bytes CLI flag.
+MAX_RESPONSE_BYTES_DEFAULT = 25_000_000
+
+
+def _env_bool(name: str) -> bool | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _env_float(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 @dataclass(slots=True)
@@ -19,9 +60,21 @@ class CrawlConfig:
     rate_limit_per_second: float = 5.0
     follow_redirects: bool = True
     verify_ssl: bool = True
-    max_response_bytes: int = 5_000_000
+    max_response_bytes: int = MAX_RESPONSE_BYTES_DEFAULT
     playwright_network_idle_timeout_seconds: float = 5.0
+    playwright_wait_for_selector: str = ""
+    """If set, the Playwright backend waits for this CSS selector to appear
+    before snapshotting the DOM (ticket 031). Times out gracefully."""
+    playwright_wait_for_selector_timeout_seconds: float = 10.0
     playwright_cdp_endpoint: str = ""
+    playwright_browser_channel: str = ""
+    playwright_executable_path: str = ""
+    playwright_user_data_dir: str = ""
+    playwright_profile_directory: str = ""
+    playwright_headless: bool = True
+    collect_web_vitals: bool = False
+    """Capture lab Core Web Vitals (LCP/CLS/INP) via a PerformanceObserver shim
+    on the Playwright backend (ticket 046). No effect on HTTP backends."""
     memory_high_watermark_percent: float = 85.0
     memory_recovery_watermark_percent: float = 70.0
     respect_robots_txt: bool = True
@@ -33,15 +86,60 @@ class CrawlConfig:
     enable_content_hashing: bool = False
     compress_html: bool = True
     store_html: bool = True
-    circuit_breaker_enabled: bool = True
-    circuit_breaker_failure_threshold: int = 15
-    circuit_breaker_recovery_seconds: float = 30.0
+    circuit_breaker_enabled: bool = CB_ENABLED_DEFAULT
+    circuit_breaker_failure_threshold: int = CB_THRESHOLD_DEFAULT
+    circuit_breaker_recovery_seconds: float = CB_RECOVERY_SECONDS_DEFAULT
     seed_from_archive: bool = False
     archive_timeout_seconds: float = 10.0
     archive_max_urls: int = 250
     frontier_max_retries: int = 3
     frontier_retry_base_delay_seconds: float = 2.0
     request_headers: dict[str, str] = field(default_factory=dict)
+    proxy: str = ""
+    """Proxy URL routed through every backend, e.g. ``http://host:8080`` or
+    ``socks5://host:1080``. Credentials may be embedded (``http://user:pass@host``)
+    or supplied separately via ``proxy_auth`` (ticket 027)."""
+    proxy_auth: str = ""
+    """Optional ``user:password`` for the proxy when not embedded in ``proxy``."""
+    proxies: list[str] = field(default_factory=list)
+    """Pool of proxy URLs to rotate across in ``list`` mode (ticket 045). When
+    non-empty this takes precedence over the single ``proxy`` for the HTTP
+    backends. Each entry may carry embedded credentials; ``proxy_auth`` is not
+    applied to pool entries."""
+    proxy_mode: str = "list"
+    """``list`` (client-side pool of distinct proxies, ticket 045) or
+    ``gateway`` (a single residential rotating-gateway endpoint whose exit IP
+    rotates server-side per request, ticket 072). In ``gateway`` mode the single
+    ``proxy`` endpoint is used, never evicted, and retried on failure."""
+    proxy_rotation: str = "round-robin"
+    """list mode only: ``round-robin`` (per request) or ``per-host`` (sticky)."""
+    proxy_max_failures: int = 3
+    """list mode only: consecutive failures before a pool proxy is put on cooldown."""
+    proxy_cooldown_seconds: float = 60.0
+    """list mode only: how long an evicted pool proxy stays out of rotation."""
+    proxy_gateway_max_retries: int = 2
+    """gateway mode: extra retries through the gateway on a failed fetch (each
+    retry gets a fresh server-side exit IP)."""
+    detect_challenges: bool = True
+    """Detect bot-challenge interstitials (Cloudflare/Datadome/...) and treat
+    them as blocked rather than content (ticket 074)."""
+    challenge_escalate_to_browser: bool = True
+    """On a challenge from an HTTP backend, escalate the fetch to the
+    Playwright/Obscura browser backend through a fresh IP (ticket 074)."""
+    challenge_max_escalations: int = 1
+    """Max browser escalations per URL before recording it as blocked."""
+    cookies: dict[str, str] = field(default_factory=dict)
+    """Session cookies injected as a ``Cookie`` header on every request (ticket 028).
+    Used as a fallback when ``scoped_cookies`` is empty."""
+    scoped_cookies: list = field(default_factory=list)
+    """Cookies (``cookies.Cookie``) with domain/path attributes retained; when
+    non-empty the backends select per-request only the cookies matching the
+    target URL (ticket 048). Typed as ``list`` to avoid a config→cookies import
+    cycle."""
+    extraction_rules: list = field(default_factory=list)
+    """Custom data extraction rules (``ExtractionRule``) evaluated per HTML page;
+    results land in ``CrawlResult.custom_data`` and the ``custom_data`` JSONB
+    column (ticket 026). Typed as ``list`` to avoid a config→extract import cycle."""
     cms_detection: bool = False
     analytics_detection: bool = False
     analytics_expected_ids: list[str] = field(default_factory=list)
@@ -50,7 +148,7 @@ class CrawlConfig:
     sitemap_max_depth: int = 3
     skip_sitemaps: bool = False
     allowed_hosts: list[str] = field(default_factory=list)
-    """Additional hosts to crawl beyond the seed host(s). 
+    """Additional hosts to crawl beyond the seed host(s).
     When empty and same_host_only=True, only the seed host is crawled.
     When populated, these hosts are also allowed (in addition to seeds).
     """
@@ -69,6 +167,23 @@ class CrawlConfig:
     obscura_workers: int = 1
     obscura_managed: bool = True
     obscura_stealth: bool | None = None
+    obscura_fetch_subprocess: bool = False
+    """Use Obscura's one-shot ``obscura fetch`` subprocess per request instead of
+    a persistent CDP browser connection. Each fetch shells out to the binary,
+    which renders the page and returns HTML. Slower per page (process spawn) but
+    avoids the persistent-CDP session (connect_over_cdp/goto) hanging seen in
+    some sandboxes. Implies a browser/JS render; honours obscura_stealth and
+    obscura_proxy. Selected via --obscura-fetch on the CLI."""
+    curl_impersonate: str = ""
+    """curl_cffi impersonation target, e.g. ``chrome``, ``safari``, ``firefox``.
+    Empty string or ``none`` disables impersonation (ticket 053)."""
+    per_host_concurrency: int = 4
+    """Maximum simultaneous requests to any single host (0 = unlimited).
+    Prevents the full worker pool bursting against one origin (ticket-063)."""
+    keep_html_in_results: bool = False
+    """Retain raw_html/extracted/discovered_links on results after persist
+    during open crawls.  Off by default so long crawls stay memory-bounded
+    (ticket-059); library callers that read job.results directly can opt in."""
 
     @staticmethod
     def _url_path(url: str) -> str:

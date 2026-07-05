@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import asyncpg
 import json
 import time
+from collections.abc import Sequence
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from .compression import compress_html, decompress_html, is_compressed
@@ -183,6 +186,24 @@ SCHEMA_STATEMENTS = [
     """,
     """
     ALTER TABLE content ADD COLUMN IF NOT EXISTS content_hash_simhash BIGINT
+    """,
+    """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS ttfb_seconds DOUBLE PRECISION
+    """,
+    """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS total_duration_seconds DOUBLE PRECISION
+    """,
+    """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS lcp_ms DOUBLE PRECISION
+    """,
+    """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS cls DOUBLE PRECISION
+    """,
+    """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS inp_ms DOUBLE PRECISION
+    """,
+    """
+    ALTER TABLE content ADD COLUMN IF NOT EXISTS custom_data JSONB
     """,
     """
     ALTER TABLE frontier ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0
@@ -407,6 +428,80 @@ SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_page_analytics_hits_page_vendor_id ON page_analytics_hits(page_id, vendor_id, identifier)
     """,
+    """
+    DELETE FROM robots_directives a
+    USING robots_directives b
+    WHERE a.ctid < b.ctid
+      AND a.url_id = b.url_id
+      AND a.source = b.source
+      AND a.directive_id = b.directive_id
+      AND a.value IS NOT DISTINCT FROM b.value
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_robots_directives_fact
+    ON robots_directives(url_id, source, directive_id, value)
+    """,
+    """
+    DELETE FROM canonical_urls a
+    USING canonical_urls b
+    WHERE a.ctid < b.ctid
+      AND a.url_id = b.url_id
+      AND a.canonical_url_id = b.canonical_url_id
+      AND a.source = b.source
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_canonical_urls_fact
+    ON canonical_urls(url_id, canonical_url_id, source)
+    """,
+    """
+    DELETE FROM hreflang_http_header a
+    USING hreflang_http_header b
+    WHERE a.ctid < b.ctid
+      AND a.url_id = b.url_id
+      AND a.hreflang_id = b.hreflang_id
+      AND a.href_url_id = b.href_url_id
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_hreflang_http_header_fact
+    ON hreflang_http_header(url_id, hreflang_id, href_url_id)
+    """,
+    """
+    DELETE FROM hreflang_html_head a
+    USING hreflang_html_head b
+    WHERE a.ctid < b.ctid
+      AND a.url_id = b.url_id
+      AND a.hreflang_id = b.hreflang_id
+      AND a.href_url_id = b.href_url_id
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_hreflang_html_head_fact
+    ON hreflang_html_head(url_id, hreflang_id, href_url_id)
+    """,
+    """
+    DELETE FROM hreflang_sitemap a
+    USING hreflang_sitemap b
+    WHERE a.ctid < b.ctid
+      AND a.url_id = b.url_id
+      AND a.hreflang_id = b.hreflang_id
+      AND a.href_url_id = b.href_url_id
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_hreflang_sitemap_fact
+    ON hreflang_sitemap(url_id, hreflang_id, href_url_id)
+    """,
+    """
+    DELETE FROM page_analytics_hits a
+    USING page_analytics_hits b
+    WHERE a.ctid < b.ctid
+      AND a.page_id = b.page_id
+      AND a.vendor_id = b.vendor_id
+      AND a.evidence_type = b.evidence_type
+      AND a.identifier IS NOT DISTINCT FROM b.identifier
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_page_analytics_hits_fact
+    ON page_analytics_hits(page_id, vendor_id, evidence_type, COALESCE(identifier, ''))
+    """,
 ]
 
 COMPARISON_VIEW_STATEMENTS = [
@@ -523,6 +618,172 @@ def encode_html_for_storage(text: str, *, compress: bool) -> bytes | None:
     return text.encode("utf-8")
 
 
+class MemoryStore:
+    """Lightweight frontier store for local crawls that do not need Postgres."""
+
+    def __init__(self) -> None:
+        self.frontier: dict[str, dict[str, object]] = {}
+        self.saved_metadata: dict[str, dict[str, object]] = {}
+        self.sources: dict[str, set[tuple[str, str | None]]] = {}
+
+    async def connect(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def initialize(self) -> None:
+        return None
+
+    async def save_metadata(self, key: str, value: dict[str, object]) -> None:
+        self.saved_metadata[key] = value
+
+    async def persist(self, result: CrawlResult) -> None:
+        return None
+
+    async def enqueue_frontier(
+        self,
+        frontier_data: Sequence[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
+        *,
+        source: str | None = None,
+        source_detail: str | None = None,
+    ) -> int:
+        inserted = 0
+        current_time = int(time.time())
+        for item in frontier_data:
+            url, depth, parent_url = item[0], item[1], item[2]
+            priority_score = float(item[3]) if len(item) > 3 and item[3] is not None else 0.0
+            if url in self.frontier:
+                continue
+            self.frontier[url] = {
+                "depth": depth,
+                "parent_url": parent_url,
+                "status": "queued",
+                "enqueued_at": current_time,
+                "updated_at": current_time,
+                "priority_score": priority_score,
+                "reset_count": 0,
+                "retry_count": 0,
+                "retry_at": 0,
+            }
+            if source:
+                await self.record_source_by_url(url, source, source_detail)
+            inserted += 1
+        return inserted
+
+    async def frontier_next_batch(self, batch_size: int) -> list[tuple[str, int, str | None, int]]:
+        now = int(time.time())
+        rows: list[tuple[str, int, str | None, int, float, int]] = []
+        for url, state in self.frontier.items():
+            if state["status"] != "queued" or int(state.get("retry_at", 0)) > now:
+                continue
+            rows.append(
+                (
+                    url,
+                    int(state["depth"]),
+                    cast(str | None, state.get("parent_url")),
+                    int(state.get("retry_count", 0)),
+                    float(state.get("priority_score", 0.0)),
+                    int(state.get("enqueued_at", 0)),
+                )
+            )
+        rows.sort(key=lambda row: (-row[4], row[5], row[0]))
+        batch = rows[:batch_size]
+        for url, *_ in batch:
+            self.frontier[url]["status"] = "pending"
+            self.frontier[url]["updated_at"] = now
+        return [(url, depth, parent_url, retry_count) for url, depth, parent_url, retry_count, _, _ in batch]
+
+    async def frontier_mark_retry(self, url: str, retry_count: int, delay_seconds: float) -> None:
+        state = self.frontier.setdefault(
+            url,
+            {
+                "depth": 0,
+                "parent_url": None,
+                "status": "queued",
+                "enqueued_at": int(time.time()),
+                "updated_at": int(time.time()),
+                "priority_score": 0.0,
+                "reset_count": 0,
+                "retry_count": 0,
+                "retry_at": 0,
+            },
+        )
+        state["status"] = "queued"
+        state["retry_count"] = retry_count
+        state["retry_at"] = int(time.time() + max(0.0, delay_seconds))
+        state["updated_at"] = int(time.time())
+
+    async def frontier_mark_done(self, urls: list[str]) -> None:
+        current_time = int(time.time())
+        for url in urls:
+            state = self.frontier.setdefault(
+                url,
+                {
+                    "depth": 0,
+                    "parent_url": None,
+                    "status": "done",
+                    "enqueued_at": current_time,
+                    "updated_at": current_time,
+                    "priority_score": 0.0,
+                    "reset_count": 0,
+                    "retry_count": 0,
+                    "retry_at": 0,
+                },
+            )
+            state["status"] = "done"
+            state["updated_at"] = current_time
+            state["retry_count"] = 0
+            state["retry_at"] = 0
+
+    async def frontier_reset_pending_to_queued(self, urls: list[str]) -> None:
+        current_time = int(time.time())
+        for url in urls:
+            state = self.frontier.get(url)
+            if state is None or state["status"] != "pending":
+                continue
+            state["status"] = "queued"
+            state["updated_at"] = current_time
+
+    async def frontier_reset_all_pending_to_queued(self) -> int:
+        reset = 0
+        current_time = int(time.time())
+        for state in self.frontier.values():
+            if state["status"] != "pending":
+                continue
+            state["status"] = "queued"
+            state["updated_at"] = current_time
+            state["reset_count"] = int(state.get("reset_count", 0)) + 1
+            reset += 1
+        return reset
+
+    async def record_source(self, url_id: int, source: str, detail: str | None = None) -> None:
+        return None
+
+    async def record_source_by_url(self, url: str, source: str, detail: str | None = None) -> None:
+        self.sources.setdefault(url, set()).add((source, detail))
+
+    async def record_sources_bulk(
+        self,
+        url_detail_pairs: list[tuple[str, str | None]],
+        source: str,
+    ) -> None:
+        for url, detail in url_detail_pairs:
+            await self.record_source_by_url(url, source, detail)
+
+    async def persist_sitemap_hreflang_bulk(
+        self,
+        page_hreflang_pairs: list[tuple[str, list]],
+    ) -> None:
+        return None
+
+    async def frontier_stats(self) -> tuple[int, int, int]:
+        queued = sum(1 for state in self.frontier.values() if state["status"] == "queued")
+        pending = sum(1 for state in self.frontier.values() if state["status"] == "pending")
+        done = sum(1 for state in self.frontier.values() if state["status"] == "done")
+        return queued, pending, done
+
+
 class AsyncpgStore:
     def __init__(
         self,
@@ -612,7 +873,11 @@ class AsyncpgStore:
     async def _bulk_get_or_create_urls(self, conn: asyncpg.Connection, urls: list[str]) -> dict[str, int]:
         if not urls:
             return {}
-        unique_urls = list(set(urls))
+        # Sorted (not just deduped) so the INSERT acquires `urls` row locks in a
+        # stable order across concurrent transactions — prevents deadlocks when
+        # multiple workers bulk-resolve overlapping URL sets (e.g. sitemap +
+        # link discovery enqueueing the same catalog).
+        unique_urls = sorted(set(urls))
         rows = await conn.fetch(
             """
             WITH input_urls AS (
@@ -657,9 +922,26 @@ class AsyncpgStore:
         )
         return {str(r["val"]): int(r["id"]) for r in rows}
 
+    async def _retry_on_deadlock(self, op, *args, _attempts: int = 8, **kwargs):
+        """Run an async store operation, retrying on Postgres deadlock /
+        serialization failures with exponential backoff.
+
+        Concurrent crawl workers upserting overlapping `urls` / `frontier` rows
+        can deadlock even with deterministic lock ordering. Every wrapped op is
+        a single self-contained transaction whose statements are idempotent
+        (ON CONFLICT DO NOTHING / DO UPDATE), so re-running it is safe.
+        """
+        for attempt in range(_attempts):
+            try:
+                return await op(*args, **kwargs)
+            except (asyncpg.DeadlockDetectedError, asyncpg.SerializationError):
+                if attempt + 1 >= _attempts:
+                    raise
+                await asyncio.sleep(0.05 * (2**attempt))
+
     async def enqueue_frontier(
         self,
-        frontier_data: list[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
+        frontier_data: Sequence[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
         *,
         source: str | None = None,
         source_detail: str | None = None,
@@ -669,6 +951,21 @@ class AsyncpgStore:
             return 0
 
         await self.connect()
+        assert self.pool is not None
+        return await self._retry_on_deadlock(
+            self._enqueue_frontier_once,
+            frontier_data,
+            source=source,
+            source_detail=source_detail,
+        )
+
+    async def _enqueue_frontier_once(
+        self,
+        frontier_data: Sequence[tuple[str, int, str | None, float | None] | tuple[str, int, str | None]],
+        *,
+        source: str | None = None,
+        source_detail: str | None = None,
+    ) -> int:
         assert self.pool is not None
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -680,9 +977,13 @@ class AsyncpgStore:
                     if parent_url:
                         urls_to_resolve.append(parent_url)
 
-                url_to_id: dict[str, int] = {}
-                for url in dict.fromkeys(urls_to_resolve):
-                    url_to_id[url] = await self._get_or_create_url(conn, url)
+                # Resolve all URLs in ONE sorted, set-based statement rather than
+                # a loop of individual INSERT ... ON CONFLICT upserts. The loop
+                # form holds row locks across many statements and still deadlocks
+                # under heavy concurrency (overlapping facet URLs from multiple
+                # workers); _bulk_get_or_create_urls sorts internally and resolves
+                # them in a single round-trip, which removes the interleaving.
+                url_to_id = await self._bulk_get_or_create_urls(conn, urls_to_resolve)
 
                 child_ids = [url_to_id[item[0]] for item in frontier_data]
                 existing_rows = await conn.fetch(
@@ -917,6 +1218,97 @@ class AsyncpgStore:
                 detail,
             )
 
+    async def record_sources_bulk(
+        self,
+        url_detail_pairs: list[tuple[str, str | None]],
+        source: str,
+    ) -> None:
+        """Bulk-record url_sources rows using a single connection and executemany.
+
+        *url_detail_pairs* is a list of (url, detail_or_None).  Duplicate
+        (url_id, source, detail_key) combos are silently skipped via ON CONFLICT.
+        """
+        if not url_detail_pairs:
+            return
+        await self.connect()
+        assert self.pool is not None
+        await self._retry_on_deadlock(self._record_sources_bulk_once, url_detail_pairs, source)
+
+    async def _record_sources_bulk_once(
+        self,
+        url_detail_pairs: list[tuple[str, str | None]],
+        source: str,
+    ) -> None:
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            urls = [u for u, _ in url_detail_pairs]
+            url_id_map = await self._bulk_get_or_create_urls(conn, urls)
+            rows = [
+                (url_id_map[url], source, detail)
+                for url, detail in url_detail_pairs
+                if url in url_id_map
+            ]
+            # Sort by url_id so concurrent inserts lock url_sources rows in a
+            # consistent order (deadlock avoidance).
+            rows.sort(key=lambda r: r[0])
+            if rows:
+                await conn.executemany(
+                    """
+                    INSERT INTO url_sources (url_id, source, detail)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (url_id, source, detail_key) DO NOTHING
+                    """,
+                    rows,
+                )
+
+    async def persist_sitemap_hreflang_bulk(
+        self,
+        page_hreflang_pairs: list[tuple[str, list]],
+    ) -> None:
+        """Persist sitemap-derived hreflang rows in a single bulk operation.
+
+        *page_hreflang_pairs* is a list of (page_url, hreflang_links) where
+        each hreflang_links item has .hreflang (language code) and .href.
+        Uses bulk upserts to avoid N+1 round-trips (ticket-065).
+        """
+        if not page_hreflang_pairs:
+            return
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            # Collect all distinct URLs and language codes for bulk upsert.
+            page_urls = [u for u, _ in page_hreflang_pairs]
+            href_urls = [link.href for _, links in page_hreflang_pairs for link in links]
+            lang_codes = [link.hreflang for _, links in page_hreflang_pairs for link in links]
+
+            all_urls = list(dict.fromkeys(page_urls + href_urls))
+            url_id_map = await self._bulk_get_or_create_urls(conn, all_urls)
+            lang_id_map = await self._bulk_get_or_create_lookups(
+                conn, "hreflang_languages", "language_code", list(dict.fromkeys(lang_codes))
+            )
+
+            rows = []
+            for page_url, links in page_hreflang_pairs:
+                page_url_id = url_id_map.get(page_url)
+                if page_url_id is None:
+                    continue
+                for link in links:
+                    href_url_id = url_id_map.get(link.href)
+                    lang_id = lang_id_map.get(link.hreflang)
+                    if href_url_id is None or lang_id is None:
+                        continue
+                    rows.append((page_url_id, lang_id, href_url_id))
+
+            if rows:
+                await conn.executemany(
+                    """
+                    INSERT INTO hreflang_sitemap (url_id, hreflang_id, href_url_id)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    rows,
+                )
+
     async def urls_with_source(self, source: str) -> list[str]:
         await self.connect()
         assert self.pool is not None
@@ -972,11 +1364,11 @@ class AsyncpgStore:
 
     async def persist(self, result: CrawlResult) -> None:
         """Persist crawl result to database.
-        
+
         Always stores page_metadata so we know the URL was fetched and what
         status it returned. Only stores content/extracted data when extraction
         succeeded (extracted is not None).
-        
+
         IMPORTANT: When the final URL differs from the requested URL (e.g., JS
         redirect in Playwright), extracted data (canonical, hreflang, robots,
         content) is stored against the FINAL URL — the URL that actually served
@@ -985,8 +1377,47 @@ class AsyncpgStore:
         """
         await self.connect()
         assert self.pool is not None
+        await self._retry_on_deadlock(self._persist_once, result)
+
+    async def _clear_page_snapshot(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        url_id: int,
+        page_id: int | None,
+    ) -> None:
+        await conn.execute("DELETE FROM robots_directives WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM canonical_urls WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM hreflang_http_header WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM hreflang_html_head WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM hreflang_sitemap WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM page_schema_references WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM schema_data WHERE url_id = $1", url_id)
+        await conn.execute("DELETE FROM internal_links WHERE source_url_id = $1", url_id)
+        if page_id is not None:
+            await conn.execute("DELETE FROM page_analytics_hits WHERE page_id = $1", page_id)
+
+    async def _persist_once(self, result: CrawlResult) -> None:
+        assert self.pool is not None
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # Pre-touch every `urls` row this transaction will create/update,
+                # in sorted order, BEFORE doing per-URL work. This makes concurrent
+                # persist() transactions acquire the shared `urls` row locks in the
+                # same order, which is what prevents the DeadlockDetectedError seen
+                # under multi-worker crawls (the later _get_or_create_url calls then
+                # just re-lock rows this transaction already holds).
+                prelock_urls = [result.requested_url, result.final_url]
+                if result.extracted is not None:
+                    if result.extracted.canonical:
+                        prelock_urls.append(result.extracted.canonical)
+                    if result.extracted.x_canonical:
+                        prelock_urls.append(result.extracted.x_canonical)
+                    prelock_urls.extend(
+                        link.href for link in result.extracted.hreflang_links if link.href
+                    )
+                await self._bulk_get_or_create_urls(conn, prelock_urls)
+
                 requested_url_id = await self._get_or_create_url(conn, result.requested_url)
                 final_url_id = await self._get_or_create_url(conn, result.final_url)
 
@@ -994,18 +1425,30 @@ class AsyncpgStore:
                 # so we know the fetch was attempted and where it landed
                 await conn.execute(
                     """
-                    INSERT INTO page_metadata (url_id, initial_status_code, final_status_code, final_url_id, fetched_at)
-                    VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::INTEGER)
+                    INSERT INTO page_metadata
+                        (url_id, initial_status_code, final_status_code, final_url_id,
+                         fetched_at, ttfb_seconds, total_duration_seconds, lcp_ms, cls, inp_ms)
+                    VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::INTEGER, $5, $6, $7, $8, $9)
                     ON CONFLICT (url_id) DO UPDATE
                     SET initial_status_code = EXCLUDED.initial_status_code,
                         final_status_code = EXCLUDED.final_status_code,
                         final_url_id = EXCLUDED.final_url_id,
-                        fetched_at = EXCLUDED.fetched_at
+                        fetched_at = EXCLUDED.fetched_at,
+                        ttfb_seconds = EXCLUDED.ttfb_seconds,
+                        total_duration_seconds = EXCLUDED.total_duration_seconds,
+                        lcp_ms = EXCLUDED.lcp_ms,
+                        cls = EXCLUDED.cls,
+                        inp_ms = EXCLUDED.inp_ms
                     """,
                     requested_url_id,
                     result.status,
                     result.status,
                     final_url_id,
+                    result.ttfb_seconds,
+                    result.total_duration_seconds,
+                    result.lcp_ms,
+                    result.cls,
+                    result.inp_ms,
                 )
 
                 if result.extracted is None:
@@ -1056,6 +1499,11 @@ class AsyncpgStore:
                     json.dumps(result.headers, sort_keys=True),
                     html_blob,
                 )
+                await self._clear_page_snapshot(
+                    conn,
+                    url_id=content_url_id,
+                    page_id=int(page_id) if page_id is not None else None,
+                )
 
                 meta_description_id = None
                 if result.extracted.meta_description:
@@ -1079,8 +1527,8 @@ class AsyncpgStore:
                     """
                     INSERT INTO content (
                         url_id, title, meta_description_id, h1_tags, h2_tags, word_count, html_lang_id, content_length
-                        , content_hash_sha256, content_hash_simhash
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        , content_hash_sha256, content_hash_simhash, custom_data
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
                     ON CONFLICT (url_id) DO UPDATE
                     SET title = EXCLUDED.title,
                         meta_description_id = EXCLUDED.meta_description_id,
@@ -1090,7 +1538,8 @@ class AsyncpgStore:
                         html_lang_id = EXCLUDED.html_lang_id,
                         content_length = EXCLUDED.content_length,
                         content_hash_sha256 = EXCLUDED.content_hash_sha256,
-                        content_hash_simhash = EXCLUDED.content_hash_simhash
+                        content_hash_simhash = EXCLUDED.content_hash_simhash,
+                        custom_data = EXCLUDED.custom_data
                     """,
                     content_url_id,
                     result.extracted.title,
@@ -1102,6 +1551,7 @@ class AsyncpgStore:
                     len(result.raw_html or ""),
                     result.content_hash_sha256,
                     simhash_to_signed(result.content_hash_simhash),
+                    json.dumps(result.custom_data) if result.custom_data else None,
                 )
 
                 await self._persist_directives(conn, content_url_id, result)
@@ -1325,7 +1775,12 @@ class AsyncpgStore:
                 parsed_obj = json.loads(parsed_raw) if isinstance(parsed_raw, str) else parsed_raw
             else:
                 parsed_obj = {}
-            content_hash = schema_data.get("content_hash") or create_schema_content_hash(parsed_obj)
+            # parsed_obj may be a dict or (for JSON-LD arrays) a list at
+            # runtime; create_schema_content_hash normalises both.  The cast
+            # documents that rather than narrowing behaviour (ticket-070).
+            content_hash = schema_data.get("content_hash") or create_schema_content_hash(
+                cast("dict[str, Any]", parsed_obj)
+            )
             existing = await conn.fetchrow(
                 "SELECT id FROM schema_instances WHERE content_hash = $1",
                 content_hash,

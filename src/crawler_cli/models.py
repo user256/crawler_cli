@@ -14,6 +14,12 @@ class BrowserRuntime:
     cdp_endpoint: str | None = None
     managed: bool | None = None
     stealth: bool | None = None
+    persistent: bool | None = None
+    channel: str | None = None
+    executable_path: str | None = None
+    user_data_dir: str | None = None
+    profile_directory: str | None = None
+    headless: bool | None = None
 
 
 @dataclass(slots=True)
@@ -24,6 +30,18 @@ class FetchResponse:
     headers: dict[str, str]
     body: bytes
     text: str
+    ttfb_seconds: float | None = None
+    """Time to first byte: request send → first response byte (ticket 029)."""
+    elapsed_seconds: float | None = None
+    """Total fetch duration: request send → full body received (ticket 029)."""
+    body_truncated: bool = False
+    """True when the response body was capped at max_response_bytes during streaming."""
+    lcp_ms: float | None = None
+    """Largest Contentful Paint in ms — lab metric, Playwright only (ticket 046)."""
+    cls: float | None = None
+    """Cumulative Layout Shift (unitless) — lab metric, Playwright only (ticket 046)."""
+    inp_ms: float | None = None
+    """Interaction to Next Paint in ms — lab metric, Playwright only (ticket 046)."""
 
 
 @dataclass(slots=True)
@@ -84,9 +102,22 @@ class CrawlResult:
     allowed_by_robots: bool | None = None
     skip_reason: str | None = None
     persist_error: str | None = None
+    challenge: str | None = None
+    """Bot-challenge vendor (cloudflare/datadome/...) if this response was an
+    anti-bot interstitial rather than real content (ticket 074). Set means the
+    page is blocked, not crawled."""
     detected_cms: "CMSDetectionResult | None" = None
     detected_analytics: "AnalyticsDetectionResult | None" = None
     browser_runtime: BrowserRuntime | None = None
+    ttfb_seconds: float | None = None
+    total_duration_seconds: float | None = None
+    custom_data: dict[str, Any] | None = None
+    lcp_ms: float | None = None
+    """Largest Contentful Paint in ms — lab metric, Playwright only (ticket 046)."""
+    cls: float | None = None
+    """Cumulative Layout Shift (unitless) — lab metric, Playwright only (ticket 046)."""
+    inp_ms: float | None = None
+    """Interaction to Next Paint in ms — lab metric, Playwright only (ticket 046)."""
 
 
 @dataclass(slots=True)
@@ -95,6 +126,11 @@ class CrawlJobResult:
     seed_urls: list[str]
     results: list[CrawlResult]
     saved_to: str | None = None
+    retry_attempts: int = 0
+    """Total transient-error attempts that were retried and do not appear in
+    *results* (ticket-062).  Surfaced in the CLI summary."""
+    interrupted: bool = False
+    """True when the crawl was stopped early via a signal (ticket-064)."""
 
     @property
     def crawled_count(self) -> int:
@@ -103,6 +139,15 @@ class CrawlJobResult:
     @property
     def blocked_count(self) -> int:
         return sum(1 for result in self.results if result.skip_reason == "robots_txt_disallow")
+
+    @property
+    def persist_error_count(self) -> int:
+        return sum(1 for result in self.results if result.persist_error is not None)
+
+    @property
+    def challenge_blocked_count(self) -> int:
+        """Pages that were anti-bot interstitials, not real content (ticket 074)."""
+        return sum(1 for result in self.results if result.challenge is not None)
 
 
 @dataclass(slots=True)

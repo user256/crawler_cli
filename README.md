@@ -62,6 +62,12 @@ For tests:
 pip install -e ".[test]"
 ```
 
+With the HTTP API:
+
+```bash
+pip install -e ".[api]"
+```
+
 ## GuardGeese Monitoring
 
 `crawler_cli` exposes a small bridge for GuardGeese-style monitoring without running `CrawlEngine`, the CLI, or PostgreSQL persistence:
@@ -108,6 +114,9 @@ crawler-cli https://www.example.com \
   --memory-high-watermark 85 \
   --archive-org-check --custom-ua "...Googlebot..."
 
+# Attach to an already-running Edge/Chrome launched with --remote-debugging-port
+crawler-cli https://www.example.com --playwright-cdp-port 9222
+
 # Crawl with Obscura (managed — starts/stops automatically)
 crawler-cli https://www.example.com --obscura
 
@@ -138,6 +147,50 @@ crawler-cli --csv-file urls.csv --auth-type basic --auth-username admin --auth-p
 ```
 
 Page HTML is **gzip-compressed by default** in `pages.html_compressed`. Use `--no-html-compression` only for debugging. Legacy uncompressed rows can be migrated with `compact-html`.
+
+#### Advanced crawl options
+
+```bash
+# Tune the per-host circuit breaker (or disable it). Also via env vars
+# CRAWLER_CLI_CB_THRESHOLD / CRAWLER_CLI_CB_RECOVERY_SECONDS / CRAWLER_CLI_CB_ENABLED.
+crawler-cli https://example.com --circuit-breaker-threshold 25 --circuit-breaker-recovery-seconds 60
+crawler-cli https://example.com --no-circuit-breaker
+
+# Route every backend through a proxy (HTTP or SOCKS); credentials may be
+# embedded in the URL or passed separately.
+crawler-cli https://example.com --proxy socks5://127.0.0.1:1080 --proxy-auth user:pass
+
+# Inject session cookies to crawl behind a login wall. --cookies-file accepts a
+# dev-tools/storageState JSON export or a Netscape cookies.txt.
+crawler-cli https://example.com --cookie "session=abc; csrf=xyz"
+crawler-cli https://example.com --cookies-file cookies.json
+
+# Raise the per-response byte cap so very large sitemaps parse intact
+# (default 25 MB). Some Magento/WooCommerce sitemaps exceed the old 5 MB cap
+# and would otherwise be truncated mid-XML and skipped.
+crawler-cli https://example.com --max-response-bytes 50000000
+
+# JS (Playwright) wait conditions for SPAs that hydrate asynchronously.
+crawler-cli https://example.com --js --wait-for-selector "div.app-ready"
+crawler-cli https://example.com --js --wait-for-network-idle 8
+
+# Custom data extraction (CSS / XPath / regex) into content.custom_data (JSONB).
+crawler-cli https://example.com --extraction-rules rules.json
+```
+
+Per-page timing (TTFB + total duration) is recorded automatically in `page_metadata`
+for the aiohttp and Playwright backends. `extraction_rules.json` looks like:
+
+```json
+{
+  "rules": [
+    {"name": "price",   "type": "css",   "selector": ".price", "attr": "text"},
+    {"name": "sku",     "type": "xpath", "selector": "//*[@id='sku']/text()"},
+    {"name": "authors", "type": "css",   "selector": "a.author", "multiple": true},
+    {"name": "phone",   "type": "regex", "pattern": "\\+?\\d[\\d ]{7,}\\d"}
+  ]
+}
+```
 
 ### 2. Generate Embeddings
 
@@ -173,7 +226,22 @@ crawler-cli compact-crawl --postgres-dsn ... --backfill-hashes --confirm crawler
 
 Run `generate-embeddings` **before** `compact-crawl` if you need vectors — compact removes HTML required for embedding generation.
 
+### 5. Generate a Sitemap
+
+Generate a clean `sitemap.xml` from a completed crawl (indexable, self-canonical, 200-OK URLs). Splits into a sitemap index above 50,000 URLs:
+
+```bash
+crawler-cli generate-sitemap --postgres-dsn ... -o sitemap.xml --base-url https://example.com
+```
+
 Connection to PostgreSQL can be configured via environment variables (`CRAWLER_CLI_POSTGRES_*` or `PostgreSQLCrawler_POSTGRES_*`) or CLI flags (`--postgres-dsn`, `--postgres-host`, etc.). CLI flags override env vars.
+
+## HTTP API
+
+The HTTP API is a **separate project**, `crawler_api`, which depends on `crawler_cli` and
+wraps its engine in a Dockerized, token-authenticated FastAPI service. It lives in its own
+repository (sibling `crawler_api/`) and is **not** part of this package. See that repo's
+README and tickets for API endpoints, auth, and deployment.
 
 ## Package Layout
 
@@ -302,9 +370,89 @@ engine = CrawlEngine(config)
 
 For long JS-enabled crawls, `max_requests_per_context` recycles Playwright contexts before they bloat, and the engine will temporarily reduce batch concurrency if system memory usage crosses `memory_high_watermark_percent`.
 
+### Drive Real Chrome or Edge Profiles
+
+For sites that only behave correctly in a real signed-in browser profile, launch
+Playwright against Chrome/Edge directly instead of the bundled Chromium:
+
+```bash
+crawler-cli https://example.com \
+  --playwright-channel msedge \
+  --playwright-user-data-dir "$HOME/.config/microsoft-edge" \
+  --playwright-profile-directory "Default"
+```
+
+You can also point at an explicit browser binary with
+`--playwright-executable-path /path/to/chrome`. When a real user-data dir is
+used, `crawler_cli` defaults that Playwright launch to headed mode so the
+profile behaves like a normal browser session. If the profile is already open in
+another Chrome/Edge process, Chromium may refuse to start because the profile is
+locked.
+
+### Attach To Existing Edge Or Chrome
+
+If you already launched a real browser yourself with remote debugging enabled,
+`crawler_cli` can attach to it over CDP instead of launching another browser.
+
+```bash
+microsoft-edge --remote-debugging-port=9222
+
+crawler-cli https://example.com --playwright-cdp-port 9222
+```
+
+Equivalent explicit form:
+
+```bash
+crawler-cli https://example.com \
+  --playwright-cdp-endpoint http://127.0.0.1:9222
+```
+
+Use `--playwright-cdp-host` if the debugging browser is bound somewhere other
+than `127.0.0.1`. CDP attach flags are mutually exclusive with `--obscura` and
+with the local Playwright launch/profile flags (`--playwright-channel`,
+`--playwright-executable-path`, `--playwright-user-data-dir`,
+`--playwright-profile-directory`).
+
 ## Obscura Browser Backend
 
 `crawler_cli` can use [Obscura](https://github.com/user256/obscura) as its JS rendering backend. Obscura runs as a stealth CDP server that is harder for anti-bot systems to detect.
+
+### Installing the Obscura binary
+
+Obscura is a **native binary**, not a Python dependency, so it can't ship inside the
+`crawler_cli` wheel. The easiest way to get it (Playwright-style):
+
+```bash
+crawler-cli install-obscura
+```
+
+This downloads the prebuilt Obscura release for your OS/architecture from GitHub and
+unpacks `obscura` + `obscura-worker` into `~/.local/share/crawler_cli/obscura/`.
+`--obscura` then finds it automatically — no `--obscura-binary` needed. Pin a version
+with `--obscura-version vX.Y.Z` or re-fetch with `--force`.
+
+**Binary resolution order** (first hit wins), so any of these work:
+
+1. `--obscura-binary <path>` (explicit override)
+2. `OBSCURA_BINARY` environment variable
+3. the `install-obscura` install dir (above)
+4. `obscura` on `PATH`
+5. a sibling source checkout at `../obscura/target/release/obscura`
+
+If none resolve, `--obscura` fails with a clear "binary not found" error.
+
+**Building from source instead** (Rust toolchain required) — useful for development or
+unsupported platforms:
+
+```bash
+cd ../obscura            # sibling checkout of github.com/h4ckf0r0day/obscura
+cargo build --release    # produces target/release/{obscura,obscura-worker}
+ln -sf "$PWD/target/release/obscura"        ~/.local/bin/obscura
+ln -sf "$PWD/target/release/obscura-worker" ~/.local/bin/obscura-worker   # needed for multi-worker serve / scrape
+```
+
+The Obscura `serve` subcommand must accept `--port`, `--workers`, `--stealth`, and
+`--proxy`, and `fetch` must support `--dump`/`--eval`/`--stealth`, which current releases do.
 
 ### Managed mode (default)
 
@@ -325,6 +473,33 @@ crawler-cli https://www.example.com --obscura --obscura-unmanaged
 ```
 
 In unmanaged mode, `crawler_cli` can only report the stealth state if you explicitly supplied `--obscura-stealth` or `--no-obscura-stealth`. Otherwise the connected server is treated as `stealth: unknown` in logs and saved crawl JSON.
+
+### One-shot fetch mode (`--obscura-fetch`)
+
+By default `--obscura` drives a **persistent CDP browser** (`connect_over_cdp` +
+`page.goto`). In some sandboxed/headless environments that long-lived CDP session
+can hang on connect or navigation. `--obscura-fetch` is a more robust alternative:
+each request shells out to the one-shot `obscura fetch` subprocess, which renders
+the page in a stealth browser and returns the HTML. No `obscura serve` process or
+port is involved.
+
+```bash
+# Each page is a separate `obscura fetch` — no persistent CDP, no port.
+crawler-cli https://www.example.com --obscura --obscura-fetch
+```
+
+Trade-offs:
+
+- **More robust**: no persistent CDP session to hang; a stuck fetch is bounded by
+  `--timeout` and killed without wedging the crawl.
+- **Safe concurrency**: each fetch is its own process, so `--max-workers` /
+  `--per-host-concurrency` > 1 work without the shared-V8-isolate corruption that
+  affects concurrent `page.content()` over a single `obscura serve`.
+- **Slower per page**: pays a process-spawn per request.
+- Sitemaps and other XML/feed/`.txt` URLs are fetched with `obscura fetch --dump
+  original` (raw HTTP body); HTML pages use `--eval` to return the rendered DOM and
+  final (post-redirect) URL together. HTTP status is reported as `200` on success
+  and `0` on fetch failure (Obscura does not surface the raw status code here).
 
 ### Stealth policy
 

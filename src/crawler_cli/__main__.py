@@ -3,19 +3,38 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
+from urllib.parse import quote as _urlquote
 
 from .archive import audit_archive_urls
 from .auth import AuthConfig
 from .comparison import compare_deep, comparison_rows
-from .config import CrawlConfig
+from .config import (
+    CB_ENABLED_DEFAULT,
+    CB_RECOVERY_SECONDS_DEFAULT,
+    CB_THRESHOLD_DEFAULT,
+    MAX_RESPONSE_BYTES_DEFAULT,
+    CrawlConfig,
+    _env_bool,
+    _env_float,
+    _env_int,
+)
+from .cookies import (
+    load_cookies_file,
+    load_scoped_cookies_file,
+    parse_cookie_pairs,
+    scoped_cookies_from_pairs,
+)
 from .csv_urls import load_urls_from_csv
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine
-from .persistence import AsyncpgStore, database_name_from_dsn
+from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .reports import CrawlReports
+
+logger = logging.getLogger(__name__)
 
 
 def _env_or_default(prefix: str, key: str, default: str | None = None) -> str | None:
@@ -29,12 +48,19 @@ def _env_or_default(prefix: str, key: str, default: str | None = None) -> str | 
 def _build_dsn(args: argparse.Namespace) -> str:
     if getattr(args, "postgres_dsn", None):
         return args.postgres_dsn
+    for prefix in ("CRAWLER_CLI", "PostgreSQLCrawler"):
+        dsn = os.environ.get(f"{prefix}_POSTGRES_DSN")
+        if dsn:
+            return dsn
     host = args.postgres_host or _env_or_default("CRAWLER_CLI", "POSTGRES_HOST", "localhost")
     port = args.postgres_port or _env_or_default("CRAWLER_CLI", "POSTGRES_PORT", "5432")
     user = args.postgres_user or _env_or_default("CRAWLER_CLI", "POSTGRES_USER", "crawler")
     password = args.postgres_password or _env_or_default("CRAWLER_CLI", "POSTGRES_PASSWORD", "")
     dbname = args.postgres_db or _env_or_default("CRAWLER_CLI", "POSTGRES_DB", "crawler")
-    return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+    # Percent-encode credentials so special chars (@, :, /, #) don't break the DSN.
+    safe_user = _urlquote(user, safe="")
+    safe_password = _urlquote(password, safe="")
+    return f"postgresql://{safe_user}:{safe_password}@{host}:{port}/{dbname}"
 
 
 def _build_auth(args: argparse.Namespace) -> AuthConfig | None:
@@ -72,6 +98,27 @@ def _store_from_args(args: argparse.Namespace) -> AsyncpgStore:
         compress_html=compress_html,
         store_html=store_html,
     )
+
+
+def _postgres_config_supplied(args: argparse.Namespace) -> bool:
+    if getattr(args, "postgres_dsn", None):
+        return True
+    arg_names = (
+        "postgres_host",
+        "postgres_port",
+        "postgres_user",
+        "postgres_password",
+        "postgres_db",
+    )
+    if any(getattr(args, name, None) for name in arg_names):
+        return True
+    for prefix in ("CRAWLER_CLI", "PostgreSQLCrawler"):
+        if os.environ.get(f"{prefix}_POSTGRES_DSN"):
+            return True
+        for key in ("POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"):
+            if f"{prefix}_{key}" in os.environ:
+                return True
+    return False
 
 
 def _add_confirm_args(parser: argparse.ArgumentParser) -> None:
@@ -132,9 +179,75 @@ def _validate_obscura_args(args: argparse.Namespace) -> None:
         print("Error: --obscura-stealth and --no-obscura-stealth are mutually exclusive", file=sys.stderr)
         sys.exit(2)
 
-    if has_obscura and getattr(args, "playwright_cdp_endpoint", None):
-        print("Error: --playwright-cdp-endpoint and --obscura are mutually exclusive", file=sys.stderr)
+    if has_obscura and any(
+        (
+            getattr(args, "playwright_cdp_endpoint", None),
+            getattr(args, "playwright_cdp_host", None),
+            getattr(args, "playwright_cdp_port", None),
+            getattr(args, "playwright_channel", None),
+            getattr(args, "playwright_executable_path", None),
+            getattr(args, "playwright_user_data_dir", None),
+            getattr(args, "playwright_profile_directory", None),
+        )
+    ):
+        print("Error: --obscura cannot be combined with Playwright CDP/profile launch flags", file=sys.stderr)
         sys.exit(2)
+
+
+def _validate_playwright_args(args: argparse.Namespace) -> None:
+    channel = getattr(args, "playwright_channel", None)
+    executable_path = getattr(args, "playwright_executable_path", None)
+    user_data_dir = getattr(args, "playwright_user_data_dir", None)
+    profile_directory = getattr(args, "playwright_profile_directory", None)
+    cdp_endpoint = getattr(args, "playwright_cdp_endpoint", None)
+    cdp_host = getattr(args, "playwright_cdp_host", None)
+    cdp_port = getattr(args, "playwright_cdp_port", None)
+
+    if channel and executable_path:
+        print(
+            "Error: --playwright-channel and --playwright-executable-path are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if profile_directory and not user_data_dir:
+        print(
+            "Error: --playwright-profile-directory requires --playwright-user-data-dir",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if cdp_host and cdp_port is None:
+        print(
+            "Error: --playwright-cdp-host requires --playwright-cdp-port",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if cdp_endpoint and any((cdp_host, cdp_port)):
+        print(
+            "Error: --playwright-cdp-endpoint cannot be combined with --playwright-cdp-host/--playwright-cdp-port",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if (cdp_endpoint or cdp_port is not None) and any((channel, executable_path, user_data_dir, profile_directory)):
+        print(
+            "Error: --playwright-cdp-endpoint cannot be combined with local Playwright launch/profile flags",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _resolve_playwright_cdp_endpoint(args: argparse.Namespace) -> str:
+    endpoint = getattr(args, "playwright_cdp_endpoint", "") or ""
+    if endpoint:
+        return endpoint
+    cdp_port = getattr(args, "playwright_cdp_port", None)
+    if cdp_port is None:
+        return ""
+    cdp_host = getattr(args, "playwright_cdp_host", None) or "127.0.0.1"
+    return f"http://{cdp_host}:{cdp_port}"
 
 
 def _resolve_obscura_stealth(args: argparse.Namespace) -> bool | None:
@@ -146,9 +259,48 @@ def _resolve_obscura_stealth(args: argparse.Namespace) -> bool | None:
     return None
 
 
+def _resolve_circuit_breaker(args: argparse.Namespace) -> tuple[bool, int, float]:
+    """Resolve circuit-breaker settings with CLI > env var > default precedence.
+
+    CLI flags use ``default=None`` (numeric) / a dedicated ``--no-circuit-breaker``
+    store_true so we can tell "not passed" from an explicit value.
+    """
+    # enabled: --no-circuit-breaker forces off; otherwise env then default.
+    if getattr(args, "no_circuit_breaker", False):
+        enabled = False
+    else:
+        env_enabled = _env_bool("CRAWLER_CLI_CB_ENABLED")
+        enabled = env_enabled if env_enabled is not None else CB_ENABLED_DEFAULT
+
+    cli_threshold = getattr(args, "circuit_breaker_threshold", None)
+    if cli_threshold is not None:
+        threshold = cli_threshold
+    else:
+        env_threshold = _env_int("CRAWLER_CLI_CB_THRESHOLD")
+        threshold = env_threshold if env_threshold is not None else CB_THRESHOLD_DEFAULT
+
+    cli_recovery = getattr(args, "circuit_breaker_recovery_seconds", None)
+    if cli_recovery is not None:
+        recovery = cli_recovery
+    else:
+        env_recovery = _env_float("CRAWLER_CLI_CB_RECOVERY_SECONDS")
+        recovery = env_recovery if env_recovery is not None else CB_RECOVERY_SECONDS_DEFAULT
+
+    return enabled, threshold, recovery
+
+
 def _build_config(args: argparse.Namespace) -> CrawlConfig:
     _validate_obscura_args(args)
-    backend: str = "playwright" if args.js else (args.http_backend or "aiohttp")
+    _validate_playwright_args(args)
+    playwright_cdp_endpoint = _resolve_playwright_cdp_endpoint(args)
+    wants_playwright = bool(
+        args.js
+        or playwright_cdp_endpoint
+        or getattr(args, "playwright_channel", None)
+        or getattr(args, "playwright_executable_path", None)
+        or getattr(args, "playwright_user_data_dir", None)
+    )
+    backend: str = "playwright" if wants_playwright else (args.http_backend or "aiohttp")
     headers: dict[str, str] = {}
     if args.custom_ua:
         headers["User-Agent"] = args.custom_ua
@@ -166,6 +318,18 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     obscura_enabled = getattr(args, "obscura", False)
     obscura_stealth = _resolve_obscura_stealth(args)
 
+    # Resolve the obscura binary: an explicit --obscura-binary wins, otherwise
+    # auto-discover (install dir from `install-obscura`, OBSCURA_BINARY env,
+    # PATH, sibling checkout). Falls back to the bare name so the spawn still
+    # produces a clear "not found" error if nothing is installed.
+    obscura_binary = getattr(args, "obscura_binary", None)
+    if obscura_enabled:
+        from .obscura_install import find_obscura_binary
+
+        obscura_binary = find_obscura_binary(obscura_binary) or (obscura_binary or "obscura")
+    else:
+        obscura_binary = obscura_binary or "obscura"
+
     if obscura_enabled:
         backend = "playwright"
         args.js = True
@@ -178,21 +342,120 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
             )
             sys.exit(2)
 
+    # Core Web Vitals need an in-page PerformanceObserver, so they're only
+    # measurable on the Playwright backend (ticket 046). Warn rather than fail:
+    # the columns simply stay null on HTTP backends.
+    if getattr(args, "collect_web_vitals", False) and backend != "playwright":
+        logger.warning(
+            "--web-vitals requires the JS backend (--js or --obscura); "
+            "Core Web Vitals will not be collected on the %s backend.",
+            backend,
+        )
+
+    cb_enabled, cb_threshold, cb_recovery = _resolve_circuit_breaker(args)
+
+    extraction_rules: list = []
+    if getattr(args, "extraction_rules", None):
+        from .custom_extract import load_extraction_rules
+
+        extraction_rules = load_extraction_rules(args.extraction_rules)
+
+    # Cookies: a cookies-file carries domain/path attributes, so it produces
+    # scoped cookies that are matched per-request (ticket 048). CLI --cookie
+    # pairs have no domain and are kept as all-host cookies so the original
+    # single-host login-wall behaviour (ticket 028) is preserved. Passing
+    # --no-cookie-scoping forces the legacy flat all-hosts map even for files.
+    cookies: dict[str, str] = {}
+    scoped_cookies: list = []
+    use_scoping = not getattr(args, "no_cookie_scoping", False)
+    if getattr(args, "cookies_file", None):
+        if use_scoping:
+            scoped_cookies.extend(load_scoped_cookies_file(args.cookies_file))
+        else:
+            cookies.update(load_cookies_file(args.cookies_file))
+    if getattr(args, "cookies", None):
+        if use_scoping:
+            scoped_cookies.extend(scoped_cookies_from_pairs(args.cookies))
+        else:
+            # CLI --cookie pairs override file values on name collision.
+            cookies.update(parse_cookie_pairs(args.cookies))
+
+    # Proxy pool (ticket 045): one URL per line, blanks and #comments skipped.
+    proxies: list[str] = []
+    if getattr(args, "proxy_file", None):
+        for line in Path(args.proxy_file).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                proxies.append(line)
+
+    # Resolve proxy mode (ticket 072): explicit flag wins; otherwise default to
+    # gateway when only a single --proxy is given (no list), else list.
+    _proxy_mode = getattr(args, "proxy_mode", None)
+    if _proxy_mode is None:
+        _proxy_mode = "gateway" if (getattr(args, "proxy", "") and not proxies) else "list"
+
+    # --max-workers and --concurrency are aliases; explicit flag wins over default.
+    _concurrency = args.max_workers or args.concurrency or 15
+
+    curl_impersonate = getattr(args, "curl_impersonate", "") or ""
+    # When impersonating, the curl_cffi profile supplies the UA; only override
+    # it if the operator explicitly passed --custom-ua.
+    if curl_impersonate and curl_impersonate != "none" and not args.custom_ua:
+        _user_agent = ""
+    else:
+        _user_agent = args.custom_ua or "crawler_cli/0.1"
+
+    user_data_dir = getattr(args, "playwright_user_data_dir", "") or ""
+    if user_data_dir:
+        user_data_dir = str(Path(user_data_dir).expanduser())
+    executable_path = getattr(args, "playwright_executable_path", "") or ""
+    if executable_path:
+        executable_path = str(Path(executable_path).expanduser())
+    using_real_profile = bool(user_data_dir)
+    headed = getattr(args, "headed", False)
+    playwright_headless = False if using_real_profile and not headed else not headed
+
     return CrawlConfig(
         backend=backend,  # type: ignore[arg-type]
-        user_agent=args.custom_ua or "crawler_cli/0.1",
-        max_concurrency=args.concurrency,
+        user_agent=_user_agent,
+        max_concurrency=_concurrency,
         max_requests_per_context=args.max_requests_per_context,
         max_pages=args.max_pages,
+        max_response_bytes=getattr(args, "max_response_bytes", MAX_RESPONSE_BYTES_DEFAULT),
         timeout_seconds=args.timeout,
-        playwright_network_idle_timeout_seconds=args.playwright_network_idle_timeout,
-        playwright_cdp_endpoint=getattr(args, "playwright_cdp_endpoint", "") or "",
+        playwright_network_idle_timeout_seconds=(
+            args.wait_for_network_idle
+            if getattr(args, "wait_for_network_idle", None) is not None
+            else args.playwright_network_idle_timeout
+        ),
+        playwright_wait_for_selector=getattr(args, "wait_for_selector", "") or "",
+        playwright_wait_for_selector_timeout_seconds=getattr(args, "wait_for_selector_timeout", 10.0),
+        playwright_cdp_endpoint=playwright_cdp_endpoint,
+        playwright_browser_channel=getattr(args, "playwright_channel", "") or "",
+        playwright_executable_path=executable_path,
+        playwright_user_data_dir=user_data_dir,
+        playwright_profile_directory=getattr(args, "playwright_profile_directory", "") or "",
+        playwright_headless=playwright_headless,
+        collect_web_vitals=getattr(args, "collect_web_vitals", False),
         memory_high_watermark_percent=args.memory_high_watermark,
         memory_recovery_watermark_percent=args.memory_recovery_watermark,
         respect_robots_txt=not args.ignore_robots,
         same_host_only=not args.offsite,
         seed_from_archive=args.archive_org_check,
         request_headers=headers,
+        cookies=cookies,
+        scoped_cookies=scoped_cookies,
+        proxy=getattr(args, "proxy", "") or "",
+        proxy_auth=getattr(args, "proxy_auth", "") or "",
+        proxies=proxies,
+        proxy_mode=_proxy_mode,
+        proxy_rotation=getattr(args, "proxy_rotation", "round-robin"),
+        proxy_max_failures=getattr(args, "proxy_max_failures", 3),
+        proxy_cooldown_seconds=getattr(args, "proxy_cooldown_seconds", 60.0),
+        proxy_gateway_max_retries=getattr(args, "proxy_gateway_max_retries", 2),
+        detect_challenges=not getattr(args, "no_challenge_detection", False),
+        challenge_escalate_to_browser=not getattr(args, "no_challenge_escalation", False),
+        extraction_rules=extraction_rules,
         discover_sitemaps=not args.skip_sitemaps,
         allowed_hosts=allowed_hosts,
         path_restriction=getattr(args, "path_restriction", "") or "",
@@ -203,17 +466,23 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         cms_detection=getattr(args, "cms_detection", False),
         analytics_detection=getattr(args, "analytics_detection", False),
         analytics_expected_ids=getattr(args, "analytics_expected_id", []) or [],
+        circuit_breaker_enabled=cb_enabled,
+        circuit_breaker_failure_threshold=cb_threshold,
+        circuit_breaker_recovery_seconds=cb_recovery,
         enable_content_hashing=getattr(args, "content_hashing", False),
         compress_html=not getattr(args, "no_html_compression", False),
         store_html=not getattr(args, "no_store_html", False),
         obscura_enabled=obscura_enabled,
-        obscura_binary=getattr(args, "obscura_binary", "obscura"),
+        obscura_binary=obscura_binary,
         obscura_host=getattr(args, "obscura_host", "127.0.0.1"),
         obscura_port=getattr(args, "obscura_port", 9222),
         obscura_proxy=getattr(args, "obscura_proxy", ""),
         obscura_workers=getattr(args, "obscura_workers", 1),
         obscura_managed=not getattr(args, "obscura_unmanaged", False),
         obscura_stealth=obscura_stealth,
+        obscura_fetch_subprocess=getattr(args, "obscura_fetch", False),
+        curl_impersonate=curl_impersonate,
+        per_host_concurrency=getattr(args, "per_host_concurrency", 4),
     )
 
 
@@ -236,11 +505,42 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         default=[],
         help="Additional seed URL. Repeat to crawl multiple hosts in one run.",
     )
-    parser.add_argument("--max-workers", type=int, default=15, help="Max concurrent workers")
-    parser.add_argument("--concurrency", type=int, default=10, help="Max concurrent requests")
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Max concurrent workers (default 15). Alias: --concurrency.",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="Alias for --max-workers.",
+    )
+    parser.add_argument(
+        "--per-host-concurrency",
+        type=int,
+        default=4,
+        help="Max simultaneous requests to any single host (0 = unlimited, default 4).",
+    )
     parser.add_argument("--max-pages", type=int, default=0, help="Max URLs to crawl (0 = unlimited)")
+    parser.add_argument(
+        "--max-response-bytes",
+        type=int,
+        default=MAX_RESPONSE_BYTES_DEFAULT,
+        help=(
+            "Max bytes read per response before truncation (default "
+            f"{MAX_RESPONSE_BYTES_DEFAULT}). Raise it for sites with very "
+            "large sitemaps so they parse intact; lower it to cap downloads."
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=30.0, help="Per-request timeout in seconds")
     parser.add_argument("--js", action="store_true", help="Use Playwright (JS-enabled) backend")
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="Launch the Playwright browser headed instead of headless",
+    )
     parser.add_argument(
         "--max-requests-per-context",
         type=int,
@@ -255,7 +555,69 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--playwright-cdp-endpoint",
-        help="Connect Playwright to an existing CDP browser such as Obscura",
+        help="Connect Playwright to an existing CDP browser such as Obscura or a locally launched Chrome/Edge",
+    )
+    parser.add_argument(
+        "--playwright-cdp-host",
+        help="CDP host for an already-running Chrome/Edge launched with --remote-debugging-port (default 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--playwright-cdp-port",
+        type=int,
+        help="CDP port for an already-running Chrome/Edge launched with --remote-debugging-port",
+    )
+    parser.add_argument(
+        "--playwright-channel",
+        help="Launch a branded browser channel with Playwright, e.g. chrome or msedge",
+    )
+    parser.add_argument(
+        "--playwright-executable-path",
+        help="Launch this Chrome/Edge/Chromium executable with Playwright",
+    )
+    parser.add_argument(
+        "--playwright-user-data-dir",
+        help="Launch a persistent Playwright browser against this Chromium user-data directory",
+    )
+    parser.add_argument(
+        "--playwright-profile-directory",
+        help="Profile directory inside --playwright-user-data-dir, e.g. Default or 'Profile 1'",
+    )
+    parser.add_argument(
+        "--wait-for-selector",
+        help="JS backend only: wait for this CSS selector before snapshotting the DOM "
+        "(for SPAs that hydrate content async). Times out gracefully.",
+    )
+    parser.add_argument(
+        "--wait-for-selector-timeout",
+        type=float,
+        default=10.0,
+        help="Timeout in seconds for --wait-for-selector (default 10)",
+    )
+    parser.add_argument(
+        "--wait-for-network-idle",
+        type=float,
+        metavar="SECONDS",
+        help="JS backend only: override the network-idle settle timeout in seconds "
+        "(alias for --playwright-network-idle-timeout; 0 disables the idle wait)",
+    )
+    parser.add_argument(
+        "--web-vitals",
+        action="store_true",
+        dest="collect_web_vitals",
+        help="JS backend only: capture lab Core Web Vitals (LCP/CLS/INP) per page "
+        "via a PerformanceObserver shim (ticket 046). No effect on HTTP backends.",
+    )
+    parser.add_argument(
+        "--no-challenge-detection",
+        action="store_true",
+        help="Disable bot-challenge (Cloudflare/Datadome/...) detection (ticket 074). "
+        "By default challenges are detected and not stored as content.",
+    )
+    parser.add_argument(
+        "--no-challenge-escalation",
+        action="store_true",
+        help="Detect challenges but do not escalate HTTP fetches to the browser "
+        "backend; just record them as blocked (ticket 074).",
     )
     parser.add_argument(
         "--memory-high-watermark",
@@ -270,6 +632,14 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         help="Restore worker concurrency once system memory usage drops to this percent",
     )
     parser.add_argument("--http-backend", choices=["aiohttp", "curl_cffi"], help="HTTP backend")
+    parser.add_argument(
+        "--impersonate",
+        dest="curl_impersonate",
+        default="",
+        metavar="TARGET",
+        help="curl_cffi only: browser fingerprint to impersonate (e.g. chrome, safari, firefox). "
+        "Pass 'none' to disable. When set, the User-Agent is not overridden unless --custom-ua is also given.",
+    )
     parser.add_argument("--custom-ua", "--user-agent", dest="custom_ua", help="Custom User-Agent")
     parser.add_argument("--ignore-robots", action="store_true", help="Ignore robots.txt")
     parser.add_argument("--offsite", action="store_true", help="Follow off-site links")
@@ -279,8 +649,37 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "--path-exclude",
         help="Comma-separated path prefixes to exclude (e.g. /news/,/admin/)",
     )
+    cb = parser.add_argument_group("Circuit breaker (per-host)")
+    cb.add_argument(
+        "--circuit-breaker-threshold",
+        type=int,
+        default=None,
+        help=(
+            "Consecutive per-host failures before the breaker opens "
+            f"(default {CB_THRESHOLD_DEFAULT}; env CRAWLER_CLI_CB_THRESHOLD)"
+        ),
+    )
+    cb.add_argument(
+        "--circuit-breaker-recovery-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Seconds an open breaker waits before a half-open retry "
+            f"(default {CB_RECOVERY_SECONDS_DEFAULT}; env CRAWLER_CLI_CB_RECOVERY_SECONDS)"
+        ),
+    )
+    cb.add_argument(
+        "--no-circuit-breaker",
+        action="store_true",
+        help="Disable the per-host circuit breaker entirely (env CRAWLER_CLI_CB_ENABLED=0)",
+    )
     parser.add_argument("--archive-org-check", action="store_true", help="Seed from archive.org + run audit")
     parser.add_argument("--skip-sitemaps", action="store_true", help="Skip sitemap discovery")
+    parser.add_argument(
+        "--extraction-rules",
+        help="Path to a JSON file of custom extraction rules (CSS/XPath/regex). "
+        "Results are stored in the content.custom_data JSONB column.",
+    )
     parser.add_argument("--cms-detection", action="store_true", help="Enable CMS platform detection")
     parser.add_argument("--analytics-detection", action="store_true", help="Enable analytics / tag manager / pixel detection")
     parser.add_argument(
@@ -314,6 +713,16 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         default=argparse.SUPPRESS,
         help="Connect to an already-running Obscura instance; do not spawn/kill it",
     )
+    obscura.add_argument(
+        "--obscura-fetch",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=(
+            "Fetch via the one-shot 'obscura fetch' subprocess per request "
+            "instead of a persistent CDP browser connection. More robust where "
+            "connect_over_cdp/goto can hang; no obscura serve / port needed."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, help="Directory for CSV/JSON output")
     parser.add_argument("--save-to", help="Path to save crawl JSON results")
     parser.add_argument("--csv-file", help="CSV file containing URLs to crawl")
@@ -338,6 +747,81 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Skip persisting raw HTML (structured extraction + hashes still stored)",
     )
+    proxy = parser.add_argument_group("Proxy")
+    proxy.add_argument(
+        "--proxy",
+        help="Proxy URL routed through all backends (e.g. http://host:8080, "
+        "socks5://host:1080). Credentials may be embedded or passed via --proxy-auth.",
+    )
+    proxy.add_argument(
+        "--proxy-auth",
+        metavar="USER:PASSWORD",
+        help="Proxy credentials when not embedded in --proxy.",
+    )
+    proxy.add_argument(
+        "--proxy-file",
+        help="File with one proxy URL per line; rotated across requests in list "
+        "mode (ticket 045). Takes precedence over --proxy.",
+    )
+    proxy.add_argument(
+        "--proxy-mode",
+        choices=["list", "gateway"],
+        default=None,
+        help="'gateway' = a single residential rotating-gateway endpoint (set "
+        "via --proxy) whose IP rotates server-side per request; never evicted, "
+        "retried on failure (ticket 072). 'list' = client-side pool from "
+        "--proxy-file/--proxy (ticket 045). Default: gateway when only --proxy "
+        "is set, else list.",
+    )
+    proxy.add_argument(
+        "--proxy-gateway-max-retries",
+        type=int,
+        default=2,
+        help="gateway mode: extra retries through the gateway on a failed fetch "
+        "(each retry gets a fresh exit IP). Default 2.",
+    )
+    proxy.add_argument(
+        "--proxy-rotation",
+        choices=["round-robin", "per-host"],
+        default="round-robin",
+        help="list mode: rotation strategy: round-robin (per request) or "
+        "per-host (sticky per target host). Default round-robin.",
+    )
+    proxy.add_argument(
+        "--proxy-max-failures",
+        type=int,
+        default=3,
+        help="Consecutive failures before a pool proxy is put on cooldown (default 3).",
+    )
+    proxy.add_argument(
+        "--proxy-cooldown",
+        type=float,
+        default=60.0,
+        dest="proxy_cooldown_seconds",
+        help="Seconds an evicted pool proxy stays out of rotation (default 60).",
+    )
+    cookies = parser.add_argument_group("Session cookies")
+    cookies.add_argument(
+        "--cookie",
+        action="append",
+        default=[],
+        dest="cookies",
+        metavar="NAME=VALUE",
+        help="Session cookie to inject on every request. Repeatable; a single "
+        "value may also contain ';'-joined pairs.",
+    )
+    cookies.add_argument(
+        "--cookies-file",
+        help="Load cookies from a JSON (dev-tools / storageState) or Netscape "
+        "cookies.txt file. Domain/path attributes are honoured per-request "
+        "(see --no-cookie-scoping).",
+    )
+    cookies.add_argument(
+        "--no-cookie-scoping",
+        action="store_true",
+        help="Send all cookies to every host as one flat Cookie header, "
+        "ignoring their domain/path attributes (legacy ticket-028 behaviour).",
+    )
     auth = parser.add_argument_group("HTTP authentication")
     auth.add_argument("--auth-type", choices=["basic", "digest", "bearer"], help="Authentication type")
     auth.add_argument("--auth-username", help="Username for basic/digest auth")
@@ -355,22 +839,69 @@ async def _run_crawl(args: argparse.Namespace) -> int:
         args.url = load_urls_from_csv(args.csv_file, column=args.csv_column)[0]
         seeds = _collect_seed_urls(args)
 
-    dsn = _build_dsn(args)
     config = _build_config(args)
-    config.max_concurrency = args.max_workers or args.concurrency
     config.default_open_crawl_limit = args.max_pages
     config.max_pages = args.max_pages
 
-    store = _store_from_args(args)
-    await store.initialize()
+    if config.circuit_breaker_enabled:
+        logger.info(
+            "Circuit breaker: enabled (threshold=%d, recovery=%.1fs)",
+            config.circuit_breaker_failure_threshold,
+            config.circuit_breaker_recovery_seconds,
+        )
+    else:
+        logger.info("Circuit breaker: disabled")
+
+    if args.archive_org_check and not _postgres_config_supplied(args):
+        print("Error: --archive-org-check requires PostgreSQL configuration", file=sys.stderr)
+        return 2
+
+    if _postgres_config_supplied(args):
+        store: AsyncpgStore | MemoryStore | None = _store_from_args(args)
+        await store.initialize()
+    else:
+        store = MemoryStore()
     engine = CrawlEngine(config, store=store)
 
+    # Install SIGINT/SIGTERM handlers: first signal requests a clean drain,
+    # second signal cancels hard (ticket-064).  Handlers are removed on exit.
+    import signal as _signal
+
+    _sig_count = 0
+
+    def _stop_handler(signum: int, _frame: object) -> None:
+        nonlocal _sig_count
+        _sig_count += 1
+        if _sig_count == 1:
+            logger.warning("Interrupt received — draining in-flight work, press again to force quit")
+            engine.request_stop()
+        else:
+            raise KeyboardInterrupt
+
+    _orig_sigint = _signal.signal(_signal.SIGINT, _stop_handler)
+    _orig_sigterm = _signal.signal(_signal.SIGTERM, _stop_handler)
+
+    _exit_code = 0
     try:
         if config.csv_urls and not config.csv_seed_mode:
             job = await engine.crawl_list(config.csv_urls, save_to=args.save_to)
         else:
             job = await engine.crawl_open(seeds, save_to=args.save_to)
-        print(f"Crawl complete: {job.crawled_count} crawled, {job.blocked_count} blocked by robots")
+        if job.interrupted:
+            _exit_code = 130
+        persist_errors = job.persist_error_count
+        label = "Crawl interrupted" if job.interrupted else "Crawl complete"
+        summary = (
+            f"{label}: {job.crawled_count} crawled, "
+            f"{job.blocked_count} blocked by robots"
+        )
+        if job.retry_attempts:
+            summary += f", {job.retry_attempts} transient retries"
+        if job.challenge_blocked_count:
+            summary += f", {job.challenge_blocked_count} blocked by bot-challenge"
+        if persist_errors:
+            summary += f", {persist_errors} persist failures (check WARNING logs)"
+        print(summary)
 
         if args.archive_org_check and seeds:
             seen_domains: set[str] = set()
@@ -381,14 +912,16 @@ async def _run_crawl(args: argparse.Namespace) -> int:
                 seen_domains.add(domain)
                 audit = await audit_archive_urls(domain, store, config, output_dir=args.output_dir)
                 print(f"Archive audit [{domain}]: {audit.archive_url_count} historical URLs")
-                print(f"  Missing: {len(audit.missing_urls)}")
-                print(f"  Legacy issues: {len(audit.legacy_issues)}")
+                logger.info("  Missing: %d", len(audit.missing_urls))
+                logger.info("  Legacy issues: %d", len(audit.legacy_issues))
                 if args.output_dir:
-                    print(f"  CSVs written to {args.output_dir}")
+                    logger.info("  CSVs written to %s", args.output_dir)
     finally:
+        _signal.signal(_signal.SIGINT, _orig_sigint)
+        _signal.signal(_signal.SIGTERM, _orig_sigterm)
         await engine.close()
         await store.close()
-    return 0
+    return _exit_code
 
 
 async def _run_embeddings(args: argparse.Namespace) -> int:
@@ -426,51 +959,143 @@ async def _run_embeddings(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_saved_crawl(path: Path) -> "CrawlJobResult":
+    from .models import (
+        BrowserRuntime,
+        CrawlJobResult,
+        CrawlResult,
+        DiscoveredLink,
+        ExtractedContent,
+        HreflangLink,
+        RobotsDirectives,
+    )
+
+    def _load_browser_runtime(payload: dict[str, object] | None) -> BrowserRuntime | None:
+        if not payload:
+            return None
+        return BrowserRuntime(
+            provider=str(payload.get("provider", "chromium")),  # type: ignore[arg-type]
+            cdp_endpoint=payload.get("cdp_endpoint"),  # type: ignore[arg-type]
+            managed=payload.get("managed"),  # type: ignore[arg-type]
+            stealth=payload.get("stealth"),  # type: ignore[arg-type]
+            persistent=payload.get("persistent"),  # type: ignore[arg-type]
+            channel=payload.get("channel"),  # type: ignore[arg-type]
+            executable_path=payload.get("executable_path"),  # type: ignore[arg-type]
+            user_data_dir=payload.get("user_data_dir"),  # type: ignore[arg-type]
+            profile_directory=payload.get("profile_directory"),  # type: ignore[arg-type]
+            headless=payload.get("headless"),  # type: ignore[arg-type]
+        )
+
+    def _load_extracted(payload: dict[str, object] | None) -> ExtractedContent | None:
+        if not payload:
+            return None
+        hreflang_links = [
+            HreflangLink(
+                hreflang=str(link.get("hreflang", "")),
+                href=str(link.get("href", "")),
+                source=str(link.get("source", "html_head")),  # type: ignore[arg-type]
+            )
+            for link in payload.get("hreflang_links", []) or []
+            if isinstance(link, dict)
+        ]
+        return ExtractedContent(
+            title=payload.get("title"),  # type: ignore[arg-type]
+            meta_description=payload.get("meta_description"),  # type: ignore[arg-type]
+            meta_robots=RobotsDirectives(raw=list(payload.get("meta_robots", []) or [])),
+            x_robots_tag=RobotsDirectives(raw=list(payload.get("x_robots_tag", []) or [])),
+            canonical=payload.get("canonical"),  # type: ignore[arg-type]
+            x_canonical=payload.get("x_canonical"),  # type: ignore[arg-type]
+            hreflang_links=hreflang_links,
+            html_lang=payload.get("html_lang"),  # type: ignore[arg-type]
+            headings=dict(payload.get("headings", {}) or {}),
+            text=str(payload.get("text", "")),
+            word_count=int(payload.get("word_count", 0) or 0),
+            metadata=dict(payload.get("metadata", {}) or {}),
+            schema_data=list(payload.get("schema_data", []) or []),
+        )
+
+    def _load_discovered_links(payload: object) -> list[DiscoveredLink]:
+        links: list[DiscoveredLink] = []
+        for item in payload or []:
+            if not isinstance(item, dict):
+                continue
+            links.append(
+                DiscoveredLink(
+                    href=str(item.get("href", "")),
+                    anchor_text=item.get("anchor_text"),  # type: ignore[arg-type]
+                    xpath=str(item.get("xpath", "")),
+                    is_image=bool(item.get("is_image", False)),
+                    fragment=item.get("fragment"),  # type: ignore[arg-type]
+                    url_parameters=item.get("url_parameters"),  # type: ignore[arg-type]
+                    original_href=item.get("original_href"),  # type: ignore[arg-type]
+                )
+            )
+        return links
+
+    def _load_result(item: dict[str, object]) -> CrawlResult:
+        return CrawlResult(
+            requested_url=str(item["requested_url"]),
+            final_url=str(item["final_url"]),
+            status=int(item["status"]),
+            headers=dict(item.get("headers", {}) or {}),
+            content_type=item.get("content_type"),  # type: ignore[arg-type]
+            fetch_backend=str(item.get("fetch_backend", "aiohttp")),
+            extracted=_load_extracted(item.get("extracted")),  # type: ignore[arg-type]
+            raw_html=item.get("raw_html"),  # type: ignore[arg-type]
+            content_hash_sha256=item.get("content_hash_sha256"),  # type: ignore[arg-type]
+            content_hash_simhash=item.get("content_hash_simhash"),  # type: ignore[arg-type]
+            discovered_links=_load_discovered_links(item.get("discovered_links")),
+            allowed_by_robots=item.get("allowed_by_robots"),  # type: ignore[arg-type]
+            skip_reason=item.get("skip_reason"),  # type: ignore[arg-type]
+            persist_error=item.get("persist_error"),  # type: ignore[arg-type]
+            challenge=item.get("challenge"),  # type: ignore[arg-type]
+            browser_runtime=_load_browser_runtime(item.get("browser_runtime")),  # type: ignore[arg-type]
+            ttfb_seconds=item.get("ttfb_seconds"),  # type: ignore[arg-type]
+            total_duration_seconds=item.get("total_duration_seconds"),  # type: ignore[arg-type]
+            custom_data=item.get("custom_data"),  # type: ignore[arg-type]
+            lcp_ms=item.get("lcp_ms"),  # type: ignore[arg-type]
+            cls=item.get("cls"),  # type: ignore[arg-type]
+            inp_ms=item.get("inp_ms"),  # type: ignore[arg-type]
+        )
+
+    raw_text = path.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        lines = [json.loads(line) for line in raw_text.splitlines() if line.strip()]
+        summary = next((line for line in lines if line.get("__type") == "summary"), {})
+        results = [_load_result(line) for line in lines if line.get("__type") != "summary"]
+        return CrawlJobResult(
+            mode=str(summary.get("mode", "open")),  # type: ignore[arg-type]
+            seed_urls=list(summary.get("seed_urls", []) or []),
+            results=results,
+            saved_to=summary.get("saved_to"),  # type: ignore[arg-type]
+            retry_attempts=int(summary.get("retry_attempts", 0) or 0),
+            interrupted=bool(summary.get("interrupted", False)),
+        )
+
+    if isinstance(payload, dict) and "results" in payload:
+        return CrawlJobResult(
+            mode=str(payload.get("mode", "list")),  # type: ignore[arg-type]
+            seed_urls=list(payload.get("seed_urls", []) or []),
+            results=[_load_result(item) for item in payload.get("results", []) or [] if isinstance(item, dict)],
+            saved_to=payload.get("saved_to"),  # type: ignore[arg-type]
+            retry_attempts=int(payload.get("retry_attempts", 0) or 0),
+            interrupted=bool(payload.get("interrupted", False)),
+        )
+
+    raise ValueError(f"Unsupported crawl artifact format: {path}")
+
+
 async def _run_compare(args: argparse.Namespace) -> int:
     baseline_path = Path(args.baseline_json)
     candidate_path = Path(args.candidate_json)
-    baseline_job = json.loads(baseline_path.read_text(encoding="utf-8"))
-    candidate_job = json.loads(candidate_path.read_text(encoding="utf-8"))
-
-    from .models import CrawlJobResult, CrawlResult
-
-    def _load_results(payload: dict) -> list[CrawlResult]:
-        results = []
-        for item in payload.get("results", []):
-            browser_runtime = None
-            br = item.get("browser_runtime")
-            if br:
-                from .models import BrowserRuntime
-
-                browser_runtime = BrowserRuntime(
-                    provider=br.get("provider", "chromium"),
-                    cdp_endpoint=br.get("cdp_endpoint"),
-                    managed=br.get("managed"),
-                    stealth=br.get("stealth"),
-                )
-            results.append(
-                CrawlResult(
-                    requested_url=item["requested_url"],
-                    final_url=item["final_url"],
-                    status=item["status"],
-                    headers=item.get("headers", {}),
-                    content_type=item.get("content_type"),
-                    fetch_backend=item.get("fetch_backend", "aiohttp"),
-                    extracted=None,
-                    raw_html=item.get("raw_html"),
-                    content_hash_sha256=item.get("content_hash_sha256"),
-                    content_hash_simhash=item.get("content_hash_simhash"),
-                    discovered_links=[],
-                    detected_cms=None,
-                    detected_analytics=None,
-                    browser_runtime=browser_runtime,
-                )
-            )
-        return results
+    baseline_job = _load_saved_crawl(baseline_path)
+    candidate_job = _load_saved_crawl(candidate_path)
 
     diff = compare_deep(
-        CrawlJobResult(mode="list", seed_urls=[], results=_load_results(baseline_job)),
-        CrawlJobResult(mode="list", seed_urls=[], results=_load_results(candidate_job)),
+        baseline_job,
+        candidate_job,
         compare_links=args.compare_links,
     )
 
@@ -605,10 +1230,47 @@ async def _run_compact_crawl(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_generate_sitemap(args: argparse.Namespace) -> int:
+    from .sitemap_generate import fetch_indexable_urls, write_sitemap
+
+    store = _store_from_args(args)
+    await store.initialize()
+    try:
+        urls = await fetch_indexable_urls(store)
+    finally:
+        await store.close()
+
+    if not urls:
+        print("No indexable, canonical, 200-OK URLs found — nothing to write.", file=sys.stderr)
+        return 1
+
+    written = write_sitemap(
+        urls,
+        args.output,
+        base_url=getattr(args, "base_url", None),
+        max_urls_per_file=args.max_urls_per_file,
+    )
+    print(f"Wrote {len(urls)} URLs to {len(written)} file(s):")
+    for path in written:
+        print(f"  {path}")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crawler-cli",
         description="Async SEO crawler with PostgreSQL persistence",
+    )
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable DEBUG logging (shows frontier/robots/breaker detail)",
+    )
+    verbosity.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Suppress INFO logs; only show warnings, errors, and final summary",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -688,7 +1350,60 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_confirm_args(compact_parser)
     _add_postgres_args(compact_parser)
 
+    sitemap_parser = subparsers.add_parser(
+        "generate-sitemap",
+        help="Generate sitemap.xml from indexable, canonical, 200-OK URLs in a crawl",
+    )
+    sitemap_parser.add_argument(
+        "-o",
+        "--output",
+        default="sitemap.xml",
+        help="Output path for the sitemap (default: sitemap.xml)",
+    )
+    sitemap_parser.add_argument(
+        "--base-url",
+        help="Base URL used to build child <loc>s when the sitemap is split into an index",
+    )
+    sitemap_parser.add_argument(
+        "--max-urls-per-file",
+        type=int,
+        default=50_000,
+        help="Split into a sitemap index above this many URLs (default 50000)",
+    )
+    _add_postgres_args(sitemap_parser)
+
+    install_parser = subparsers.add_parser(
+        "install-obscura",
+        help="Download the prebuilt Obscura browser binary for this platform",
+    )
+    install_parser.add_argument(
+        "--obscura-version",
+        default=None,
+        help="Obscura release tag to install (default: the version pinned in crawler_cli)",
+    )
+    install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reinstall even if Obscura is already present",
+    )
+
     return parser
+
+
+_BARE_DOMAIN_RE = None  # compiled lazily
+
+
+def _looks_like_hostname(token: str) -> bool:
+    """Return True if *token* looks like a bare hostname or host:port."""
+    import re
+
+    global _BARE_DOMAIN_RE
+    if _BARE_DOMAIN_RE is None:
+        # matches e.g. example.com, example.com/path, localhost, 192.168.1.1:8080
+        _BARE_DOMAIN_RE = re.compile(
+            r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,}|:\d+)"
+        )
+    return bool(_BARE_DOMAIN_RE.match(token))
 
 
 def _normalize_argv(argv: list[str]) -> list[str]:
@@ -701,15 +1416,32 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "compact-html",
         "delete-crawl",
         "compact-crawl",
+        "generate-sitemap",
     }:
         return argv
     if "://" in argv[0]:
         return ["crawl", *argv]
+    if _looks_like_hostname(argv[0]):
+        return ["crawl", f"https://{argv[0]}", *argv[1:]]
     return argv
+
+
+def _run_install_obscura(args: argparse.Namespace) -> int:
+    from .obscura_install import DEFAULT_OBSCURA_VERSION, install_obscura
+
+    version = getattr(args, "obscura_version", None) or DEFAULT_OBSCURA_VERSION
+    try:
+        install_obscura(version, force=getattr(args, "force", False), log=print)
+    except Exception as exc:  # noqa: BLE001 - surface a clean CLI error
+        print(f"Error installing Obscura: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 async def _dispatch(args: argparse.Namespace) -> int:
     command = args.command or "crawl"
+    if command == "install-obscura":
+        return _run_install_obscura(args)
     if command == "crawl":
         return await _run_crawl(args)
     if command == "generate-embeddings":
@@ -722,6 +1454,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_delete_crawl(args)
     if command == "compact-crawl":
         return await _run_compact_crawl(args)
+    if command == "generate-sitemap":
+        return await _run_generate_sitemap(args)
     print(f"Unknown command: {command}", file=sys.stderr)
     return 2
 
@@ -732,6 +1466,21 @@ def main() -> None:
     args = parser.parse_args(argv)
     if args.command in {None, "crawl"} and not getattr(args, "command", None):
         args.command = "crawl"
+
+    # Configure logging once, here in __main__ only (library code never calls
+    # basicConfig so it can be used as a library without noise).
+    if getattr(args, "verbose", False):
+        level = logging.DEBUG
+    elif getattr(args, "quiet", False):
+        level = logging.WARNING
+    else:
+        level = logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     try:
         sys.exit(asyncio.run(_dispatch(args)))
     except KeyboardInterrupt:

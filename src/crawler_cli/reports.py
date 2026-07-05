@@ -56,6 +56,39 @@ class CrawlReports:
             min_outlinks,
         )
 
+    async def slowest_pages(self, limit: int = 50) -> list[dict[str, object]]:
+        """Pages ranked by total fetch duration (ticket 029 perf metrics)."""
+        return await self._fetch(
+            """
+            SELECT u.url, pm.ttfb_seconds, pm.total_duration_seconds, pm.final_status_code
+            FROM page_metadata pm
+            JOIN urls u ON u.id = pm.url_id
+            WHERE pm.total_duration_seconds IS NOT NULL
+            ORDER BY pm.total_duration_seconds DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+
+    async def worst_cwv_pages(self, limit: int = 50) -> list[dict[str, object]]:
+        """Pages ranked by worst lab Core Web Vitals (ticket 046).
+
+        Ranking is by LCP (the headline metric); CLS and INP are included for
+        context. Only pages that recorded at least one CWV value are returned —
+        HTTP-backend crawls leave them null and are excluded.
+        """
+        return await self._fetch(
+            """
+            SELECT u.url, pm.lcp_ms, pm.cls, pm.inp_ms, pm.final_status_code
+            FROM page_metadata pm
+            JOIN urls u ON u.id = pm.url_id
+            WHERE pm.lcp_ms IS NOT NULL OR pm.cls IS NOT NULL OR pm.inp_ms IS NOT NULL
+            ORDER BY pm.lcp_ms DESC NULLS LAST, pm.cls DESC NULLS LAST
+            LIMIT $1
+            """,
+            limit,
+        )
+
     async def as_json(self) -> str:
         payload = {
             "orphans": await self.orphan_pages(),
