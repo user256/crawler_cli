@@ -419,9 +419,15 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     headed = getattr(args, "headed", False)
     playwright_headless = False if using_real_profile and not headed else not headed
 
+    from .config import parse_ua_map
+
+    ua_map = parse_ua_map(getattr(args, "ua", None) or [])
+
     return CrawlConfig(
         backend=backend,  # type: ignore[arg-type]
         user_agent=_user_agent,
+        ua_map=ua_map,
+        refresh_days=getattr(args, "refresh_days", 0) or 0,
         max_concurrency=_concurrency,
         max_requests_per_context=args.max_requests_per_context,
         max_pages=args.max_pages,
@@ -513,6 +519,20 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "--intent-signatures",
         action="store_true",
         help="After the crawl, compute intent signatures over crawled HTML (ticket 076).",
+    )
+    parser.add_argument(
+        "--refresh-days",
+        type=int,
+        default=0,
+        help="Skip URLs already fetched successfully within N days (0 = refetch all).",
+    )
+    parser.add_argument(
+        "--ua",
+        action="append",
+        default=[],
+        metavar="DOMAIN=UA",
+        help='Per-domain User-Agent, e.g. --ua "casino.org=Screaming Frog/1.0" '
+        "(repeatable; matches subdomains). Falls back to --custom-ua/--user-agent.",
     )
     parser.add_argument(
         "--max-workers",
@@ -904,6 +924,8 @@ async def _run_crawl(args: argparse.Namespace) -> int:
             f"{label}: {job.crawled_count} crawled, "
             f"{job.blocked_count} blocked by robots"
         )
+        if job.refresh_skipped_count:
+            summary += f", {job.refresh_skipped_count} skipped (fresh within --refresh-days)"
         if job.retry_attempts:
             summary += f", {job.retry_attempts} transient retries"
         if job.challenge_blocked_count:

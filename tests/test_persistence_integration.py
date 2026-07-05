@@ -322,6 +322,35 @@ async def test_full_intent_overlap_pipeline(store: AsyncpgStore, tmp_path) -> No
 
 
 @pytest.mark.asyncio
+async def test_urls_fetched_since_staleness(store: AsyncpgStore) -> None:
+    """urls_fetched_since returns only successfully-fetched URLs within the window (ticket 080)."""
+    import time
+
+    result = CrawlResult(
+        requested_url="https://fresh.example/p",
+        final_url="https://fresh.example/p",
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=None,
+        raw_html="<html></html>",
+    )
+    await store.persist(result)
+    now = int(time.time())
+
+    # Recent cutoff -> the freshly-persisted 200 page is "fresh".
+    fresh = await store.urls_fetched_since(
+        ["https://fresh.example/p", "https://never.example/x"], now - 86400
+    )
+    assert fresh == {"https://fresh.example/p"}
+
+    # Cutoff in the future -> nothing counts as fresh.
+    none_fresh = await store.urls_fetched_since(["https://fresh.example/p"], now + 86400)
+    assert none_fresh == set()
+
+
+@pytest.mark.asyncio
 async def test_truncate_only_touches_crawl_tables(store: AsyncpgStore) -> None:
     """truncate_crawl_tables must not drop tables that don't belong to it."""
     await store.enqueue_frontier([("https://example.com/", 0, None)], source="seed")
