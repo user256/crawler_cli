@@ -1052,6 +1052,25 @@ async def _run_backfill_signatures(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_hreflang_groups(args: argparse.Namespace) -> int:
+    from .hreflang_groups import build_and_store_identity
+
+    store = _store_from_args(args)
+    await store.initialize()
+    try:
+        result = await build_and_store_identity(store)
+    finally:
+        await store.close()
+
+    print(
+        f"Hreflang identity: {result.groups} groups covering {result.grouped_urls} "
+        f"of {result.pages} pages; {result.variants} URL variants folded into "
+        f"{result.representatives} representatives; "
+        f"{result.reciprocity_issues} reciprocity issues."
+    )
+    return 0
+
+
 def _load_saved_crawl(path: Path) -> "CrawlJobResult":
     from .models import (
         BrowserRuntime,
@@ -1425,6 +1444,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sig_parser.add_argument("--dry-run", action="store_true", help="Report counts without writing")
     _add_postgres_args(sig_parser)
 
+    hreflang_parser = subparsers.add_parser(
+        "hreflang-groups",
+        help="Build hreflang alternate groups + resolve URL variants from crawler-captured edges",
+    )
+    _add_postgres_args(hreflang_parser)
+
     cmp_parser = subparsers.add_parser("compare", help="Compare two saved crawl JSON files")
     cmp_parser.add_argument("baseline_json", help="Baseline crawl JSON path")
     cmp_parser.add_argument("candidate_json", help="Candidate crawl JSON path")
@@ -1587,6 +1612,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_embeddings(args)
     if command == "backfill-signatures":
         return await _run_backfill_signatures(args)
+    if command == "hreflang-groups":
+        return await _run_hreflang_groups(args)
     if command == "compare":
         return await _run_compare(args)
     if command == "compact-html":

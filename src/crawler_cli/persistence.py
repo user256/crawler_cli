@@ -358,6 +358,27 @@ SCHEMA_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_page_embeddings_model ON page_embeddings(model)
     """,
     """
+    ALTER TABLE urls ADD COLUMN IF NOT EXISTS norm_url TEXT
+    """,
+    """
+    ALTER TABLE urls ADD COLUMN IF NOT EXISTS hreflang_group TEXT
+    """,
+    """
+    ALTER TABLE urls ADD COLUMN IF NOT EXISTS resolved_hreflang_code TEXT
+    """,
+    """
+    ALTER TABLE urls ADD COLUMN IF NOT EXISTS lang_bucket TEXT
+    """,
+    """
+    ALTER TABLE urls ADD COLUMN IF NOT EXISTS variant_of_id INTEGER
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_urls_hreflang_group ON urls(hreflang_group)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_urls_norm_url ON urls(norm_url)
+    """,
+    """
     ALTER TABLE page_embeddings ADD COLUMN IF NOT EXISTS signature_hash TEXT
     """,
     """
@@ -2207,6 +2228,146 @@ class AsyncpgStore:
                 """,
                 batch,
             )
+
+    async def fetch_hreflang_edges(self) -> list[tuple[str, str, str | None]]:
+        """All crawler-captured hreflang edges (url, alt_url, code) unioned from
+        the three edge tables (ticket 078). 100% crawler-derived."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT su.url AS url, tu.url AS alt_url, hl.language_code AS code
+                FROM (
+                    SELECT url_id, href_url_id, hreflang_id FROM hreflang_http_header
+                    UNION ALL
+                    SELECT url_id, href_url_id, hreflang_id FROM hreflang_html_head
+                    UNION ALL
+                    SELECT url_id, href_url_id, hreflang_id FROM hreflang_sitemap
+                ) e
+                JOIN urls su ON su.id = e.url_id
+                JOIN urls tu ON tu.id = e.href_url_id
+                JOIN hreflang_languages hl ON hl.id = e.hreflang_id
+                """
+            )
+        return [(str(r["url"]), str(r["alt_url"]), r["code"]) for r in rows]
+
+    async def fetch_pages_for_identity(self) -> list[dict[str, Any]]:
+        """Fetched pages with the fields needed for language + variant
+        resolution (ticket 078)."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT u.id AS url_id, u.url AS url,
+                       hl.language_code AS html_lang,
+                       pm.final_status_code AS status,
+                       c.word_count AS word_count,
+                       fu.url AS final_url
+                FROM urls u
+                JOIN page_metadata pm ON pm.url_id = u.id
+                LEFT JOIN content c ON c.url_id = u.id
+                LEFT JOIN html_languages hl ON hl.id = c.html_lang_id
+                LEFT JOIN urls fu ON fu.id = pm.final_url_id
+                """
+            )
+        return [
+            {
+                "url_id": int(r["url_id"]),
+                "url": str(r["url"]),
+                "html_lang": r["html_lang"],
+                "status": r["status"],
+                "word_count": r["word_count"],
+                "final_url": r["final_url"],
+            }
+            for r in rows
+        ]
+
+    async def store_hreflang_identity(self, rows: list[dict[str, Any]]) -> None:
+        """Bulk-update urls with norm_url / hreflang_group / resolved code /
+        lang_bucket (ticket 078)."""
+        if not rows:
+            return
+        await self.connect()
+        assert self.pool is not None
+        batch = [
+            (
+                int(r["url_id"]),
+                r.get("norm_url"),
+                r.get("hreflang_group"),
+                r.get("resolved_hreflang_code"),
+                r.get("lang_bucket"),
+            )
+            for r in rows
+        ]
+        async with self.pool.acquire() as conn:
+            await conn.executemany(
+                """
+                UPDATE urls
+                SET norm_url = $2,
+                    hreflang_group = $3,
+                    resolved_hreflang_code = $4,
+                    lang_bucket = $5
+                WHERE id = $1
+                """,
+                batch,
+            )
+
+    async def store_url_variants(self, variant_pairs: list[tuple[int, int]]) -> None:
+        """Set urls.variant_of_id for folded variants (ticket 078).  Reps and
+        non-variants are reset to NULL first so a rebuild is idempotent."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("UPDATE urls SET variant_of_id = NULL WHERE variant_of_id IS NOT NULL")
+                if variant_pairs:
+                    await conn.executemany(
+                        "UPDATE urls SET variant_of_id = $2 WHERE id = $1",
+                        variant_pairs,
+                    )
+
+    async def fetch_url_variant_rows(self) -> list[dict[str, Any]]:
+        """Variant groups (norm_url, representative, variants) for reporting
+        (ticket 078; CSV written by ticket 079)."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT u.url AS url, u.norm_url AS norm_url, r.url AS representative
+                FROM urls u
+                LEFT JOIN urls r ON r.id = u.variant_of_id
+                WHERE u.norm_url IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1 FROM urls u2
+                    WHERE u2.norm_url = u.norm_url AND u2.id <> u.id
+                  )
+                ORDER BY u.norm_url, u.url
+                """
+            )
+        return [
+            {
+                "url": str(r["url"]),
+                "norm_url": str(r["norm_url"]),
+                "representative": r["representative"],
+            }
+            for r in rows
+        ]
+
+    async def hreflang_group_summary(self) -> dict[str, int]:
+        """Counts of groups and grouped URLs (ticket 078)."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            groups = await conn.fetchval(
+                "SELECT COUNT(DISTINCT hreflang_group) FROM urls WHERE hreflang_group IS NOT NULL"
+            )
+            grouped_urls = await conn.fetchval(
+                "SELECT COUNT(*) FROM urls WHERE hreflang_group IS NOT NULL"
+            )
+        return {"groups": int(groups or 0), "grouped_urls": int(grouped_urls or 0)}
 
     async def persist_comparison_session(
         self,
