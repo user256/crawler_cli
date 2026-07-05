@@ -194,11 +194,71 @@ for the aiohttp and Playwright backends. `extraction_rules.json` looks like:
 
 ### 2. Generate Embeddings
 
-Generate vector embeddings for the crawled pages using the OpenAI API:
+Generate vector embeddings for the crawled pages. Two providers:
 
 ```bash
+# OpenAI (default, unchanged)
 crawler-cli generate-embeddings --api-key sk-... --model text-embedding-3-small
+
+# Local sentence-transformers — no API key, multilingual, free to re-run.
+# Needs the [embeddings-local] extra. Embeds the intent signature (see below)
+# and skips pages whose signature hasn't changed since the last run.
+crawler-cli generate-embeddings --provider sentence-transformers --postgres-dsn ...
 ```
+
+### 2b. Intent-overlap / de-canonicalisation analysis
+
+Find pages competing for the same search intent (a common cause of
+de-canonicalisation on large multilingual sites). The pipeline is
+**crawl → signatures → embeddings → hreflang groups → analyse**, all backed by
+the crawl's Postgres store (ported from the standalone `Intent_Overlap` tool,
+which this supersedes):
+
+```bash
+# 1. Crawl (optionally compute signatures inline with --intent-signatures)
+crawler-cli crawl https://example.com --postgres-dsn ... --intent-signatures
+
+# 1b. Or backfill signatures over an existing crawl (trafilatura main text +
+#     boilerplate stripping + a unified content hash so unchanged pages are skipped)
+crawler-cli backfill-signatures --postgres-dsn ...
+
+# 2. Embed the signatures locally (multilingual, no API key)
+crawler-cli generate-embeddings --provider sentence-transformers --postgres-dsn ...
+
+# 3. Build hreflang alternate groups + resolve URL variants (100% from the
+#    crawler's own captured hreflang edges — no external import)
+crawler-cli hreflang-groups --postgres-dsn ...
+
+# 4. Analyse: pairwise cosine similarity with hreflang suppression, clustering,
+#    de-canonicalisation risk, suggested canonicals, threshold calibration.
+crawler-cli intent-overlap --postgres-dsn ... --out ./out
+```
+
+`intent-overlap` writes six CSVs plus `run_manifest.json` to `--out`:
+`pages.csv`, `overlap_pairs.csv`, `clusters.csv`, `hreflang_issues.csv`,
+`url_variants.csv`, `similarity_distribution.csv`.
+
+**Threshold calibration.** `--threshold` (default `0.85`) flags "high intent
+overlap"; `--dup-threshold` (default `0.92`) flags "duplicate —
+decanonicalisation likely". These are cosine-similarity cut-offs on
+**normalised** embeddings and are model-dependent — the defaults are tuned for
+`paraphrase-multilingual-MiniLM-L12-v2`. Every run prints where your thresholds
+fall on the site's own nearest-neighbour similarity distribution (e.g.
+`threshold 0.85 ~ p68`), and `similarity_distribution.csv` lists per-language
+percentiles (p50–p99.9) and pair counts at candidate thresholds 0.80–0.95. Use
+those to calibrate: if `0.85` sits below ~p50 you will flag too much; pick a
+threshold nearer the p90–p95 knee for a new model or corpus.
+
+Useful flags: `--hreflang-mode {suppress,primary-only,off}` (default `suppress`
+skips same-group pairs), `--no-lang-split` (compare across languages),
+`--linkage {single,complete}`, `--fail-on {duplicate,overlap}` (non-zero exit
+for CI — `duplicate` triggers on pages at duplicate risk, `overlap` on any
+overlap pair), and `--ann` (hnswlib approximate pairing above `--ann-min-pages`,
+≥0.99 recall vs exact; needs the `[ann]` extra).
+
+Periodic re-runs: `crawl --refresh-days 30` skips URLs fetched successfully
+within the window, and `--ua "domain=User Agent"` sets a per-domain User-Agent
+(matches subdomains) for portfolio crawls.
 
 ### 3. Compare Crawls
 

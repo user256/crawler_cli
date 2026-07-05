@@ -66,6 +66,50 @@ def similarity_pairs(vecs: Any, threshold: float, block: int = 1000) -> Iterable
                 yield i, j, float(chunk[bi, j])
 
 
+def ann_similarity_pairs(vecs: Any, threshold: float, k: int = 128) -> Iterable[tuple[int, int, float]]:
+    """Approximate pairs via an hnswlib cosine index (recall depends on k/ef).
+
+    Ported from intent_overlap.py:1060 (IO ticket 112). Raises a clear error
+    naming the `[ann]` extra when hnswlib is absent.
+    """
+    try:
+        import hnswlib
+    except ImportError as exc:
+        raise RuntimeError(
+            "hnswlib is required for --ann. Install the extra: "
+            'pip install "crawler-cli[ann]" (or omit --ann for the exact path).'
+        ) from exc
+    np = _np()
+    n, dim = vecs.shape
+    index = hnswlib.Index(space="cosine", dim=dim)
+    index.init_index(max_elements=n, ef_construction=200, M=16)
+    index.add_items(vecs, np.arange(n))
+    index.set_ef(max(50, k))
+    best: dict[tuple[int, int], float] = {}
+    for i in range(n):
+        labels, distances = index.knn_query(vecs[i], k=min(k, n))
+        for j, dist in zip(labels[0], distances[0]):
+            j = int(j)
+            if j == i:
+                continue
+            lo, hi = min(i, j), max(i, j)
+            sim = 1.0 - float(dist)
+            best[(lo, hi)] = max(best.get((lo, hi), 0.0), sim)
+    for (lo, hi), sim in best.items():
+        if sim >= threshold:
+            yield lo, hi, sim
+
+
+def ann_recall_check(vecs: Any, threshold: float, k: int = 128, min_recall: float = 0.99) -> float:
+    """Recall of ANN vs brute-force pairs at *threshold* (intent_overlap.py:1086,
+    IO ticket 116). Returns 1.0 when there are no brute-force pairs."""
+    brute = {(min(i, j), max(i, j)) for i, j, _ in similarity_pairs(vecs, threshold)}
+    if not brute:
+        return 1.0
+    ann = {(min(i, j), max(i, j)) for i, j, _ in ann_similarity_pairs(vecs, threshold, k=k)}
+    return len(brute & ann) / len(brute)
+
+
 def nearest_neighbor_sims(vecs: Any, block: int = 1000) -> Any:
     """Per-page max cosine similarity to any other page, block-wise (no N×N;
     intent_overlap.py:1115)."""
@@ -214,6 +258,9 @@ def analyse_embeddings(
     primary_lang: str = "en",
     lang_split: bool = True,
     linkage: str = "single",
+    use_ann: bool = False,
+    ann_min_pages: int = 10000,
+    ann_k: int = 128,
 ) -> AnalysisResult:
     """Core analysis over embedded, non-excluded page records.
 
@@ -289,7 +336,11 @@ def analyse_embeddings(
             all_nn.extend(nn.tolist())
         part_pair_sims: list[float] = []
         part_edges: list[tuple[int, int, float]] = []
-        for a, b, s in similarity_pairs(sub, scan_low):
+        if use_ann and part_n >= ann_min_pages:
+            pair_iter = ann_similarity_pairs(sub, scan_low, k=ann_k)
+        else:
+            pair_iter = similarity_pairs(sub, scan_low)
+        for a, b, s in pair_iter:
             i, j = int(idxs[a]), int(idxs[b])
             if hreflang_mode == "suppress" and groups[i] and groups[i] == groups[j]:
                 if s >= threshold:
@@ -584,6 +635,9 @@ async def run_intent_overlap(
     lang_split: bool = True,
     linkage: str = "single",
     fail_on: str | None = None,
+    use_ann: bool = False,
+    ann_min_pages: int = 10000,
+    ann_k: int = 128,
     run_args: dict[str, Any] | None = None,
 ) -> IntentOverlapRun:
     """Load embeddings + identity from the store, run the analysis, write the
@@ -618,6 +672,9 @@ async def run_intent_overlap(
         primary_lang=primary_lang,
         lang_split=lang_split,
         linkage=linkage,
+        use_ann=use_ann,
+        ann_min_pages=ann_min_pages,
+        ann_k=ann_k,
     )
 
     edges = await store.fetch_hreflang_edges()

@@ -34,6 +34,12 @@ embeddings-local = [
   "sentence-transformers>=2.2",
   "numpy>=1.24",
 ]
+# Approximate nearest-neighbour pair search for intent-overlap at scale
+# (ticket 081). Imported lazily with an error naming this extra; the exact
+# block-wise path is the default and always available.
+ann = [
+  "hnswlib>=0.7",
+]
 test = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",
@@ -57,6 +63,7 @@ testpaths = ["tests"]
 # integration-only CI job, failing both (ticket-067).
 markers = [
     "integration: requires a real PostgreSQL database (set CRAWLER_CLI_TEST_DSN)",
+    "slow: long-running (e.g. 10k-vector ANN recall evidence, ticket 081)",
 ]
 
 [tool.mypy]
