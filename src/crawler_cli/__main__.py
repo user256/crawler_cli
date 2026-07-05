@@ -949,11 +949,16 @@ async def _run_crawl(args: argparse.Namespace) -> int:
 
 
 async def _run_embeddings(args: argparse.Namespace) -> int:
+    if args.provider == "sentence-transformers":
+        return await _run_local_embeddings(args)
+
     api_key = args.api_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         print("Error: set --api-key or OPENAI_API_KEY", file=sys.stderr)
         return 2
 
+    model = args.model or "text-embedding-3-small"
+    batch_size = args.batch_size or 10
     store = _store_from_args(args)
     await store.initialize()
 
@@ -964,8 +969,8 @@ async def _run_embeddings(args: argparse.Namespace) -> int:
         result = await generate_embeddings_for_store(
             store,
             api_key=api_key,
-            model=args.model,
-            batch_size=args.batch_size,
+            model=model,
+            batch_size=batch_size,
             delay_seconds=args.delay,
             skip_existing=not args.force,
             urls=urls,
@@ -981,6 +986,42 @@ async def _run_embeddings(args: argparse.Namespace) -> int:
     finally:
         await store.close()
     return 0
+
+
+async def _run_local_embeddings(args: argparse.Namespace) -> int:
+    from .embeddings import (
+        DEFAULT_LOCAL_MODEL,
+        generate_signature_embeddings_for_store,
+    )
+
+    model = args.model or DEFAULT_LOCAL_MODEL
+    source = args.source or "signature"
+    batch_size = args.batch_size or 64
+
+    store = _store_from_args(args)
+    await store.initialize()
+    try:
+        result = await generate_signature_embeddings_for_store(
+            store,
+            model=model,
+            revision=args.model_revision,
+            batch_size=batch_size,
+            force=args.force,
+            urls=args.urls or None,
+            source=source,
+        )
+    finally:
+        await store.close()
+
+    print(
+        f"Embeddings complete (sentence-transformers, model={model}, source={source}): "
+        f"processed={result.processed} skipped={result.skipped} failed={result.failed}"
+    )
+    if result.errors:
+        print("Errors:")
+        for error in result.errors[:10]:
+            print(f"  - {error}")
+    return 1 if result.failed else 0
 
 
 async def _run_backfill_signatures(args: argparse.Namespace) -> int:
@@ -1329,11 +1370,37 @@ def _build_parser() -> argparse.ArgumentParser:
     crawl_parser = subparsers.add_parser("crawl", help="Run a crawl")
     _add_crawl_args(crawl_parser)
 
-    emb_parser = subparsers.add_parser("generate-embeddings", help="Generate OpenAI embeddings for crawled pages")
+    emb_parser = subparsers.add_parser(
+        "generate-embeddings",
+        help="Generate embeddings for crawled pages (OpenAI or local sentence-transformers)",
+    )
+    emb_parser.add_argument(
+        "--provider",
+        choices=("openai", "sentence-transformers"),
+        default="openai",
+        help="Embedding provider (default: openai; sentence-transformers is local, no API key)",
+    )
     emb_parser.add_argument("--api-key", help="OpenAI API key (or set OPENAI_API_KEY)")
-    emb_parser.add_argument("--model", default="text-embedding-3-small", help="Embedding model")
-    emb_parser.add_argument("--batch-size", type=int, default=10, help="Pages per API batch")
-    emb_parser.add_argument("--delay", type=float, default=1.0, help="Delay between batches (seconds)")
+    emb_parser.add_argument(
+        "--model",
+        default=None,
+        help="Embedding model (default: text-embedding-3-small for openai, "
+        "paraphrase-multilingual-MiniLM-L12-v2 for sentence-transformers)",
+    )
+    emb_parser.add_argument(
+        "--model-revision",
+        default=None,
+        help="HuggingFace model revision to pin (sentence-transformers only)",
+    )
+    emb_parser.add_argument(
+        "--source",
+        choices=("signature", "page-text"),
+        default=None,
+        help="Embed intent signatures or cleaned page text "
+        "(default: signature for sentence-transformers, page-text for openai)",
+    )
+    emb_parser.add_argument("--batch-size", type=int, default=None, help="Batch size (default 10 openai, 64 local)")
+    emb_parser.add_argument("--delay", type=float, default=1.0, help="Delay between batches (seconds, openai)")
     emb_parser.add_argument("--force", action="store_true", help="Regenerate existing embeddings")
     emb_parser.add_argument("--urls", nargs="*", help="Optional URL filter list")
     _add_postgres_args(emb_parser)
