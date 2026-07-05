@@ -261,6 +261,67 @@ async def test_hreflang_identity_round_trip(store: AsyncpgStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_full_intent_overlap_pipeline(store: AsyncpgStore, tmp_path) -> None:
+    """crawl -> signatures -> (fake) embeddings -> groups -> intent-overlap end to end (ticket 079)."""
+    from crawler_cli.intent_signature import backfill_intent_signatures
+    from crawler_cli.embeddings import generate_signature_embeddings_for_store
+    from crawler_cli.hreflang_groups import build_and_store_identity
+    from crawler_cli.intent_overlap import run_intent_overlap
+
+    def _page(url: str, title: str, body_word: str) -> CrawlResult:
+        body = "<article><p>" + (f"{body_word} content here. " * 40) + "</p></article>"
+        return CrawlResult(
+            requested_url=url,
+            final_url=url,
+            status=200,
+            headers={"content-type": "text/html"},
+            content_type="text/html",
+            fetch_backend="aiohttp",
+            extracted=ExtractedContent(
+                title=title,
+                meta_description="m",
+                meta_robots=RobotsDirectives(),
+                x_robots_tag=RobotsDirectives(),
+                canonical=None,
+                x_canonical=None,
+                hreflang_links=[],
+                html_lang="en",
+                headings={"h1": [title], "h2": []},
+                text="b",
+                word_count=200,
+                metadata={},
+            ),
+            raw_html=f"<html><head><title>{title}</title></head><body>{body}</body></html>",
+        )
+
+    await store.persist(_page("https://io.example/a", "Alpha", "widget"))
+    await store.persist(_page("https://io.example/b", "Beta", "widget"))
+    await store.persist(_page("https://io.example/c", "Gamma", "sailboat"))
+    await backfill_intent_signatures(store)
+    await build_and_store_identity(store)
+
+    # Deterministic fake vectors: a/b identical, c orthogonal.
+    vectors = {
+        "https://io.example/a": [1.0, 0.0, 0.0],
+        "https://io.example/b": [1.0, 0.0, 0.0],
+        "https://io.example/c": [0.0, 1.0, 0.0],
+    }
+
+    # Encode with url-aware vectors by embedding one page at a time.
+    for url, vec in vectors.items():
+        await generate_signature_embeddings_for_store(
+            store, model="local-test", encoder=lambda texts, v=vec: [v for _ in texts], urls=[url]
+        )
+
+    run = await run_intent_overlap(store, out_dir=str(tmp_path), lang_split=False, run_args={"threshold": 0.85})
+    # a and b are duplicates; c is alone.
+    assert run.result.summary["duplicate_pages"] == 2
+    assert run.result.summary["overlap_pairs"] == 1
+    assert (tmp_path / "pages.csv").exists()
+    assert (tmp_path / "run_manifest.json").exists()
+
+
+@pytest.mark.asyncio
 async def test_truncate_only_touches_crawl_tables(store: AsyncpgStore) -> None:
     """truncate_crawl_tables must not drop tables that don't belong to it."""
     await store.enqueue_frontier([("https://example.com/", 0, None)], source="seed")
