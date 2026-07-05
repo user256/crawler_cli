@@ -21,13 +21,40 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from .embeddings import ensure_single_model
 from .hreflang_groups import UnionFind, lang_bucket, normalise_url, reciprocity_issues
+from .persistence import AnalysisRow, UrlVariantRow
+
+if TYPE_CHECKING:
+    from .persistence import AsyncpgStore
+
+
+class AnalysedRow(AnalysisRow, total=False):
+    """A store :class:`AnalysisRow` augmented in-memory with the pairing
+    ``excluded`` reason computed by :func:`compute_exclusion` (``None`` == the
+    page is eligible for pairing).  ``excluded`` is derived at analysis time,
+    never a SELECT column, so it lives here instead of polluting the DB-column
+    ``AnalysisRow`` in persistence.py (ticket 085).  ``total=False`` marks only
+    this added key optional — and, unlike ``NotRequired``, stays correct at
+    runtime under ``from __future__ import annotations``."""
+
+    excluded: str | None
+
+
+class VariantReportRow(TypedDict):
+    """One grouped row of url_variants.csv: a norm_url, its representative, the
+    other variants folded into it, and the member count."""
+
+    norm_url: str
+    representative: str
+    variants: str
+    count: int
+
 
 VERSION = "1.0.0"
 CLUSTER_SAMPLE_CAP = 50
@@ -494,7 +521,7 @@ def analyse_embeddings(
 # --------------------------------------------------------------------------
 
 
-def compute_exclusion(row: dict[str, Any]) -> str | None:
+def compute_exclusion(row: AnalysisRow) -> str | None:
     """Derive the pairing-exclusion reason for a crawled page (or None if
     eligible).  Mirrors upstream's excluded semantics onto crawler_cli tables.
     """
@@ -548,7 +575,7 @@ _ISSUE_FIELDS = ["url", "declares_alternate", "hreflang", "issue"]
 _VARIANT_FIELDS = ["norm_url", "representative", "variants", "count"]
 
 
-def _write_csv(path: Path, fieldnames: list[str], rows: Iterable[dict[str, Any]]) -> None:
+def _write_csv(path: Path, fieldnames: list[str], rows: Iterable[Mapping[str, Any]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
@@ -569,9 +596,9 @@ def write_reports(
     out_dir: str,
     result: AnalysisResult,
     *,
-    excluded_rows: list[dict[str, Any]],
+    excluded_rows: list[AnalysedRow],
     hreflang_issues: list[dict[str, Any]],
-    variant_rows: list[dict[str, Any]],
+    variant_rows: list[VariantReportRow],
     manifest: dict[str, Any] | None = None,
 ) -> list[str]:
     out = Path(out_dir)
@@ -616,13 +643,13 @@ def write_reports(
     return [str(out / name) for name in written]
 
 
-def _variant_rows_from_store(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _variant_rows_from_store(raw: list[UrlVariantRow]) -> list[VariantReportRow]:
     """Group store variant rows (url, norm_url, representative) into one row per
     norm_url (representative + variants), for url_variants.csv."""
-    by_norm: dict[str, list[dict[str, Any]]] = {}
+    by_norm: dict[str, list[UrlVariantRow]] = {}
     for r in raw:
         by_norm.setdefault(r["norm_url"], []).append(r)
-    out = []
+    out: list[VariantReportRow] = []
     for norm, members in sorted(by_norm.items()):
         rep = next((m["url"] for m in members if not m.get("representative")), members[0]["url"])
         variants = sorted(m["url"] for m in members if m["url"] != rep)
@@ -650,7 +677,7 @@ class IntentOverlapRun:
 
 
 async def run_intent_overlap(
-    store: Any,
+    store: AsyncpgStore,
     *,
     out_dir: str,
     threshold: float = DEFAULT_THRESHOLD,
@@ -669,11 +696,9 @@ async def run_intent_overlap(
     six CSVs + manifest, and return a run summary (ticket 079)."""
     from datetime import datetime, timezone
 
-    rows = await store.fetch_analysis_rows()
+    fetched = await store.fetch_analysis_rows()
+    rows: list[AnalysedRow] = [{**r, "excluded": compute_exclusion(r)} for r in fetched]
     model = ensure_single_model([r.get("embedding_model") for r in rows if r.get("embedding_model")])
-
-    for r in rows:
-        r["excluded"] = compute_exclusion(r)
 
     records = [
         {
@@ -747,7 +772,7 @@ async def run_intent_overlap(
     return IntentOverlapRun(result=result, written=written, exit_code=exit_code)
 
 
-def _count_reasons(excluded_rows: list[dict[str, Any]]) -> dict[str, int]:
+def _count_reasons(excluded_rows: list[AnalysedRow]) -> dict[str, int]:
     out: dict[str, int] = {}
     for r in excluded_rows:
         reason = str(r.get("excluded"))
