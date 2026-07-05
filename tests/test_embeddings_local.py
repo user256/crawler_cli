@@ -23,6 +23,7 @@ from crawler_cli.embeddings import (
 # Mixed-model guard
 # --------------------------------------------------------------------------
 
+
 def test_ensure_single_model_ok():
     assert ensure_single_model(["m1", "m1"]) == "m1"
     assert ensure_single_model([]) == ""
@@ -37,10 +38,11 @@ def test_ensure_single_model_rejects_mixed():
 # Lazy-import error names the extra
 # --------------------------------------------------------------------------
 
+
 def test_local_encoder_lazy_import_error(monkeypatch):
     def _boom(model, revision):
         raise RuntimeError(
-            'sentence-transformers is not installed. Install the local embedding '
+            "sentence-transformers is not installed. Install the local embedding "
             'extra: pip install "crawler-cli[embeddings-local]"'
         )
 
@@ -53,6 +55,7 @@ def test_local_encoder_lazy_import_error(monkeypatch):
 # --------------------------------------------------------------------------
 # Normalized output + normalize_embeddings=True passed to the model
 # --------------------------------------------------------------------------
+
 
 class _FakeST:
     def __init__(self):
@@ -84,6 +87,7 @@ def test_local_encoder_requests_normalization_and_returns_unit_vectors(monkeypat
 # --------------------------------------------------------------------------
 # Hash-gated re-embed against a fake store
 # --------------------------------------------------------------------------
+
 
 class FakeEmbStore:
     def __init__(self, sig_rows):
@@ -142,9 +146,7 @@ async def test_signature_embedding_force_reembeds_all():
     rows = [{"url_id": 1, "url": "u1", "text": "alpha", "signature_hash": "h1"}]
     store = FakeEmbStore(rows)
     await generate_signature_embeddings_for_store(store, model="M", encoder=_unit_encoder)
-    forced = await generate_signature_embeddings_for_store(
-        store, model="M", encoder=_unit_encoder, force=True
-    )
+    forced = await generate_signature_embeddings_for_store(store, model="M", encoder=_unit_encoder, force=True)
     assert forced.processed == 1
 
 

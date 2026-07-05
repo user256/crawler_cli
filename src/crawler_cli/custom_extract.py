@@ -38,9 +38,9 @@ RuleType = Literal["css", "xpath", "regex"]
 class ExtractionRule:
     name: str
     type: RuleType
-    selector: str = ""       # css selector or xpath expression
-    pattern: str = ""        # regex pattern
-    attr: str = "text"       # element attribute, or "text" for text content
+    selector: str = ""  # css selector or xpath expression
+    pattern: str = ""  # regex pattern
+    attr: str = "text"  # element attribute, or "text" for text content
     multiple: bool = False
     _compiled_regex: re.Pattern[str] | None = None
 

@@ -59,8 +59,14 @@ def test_ann_and_exact_agree_on_analysis(tmp_path=None):
     # the exact path on a clustered fixture (recall ~1 at this scale).
     vecs = _synthetic_clustered(n=1200, clusters=40)
     recs = [
-        {"url": f"https://x/{i}", "vector": vecs[i].tolist(), "group": None,
-         "hreflang_code": None, "word_count": 100, "signal_confidence": "high"}
+        {
+            "url": f"https://x/{i}",
+            "vector": vecs[i].tolist(),
+            "group": None,
+            "hreflang_code": None,
+            "word_count": 100,
+            "signal_confidence": "high",
+        }
         for i in range(len(vecs))
     ]
     exact = analyse_embeddings(recs, threshold=0.9, lang_split=False, use_ann=False)

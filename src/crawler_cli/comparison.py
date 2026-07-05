@@ -119,12 +119,8 @@ def compare_deep(
         diff.candidate_urls_by_path[path] = result.final_url
     base_paths = set(base_by_path)
     cand_paths = set(cand_by_path)
-    diff.missing_urls = sorted(
-        base_by_path[path].final_url for path in sorted(base_paths - cand_paths)
-    )
-    diff.new_urls = sorted(
-        cand_by_path[path].final_url for path in sorted(cand_paths - base_paths)
-    )
+    diff.missing_urls = sorted(base_by_path[path].final_url for path in sorted(base_paths - cand_paths))
+    diff.new_urls = sorted(cand_by_path[path].final_url for path in sorted(cand_paths - base_paths))
 
     for path in sorted(base_paths):
         base_result = base_by_path[path]

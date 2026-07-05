@@ -12,8 +12,9 @@ from crawler_cli.config import CrawlConfig, parse_ua_map
 # UA map parsing + resolution precedence
 # --------------------------------------------------------------------------
 
+
 def test_parse_ua_map_basic():
-    m = parse_ua_map(['casino.org=Screaming Frog/1.0', 'example.com=Bot/2'])
+    m = parse_ua_map(["casino.org=Screaming Frog/1.0", "example.com=Bot/2"])
     assert m == {"casino.org": "Screaming Frog/1.0", "example.com": "Bot/2"}
 
 
@@ -45,6 +46,7 @@ def test_user_agent_for_no_map_uses_default():
 # Backend header pass-through (aiohttp / curl_cffi share _request_headers)
 # --------------------------------------------------------------------------
 
+
 def test_request_headers_uses_per_domain_ua():
     cfg = CrawlConfig(user_agent="default-UA", ua_map={"casino.org": "SF/1.0"})
     h1 = _request_headers(cfg, "https://www.casino.org/page")
@@ -73,6 +75,7 @@ def test_obscura_argv_uses_per_domain_ua():
 # --refresh-days staleness filtering in the engine
 # --------------------------------------------------------------------------
 
+
 class FakeRefreshStore:
     """Records enqueue calls and answers the staleness query from a fixed set."""
 
@@ -99,7 +102,7 @@ async def test_enqueue_frontier_skips_fresh_urls():
     frontier = [
         ("https://a.com/fresh", 0, None, 0.0),  # fetched recently -> skipped
         ("https://a.com/stale", 0, None, 0.0),  # aged out -> enqueued
-        ("https://a.com/new", 0, None, 0.0),    # never fetched -> enqueued
+        ("https://a.com/new", 0, None, 0.0),  # never fetched -> enqueued
     ]
     inserted = await engine._enqueue_frontier(frontier, source="seed")
     enqueued_urls = {item[0] for item in store.enqueued}

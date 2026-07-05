@@ -26,9 +26,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 
 # Tracking query keys stripped during normalisation so ?gclid=… variants fold
 # to one representative (intent_overlap.py:209, IO ticket 108).
-TRACKING_QUERY_KEYS = frozenset(
-    {"gclid", "fbclid", "msclkid", "mc_cid", "mc_eid", "dclid", "gbraid", "wbraid"}
-)
+TRACKING_QUERY_KEYS = frozenset({"gclid", "fbclid", "msclkid", "mc_cid", "mc_eid", "dclid", "gbraid", "wbraid"})
 
 
 def _strip_tracking_query(query: str) -> str:
@@ -126,9 +124,7 @@ def build_groups(edges: Iterable[tuple[str, str, str | None]]) -> HreflangGroupi
         comp.setdefault(uf.find(idx[n]), []).append(n)
     groups_by_norm = {
         m: f"H{k:04d}"
-        for k, members in enumerate(
-            sorted((v for v in comp.values() if len(v) > 1), key=lambda v: sorted(v)[0])
-        )
+        for k, members in enumerate(sorted((v for v in comp.values() if len(v) > 1), key=lambda v: sorted(v)[0]))
         for m in members
     }
     result.self_lang_by_norm = self_lang
@@ -156,8 +152,7 @@ def reciprocity_issues(
             "issue": "no return link from alternate",
         }
         for u, a, h in edges
-        if normalise_url(u) != normalise_url(a)
-        and (normalise_url(a), normalise_url(u)) not in have
+        if normalise_url(u) != normalise_url(a) and (normalise_url(a), normalise_url(u)) not in have
     ]
 
 

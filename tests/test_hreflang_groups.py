@@ -25,6 +25,7 @@ from crawler_cli.hreflang_groups import (
 # normalise_url
 # --------------------------------------------------------------------------
 
+
 def test_normalise_url_lowercases_and_drops_fragment_and_trailing_slash():
     assert normalise_url("HTTPS://Example.COM/Path/#frag") == "https://example.com/path"
     assert normalise_url("https://example.com/") == "https://example.com/"
@@ -51,6 +52,7 @@ def test_lang_bucket():
 # --------------------------------------------------------------------------
 # UnionFind + grouping
 # --------------------------------------------------------------------------
+
 
 def test_union_find_basic():
     uf = UnionFind(4)
@@ -105,6 +107,7 @@ def test_build_groups_empty():
 # Reciprocity
 # --------------------------------------------------------------------------
 
+
 def test_reciprocity_flags_missing_return_link():
     edges = [
         ("https://a.com/en", "https://a.com/fr", "fr"),  # a->fr, no fr->a
@@ -125,6 +128,7 @@ def test_reciprocity_ok_when_mutual():
 # --------------------------------------------------------------------------
 # Variant resolution
 # --------------------------------------------------------------------------
+
 
 def test_resolve_variants_picks_non_redirected_200_representative():
     pages = [
@@ -179,6 +183,7 @@ def test_resolve_language_prefers_declared_then_html_lang():
 # Orchestrator against a fake store (no DB)
 # --------------------------------------------------------------------------
 
+
 class FakeIdentityStore:
     def __init__(self, edges, pages):
         self._edges = edges
@@ -206,10 +211,31 @@ async def test_build_and_store_identity_end_to_end():
         ("https://a.com/fr", "https://a.com/en", "en"),
     ]
     pages = [
-        {"url_id": 1, "url": "https://a.com/en", "html_lang": "en", "status": 200, "word_count": 300, "final_url": None},
-        {"url_id": 2, "url": "https://a.com/fr", "html_lang": "fr", "status": 200, "word_count": 300, "final_url": None},
+        {
+            "url_id": 1,
+            "url": "https://a.com/en",
+            "html_lang": "en",
+            "status": 200,
+            "word_count": 300,
+            "final_url": None,
+        },
+        {
+            "url_id": 2,
+            "url": "https://a.com/fr",
+            "html_lang": "fr",
+            "status": 200,
+            "word_count": 300,
+            "final_url": None,
+        },
         # A tracking-param variant of /en that folds.
-        {"url_id": 3, "url": "https://a.com/en?gclid=9", "html_lang": "en", "status": 200, "word_count": 300, "final_url": None},
+        {
+            "url_id": 3,
+            "url": "https://a.com/en?gclid=9",
+            "html_lang": "en",
+            "status": 200,
+            "word_count": 300,
+            "final_url": None,
+        },
     ]
     store = FakeIdentityStore(edges, pages)
     result = await build_and_store_identity(store)

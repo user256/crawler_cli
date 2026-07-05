@@ -118,9 +118,7 @@ def make_local_encoder(
         nonlocal st_model
         if st_model is None:
             st_model = _load_sentence_transformer(model, revision)
-        vecs = st_model.encode(
-            list(texts), batch_size=batch_size, normalize_embeddings=True
-        )
+        vecs = st_model.encode(list(texts), batch_size=batch_size, normalize_embeddings=True)
         arr = np.asarray(vecs, dtype=np.float32)
         return [row.tolist() for row in arr]
 
@@ -171,10 +169,7 @@ async def generate_signature_embeddings_for_store(
             continue
         if not force and source == "signature":
             same_model = row.get("embedded_model") == model
-            same_hash = (
-                row.get("signature_hash") is not None
-                and row.get("embedded_hash") == row.get("signature_hash")
-            )
+            same_hash = row.get("signature_hash") is not None and row.get("embedded_hash") == row.get("signature_hash")
             if same_model and same_hash:
                 result.skipped += 1
                 continue

@@ -64,4 +64,3 @@ def simhash_to_unsigned(value: int | None) -> int | None:
     if value is None:
         return None
     return value + _UINT64 if value < 0 else value
-

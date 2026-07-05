@@ -28,9 +28,7 @@ def test_css_single_text():
 
 
 def test_css_multiple():
-    extractor = CustomExtractor(
-        [ExtractionRule(name="authors", type="css", selector="a.author", multiple=True)]
-    )
+    extractor = CustomExtractor([ExtractionRule(name="authors", type="css", selector="a.author", multiple=True)])
     assert extractor.extract(HTML) == {"authors": ["Jane", "John"]}
 
 
@@ -42,9 +40,7 @@ def test_css_attribute():
 
 
 def test_xpath_text():
-    extractor = CustomExtractor(
-        [ExtractionRule(name="sku", type="xpath", selector="//*[@id='sku']/text()")]
-    )
+    extractor = CustomExtractor([ExtractionRule(name="sku", type="xpath", selector="//*[@id='sku']/text()")])
     assert extractor.extract(HTML) == {"sku": "ABC-123"}
 
 
@@ -56,9 +52,7 @@ def test_xpath_attribute_node():
 
 
 def test_regex():
-    extractor = CustomExtractor(
-        [ExtractionRule(name="phone", type="regex", pattern=r"\+?\d[\d ]{7,}\d")]
-    )
+    extractor = CustomExtractor([ExtractionRule(name="phone", type="regex", pattern=r"\+?\d[\d ]{7,}\d")])
     assert extractor.extract(HTML) == {"phone": "+1 555 1234567"}
 
 
@@ -68,9 +62,7 @@ def test_missing_match_returns_none():
 
 
 def test_missing_match_multiple_returns_empty_list():
-    extractor = CustomExtractor(
-        [ExtractionRule(name="nope", type="css", selector=".x", multiple=True)]
-    )
+    extractor = CustomExtractor([ExtractionRule(name="nope", type="css", selector=".x", multiple=True)])
     assert extractor.extract(HTML) == {"nope": []}
 
 
@@ -83,22 +75,28 @@ def test_rule_validation_errors():
 
 def test_load_rules_file(tmp_path):
     path = tmp_path / "rules.json"
-    path.write_text(json.dumps({
-        "rules": [
-            {"name": "price", "type": "css", "selector": ".price"},
-            {"name": "sku", "type": "xpath", "selector": "//*[@id='sku']/text()"},
-        ]
-    }))
+    path.write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {"name": "price", "type": "css", "selector": ".price"},
+                    {"name": "sku", "type": "xpath", "selector": "//*[@id='sku']/text()"},
+                ]
+            }
+        )
+    )
     rules = load_extraction_rules(path)
     assert [r.name for r in rules] == ["price", "sku"]
     assert rules[0].type == "css"
 
 
 def test_combined_rules():
-    extractor = CustomExtractor([
-        ExtractionRule(name="price", type="css", selector=".price"),
-        ExtractionRule(name="sku", type="xpath", selector="//*[@id='sku']/text()"),
-        ExtractionRule(name="phone", type="regex", pattern=r"\+?\d[\d ]{7,}\d"),
-    ])
+    extractor = CustomExtractor(
+        [
+            ExtractionRule(name="price", type="css", selector=".price"),
+            ExtractionRule(name="sku", type="xpath", selector="//*[@id='sku']/text()"),
+            ExtractionRule(name="phone", type="regex", pattern=r"\+?\d[\d ]{7,}\d"),
+        ]
+    )
     result = extractor.extract(HTML)
     assert result == {"price": "$19.99", "sku": "ABC-123", "phone": "+1 555 1234567"}

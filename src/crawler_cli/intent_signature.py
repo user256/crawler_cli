@@ -278,16 +278,12 @@ async def backfill_intent_signatures(
     to_write: list[dict[str, Any]] = []
     for row in extracted:
         result.processed += 1
-        result.by_method[row["extraction_method"]] = (
-            result.by_method.get(row["extraction_method"], 0) + 1
-        )
+        result.by_method[row["extraction_method"]] = result.by_method.get(row["extraction_method"], 0) + 1
         if row["text"] is None:
             result.no_text += 1
         sig_text = signature_text(row, boilerplate)
         sig_hash = hashlib.sha256(sig_text.encode("utf-8")).hexdigest()
-        confidence = resolve_signal_confidence(
-            row["word_count"], row["extraction_method"], min_words
-        )
+        confidence = resolve_signal_confidence(row["word_count"], row["extraction_method"], min_words)
         if confidence == "low":
             result.low_confidence += 1
         if existing.get(row["url_id"]) == sig_hash:

@@ -246,6 +246,7 @@ class CrawlConfig:
     def is_host_allowed(self, url: str, seeds: list[str]) -> bool:
         """Check if a URL's host is allowed given the crawl constraints."""
         from urllib.parse import urlparse
+
         host = urlparse(url).netloc.lower()
         seed_hosts = {urlparse(s).netloc.lower() for s in seeds}
         allowed = seed_hosts | {h.lower() for h in self.allowed_hosts}

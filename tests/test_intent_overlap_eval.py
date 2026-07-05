@@ -34,9 +34,10 @@ pytestmark = pytest.mark.integration
 # Fixture site
 # --------------------------------------------------------------------------
 
+
 def _page(title, body, *, hreflang=None, noindex=False):
     alt = ""
-    for code, href in (hreflang or []):
+    for code, href in hreflang or []:
         alt += f'<link rel="alternate" hreflang="{code}" href="{href}"/>'
     robots = '<meta name="robots" content="noindex">' if noindex else ""
     return (
@@ -49,14 +50,16 @@ def _fixture_pages(base):
     widgets_body = "Blue widgets for sale. " * 40 + "Buy quality blue widgets online today."
     return {
         "/en/widgets": _page(
-            "Blue Widgets", widgets_body,
+            "Blue Widgets",
+            widgets_body,
             hreflang=[("en", f"{base}/en/widgets"), ("fr", f"{base}/fr/widgets")],
         ),
         # Near-identical to /en/widgets -> a duplicate.
         "/en/widgets-copy": _page("Blue Widgets Copy", widgets_body),
         # French alternate (mutual hreflang) -> same group as /en/widgets.
         "/fr/widgets": _page(
-            "Widgets Bleus", "Widgets bleus a vendre. " * 40 + "Achetez des widgets bleus.",
+            "Widgets Bleus",
+            "Widgets bleus a vendre. " * 40 + "Achetez des widgets bleus.",
             hreflang=[("en", f"{base}/en/widgets"), ("fr", f"{base}/fr/widgets")],
         ),
         # Unrelated unique content.
@@ -125,12 +128,12 @@ def _deterministic_encoder(texts):
 # Committed golden: the structured outcome the pipeline must keep producing.
 GOLDEN = {
     "pages_total": 5,
-    "pages_excluded": 1,          # the noindex page
+    "pages_excluded": 1,  # the noindex page
     "excluded_by_reason": {"noindex": 1},
-    "embedded": 4,                # 5 crawled - 1 noindex
-    "duplicate_pages": 2,         # widgets + widgets-copy
-    "overlap_pairs": 1,           # the widgets<->widgets-copy pair
-    "hreflang_groups": 1,         # en/widgets + fr/widgets
+    "embedded": 4,  # 5 crawled - 1 noindex
+    "duplicate_pages": 2,  # widgets + widgets-copy
+    "overlap_pairs": 1,  # the widgets<->widgets-copy pair
+    "hreflang_groups": 1,  # en/widgets + fr/widgets
 }
 
 
@@ -157,13 +160,9 @@ async def test_intent_overlap_eval_fixture_matches_golden(fixture_site_and_store
 
     await backfill_intent_signatures(store)
     identity = await build_and_store_identity(store)
-    await generate_signature_embeddings_for_store(
-        store, model="eval-deterministic", encoder=_deterministic_encoder
-    )
+    await generate_signature_embeddings_for_store(store, model="eval-deterministic", encoder=_deterministic_encoder)
 
-    run = await run_intent_overlap(
-        store, out_dir=str(tmp_path), lang_split=False, run_args={"eval": True}
-    )
+    run = await run_intent_overlap(store, out_dir=str(tmp_path), lang_split=False, run_args={"eval": True})
     s = run.result.summary
 
     got = {
@@ -179,8 +178,12 @@ async def test_intent_overlap_eval_fixture_matches_golden(fixture_site_and_store
 
     # The six CSVs + manifest exist.
     for name in (
-        "pages.csv", "overlap_pairs.csv", "clusters.csv",
-        "hreflang_issues.csv", "url_variants.csv", "similarity_distribution.csv",
+        "pages.csv",
+        "overlap_pairs.csv",
+        "clusters.csv",
+        "hreflang_issues.csv",
+        "url_variants.csv",
+        "similarity_distribution.csv",
         "run_manifest.json",
     ):
         assert (tmp_path / name).exists(), f"missing {name}"

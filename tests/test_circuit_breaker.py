@@ -18,4 +18,3 @@ def test_circuit_breaker_opens_and_transitions_half_open():
 
     breaker.record_success()
     assert breaker.state == CircuitState.CLOSED
-

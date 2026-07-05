@@ -57,9 +57,7 @@ async def compare_renders(
     """Fetch the same URL with aiohttp and playwright backends and diff SEO signals."""
     if js_config.obscura_enabled and js_config.obscura_stealth is not False:
         # Stealth may affect the diff; warn but do not block.
-        print(
-            "[compare_renders] Warning: Obscura stealth may alter page behaviour and affect render comparison."
-        )
+        print("[compare_renders] Warning: Obscura stealth may alter page behaviour and affect render comparison.")
     nojs_engine = CrawlEngine(nojs_config)
     js_engine = CrawlEngine(js_config)
 
@@ -75,12 +73,8 @@ async def compare_renders(
     js_title = _norm(js_result.extracted.title if js_result.extracted else None)
     nojs_canonical = _norm(nojs_result.extracted.canonical if nojs_result.extracted else None)
     js_canonical = _norm(js_result.extracted.canonical if js_result.extracted else None)
-    nojs_robots = _norm(
-        " ".join(nojs_result.extracted.meta_robots.raw) if nojs_result.extracted else None
-    )
-    js_robots = _norm(
-        " ".join(js_result.extracted.meta_robots.raw) if js_result.extracted else None
-    )
+    nojs_robots = _norm(" ".join(nojs_result.extracted.meta_robots.raw) if nojs_result.extracted else None)
+    js_robots = _norm(" ".join(js_result.extracted.meta_robots.raw) if js_result.extracted else None)
     nojs_meta = _norm(nojs_result.extracted.meta_description if nojs_result.extracted else None)
     js_meta = _norm(js_result.extracted.meta_description if js_result.extracted else None)
 

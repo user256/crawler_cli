@@ -288,7 +288,9 @@ class FlakyBackend:
 @pytest.mark.asyncio
 async def test_open_crawl_retries_transient_errors():
     store = FakeStore()
-    engine = CrawlEngine(CrawlConfig(max_concurrency=1, default_open_crawl_limit=1, frontier_max_retries=2), store=store)
+    engine = CrawlEngine(
+        CrawlConfig(max_concurrency=1, default_open_crawl_limit=1, frontier_max_retries=2), store=store
+    )
     engine.backend = FlakyBackend()
     engine._robots = FakeRobots()
 
@@ -309,10 +311,7 @@ async def test_open_crawl_reduces_batch_size_under_memory_pressure(monkeypatch):
     - it eventually recovers once memory pressure drops
     """
     store = FakeStore()
-    pages = {
-        f"https://example.com/{idx}": f"<html><body>{idx}</body></html>"
-        for idx in range(6)
-    }
+    pages = {f"https://example.com/{idx}": f"<html><body>{idx}</body></html>" for idx in range(6)}
     for idx in range(6):
         store.frontier[f"https://example.com/{idx}"] = {
             "depth": 0,

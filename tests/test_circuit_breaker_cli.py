@@ -86,8 +86,7 @@ def test_no_circuit_breaker_disables_engine_gate(monkeypatch):
 
 def test_all_three_flags_registered():
     parsed = _parse(
-        ["--circuit-breaker-threshold", "5",
-         "--circuit-breaker-recovery-seconds", "12", "--no-circuit-breaker"]
+        ["--circuit-breaker-threshold", "5", "--circuit-breaker-recovery-seconds", "12", "--no-circuit-breaker"]
     )
     assert parsed.circuit_breaker_threshold == 5
     assert parsed.circuit_breaker_recovery_seconds == 12.0

@@ -47,4 +47,3 @@ def test_compare_detects_missing_new_and_changed_metadata():
     diff = compare(baseline, candidate)
     assert diff.missing_urls == ["https://example.com/a"]
     assert diff.new_urls == ["https://example.com/b"]
-

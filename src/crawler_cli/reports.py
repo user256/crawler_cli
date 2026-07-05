@@ -246,4 +246,3 @@ class CrawlReports:
         async with self.store.pool.acquire() as conn:
             rows = await conn.fetch(query, *args)
         return [dict(row) for row in rows]
-

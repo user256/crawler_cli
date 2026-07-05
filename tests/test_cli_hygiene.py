@@ -1,4 +1,5 @@
 """Tests for ticket-051: --concurrency / --max-workers, DSN escaping, bare-domain argv."""
+
 from __future__ import annotations
 
 import argparse
@@ -20,6 +21,7 @@ from crawler_cli.persistence import MemoryStore
 # ---------------------------------------------------------------------------
 # _normalize_argv: bare-domain argv
 # ---------------------------------------------------------------------------
+
 
 def test_normalize_bare_domain_prepends_https():
     assert _normalize_argv(["example.com"]) == ["crawl", "https://example.com"]
@@ -47,6 +49,7 @@ def test_normalize_localhost():
 # ---------------------------------------------------------------------------
 # _build_dsn: credential URL-encoding
 # ---------------------------------------------------------------------------
+
 
 def _make_ns(**kwargs) -> argparse.Namespace:
     defaults = dict(
@@ -127,6 +130,7 @@ def test_postgres_config_supplied_when_postgres_dsn_env_set(monkeypatch):
 # --concurrency / --max-workers: explicit flag wins
 # ---------------------------------------------------------------------------
 
+
 def test_max_workers_sets_concurrency():
     args = _build_parser().parse_args(["crawl", "https://x.com", "--max-workers", "5"])
     config = _build_config(args)
@@ -140,9 +144,7 @@ def test_concurrency_alias_sets_concurrency():
 
 
 def test_max_workers_wins_when_both_passed():
-    args = _build_parser().parse_args(
-        ["crawl", "https://x.com", "--max-workers", "20", "--concurrency", "5"]
-    )
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--max-workers", "20", "--concurrency", "5"])
     config = _build_config(args)
     assert config.max_concurrency == 20
 
@@ -175,9 +177,7 @@ def test_profile_flags_enable_playwright_and_default_to_headed():
 
 
 def test_cdp_port_builds_local_endpoint_and_enables_playwright():
-    args = _build_parser().parse_args(
-        ["crawl", "https://x.com", "--playwright-cdp-port", "9222"]
-    )
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--playwright-cdp-port", "9222"])
     config = _build_config(args)
     assert config.backend == "playwright"
     assert config.playwright_cdp_endpoint == "http://127.0.0.1:9222"
@@ -199,9 +199,7 @@ def test_cdp_host_and_port_build_endpoint():
 
 
 def test_profile_directory_requires_user_data_dir():
-    args = _build_parser().parse_args(
-        ["crawl", "https://x.com", "--playwright-profile-directory", "Default"]
-    )
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--playwright-profile-directory", "Default"])
     try:
         _build_config(args)
     except SystemExit as exc:
@@ -230,9 +228,7 @@ def test_cdp_and_profile_flags_are_mutually_exclusive():
 
 
 def test_cdp_host_requires_cdp_port():
-    args = _build_parser().parse_args(
-        ["crawl", "https://x.com", "--playwright-cdp-host", "127.0.0.1"]
-    )
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--playwright-cdp-host", "127.0.0.1"])
     try:
         _build_config(args)
     except SystemExit as exc:

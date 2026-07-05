@@ -27,9 +27,21 @@ class ArchiveAuditResult:
 
 
 DEFAULT_ARCHIVE_STRIP_EXTENSIONS = (
-    ".js", ".css", ".jpg", ".jpeg", ".png", ".gif",
-    ".svg", ".webp", ".ico", ".bmp", ".woff", ".woff2",
-    ".ttf", ".eot", ".pdf",
+    ".js",
+    ".css",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".ico",
+    ".bmp",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".pdf",
 )
 
 DEFAULT_ARCHIVE_STRIP_PATHS = (
@@ -48,7 +60,7 @@ def _normalize_url(url: str) -> str | None:
         first_scheme = url.find("://")
         second_scheme = url.find("://", first_scheme + 3)
         if second_scheme != -1:
-            url = url[second_scheme + 3:]
+            url = url[second_scheme + 3 :]
             if "://" not in url:
                 url = "https://" + url
     return url
@@ -257,11 +269,13 @@ async def audit_archive_urls(
             writer = csv.writer(f)
             writer.writerow(["url", "final_status_code", "redirect_chain_length", "redirect_final_status_code"])
             for issue in legacy:
-                writer.writerow([
-                    issue.url,
-                    issue.final_status_code,
-                    issue.redirect_chain_length,
-                    issue.redirect_final_status_code,
-                ])
+                writer.writerow(
+                    [
+                        issue.url,
+                        issue.final_status_code,
+                        issue.redirect_chain_length,
+                        issue.redirect_final_status_code,
+                    ]
+                )
 
     return result

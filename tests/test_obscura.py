@@ -625,6 +625,7 @@ def test_run_compare_accepts_open_crawl_jsonl_and_preserves_deep_diff_fields():
 # Obscura binary discovery + installer (obscura_install.py)
 # ---------------------------------------------------------------------------
 
+
 def test_asset_matrix_covers_common_platforms():
     from crawler_cli.obscura_install import _ASSET_MATRIX
 

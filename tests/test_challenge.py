@@ -14,16 +14,14 @@ CF_INTERSTITIAL = (
     '<html lang="en-US"><head><title>Just a moment...</title>'
     '<meta http-equiv="content-security-policy" content="...challenges.cloudflare.com...">'
     '</head><body><div id="challenge-error-text"></div>'
-    '<script>window._cf_chl_opt={};</script></body></html>'
+    "<script>window._cf_chl_opt={};</script></body></html>"
 )
 
-CLEAN_PAGE = (
-    "<html><head><title>Real Page</title></head>"
-    "<body><h1>Hello</h1><a href='/next'>n</a></body></html>"
-)
+CLEAN_PAGE = "<html><head><title>Real Page</title></head><body><h1>Hello</h1><a href='/next'>n</a></body></html>"
 
 
 # --- detector ---
+
 
 def test_detects_cloudflare_interstitial_body():
     assert detect_challenge(403, {}, CF_INTERSTITIAL) == "cloudflare"
@@ -62,6 +60,7 @@ def test_cloudflare_marker_without_status_still_detected():
 
 # --- engine escalation ---
 
+
 class _ChallengedHTTPBackend:
     """HTTP backend that always returns a Cloudflare interstitial."""
 
@@ -71,9 +70,12 @@ class _ChallengedHTTPBackend:
     async def fetch(self, url):
         self.calls += 1
         return FetchResponse(
-            url=url, requested_url=url, status=403,
+            url=url,
+            requested_url=url,
+            status=403,
             headers={"content-type": "text/html"},
-            body=CF_INTERSTITIAL.encode(), text=CF_INTERSTITIAL,
+            body=CF_INTERSTITIAL.encode(),
+            text=CF_INTERSTITIAL,
         )
 
     async def fetch_resilient(self, url):
@@ -92,9 +94,12 @@ class _CleanBrowserBackend:
     async def fetch(self, url):
         self.calls += 1
         return FetchResponse(
-            url=url, requested_url=url, status=200,
+            url=url,
+            requested_url=url,
+            status=200,
             headers={"content-type": "text/html"},
-            body=CLEAN_PAGE.encode(), text=CLEAN_PAGE,
+            body=CLEAN_PAGE.encode(),
+            text=CLEAN_PAGE,
         )
 
     async def fetch_resilient(self, url):
@@ -147,8 +152,7 @@ async def test_engine_records_blocked_when_escalation_still_challenged(monkeypat
 @pytest.mark.asyncio
 async def test_engine_no_escalation_when_disabled(monkeypatch):
     engine = CrawlEngine(
-        CrawlConfig(respect_robots_txt=False, detect_challenges=True,
-                    challenge_escalate_to_browser=False)
+        CrawlConfig(respect_robots_txt=False, detect_challenges=True, challenge_escalate_to_browser=False)
     )
     http_backend = _ChallengedHTTPBackend()
     engine.backend = http_backend

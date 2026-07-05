@@ -7,4 +7,3 @@ def test_hashes_are_stable_for_dynamic_attributes():
 
     assert sha256_hash(html_a) == sha256_hash(html_b)
     assert simhash64(html_a) == simhash64(html_b)
-

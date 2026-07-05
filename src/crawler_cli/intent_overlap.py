@@ -52,13 +52,14 @@ def _np() -> Any:
 # Numeric core (verbatim ports)
 # --------------------------------------------------------------------------
 
+
 def similarity_pairs(vecs: Any, threshold: float, block: int = 1000) -> Iterable[tuple[int, int, float]]:
     """Yield (i, j, sim) for i<j with sim >= threshold, block-wise so the full
     NxN matrix never exists at once (intent_overlap.py:1047)."""
     np = _np()
     n = len(vecs)
     for start in range(0, n, block):
-        chunk = vecs[start:start + block] @ vecs.T
+        chunk = vecs[start : start + block] @ vecs.T
         for bi, j in np.argwhere(chunk >= threshold):
             i = start + int(bi)
             j = int(j)
@@ -119,7 +120,7 @@ def nearest_neighbor_sims(vecs: Any, block: int = 1000) -> Any:
         return np.array([])
     nn = np.full(n, -1.0, dtype=np.float32)
     for start in range(0, n, block):
-        chunk = vecs[start:start + block] @ vecs.T
+        chunk = vecs[start : start + block] @ vecs.T
         for bi in range(chunk.shape[0]):
             i = start + bi
             row = chunk[bi]
@@ -136,7 +137,9 @@ def percentile_rank(value: float, sample: Any) -> float:
     return float(100.0 * np.searchsorted(sorted_s, value, side="right") / len(sorted_s))
 
 
-def build_similarity_distribution(lang: str, nn: Any, pair_sims: list[float], pages: int | None = None) -> dict[str, Any]:
+def build_similarity_distribution(
+    lang: str, nn: Any, pair_sims: list[float], pages: int | None = None
+) -> dict[str, Any]:
     np = _np()
     row: dict[str, Any] = {"language": lang, "pages": pages if pages is not None else len(nn)}
     if len(nn) >= 2:
@@ -165,7 +168,7 @@ def _min_pairwise_sim(vecs: Any, member_idxs: list[int], block: int = 512) -> fl
     m = len(sub)
     min_s = 1.0
     for start in range(0, m, block):
-        chunk = sub[start:start + block] @ sub.T
+        chunk = sub[start : start + block] @ sub.T
         for bi in range(chunk.shape[0]):
             chunk[bi, start + bi] = np.inf
             min_s = min(min_s, float(chunk[bi].min()))
@@ -229,6 +232,7 @@ def complete_linkage_clusters(edges: list[tuple[int, int, float]], vecs: Any, th
 # --------------------------------------------------------------------------
 # Analysis over structured records (no DB, no pandas)
 # --------------------------------------------------------------------------
+
 
 @dataclass(slots=True)
 class AnalysisResult:
@@ -446,9 +450,7 @@ def analyse_embeddings(
 
     # sim_percentile on each pair
     for pair in result.overlap_pairs:
-        pair["sim_percentile"] = (
-            round(percentile_rank(pair["similarity"], nn_arr), 2) if len(nn_arr) else 0.0
-        )
+        pair["sim_percentile"] = round(percentile_rank(pair["similarity"], nn_arr), 2) if len(nn_arr) else 0.0
     result.overlap_pairs.sort(key=lambda p: p["similarity"], reverse=True)
 
     # Per-page report rows (embedded pages)
@@ -491,6 +493,7 @@ def analyse_embeddings(
 # Exclusion reasons
 # --------------------------------------------------------------------------
 
+
 def compute_exclusion(row: dict[str, Any]) -> str | None:
     """Derive the pairing-exclusion reason for a crawled page (or None if
     eligible).  Mirrors upstream's excluded semantics onto crawler_cli tables.
@@ -515,14 +518,31 @@ def compute_exclusion(row: dict[str, Any]) -> str | None:
 # --------------------------------------------------------------------------
 
 _PAGES_FIELDS = [
-    "url", "cluster_id", "max_similarity", "nearest_url", "risk",
-    "suggested_canonical", "hreflang_role", "hreflang_code", "word_count",
-    "signal_confidence", "excluded",
+    "url",
+    "cluster_id",
+    "max_similarity",
+    "nearest_url",
+    "risk",
+    "suggested_canonical",
+    "hreflang_role",
+    "hreflang_code",
+    "word_count",
+    "signal_confidence",
+    "excluded",
 ]
 _PAIRS_FIELDS = ["url_a", "url_b", "similarity", "low_confidence", "sim_percentile"]
 _CLUSTER_FIELDS = [
-    "cluster_id", "size", "suggested_canonical", "languages", "urls",
-    "avg_word_count", "min_intra_sim", "mean_intra_sim", "cohesion", "chained", "cohesion_note",
+    "cluster_id",
+    "size",
+    "suggested_canonical",
+    "languages",
+    "urls",
+    "avg_word_count",
+    "min_intra_sim",
+    "mean_intra_sim",
+    "cohesion",
+    "chained",
+    "cohesion_note",
 ]
 _ISSUE_FIELDS = ["url", "declares_alternate", "hreflang", "issue"]
 _VARIANT_FIELDS = ["norm_url", "representative", "variants", "count"]
@@ -583,8 +603,12 @@ def write_reports(
     _write_csv(out / "similarity_distribution.csv", dist_fields, result.distribution_rows)
 
     written = [
-        "pages.csv", "overlap_pairs.csv", "clusters.csv",
-        "hreflang_issues.csv", "url_variants.csv", "similarity_distribution.csv",
+        "pages.csv",
+        "overlap_pairs.csv",
+        "clusters.csv",
+        "hreflang_issues.csv",
+        "url_variants.csv",
+        "similarity_distribution.csv",
     ]
     if manifest is not None:
         (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -616,6 +640,7 @@ def _variant_rows_from_store(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 # Store-driven orchestrator
 # --------------------------------------------------------------------------
+
 
 @dataclass(slots=True)
 class IntentOverlapRun:

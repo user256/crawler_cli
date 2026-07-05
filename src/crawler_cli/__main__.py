@@ -144,8 +144,7 @@ def _require_confirm(args: argparse.Namespace, dsn: str) -> int | None:
         return None
     if getattr(args, "confirm", None) != db_name:
         print(
-            f"Refusing to modify database {db_name!r} without "
-            f"--confirm {db_name}",
+            f"Refusing to modify database {db_name!r} without --confirm {db_name}",
             file=sys.stderr,
         )
         return 2
@@ -311,9 +310,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
 
     allowed_hosts = [h.strip() for h in args.allowed_hosts.split(",") if h.strip()] if args.allowed_hosts else []
     path_exclude = (
-        [p.strip() for p in args.path_exclude.split(",") if p.strip()]
-        if getattr(args, "path_exclude", None)
-        else []
+        [p.strip() for p in args.path_exclude.split(",") if p.strip()] if getattr(args, "path_exclude", None) else []
     )
     csv_urls: list[str] = []
     if getattr(args, "csv_file", None):
@@ -710,7 +707,9 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "Results are stored in the content.custom_data JSONB column.",
     )
     parser.add_argument("--cms-detection", action="store_true", help="Enable CMS platform detection")
-    parser.add_argument("--analytics-detection", action="store_true", help="Enable analytics / tag manager / pixel detection")
+    parser.add_argument(
+        "--analytics-detection", action="store_true", help="Enable analytics / tag manager / pixel detection"
+    )
     parser.add_argument(
         "--analytics-expected-id",
         action="append",
@@ -836,8 +835,7 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         default=[],
         dest="cookies",
         metavar="NAME=VALUE",
-        help="Session cookie to inject on every request. Repeatable; a single "
-        "value may also contain ';'-joined pairs.",
+        help="Session cookie to inject on every request. Repeatable; a single value may also contain ';'-joined pairs.",
     )
     cookies.add_argument(
         "--cookies-file",
@@ -920,10 +918,7 @@ async def _run_crawl(args: argparse.Namespace) -> int:
             _exit_code = 130
         persist_errors = job.persist_error_count
         label = "Crawl interrupted" if job.interrupted else "Crawl complete"
-        summary = (
-            f"{label}: {job.crawled_count} crawled, "
-            f"{job.blocked_count} blocked by robots"
-        )
+        summary = f"{label}: {job.crawled_count} crawled, {job.blocked_count} blocked by robots"
         if job.refresh_skipped_count:
             summary += f", {job.refresh_skipped_count} skipped (fresh within --refresh-days)"
         if job.retry_attempts:
@@ -997,10 +992,7 @@ async def _run_embeddings(args: argparse.Namespace) -> int:
             skip_existing=not args.force,
             urls=urls,
         )
-        print(
-            f"Embeddings complete: processed={result.processed} "
-            f"skipped={result.skipped} failed={result.failed}"
-        )
+        print(f"Embeddings complete: processed={result.processed} skipped={result.skipped} failed={result.failed}")
         if result.errors:
             print("Errors:")
             for error in result.errors[:10]:
@@ -1461,12 +1453,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Enable DEBUG logging (shows frontier/robots/breaker detail)",
     )
     verbosity.add_argument(
-        "-q", "--quiet",
+        "-q",
+        "--quiet",
         action="store_true",
         help="Suppress INFO logs; only show warnings, errors, and final summary",
     )
@@ -1685,9 +1679,7 @@ def _looks_like_hostname(token: str) -> bool:
     global _BARE_DOMAIN_RE
     if _BARE_DOMAIN_RE is None:
         # matches e.g. example.com, example.com/path, localhost, 192.168.1.1:8080
-        _BARE_DOMAIN_RE = re.compile(
-            r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,}|:\d+)"
-        )
+        _BARE_DOMAIN_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,}|:\d+)")
     return bool(_BARE_DOMAIN_RE.match(token))
 
 

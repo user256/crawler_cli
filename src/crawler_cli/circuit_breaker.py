@@ -60,4 +60,3 @@ class CircuitBreakerRegistry:
             circuit = CircuitBreaker(self.failure_threshold, self.recovery_timeout_seconds)
             self._circuits[host] = circuit
         return circuit
-

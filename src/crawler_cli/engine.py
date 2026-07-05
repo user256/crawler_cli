@@ -80,9 +80,7 @@ class CrawlEngine:
         )
         self._cms_detector = CMSDetector() if config.cms_detection else None
         self._analytics_detector = AnalyticsDetector() if config.analytics_detection else None
-        self._custom_extractor = (
-            CustomExtractor(config.extraction_rules) if config.extraction_rules else None
-        )
+        self._custom_extractor = CustomExtractor(config.extraction_rules) if config.extraction_rules else None
         self._effective_worker_limit = max(1, config.max_concurrency)
         self._stop_requested: bool = False
         # Count of URLs skipped at enqueue time by --refresh-days (ticket 080).
@@ -94,7 +92,9 @@ class CrawlEngine:
             logger.info(
                 "Per-host cap %d is below max workers %d — single-host crawls are limited to "
                 "%d concurrent fetches (adjust with --per-host-concurrency)",
-                config.per_host_concurrency, config.max_concurrency, config.per_host_concurrency,
+                config.per_host_concurrency,
+                config.max_concurrency,
+                config.per_host_concurrency,
             )
 
     def request_stop(self) -> None:
@@ -159,7 +159,9 @@ class CrawlEngine:
         if not was_open and circuit.state == CircuitState.OPEN:
             logger.warning(
                 "Circuit breaker OPEN for %s after %d failures (last trigger: %s)",
-                host, circuit.failure_count, trigger,
+                host,
+                circuit.failure_count,
+                trigger,
             )
 
     def _parse_and_extract(
@@ -349,7 +351,9 @@ class CrawlEngine:
                     result.persist_error = type(exc).__name__
                     logger.warning(
                         "Persist failed for %s after %d attempts: %s — page data retained",
-                        result.final_url, max_attempts, result.persist_error,
+                        result.final_url,
+                        max_attempts,
+                        result.persist_error,
                     )
                     return
                 await asyncio.sleep(0.05 * (2**attempt))
@@ -357,7 +361,8 @@ class CrawlEngine:
                 result.persist_error = type(exc).__name__
                 logger.warning(
                     "Persist failed for %s: %s — page data retained in results",
-                    result.final_url, result.persist_error,
+                    result.final_url,
+                    result.persist_error,
                 )
                 return
 
@@ -397,9 +402,7 @@ class CrawlEngine:
         results = [r for r in ordered if r is not None]
         if save_to:
             await self._save_results(
-                CrawlJobResult(
-                    mode="list", seed_urls=url_list, results=results, interrupted=self._stop_requested
-                ),
+                CrawlJobResult(mode="list", seed_urls=url_list, results=results, interrupted=self._stop_requested),
                 save_to,
             )
         return results
@@ -426,9 +429,7 @@ class CrawlEngine:
                 self._refresh_skipped += before - len(frontier_data)
         if not frontier_data or self.store is None:
             return 0
-        return await self.store.enqueue_frontier(
-            frontier_data, source=source, source_detail=source_detail
-        )
+        return await self.store.enqueue_frontier(frontier_data, source=source, source_detail=source_detail)
 
     async def crawl_list(self, urls: Iterable[str], *, save_to: str | None = None) -> CrawlJobResult:
         seed_urls = list(urls)
@@ -509,16 +510,12 @@ class CrawlEngine:
             # Process in bounded batches to respect worker limit.
             for i in range(0, len(to_fetch_now), fetch_limit):
                 batch = to_fetch_now[i : i + fetch_limit]
-                batch_results = await asyncio.gather(
-                    *[_fetch_one(sm_url, sk, depth) for sm_url, sk, depth in batch]
-                )
+                batch_results = await asyncio.gather(*[_fetch_one(sm_url, sk, depth) for sm_url, sk, depth in batch])
                 for sm_url, source_kind, depth, response in batch_results:
                     if response is None or response.status != 200:
                         continue
                     try:
-                        doc = parser.parse(
-                            sm_url, response.body, response.headers.get("Content-Type")
-                        )
+                        doc = parser.parse(sm_url, response.body, response.headers.get("Content-Type"))
                     except Exception as exc:
                         # A single malformed/truncated sitemap must not abort the
                         # whole crawl; skip it and continue with the others.
@@ -529,7 +526,7 @@ class CrawlEngine:
                             if child not in fetched:
                                 next_level.append((child, source_kind, depth + 1))
                     else:
-                        for su in doc.urls[:self.config.sitemap_max_urls]:
+                        for su in doc.urls[: self.config.sitemap_max_urls]:
                             all_page_urls.append((su.loc, sm_url))
                             if su.hreflang_links:
                                 hreflang_data.append((su.loc, su.hreflang_links))
@@ -555,11 +552,7 @@ class CrawlEngine:
                 source_detail=None,
             )
             # Record source detail for all in-scope URLs in one bulk call.
-            in_scope_pairs = [
-                (url, sm_url)
-                for url, sm_url in all_page_urls
-                if self.config.should_crawl_url(url)
-            ]
+            in_scope_pairs = [(url, sm_url) for url, sm_url in all_page_urls if self.config.should_crawl_url(url)]
             if in_scope_pairs:
                 await self.store.record_sources_bulk(in_scope_pairs, source="sitemap")
 
@@ -599,11 +592,7 @@ class CrawlEngine:
         if self.config.seed_from_archive:
             archive_candidates: list[str] = []
             archive_targets = list(
-                dict.fromkeys(
-                    target
-                    for seed in seeds
-                    if (target := _archive_seed_target(seed)) is not None
-                )
+                dict.fromkeys(target for seed in seeds if (target := _archive_seed_target(seed)) is not None)
             )
             for archive_target in archive_targets:
                 archive_candidates.extend(await discover_historical_urls(archive_target, self.config))
@@ -641,9 +630,7 @@ class CrawlEngine:
         if not is_resume:
             # Fresh crawl: enqueue seeds (record out-of-scope seeds without fetching)
             seed_enqueue = [
-                (url, 0, None, self._priority_score(url, 0))
-                for url in seeds
-                if self.config.should_crawl_url(url)
+                (url, 0, None, self._priority_score(url, 0)) for url in seeds if self.config.should_crawl_url(url)
             ]
             seed_skip = [url for url in seeds if not self.config.should_crawl_url(url)]
             if seed_skip:
@@ -752,9 +739,9 @@ class CrawlEngine:
                             )
                 except Exception as exc:  # noqa: BLE001 - link enqueue is best-effort
                     logger.warning(
-                        "Failed to enqueue %d discovered links (%s) — they will be "
-                        "rediscovered from sibling pages",
-                        len(discovered_to_enqueue), type(exc).__name__,
+                        "Failed to enqueue %d discovered links (%s) — they will be rediscovered from sibling pages",
+                        len(discovered_to_enqueue),
+                        type(exc).__name__,
                     )
             if done_urls:
                 await self.store.frontier_mark_done(done_urls)
@@ -793,9 +780,7 @@ class CrawlEngine:
                         else:
                             path_skipped.append(url)
                     if path_skipped:
-                        await self._record_out_of_scope_urls(
-                            path_skipped, source="link", detail="path_out_of_scope"
-                        )
+                        await self._record_out_of_scope_urls(path_skipped, source="link", detail="path_out_of_scope")
 
                 if not in_flight:
                     # Nothing queued and nothing running — crawl is complete.
@@ -925,11 +910,7 @@ class CrawlEngine:
             return None
         if self.config.obscura_enabled:
             effective_stealth = self.config.obscura_stealth
-            if (
-                effective_stealth is None
-                and self.config.obscura_managed
-                and not self.config.analytics_detection
-            ):
+            if effective_stealth is None and self.config.obscura_managed and not self.config.analytics_detection:
                 effective_stealth = True
             return BrowserRuntime(
                 provider="obscura",

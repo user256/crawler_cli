@@ -154,11 +154,7 @@ def extract_page_data(
         word_count=len(words),
         metadata={
             "meta_names": sorted(
-                {
-                    tag.get("name", "").strip().lower()
-                    for tag in soup.find_all("meta")
-                    if tag.get("name")
-                }
+                {tag.get("name", "").strip().lower() for tag in soup.find_all("meta") if tag.get("name")}
             ),
         },
         schema_data=extract_schema_data(html, base_url, soup=soup),

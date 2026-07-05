@@ -42,8 +42,7 @@ def serialize_extracted_content(extracted: ExtractedContent) -> dict[str, object
         "canonical": extracted.canonical,
         "x_canonical": extracted.x_canonical,
         "hreflang_links": [
-            {"hreflang": link.hreflang, "href": link.href, "source": link.source}
-            for link in extracted.hreflang_links
+            {"hreflang": link.hreflang, "href": link.href, "source": link.source} for link in extracted.hreflang_links
         ],
         "html_lang": extracted.html_lang,
         "headings": extracted.headings,

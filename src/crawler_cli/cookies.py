@@ -88,7 +88,7 @@ def _path_match(request_path: str, cookie_path: str) -> bool:
     if request_path.startswith(cookie_path):
         # Either the cookie-path ends in '/', or the next char in the request
         # path is '/'. Prevents '/foo' matching '/foobar'.
-        return cookie_path.endswith("/") or request_path[len(cookie_path):].startswith("/")
+        return cookie_path.endswith("/") or request_path[len(cookie_path) :].startswith("/")
     return False
 
 
@@ -132,7 +132,7 @@ def _parse_netscape_scoped(text: str) -> list[Cookie]:
             continue
         # #HttpOnly_ prefix marks an httponly cookie but is otherwise a normal row.
         if line.startswith("#HttpOnly_"):
-            line = line[len("#HttpOnly_"):]
+            line = line[len("#HttpOnly_") :]
             httponly = True
         fields = line.split("\t")
         # Netscape format: domain, flag, path, secure, expiry, name, value

@@ -41,19 +41,27 @@ def test_build_cookie_header():
 
 def test_load_json_array_file(tmp_path):
     path = tmp_path / "cookies.json"
-    path.write_text(json.dumps([
-        {"name": "session", "value": "abc", "domain": ".example.com"},
-        {"name": "lang", "value": "en"},
-    ]))
+    path.write_text(
+        json.dumps(
+            [
+                {"name": "session", "value": "abc", "domain": ".example.com"},
+                {"name": "lang", "value": "en"},
+            ]
+        )
+    )
     assert load_cookies_file(path) == {"session": "abc", "lang": "en"}
 
 
 def test_load_storagestate_file(tmp_path):
     path = tmp_path / "state.json"
-    path.write_text(json.dumps({
-        "cookies": [{"name": "sid", "value": "999"}],
-        "origins": [],
-    }))
+    path.write_text(
+        json.dumps(
+            {
+                "cookies": [{"name": "sid", "value": "999"}],
+                "origins": [],
+            }
+        )
+    )
     assert load_cookies_file(path) == {"sid": "999"}
 
 
@@ -148,9 +156,13 @@ def test_load_scoped_netscape_retains_attributes(tmp_path):
 
 def test_load_scoped_json_retains_attributes(tmp_path):
     path = tmp_path / "cookies.json"
-    path.write_text(json.dumps([
-        {"name": "s", "value": "1", "domain": ".example.com", "path": "/", "secure": True, "httpOnly": True},
-    ]))
+    path.write_text(
+        json.dumps(
+            [
+                {"name": "s", "value": "1", "domain": ".example.com", "path": "/", "secure": True, "httpOnly": True},
+            ]
+        )
+    )
     cookies = load_scoped_cookies_file(path)
     assert cookies[0].domain == ".example.com"
     assert cookies[0].secure is True

@@ -131,8 +131,9 @@ class EnsureStartedBackend(PlaywrightBackend):
 class StubCurlStreamResponse:
     """Mimics a curl_cffi streaming Response: aiter_content yields chunks."""
 
-    def __init__(self, chunks: list[bytes], headers: dict[str, str], *, status: int = 200,
-                 chunk_delay: float = 0.0) -> None:
+    def __init__(
+        self, chunks: list[bytes], headers: dict[str, str], *, status: int = 200, chunk_delay: float = 0.0
+    ) -> None:
         self._chunks = chunks
         self.headers = headers
         self.status_code = status
@@ -142,6 +143,7 @@ class StubCurlStreamResponse:
 
     async def aiter_content(self):
         import asyncio
+
         for chunk in self._chunks:
             if self._chunk_delay:
                 await asyncio.sleep(self._chunk_delay)
@@ -178,8 +180,7 @@ async def test_fetch_resilient_retries_gateway_on_failure():
     fail = StubCurlStreamResponse([], {"Content-Type": "text/html"}, status=0)
     ok = StubCurlStreamResponse([b"<html>ok</html>"], {"Content-Type": "text/html"}, status=200)
     backend = CurlCffiBackend(
-        CrawlConfig(backend="curl_cffi", proxy="http://gw:8000",
-                    proxy_mode="gateway", proxy_gateway_max_retries=3)
+        CrawlConfig(backend="curl_cffi", proxy="http://gw:8000", proxy_mode="gateway", proxy_gateway_max_retries=3)
     )
 
     seq = [fail, fail, ok]
@@ -281,9 +282,7 @@ def test_playwright_proxy_setting_from_gateway():
 
 
 def test_playwright_proxy_setting_from_list():
-    backend = PlaywrightBackend(
-        CrawlConfig(backend="playwright", proxies=["http://a.proxy:3128"], proxy_mode="list")
-    )
+    backend = PlaywrightBackend(CrawlConfig(backend="playwright", proxies=["http://a.proxy:3128"], proxy_mode="list"))
     setting = backend._playwright_proxy_setting()
     assert setting["server"] == "http://a.proxy:3128"
 
@@ -304,27 +303,41 @@ async def test_managed_obscura_argv_includes_gateway_proxy(monkeypatch):
     class _Proc:
         returncode = None
         stderr = None
-        def terminate(self): self.returncode = 0
-        async def wait(self): return 0
+
+        def terminate(self):
+            self.returncode = 0
+
+        async def wait(self):
+            return 0
 
     async def _fake_exec(*argv, **kwargs):
         spawned["argv"] = list(argv)
         return _Proc()
 
     class _FakeBrowser:
-        async def close(self): pass
+        async def close(self):
+            pass
 
     class _FakeChromium:
-        async def connect_over_cdp(self, endpoint): return _FakeBrowser()
+        async def connect_over_cdp(self, endpoint):
+            return _FakeBrowser()
 
     class _FakePW:
         chromium = _FakeChromium()
-        async def stop(self): pass
+
+        async def stop(self):
+            pass
 
     monkeypatch.setattr(_asyncio, "create_subprocess_exec", _fake_exec)
     backend = PlaywrightBackend(
-        CrawlConfig(backend="playwright", obscura_enabled=True, obscura_managed=True,
-                    obscura_stealth=True, proxy="http://user:pass@gw:8000", proxy_mode="gateway")
+        CrawlConfig(
+            backend="playwright",
+            obscura_enabled=True,
+            obscura_managed=True,
+            obscura_stealth=True,
+            proxy="http://user:pass@gw:8000",
+            proxy_mode="gateway",
+        )
     )
     backend._playwright = _FakePW()
     await backend._start_managed_obscura()

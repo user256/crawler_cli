@@ -340,9 +340,7 @@ async def test_urls_fetched_since_staleness(store: AsyncpgStore) -> None:
     now = int(time.time())
 
     # Recent cutoff -> the freshly-persisted 200 page is "fresh".
-    fresh = await store.urls_fetched_since(
-        ["https://fresh.example/p", "https://never.example/x"], now - 86400
-    )
+    fresh = await store.urls_fetched_since(["https://fresh.example/p", "https://never.example/x"], now - 86400)
     assert fresh == {"https://fresh.example/p"}
 
     # Cutoff in the future -> nothing counts as fresh.

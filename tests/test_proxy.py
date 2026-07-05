@@ -46,9 +46,7 @@ def test_playwright_proxy_server_only():
 def test_cli_wires_proxy():
     from crawler_cli.__main__ import _build_config, _build_parser
 
-    args = _build_parser().parse_args(
-        ["crawl", "https://x.com", "--proxy", "http://p:8080", "--proxy-auth", "u:p"]
-    )
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--proxy", "http://p:8080", "--proxy-auth", "u:p"])
     config = _build_config(args)
     assert config.proxy == "http://p:8080"
     assert config.proxy_auth == "u:p"

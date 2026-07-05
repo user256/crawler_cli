@@ -12,6 +12,7 @@ from ..models import FetchResponse
 @dataclass(slots=True)
 class CMSDetectionResult:
     """Result of CMS detection."""
+
     cms_name: str | None
     confidence: float
     indicators: list[str]
@@ -42,7 +43,7 @@ class CMSDetector:
                 "scripts": [
                     r"/wp-content/themes/",
                     r"/wp-content/plugins/",
-                ]
+                ],
             },
             "shopify": {
                 "headers": [
@@ -63,7 +64,7 @@ class CMSDetector:
                 "scripts": [
                     r"cdn\.shopify\.com",
                     r"Shopify\.",
-                ]
+                ],
             },
             "drupal": {
                 "headers": [
@@ -84,7 +85,7 @@ class CMSDetector:
                 "scripts": [
                     r"/sites/default/files/",
                     r"Drupal\.settings",
-                ]
+                ],
             },
             "joomla": {
                 "headers": [
@@ -103,7 +104,7 @@ class CMSDetector:
                 "scripts": [
                     r"/media/",
                     r"Joomla\.",
-                ]
+                ],
             },
             "squarespace": {
                 "headers": [
@@ -121,7 +122,7 @@ class CMSDetector:
                 "scripts": [
                     r"squarespace\.com",
                     r"Squarespace\.",
-                ]
+                ],
             },
             "wix": {
                 "headers": [
@@ -140,8 +141,8 @@ class CMSDetector:
                 "scripts": [
                     r"wix\.com",
                     r"Wix\.",
-                ]
-            }
+                ],
+            },
         }
 
     def detect(self, response: FetchResponse) -> CMSDetectionResult:
@@ -162,11 +163,7 @@ class CMSDetector:
         best_cms = max(scores, key=scores.get)
         confidence = min(scores[best_cms] / 10.0, 1.0)  # Normalize to 0-1
 
-        return CMSDetectionResult(
-            cms_name=best_cms,
-            confidence=confidence,
-            indicators=indicators[best_cms]
-        )
+        return CMSDetectionResult(cms_name=best_cms, confidence=confidence, indicators=indicators[best_cms])
 
     def _detect_cms(self, response: FetchResponse, patterns: dict[str, Any]) -> tuple[float, list[str]]:
         """Detect a specific CMS using its patterns."""
@@ -182,7 +179,9 @@ class CMSDetector:
 
         # Check meta tags (in HTML content)
         for meta_name, pattern in patterns.get("meta_tags", []):
-            meta_pattern = rf'<meta[^>]+name=["\']{re.escape(meta_name)}["\'][^>]+content=["\'][^"\']*{pattern}[^"\']*["\']'
+            meta_pattern = (
+                rf'<meta[^>]+name=["\']{re.escape(meta_name)}["\'][^>]+content=["\'][^"\']*{pattern}[^"\']*["\']'
+            )
             if re.search(meta_pattern, response.text, re.IGNORECASE):
                 score += 3.0
                 found_indicators.append(f"Meta {meta_name}: {pattern}")

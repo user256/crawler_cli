@@ -10,6 +10,7 @@ from crawler_cli.config import CrawlConfig
 # _RobotsRules unit tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_check_returns_matched_disallow_rule():
     rules = _RobotsRules("example.com", "User-agent: *\nDisallow: /wp-admin/\n")
@@ -69,6 +70,7 @@ def test_dollar_anchors_end_of_path():
 # Longest-match precedence (RFC 9309 §2.2.2)
 # ---------------------------------------------------------------------------
 
+
 def test_longest_match_wins_over_order():
     """A more-specific (longer) rule wins even if it appears earlier in the file."""
     content = "User-agent: *\nDisallow: /\nAllow: /public/\n"
@@ -97,6 +99,7 @@ def test_disallow_longer_beats_allow_shorter():
 # ---------------------------------------------------------------------------
 # Case-insensitive user-agent matching
 # ---------------------------------------------------------------------------
+
 
 def test_ua_exact_case_insensitive():
     content = "User-agent: MyCrawler\nDisallow: /secret/\nUser-agent: *\nDisallow:\n"
@@ -131,6 +134,7 @@ def test_ua_falls_back_to_wildcard_when_no_group_matches():
 # Scheme in source_url
 # ---------------------------------------------------------------------------
 
+
 def test_source_url_uses_provided_scheme():
     rules = _RobotsRules("localhost", "", scheme="http")
     assert rules.source_url == "http://localhost/robots.txt"
@@ -145,6 +149,7 @@ def test_source_url_defaults_to_https():
 # Empty Disallow = allow-all (RFC 9309 §2.2.3)
 # ---------------------------------------------------------------------------
 
+
 def test_empty_disallow_is_allow_all():
     content = "User-agent: *\nDisallow:\n"
     rules = _RobotsRules("example.com", content)
@@ -155,8 +160,10 @@ def test_empty_disallow_is_allow_all():
 # RobotsPolicyCache fetch-and-parse: 4xx → allow-all, 5xx → disallow/failed
 # ---------------------------------------------------------------------------
 
+
 class _FakeSession:
     """Minimal aiohttp.ClientSession stand-in."""
+
     def __init__(self, status: int, body: str = "") -> None:
         self._status = status
         self._body = body
@@ -227,6 +234,7 @@ async def test_network_error_marks_failed(monkeypatch):
 # ---------------------------------------------------------------------------
 # Scheme-correct robots fetch URL
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_robots_fetched_with_correct_scheme(monkeypatch):

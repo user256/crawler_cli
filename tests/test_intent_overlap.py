@@ -43,6 +43,7 @@ def _rec(url, vec, *, group=None, code=None, wc=100, conf="high"):
 # Numeric core
 # --------------------------------------------------------------------------
 
+
 def test_similarity_pairs_matches_bruteforce():
     rng = np.random.RandomState(0)
     vecs = rng.randn(30, 8).astype(np.float32)
@@ -51,12 +52,7 @@ def test_similarity_pairs_matches_bruteforce():
     got = {(i, j): s for i, j, s in similarity_pairs(vecs, threshold, block=7)}
     # Brute force upper triangle, same threshold.
     full = vecs @ vecs.T
-    expected = {
-        (i, j): float(full[i, j])
-        for i in range(30)
-        for j in range(i + 1, 30)
-        if full[i, j] >= threshold
-    }
+    expected = {(i, j): float(full[i, j]) for i in range(30) for j in range(i + 1, 30) if full[i, j] >= threshold}
     assert set(got) == set(expected)
     for key, sim in expected.items():
         assert math.isclose(got[key], sim, abs_tol=1e-5)
@@ -65,6 +61,7 @@ def test_similarity_pairs_matches_bruteforce():
 # --------------------------------------------------------------------------
 # Pairing + suppression
 # --------------------------------------------------------------------------
+
 
 def test_two_near_identical_pages_flagged_duplicate():
     recs = [
@@ -133,6 +130,7 @@ def test_language_split_auto_disabled_when_few_codes():
 # Clustering + chained flag
 # --------------------------------------------------------------------------
 
+
 def test_single_linkage_clusters_and_singletons_excluded():
     recs = [
         _rec("https://a.com/1", [1.0, 0.0, 0.0]),
@@ -180,6 +178,7 @@ def test_pick_canonical_prefers_word_count_then_shortest_url():
 # Exclusion reasons
 # --------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "row,expected",
     [
@@ -202,6 +201,7 @@ def test_compute_exclusion(row, expected):
 # CSV contracts
 # --------------------------------------------------------------------------
 
+
 def test_write_reports_produces_six_csvs_and_manifest(tmp_path):
     recs = [
         _rec("https://a.com/1", [1.0, 0.0]),
@@ -218,8 +218,12 @@ def test_write_reports_produces_six_csvs_and_manifest(tmp_path):
     )
     names = {p.split("/")[-1] for p in written}
     assert names == {
-        "pages.csv", "overlap_pairs.csv", "clusters.csv",
-        "hreflang_issues.csv", "url_variants.csv", "similarity_distribution.csv",
+        "pages.csv",
+        "overlap_pairs.csv",
+        "clusters.csv",
+        "hreflang_issues.csv",
+        "url_variants.csv",
+        "similarity_distribution.csv",
         "run_manifest.json",
     }
     # overlap_pairs column contract.
@@ -236,6 +240,7 @@ def test_write_reports_produces_six_csvs_and_manifest(tmp_path):
 # --------------------------------------------------------------------------
 # Orchestrator + --fail-on against a fake store
 # --------------------------------------------------------------------------
+
 
 class FakeAnalysisStore:
     def __init__(self, rows):

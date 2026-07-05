@@ -104,9 +104,7 @@ def find_obscura_binary(explicit: str | None = None) -> str | None:
         return on_path
 
     # Sibling source checkout next to the crawler_cli repo.
-    sibling = (
-        Path(__file__).resolve().parents[2].parent / "obscura" / "target" / "release" / name
-    )
+    sibling = Path(__file__).resolve().parents[2].parent / "obscura" / "target" / "release" / name
     if sibling.is_file():
         return str(sibling)
 
@@ -162,8 +160,7 @@ def install_obscura(
 
     if not binary.is_file():
         raise RuntimeError(
-            f"Install completed but {binary} is missing — the release asset "
-            f"layout for {asset_file} may have changed."
+            f"Install completed but {binary} is missing — the release asset layout for {asset_file} may have changed."
         )
 
     # Ensure the binaries are executable (tarball usually preserves this; be safe).

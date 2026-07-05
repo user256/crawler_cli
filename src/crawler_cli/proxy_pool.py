@@ -65,9 +65,7 @@ class ProxyPool:
         if self.mode not in {"list", "gateway"}:
             raise ValueError(f"Unknown proxy mode: {self.mode}")
         if self.mode == "gateway" and len(self._states) != 1:
-            raise ValueError(
-                f"gateway mode requires exactly one endpoint, got {len(self._states)}"
-            )
+            raise ValueError(f"gateway mode requires exactly one endpoint, got {len(self._states)}")
         if self.rotation not in {"round-robin", "per-host"}:
             raise ValueError(f"Unknown proxy rotation strategy: {self.rotation}")
 
@@ -153,11 +151,11 @@ class ProxyPool:
                     state.cooled_until = time.monotonic() + self.cooldown_seconds
                     logger.warning(
                         "Proxy %s evicted for %.0fs after %d consecutive failures",
-                        proxy_url, self.cooldown_seconds, state.consecutive_failures,
+                        proxy_url,
+                        self.cooldown_seconds,
+                        state.consecutive_failures,
                     )
                     state.consecutive_failures = 0
                     # Drop any host stickiness to this proxy so traffic moves on.
-                    self._host_assignments = {
-                        h: p for h, p in self._host_assignments.items() if p != proxy_url
-                    }
+                    self._host_assignments = {h: p for h, p in self._host_assignments.items() if p != proxy_url}
                 return

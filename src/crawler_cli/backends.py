@@ -467,9 +467,14 @@ def _browser_like_descendants(root_pid: int) -> set[int]:
     matches: set[int] = set()
     for pid in _linux_descendant_pids(root_pid):
         try:
-            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode(
-                "utf-8",
-                errors="ignore",
+            cmdline = (
+                Path(f"/proc/{pid}/cmdline")
+                .read_bytes()
+                .replace(b"\x00", b" ")
+                .decode(
+                    "utf-8",
+                    errors="ignore",
+                )
             )
         except OSError:
             continue
@@ -522,8 +527,7 @@ class PlaywrightBackend(FetchBackend):
                 return None
             parsed = urlparse(selected)
             setting: dict[str, str] = {
-                "server": f"{parsed.scheme}://{parsed.hostname}"
-                + (f":{parsed.port}" if parsed.port else "")
+                "server": f"{parsed.scheme}://{parsed.hostname}" + (f":{parsed.port}" if parsed.port else "")
             }
             if parsed.username:
                 setting["username"] = parsed.username
@@ -543,9 +547,7 @@ class PlaywrightBackend(FetchBackend):
         if self.config.playwright_executable_path:
             launch_kwargs["executable_path"] = self.config.playwright_executable_path
         if self.config.playwright_profile_directory:
-            launch_kwargs["args"] = [
-                f"--profile-directory={self.config.playwright_profile_directory}"
-            ]
+            launch_kwargs["args"] = [f"--profile-directory={self.config.playwright_profile_directory}"]
         return launch_kwargs
 
     def _context_kwargs(self) -> dict[str, object]:
@@ -721,14 +723,9 @@ class PlaywrightBackend(FetchBackend):
             except Exception as exc:
                 last_err = str(exc)
                 # Collect any stderr for diagnostics
-                if (
-                    self._managed_obscura_proc.stderr is not None
-                    and self._managed_obscura_proc.returncode is None
-                ):
+                if self._managed_obscura_proc.stderr is not None and self._managed_obscura_proc.returncode is None:
                     with contextlib.suppress(Exception):
-                        data = await asyncio.wait_for(
-                            self._managed_obscura_proc.stderr.read(4096), timeout=0.2
-                        )
+                        data = await asyncio.wait_for(self._managed_obscura_proc.stderr.read(4096), timeout=0.2)
                         if data:
                             self._obscura_stderr.append(data.decode("utf-8", errors="replace"))
                 await asyncio.sleep(0.3)
@@ -774,16 +771,12 @@ class PlaywrightBackend(FetchBackend):
             if self.config.obscura_enabled:
                 if self.config.obscura_managed:
                     await self._start_managed_obscura()
-                self._browser = await self._playwright.chromium.connect_over_cdp(
-                    self._obscura_cdp_endpoint()
-                )
+                self._browser = await self._playwright.chromium.connect_over_cdp(self._obscura_cdp_endpoint())
                 self._cdp_connected = True
                 self._persistent_context = False
                 self._tracked_browser_pids = set()
             elif self.config.playwright_cdp_endpoint:
-                self._browser = await self._playwright.chromium.connect_over_cdp(
-                    self.config.playwright_cdp_endpoint
-                )
+                self._browser = await self._playwright.chromium.connect_over_cdp(self.config.playwright_cdp_endpoint)
                 self._cdp_connected = True
                 self._persistent_context = False
                 self._tracked_browser_pids = set()
@@ -796,9 +789,7 @@ class PlaywrightBackend(FetchBackend):
                 self._cdp_connected = False
                 self._persistent_context = True
                 self._owns_context = True
-                self._tracked_browser_pids = (
-                    _browser_like_descendants(os.getpid()) - self._baseline_browser_pids
-                )
+                self._tracked_browser_pids = _browser_like_descendants(os.getpid()) - self._baseline_browser_pids
                 await self._initialize_context_locked()
             else:
                 launch_kwargs: dict[str, object] = {"headless": self.config.playwright_headless}
@@ -842,8 +833,7 @@ class PlaywrightBackend(FetchBackend):
             self._context_request_count += 1
             if (
                 not self._persistent_context
-                and
-                self.config.max_requests_per_context > 0
+                and self.config.max_requests_per_context > 0
                 and self._context_request_count >= self.config.max_requests_per_context
             ):
                 self._context_recycle_requested = True
@@ -978,9 +968,7 @@ class PlaywrightBackend(FetchBackend):
 
 # Eval expression run on the rendered page to return the final URL and full
 # serialized DOM in one JSON payload, so a single `obscura fetch` yields both.
-_OBSCURA_FETCH_EVAL = (
-    "JSON.stringify({u:location.href,h:document.documentElement.outerHTML})"
-)
+_OBSCURA_FETCH_EVAL = "JSON.stringify({u:location.href,h:document.documentElement.outerHTML})"
 # URL suffixes / markers that should be fetched as the raw HTTP body (sitemaps,
 # feeds, plain text) rather than a rendered DOM. `obscura fetch --dump original`
 # streams the verbatim response body, which is what the sitemap parser expects.
@@ -1064,9 +1052,11 @@ class ObscuraFetchBackend(FetchBackend):
         if raw:
             body = stdout[:cap]
             final_url = url
-            content_type = "application/xml" if url.lower().rstrip("/").endswith(
-                (".xml", ".gz", ".rss", ".atom")
-            ) else "text/plain"
+            content_type = (
+                "application/xml"
+                if url.lower().rstrip("/").endswith((".xml", ".gz", ".rss", ".atom"))
+                else "text/plain"
+            )
             text = _decode_body(body, content_type)
         else:
             try:
@@ -1077,7 +1067,7 @@ class ObscuraFetchBackend(FetchBackend):
                 # Fall back to treating stdout as raw HTML if eval JSON parsing fails.
                 html = stdout.decode("utf-8", "replace")
                 final_url = url
-            text = html[: cap]
+            text = html[:cap]
             body = text.encode("utf-8")
             content_type = "text/html; charset=utf-8"
 

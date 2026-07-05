@@ -35,11 +35,11 @@ def test_extract_links_same_host_only_drops_external():
 
 def test_extract_links_allowed_hosts_admits_extra_host():
     html = (
-        '<html><body>'
+        "<html><body>"
         '<a href="https://blog.example.com/post">blog</a>'
         '<a href="https://external.com/nope">nope</a>'
         '<a href="/local">local</a>'
-        '</body></html>'
+        "</body></html>"
     )
     links = extract_links(
         html,
@@ -54,12 +54,7 @@ def test_extract_links_allowed_hosts_admits_extra_host():
 
 
 def test_extract_links_no_host_filter_returns_all():
-    html = (
-        '<html><body>'
-        '<a href="https://a.com/">a</a>'
-        '<a href="https://b.com/">b</a>'
-        '</body></html>'
-    )
+    html = '<html><body><a href="https://a.com/">a</a><a href="https://b.com/">b</a></body></html>'
     links = extract_links(html, "https://a.com/", same_host_only=False)
     hrefs = {lnk.href for lnk in links}
     assert "https://a.com/" in hrefs

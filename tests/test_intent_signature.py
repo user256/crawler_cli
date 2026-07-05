@@ -25,6 +25,7 @@ from crawler_cli.intent_signature import (
 # Boilerplate detection
 # --------------------------------------------------------------------------
 
+
 def test_boilerplate_share_threshold_strictly_greater():
     # Suffix "Acme" appears on 2/4 = 0.50 (> 0.30) -> stripped.
     titles = {
@@ -60,6 +61,7 @@ def test_strip_boilerplate_prefix_and_suffix():
 # --------------------------------------------------------------------------
 # intent_text / signature composition
 # --------------------------------------------------------------------------
+
 
 def test_intent_text_field_order_and_body_cap():
     row = {
@@ -100,6 +102,7 @@ def test_signature_text_derives_site_from_url():
 # Hash contract: one definition, stable, changes with any field
 # --------------------------------------------------------------------------
 
+
 def _row(**over):
     base = {
         "url": "https://acme.com/p",
@@ -133,6 +136,7 @@ def test_signature_hash_matches_manual_sha256():
 # Extraction + confidence
 # --------------------------------------------------------------------------
 
+
 def test_extract_main_text_fallback_or_trafilatura():
     html = "<html><body><article><p>" + ("Real content here. " * 40) + "</p></article></body></html>"
     text, method = extract_main_text(html)
@@ -165,6 +169,7 @@ def test_resolve_signal_confidence():
 # --------------------------------------------------------------------------
 # Zero-re-embed proof against a fake store (no DB, CI-safe)
 # --------------------------------------------------------------------------
+
 
 class FakeSignatureStore:
     """In-memory stand-in exercising the backfill contract without Postgres."""

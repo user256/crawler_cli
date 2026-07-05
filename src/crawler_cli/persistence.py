@@ -945,7 +945,9 @@ class AsyncpgStore:
         )
         return {str(r["url"]): int(r["id"]) for r in rows}
 
-    async def _bulk_get_or_create_lookups(self, conn: asyncpg.Connection, table: str, column: str, values: list[str]) -> dict[str, int]:
+    async def _bulk_get_or_create_lookups(
+        self, conn: asyncpg.Connection, table: str, column: str, values: list[str]
+    ) -> dict[str, int]:
         if not values:
             return {}
         unique_values = list(set(values))
@@ -1042,11 +1044,7 @@ class AsyncpgStore:
                     child_ids,
                 )
                 existing_ids = {int(row["url_id"]) for row in existing_rows}
-                filtered = [
-                    item
-                    for item in frontier_data
-                    if url_to_id[item[0]] not in existing_ids
-                ]
+                filtered = [item for item in frontier_data if url_to_id[item[0]] not in existing_ids]
                 if not filtered:
                     return 0
 
@@ -1086,10 +1084,7 @@ class AsyncpgStore:
                     batch_data,
                 )
                 if source:
-                    source_batch = [
-                        (url_to_id[item[0]], source, source_detail)
-                        for item in filtered
-                    ]
+                    source_batch = [(url_to_id[item[0]], source, source_detail) for item in filtered]
                     await conn.executemany(
                         """
                         INSERT INTO url_sources (url_id, source, detail)
@@ -1290,11 +1285,7 @@ class AsyncpgStore:
         async with self.pool.acquire() as conn:
             urls = [u for u, _ in url_detail_pairs]
             url_id_map = await self._bulk_get_or_create_urls(conn, urls)
-            rows = [
-                (url_id_map[url], source, detail)
-                for url, detail in url_detail_pairs
-                if url in url_id_map
-            ]
+            rows = [(url_id_map[url], source, detail) for url, detail in url_detail_pairs if url in url_id_map]
             # Sort by url_id so concurrent inserts lock url_sources rows in a
             # consistent order (deadlock avoidance).
             rows.sort(key=lambda r: r[0])
@@ -1484,9 +1475,7 @@ class AsyncpgStore:
                         prelock_urls.append(result.extracted.canonical)
                     if result.extracted.x_canonical:
                         prelock_urls.append(result.extracted.x_canonical)
-                    prelock_urls.extend(
-                        link.href for link in result.extracted.hreflang_links if link.href
-                    )
+                    prelock_urls.extend(link.href for link in result.extracted.hreflang_links if link.href)
                 await self._bulk_get_or_create_urls(conn, prelock_urls)
 
                 requested_url_id = await self._get_or_create_url(conn, result.requested_url)
@@ -2075,10 +2064,7 @@ class AsyncpgStore:
                     WHERE p.html_compressed IS NOT NULL
                     """
                 )
-        return [
-            (int(row["url_id"]), str(row["url"]), decompress_html(bytes(row["html_compressed"])))
-            for row in rows
-        ]
+        return [(int(row["url_id"]), str(row["url"]), decompress_html(bytes(row["html_compressed"]))) for row in rows]
 
     async def embedding_url_ids(self, *, model: str) -> set[int]:
         await self.connect()
@@ -2457,9 +2443,7 @@ class AsyncpgStore:
             groups = await conn.fetchval(
                 "SELECT COUNT(DISTINCT hreflang_group) FROM urls WHERE hreflang_group IS NOT NULL"
             )
-            grouped_urls = await conn.fetchval(
-                "SELECT COUNT(*) FROM urls WHERE hreflang_group IS NOT NULL"
-            )
+            grouped_urls = await conn.fetchval("SELECT COUNT(*) FROM urls WHERE hreflang_group IS NOT NULL")
         return {"groups": int(groups or 0), "grouped_urls": int(grouped_urls or 0)}
 
     async def persist_comparison_session(
@@ -2567,18 +2551,14 @@ class AsyncpgStore:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
-            value = await conn.fetchval(
-                "SELECT COALESCE(pg_total_relation_size('pages'::regclass), 0)"
-            )
+            value = await conn.fetchval("SELECT COALESCE(pg_total_relation_size('pages'::regclass), 0)")
         return int(value or 0)
 
     async def html_storage_stats(self) -> dict[str, int]:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
-            total = await conn.fetchval(
-                "SELECT COUNT(*) FROM pages WHERE html_compressed IS NOT NULL"
-            )
+            total = await conn.fetchval("SELECT COUNT(*) FROM pages WHERE html_compressed IS NOT NULL")
             legacy = await conn.fetchval(
                 """
                 SELECT COUNT(*) FROM pages
@@ -2754,9 +2734,7 @@ class AsyncpgStore:
         assert self.pool is not None
         bytes_before = await self.pages_relation_bytes()
         async with self.pool.acquire() as conn:
-            with_html = await conn.fetchval(
-                "SELECT COUNT(*) FROM pages WHERE html_compressed IS NOT NULL"
-            )
+            with_html = await conn.fetchval("SELECT COUNT(*) FROM pages WHERE html_compressed IS NOT NULL")
             if dry_run:
                 bytes_after = bytes_before
             else:
@@ -2769,9 +2747,7 @@ class AsyncpgStore:
                         """
                     )
                 else:
-                    await conn.execute(
-                        "UPDATE pages SET html_compressed = NULL WHERE html_compressed IS NOT NULL"
-                    )
+                    await conn.execute("UPDATE pages SET html_compressed = NULL WHERE html_compressed IS NOT NULL")
                 if vacuum:
                     await conn.execute("VACUUM ANALYZE pages")
                 bytes_after = await self.pages_relation_bytes()

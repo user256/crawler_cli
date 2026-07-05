@@ -1,4 +1,3 @@
-
 from crawler_cli.auth import AuthConfig
 from crawler_cli.backends import _request_headers
 from crawler_cli.config import CrawlConfig

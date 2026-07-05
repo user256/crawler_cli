@@ -12,8 +12,12 @@ def test_round_robin_cycles_through_proxies():
     pool = ProxyPool(["http://a:1", "http://b:1", "http://c:1"], rotation="round-robin")
     picks = [pool.select("https://x.test/") for _ in range(6)]
     assert picks == [
-        "http://a:1", "http://b:1", "http://c:1",
-        "http://a:1", "http://b:1", "http://c:1",
+        "http://a:1",
+        "http://b:1",
+        "http://c:1",
+        "http://a:1",
+        "http://b:1",
+        "http://c:1",
     ]
 
 
@@ -83,6 +87,7 @@ def test_unknown_rotation_raises():
 
 # --- ticket 072: gateway mode ---
 
+
 def test_gateway_always_returns_endpoint():
     pool = ProxyPool(["http://gw:8000"], mode="gateway")
     assert pool.is_gateway is True
@@ -129,9 +134,7 @@ def test_build_proxy_pool_list_mode():
 def test_cli_defaults_to_gateway_for_single_proxy():
     from crawler_cli.__main__ import _build_config, _build_parser
 
-    args = _build_parser().parse_args(
-        ["crawl", "https://x.com", "--proxy", "http://user:pass@gw:8000"]
-    )
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--proxy", "http://user:pass@gw:8000"])
     config = _build_config(args)
     assert config.proxy_mode == "gateway"
 
@@ -139,9 +142,7 @@ def test_cli_defaults_to_gateway_for_single_proxy():
 def test_cli_explicit_proxy_mode_list_with_single_proxy():
     from crawler_cli.__main__ import _build_config, _build_parser
 
-    args = _build_parser().parse_args(
-        ["crawl", "https://x.com", "--proxy", "http://gw:8000", "--proxy-mode", "list"]
-    )
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--proxy", "http://gw:8000", "--proxy-mode", "list"])
     config = _build_config(args)
     assert config.proxy_mode == "list"
 
@@ -153,11 +154,16 @@ def test_cli_wires_proxy_pool(tmp_path):
     proxy_file.write_text("# pool\nhttp://a:1\nhttp://b:1\n\n")
     args = _build_parser().parse_args(
         [
-            "crawl", "https://x.com",
-            "--proxy-file", str(proxy_file),
-            "--proxy-rotation", "per-host",
-            "--proxy-max-failures", "5",
-            "--proxy-cooldown", "30",
+            "crawl",
+            "https://x.com",
+            "--proxy-file",
+            str(proxy_file),
+            "--proxy-rotation",
+            "per-host",
+            "--proxy-max-failures",
+            "5",
+            "--proxy-cooldown",
+            "30",
         ]
     )
     config = _build_config(args)

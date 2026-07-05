@@ -51,9 +51,7 @@ def detect_challenge(
     if any(m in lowered for m in cf_strong):
         return "cloudflare"
     # Weaker marker needs corroboration (a vendor string or a challenge status).
-    if "cf-challenge" in lowered and (
-        "cloudflare" in lowered or status in (403, 503, 429)
-    ):
+    if "cf-challenge" in lowered and ("cloudflare" in lowered or status in (403, 503, 429)):
         return "cloudflare"
 
     # --- Datadome ---
