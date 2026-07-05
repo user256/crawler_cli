@@ -621,6 +621,100 @@ def test_run_compare_accepts_open_crawl_jsonl_and_preserves_deep_diff_fields():
         assert rows[0]["links_removed"][0]["href"] == "https://example.com/a"
 
 
+def test_load_saved_crawl_returns_typed_crawl_job_result():
+    """Regression for the ruff F821 fix (ticket 083): ``_load_saved_crawl``'s
+    return annotation references ``CrawlJobResult``, which is imported only under
+    ``TYPE_CHECKING`` at module scope.  This drives the deserializer end to end so
+    the previously-undefined-name path is exercised, and checks the TypedDict
+    deserializers round-trip the field types (int simhash, literal provider/source)
+    that used to be silenced by ``# type: ignore[arg-type]``."""
+    from crawler_cli.__main__ import _load_saved_crawl
+    from crawler_cli.models import BrowserRuntime as _BR
+    from crawler_cli.models import CrawlJobResult
+
+    import json
+    import tempfile
+    from pathlib import Path
+
+    artifact = {
+        "mode": "list",
+        "seed_urls": ["https://example.com/"],
+        "results": [
+            {
+                "requested_url": "https://example.com",
+                "final_url": "https://example.com",
+                "status": 200,
+                "headers": {"content-type": "text/html"},
+                "fetch_backend": "playwright",
+                "content_hash_simhash": 12345,
+                "browser_runtime": {"provider": "obscura", "managed": True},
+                "extracted": {
+                    "title": "T",
+                    "hreflang_links": [{"hreflang": "en", "href": "https://example.com", "source": "html_head"}],
+                    "text": "body",
+                    "word_count": 2,
+                },
+            }
+        ],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "crawl.json"
+        path.write_text(json.dumps(artifact), encoding="utf-8")
+        job = _load_saved_crawl(path)
+
+    assert isinstance(job, CrawlJobResult)
+    assert job.mode == "list"
+    result = job.results[0]
+    # simhash stays an int, not a stringified value
+    assert result.content_hash_simhash == 12345
+    assert isinstance(result.content_hash_simhash, int)
+    assert isinstance(result.browser_runtime, _BR)
+    assert result.browser_runtime.provider == "obscura"
+    assert result.extracted is not None
+    assert result.extracted.hreflang_links[0].source == "html_head"
+
+
+def test_load_saved_crawl_reads_open_jsonl_format():
+    """The JSONL (crawl_open) branch of ``_load_saved_crawl`` also returns a
+    ``CrawlJobResult`` (ticket 083 deserializer + F821 coverage)."""
+    from crawler_cli.__main__ import _load_saved_crawl
+    from crawler_cli.models import CrawlJobResult
+
+    import json
+    import tempfile
+    from pathlib import Path
+
+    lines = [
+        {
+            "requested_url": "https://example.com/p",
+            "final_url": "https://example.com/p",
+            "status": 200,
+            "headers": {},
+            "fetch_backend": "aiohttp",
+        },
+        {
+            "__type": "summary",
+            "mode": "open",
+            "seed_urls": ["https://example.com/"],
+            "retry_attempts": 3,
+            "interrupted": True,
+            "saved_to": "crawl.jsonl",
+        },
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "crawl.jsonl"
+        path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+        job = _load_saved_crawl(path)
+
+    assert isinstance(job, CrawlJobResult)
+    assert job.mode == "open"
+    assert job.retry_attempts == 3
+    assert job.interrupted is True
+    assert job.results[0].requested_url == "https://example.com/p"
+
+
 # ---------------------------------------------------------------------------
 # Obscura binary discovery + installer (obscura_install.py)
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ import asyncpg
 import json
 import time
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 from urllib.parse import urlparse
 
 from .compression import compress_html, decompress_html, is_compressed
@@ -13,6 +13,85 @@ from .detection.analytics import AnalyticsDetectionResult
 from .hashing import sha256_hash, simhash64, simhash_to_signed, simhash_to_unsigned
 from .models import CrawlResult, DiscoveredLink
 from .schema import create_schema_content_hash, identify_schema_relationships
+
+
+# --- Query-row schemas (ticket 083) -----------------------------------------
+# TypedDicts for the rows the intent-overlap query helpers return/consume,
+# keyed by the actual SELECT column aliases.  These replace the
+# ``list[dict[str, Any]]`` returns so mypy checks the column names/types again
+# (persistence.py is deliberately outside the mypy ignore blanket — ticket 070).
+# Nullability follows the schema and the LEFT JOINs: a column reached through a
+# LEFT JOIN can be NULL even when its table declares it NOT NULL.
+
+
+class SignatureEmbeddingRow(TypedDict):
+    url_id: int
+    url: str
+    text: str | None
+    signature_hash: str | None
+    embedded_hash: str | None
+    embedded_model: str | None
+
+
+class SignaturePageRow(TypedDict):
+    url_id: int
+    url: str
+    html: str
+    title: str | None
+    h1: str | None
+    meta_description: str | None
+
+
+class IntentSignatureRow(TypedDict):
+    url_id: int
+    main_text: str | None
+    extraction_method: str | None
+    signal_confidence: str | None
+    signature_hash: str | None
+    signature_model_input: str | None
+
+
+class IdentityPageRow(TypedDict):
+    url_id: int
+    url: str
+    html_lang: str | None
+    status: int | None
+    word_count: int | None
+    final_url: str | None
+
+
+class HreflangIdentityRow(TypedDict):
+    url_id: int
+    norm_url: str | None
+    hreflang_group: str | None
+    resolved_hreflang_code: str | None
+    lang_bucket: str | None
+
+
+class UrlVariantRow(TypedDict):
+    url: str
+    norm_url: str
+    representative: str | None
+
+
+class AnalysisRow(TypedDict):
+    url_id: int
+    url: str
+    kind: str | None
+    norm_url: str | None
+    hreflang_group: str | None
+    hreflang_code: str | None
+    variant_of: str | None
+    status: int | None
+    title: str | None
+    h1: str | None
+    word_count: int | None
+    overall_indexable: bool | None
+    signal_confidence: str | None
+    extraction_method: str | None
+    embedding: list[float] | None
+    embedding_model: str | None
+    canonical_url: str | None
 
 
 SCHEMA_STATEMENTS = [
@@ -1785,6 +1864,12 @@ class AsyncpgStore:
 
     @staticmethod
     def _parse_schema_position(position: object) -> int:
+        # ``position`` arrives as a schema-item "position" value pulled from a
+        # ``dict[str, object]`` (int index, "<n>-<m>" @graph string, or absent),
+        # so its concrete static type at the call site is ``object`` — not an Any
+        # widening.  The isinstance ladder narrows it defensively; keeping the
+        # param ``object`` (rather than ``int | str | None``) is what lets the
+        # ``dict[str, object]`` caller pass through without a cast (ticket 083).
         if position is None:
             return 0
         if isinstance(position, int):
@@ -2113,7 +2198,7 @@ class AsyncpgStore:
         self,
         *,
         urls: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[SignatureEmbeddingRow]:
         """Return intent-signature rows joined with any existing embedding, for
         hash-gated signature embedding (ticket 077).
 
@@ -2162,7 +2247,7 @@ class AsyncpgStore:
         self,
         *,
         urls: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[SignaturePageRow]:
         """Return stored HTML pages joined with title/h1/meta for signature
         computation (ticket 076)."""
         await self.connect()
@@ -2203,7 +2288,7 @@ class AsyncpgStore:
             )
         return {int(row["url_id"]): str(row["signature_hash"]) for row in rows}
 
-    async def store_intent_signatures_bulk(self, rows: list[dict[str, Any]]) -> None:
+    async def store_intent_signatures_bulk(self, rows: list[IntentSignatureRow]) -> None:
         """Upsert intent-signature rows (ticket 076).
 
         Each row carries ``url_id``, ``main_text`` (compressed on write),
@@ -2266,7 +2351,7 @@ class AsyncpgStore:
             )
         return [(str(r["url"]), str(r["alt_url"]), r["code"]) for r in rows]
 
-    async def fetch_pages_for_identity(self) -> list[dict[str, Any]]:
+    async def fetch_pages_for_identity(self) -> list[IdentityPageRow]:
         """Fetched pages with the fields needed for language + variant
         resolution (ticket 078)."""
         await self.connect()
@@ -2298,7 +2383,7 @@ class AsyncpgStore:
             for r in rows
         ]
 
-    async def store_hreflang_identity(self, rows: list[dict[str, Any]]) -> None:
+    async def store_hreflang_identity(self, rows: list[HreflangIdentityRow]) -> None:
         """Bulk-update urls with norm_url / hreflang_group / resolved code /
         lang_bucket (ticket 078)."""
         if not rows:
@@ -2342,7 +2427,7 @@ class AsyncpgStore:
                         variant_pairs,
                     )
 
-    async def fetch_url_variant_rows(self) -> list[dict[str, Any]]:
+    async def fetch_url_variant_rows(self) -> list[UrlVariantRow]:
         """Variant groups (norm_url, representative, variants) for reporting
         (ticket 078; CSV written by ticket 079)."""
         await self.connect()
@@ -2370,7 +2455,7 @@ class AsyncpgStore:
             for r in rows
         ]
 
-    async def fetch_analysis_rows(self) -> list[dict[str, Any]]:
+    async def fetch_analysis_rows(self) -> list[AnalysisRow]:
         """Load every fetched page with the fields the intent-overlap analysis
         needs, including its embedding vector (ticket 079)."""
         await self.connect()
@@ -2406,7 +2491,7 @@ class AsyncpgStore:
                 LEFT JOIN urls canu ON canu.id = can.canonical_url_id
                 """
             )
-        out: list[dict[str, Any]] = []
+        out: list[AnalysisRow] = []
         for r in rows:
             embedding = None
             raw = r["embedding_json"]

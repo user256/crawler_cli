@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse
 
+from .persistence import AsyncpgStore, HreflangIdentityRow
+
 # Tracking query keys stripped during normalisation so ?gclid=… variants fold
 # to one representative (intent_overlap.py:209, IO ticket 108).
 TRACKING_QUERY_KEYS = frozenset({"gclid", "fbclid", "msclkid", "mc_cid", "mc_eid", "dclid", "gbraid", "wbraid"})
@@ -218,7 +220,7 @@ class IdentityResult:
     reciprocity_issues: int = 0
 
 
-async def build_and_store_identity(store: Any) -> IdentityResult:
+async def build_and_store_identity(store: AsyncpgStore) -> IdentityResult:
     """Build hreflang groups, resolve languages, and fold URL variants over a
     crawl, persisting the results (ticket 078).  Reads only crawler-captured
     data; no external input.
@@ -232,7 +234,7 @@ async def build_and_store_identity(store: Any) -> IdentityResult:
     result.reciprocity_issues = len(reciprocity_issues(edges))
 
     # Per-page identity: norm_url, group, resolved language + bucket.
-    identity_rows: list[dict[str, Any]] = []
+    identity_rows: list[HreflangIdentityRow] = []
     variant_input: list[dict[str, Any]] = []
     url_to_id: dict[str, int] = {}
     for page in pages:

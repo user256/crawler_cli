@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
+from .persistence import AsyncpgStore, IntentSignatureRow
+
 # Title separator characters, in priority order, used to split site-level
 # boilerplate prefixes/suffixes off a title (intent_overlap.py:886).
 _TITLE_SPLITS = (" | ", " – ", " — ", " - ", "|", "–", "—")
@@ -228,7 +230,7 @@ class SignatureBackfillResult:
 
 
 async def backfill_intent_signatures(
-    store: Any,
+    store: AsyncpgStore,
     *,
     urls: list[str] | None = None,
     boilerplate_share: float = DEFAULT_BOILERPLATE_SHARE,
@@ -275,7 +277,7 @@ async def backfill_intent_signatures(
     existing = await store.existing_signature_hashes()
 
     result = SignatureBackfillResult()
-    to_write: list[dict[str, Any]] = []
+    to_write: list[IntentSignatureRow] = []
     for row in extracted:
         result.processed += 1
         result.by_method[row["extraction_method"]] = result.by_method.get(row["extraction_method"], 0) + 1

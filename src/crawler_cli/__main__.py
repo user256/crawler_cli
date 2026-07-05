@@ -7,20 +7,21 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, Required, TypedDict, cast
 from urllib.parse import quote as _urlquote
 
 if TYPE_CHECKING:
     from .models import CrawlJobResult
 
 from .archive import audit_archive_urls
-from .auth import AuthConfig
+from .auth import AuthConfig, AuthType
 from .comparison import compare_deep, comparison_rows
 from .config import (
     CB_ENABLED_DEFAULT,
     CB_RECOVERY_SECONDS_DEFAULT,
     CB_THRESHOLD_DEFAULT,
     MAX_RESPONSE_BYTES_DEFAULT,
+    BackendName,
     CrawlConfig,
     _env_bool,
     _env_float,
@@ -77,7 +78,8 @@ def _build_auth(args: argparse.Namespace) -> AuthConfig | None:
     if not auth_type:
         auth_type = "basic" if username else "bearer"
     return AuthConfig(
-        auth_type=auth_type,  # type: ignore[arg-type]
+        # argparse --auth-type choices constrain this to the AuthType literal set.
+        auth_type=cast("AuthType", auth_type),
         username=username,
         password=password,
         token=token,
@@ -421,7 +423,9 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     ua_map = parse_ua_map(getattr(args, "ua", None) or [])
 
     return CrawlConfig(
-        backend=backend,  # type: ignore[arg-type]
+        # backend is built from the --http-backend choices plus the "playwright"
+        # literal, so it is always a valid BackendName.
+        backend=cast("BackendName", backend),
         user_agent=_user_agent,
         ua_map=ua_map,
         refresh_days=getattr(args, "refresh_days", 0) or 0,
@@ -1149,6 +1153,95 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
     return run.exit_code
 
 
+# --- Saved-crawl JSON schema (ticket 083) -----------------------------------
+# TypedDicts describing exactly what serialization.py writes, so mypy checks the
+# field types the _load_* deserializers pull back out — replacing the per-field
+# arg-type suppressions that widened the payloads to ``Any``.
+# Every key is optional at the JSON level (older artifacts omit newer keys, hence
+# the tolerant ``.get(..., default)`` reads below); the three the loader
+# dereferences unconditionally are ``Required`` so a row missing them is a type
+# error rather than a silent ``None``.
+
+
+class _SavedHreflangLink(TypedDict, total=False):
+    hreflang: str
+    href: str
+    source: Literal["http_header", "html_head", "sitemap"]
+
+
+class _SavedExtracted(TypedDict, total=False):
+    title: str | None
+    meta_description: str | None
+    meta_robots: list[str]
+    x_robots_tag: list[str]
+    canonical: str | None
+    x_canonical: str | None
+    hreflang_links: list[_SavedHreflangLink]
+    html_lang: str | None
+    headings: dict[str, list[str]]
+    text: str
+    word_count: int
+    metadata: dict[str, Any]
+    schema_data: list[dict[str, Any]]
+
+
+class _SavedBrowserRuntime(TypedDict, total=False):
+    provider: Literal["chromium", "cdp", "obscura"]
+    cdp_endpoint: str | None
+    managed: bool | None
+    stealth: bool | None
+    persistent: bool | None
+    channel: str | None
+    executable_path: str | None
+    user_data_dir: str | None
+    profile_directory: str | None
+    headless: bool | None
+
+
+class _SavedDiscoveredLink(TypedDict, total=False):
+    href: str
+    anchor_text: str | None
+    xpath: str
+    is_image: bool
+    fragment: str | None
+    url_parameters: str | None
+    original_href: str | None
+
+
+class _SavedResult(TypedDict, total=False):
+    requested_url: Required[str]
+    final_url: Required[str]
+    status: Required[int]
+    headers: dict[str, str]
+    content_type: str | None
+    fetch_backend: str
+    extracted: _SavedExtracted | None
+    raw_html: str | None
+    content_hash_sha256: str | None
+    content_hash_simhash: int | None
+    discovered_links: list[_SavedDiscoveredLink]
+    allowed_by_robots: bool | None
+    skip_reason: str | None
+    persist_error: str | None
+    challenge: str | None
+    browser_runtime: _SavedBrowserRuntime | None
+    ttfb_seconds: float | None
+    total_duration_seconds: float | None
+    custom_data: dict[str, Any] | None
+    lcp_ms: float | None
+    cls: float | None
+    inp_ms: float | None
+
+
+class _SavedJob(TypedDict, total=False):
+    mode: Literal["list", "open"]
+    seed_urls: list[str]
+    saved_to: str | None
+    retry_attempts: int
+    interrupted: bool
+    results: list[_SavedResult]
+
+
 def _load_saved_crawl(path: Path) -> "CrawlJobResult":
     from .models import (
         BrowserRuntime,
@@ -1160,43 +1253,43 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         RobotsDirectives,
     )
 
-    def _load_browser_runtime(payload: dict[str, Any] | None) -> BrowserRuntime | None:
+    def _load_browser_runtime(payload: _SavedBrowserRuntime | None) -> BrowserRuntime | None:
         if not payload:
             return None
         return BrowserRuntime(
-            provider=str(payload.get("provider", "chromium")),  # type: ignore[arg-type]
-            cdp_endpoint=payload.get("cdp_endpoint"),  # type: ignore[arg-type]
-            managed=payload.get("managed"),  # type: ignore[arg-type]
-            stealth=payload.get("stealth"),  # type: ignore[arg-type]
-            persistent=payload.get("persistent"),  # type: ignore[arg-type]
-            channel=payload.get("channel"),  # type: ignore[arg-type]
-            executable_path=payload.get("executable_path"),  # type: ignore[arg-type]
-            user_data_dir=payload.get("user_data_dir"),  # type: ignore[arg-type]
-            profile_directory=payload.get("profile_directory"),  # type: ignore[arg-type]
-            headless=payload.get("headless"),  # type: ignore[arg-type]
+            provider=payload.get("provider", "chromium"),
+            cdp_endpoint=payload.get("cdp_endpoint"),
+            managed=payload.get("managed"),
+            stealth=payload.get("stealth"),
+            persistent=payload.get("persistent"),
+            channel=payload.get("channel"),
+            executable_path=payload.get("executable_path"),
+            user_data_dir=payload.get("user_data_dir"),
+            profile_directory=payload.get("profile_directory"),
+            headless=payload.get("headless"),
         )
 
-    def _load_extracted(payload: dict[str, Any] | None) -> ExtractedContent | None:
+    def _load_extracted(payload: _SavedExtracted | None) -> ExtractedContent | None:
         if not payload:
             return None
         hreflang_links = [
             HreflangLink(
                 hreflang=str(link.get("hreflang", "")),
                 href=str(link.get("href", "")),
-                source=str(link.get("source", "html_head")),  # type: ignore[arg-type]
+                source=link.get("source", "html_head"),
             )
             for link in payload.get("hreflang_links", []) or []
             if isinstance(link, dict)
         ]
         return ExtractedContent(
-            title=payload.get("title"),  # type: ignore[arg-type]
-            meta_description=payload.get("meta_description"),  # type: ignore[arg-type]
+            title=payload.get("title"),
+            meta_description=payload.get("meta_description"),
             meta_robots=RobotsDirectives(raw=list(payload.get("meta_robots", []) or [])),
             x_robots_tag=RobotsDirectives(raw=list(payload.get("x_robots_tag", []) or [])),
-            canonical=payload.get("canonical"),  # type: ignore[arg-type]
-            x_canonical=payload.get("x_canonical"),  # type: ignore[arg-type]
+            canonical=payload.get("canonical"),
+            x_canonical=payload.get("x_canonical"),
             hreflang_links=hreflang_links,
-            html_lang=payload.get("html_lang"),  # type: ignore[arg-type]
+            html_lang=payload.get("html_lang"),
             headings=dict(payload.get("headings", {}) or {}),
             text=str(payload.get("text", "")),
             word_count=int(payload.get("word_count", 0) or 0),
@@ -1204,7 +1297,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             schema_data=list(payload.get("schema_data", []) or []),
         )
 
-    def _load_discovered_links(payload: Any) -> list[DiscoveredLink]:
+    def _load_discovered_links(payload: list[_SavedDiscoveredLink] | None) -> list[DiscoveredLink]:
         links: list[DiscoveredLink] = []
         for item in payload or []:
             if not isinstance(item, dict):
@@ -1212,40 +1305,40 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             links.append(
                 DiscoveredLink(
                     href=str(item.get("href", "")),
-                    anchor_text=item.get("anchor_text"),  # type: ignore[arg-type]
+                    anchor_text=item.get("anchor_text"),
                     xpath=str(item.get("xpath", "")),
                     is_image=bool(item.get("is_image", False)),
-                    fragment=item.get("fragment"),  # type: ignore[arg-type]
-                    url_parameters=item.get("url_parameters"),  # type: ignore[arg-type]
-                    original_href=item.get("original_href"),  # type: ignore[arg-type]
+                    fragment=item.get("fragment"),
+                    url_parameters=item.get("url_parameters"),
+                    original_href=item.get("original_href"),
                 )
             )
         return links
 
-    def _load_result(item: dict[str, Any]) -> CrawlResult:
+    def _load_result(item: _SavedResult) -> CrawlResult:
         return CrawlResult(
             requested_url=str(item["requested_url"]),
             final_url=str(item["final_url"]),
             status=int(item["status"]),
             headers=dict(item.get("headers", {}) or {}),
-            content_type=item.get("content_type"),  # type: ignore[arg-type]
+            content_type=item.get("content_type"),
             fetch_backend=str(item.get("fetch_backend", "aiohttp")),
-            extracted=_load_extracted(item.get("extracted")),  # type: ignore[arg-type]
-            raw_html=item.get("raw_html"),  # type: ignore[arg-type]
-            content_hash_sha256=item.get("content_hash_sha256"),  # type: ignore[arg-type]
-            content_hash_simhash=item.get("content_hash_simhash"),  # type: ignore[arg-type]
+            extracted=_load_extracted(item.get("extracted")),
+            raw_html=item.get("raw_html"),
+            content_hash_sha256=item.get("content_hash_sha256"),
+            content_hash_simhash=item.get("content_hash_simhash"),
             discovered_links=_load_discovered_links(item.get("discovered_links")),
-            allowed_by_robots=item.get("allowed_by_robots"),  # type: ignore[arg-type]
-            skip_reason=item.get("skip_reason"),  # type: ignore[arg-type]
-            persist_error=item.get("persist_error"),  # type: ignore[arg-type]
-            challenge=item.get("challenge"),  # type: ignore[arg-type]
-            browser_runtime=_load_browser_runtime(item.get("browser_runtime")),  # type: ignore[arg-type]
-            ttfb_seconds=item.get("ttfb_seconds"),  # type: ignore[arg-type]
-            total_duration_seconds=item.get("total_duration_seconds"),  # type: ignore[arg-type]
-            custom_data=item.get("custom_data"),  # type: ignore[arg-type]
-            lcp_ms=item.get("lcp_ms"),  # type: ignore[arg-type]
-            cls=item.get("cls"),  # type: ignore[arg-type]
-            inp_ms=item.get("inp_ms"),  # type: ignore[arg-type]
+            allowed_by_robots=item.get("allowed_by_robots"),
+            skip_reason=item.get("skip_reason"),
+            persist_error=item.get("persist_error"),
+            challenge=item.get("challenge"),
+            browser_runtime=_load_browser_runtime(item.get("browser_runtime")),
+            ttfb_seconds=item.get("ttfb_seconds"),
+            total_duration_seconds=item.get("total_duration_seconds"),
+            custom_data=item.get("custom_data"),
+            lcp_ms=item.get("lcp_ms"),
+            cls=item.get("cls"),
+            inp_ms=item.get("inp_ms"),
         )
 
     raw_text = path.read_text(encoding="utf-8")
@@ -1253,25 +1346,29 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         payload = json.loads(raw_text)
     except json.JSONDecodeError:
         lines = [json.loads(line) for line in raw_text.splitlines() if line.strip()]
-        summary: dict[str, Any] = next((line for line in lines if line.get("__type") == "summary"), {})
+        # json.loads returns Any; cast the summary line to the saved-job schema so
+        # the CrawlJobResult fields below are type-checked. Result lines stay Any,
+        # which _load_result accepts as a _SavedResult.
+        summary = cast("_SavedJob", next((line for line in lines if line.get("__type") == "summary"), {}))
         results = [_load_result(line) for line in lines if line.get("__type") != "summary"]
         return CrawlJobResult(
-            mode=str(summary.get("mode", "open")),  # type: ignore[arg-type]
+            mode=summary.get("mode", "open"),
             seed_urls=list(summary.get("seed_urls", []) or []),
             results=results,
-            saved_to=summary.get("saved_to"),  # type: ignore[arg-type]
+            saved_to=summary.get("saved_to"),
             retry_attempts=int(summary.get("retry_attempts", 0) or 0),
             interrupted=bool(summary.get("interrupted", False)),
         )
 
     if isinstance(payload, dict) and "results" in payload:
+        job = cast("_SavedJob", payload)
         return CrawlJobResult(
-            mode=str(payload.get("mode", "list")),  # type: ignore[arg-type]
-            seed_urls=list(payload.get("seed_urls", []) or []),
-            results=[_load_result(item) for item in payload.get("results", []) or [] if isinstance(item, dict)],
-            saved_to=payload.get("saved_to"),  # type: ignore[arg-type]
-            retry_attempts=int(payload.get("retry_attempts", 0) or 0),
-            interrupted=bool(payload.get("interrupted", False)),
+            mode=job.get("mode", "list"),
+            seed_urls=list(job.get("seed_urls", []) or []),
+            results=[_load_result(item) for item in job.get("results", []) or [] if isinstance(item, dict)],
+            saved_to=job.get("saved_to"),
+            retry_attempts=int(job.get("retry_attempts", 0) or 0),
+            interrupted=bool(job.get("interrupted", False)),
         )
 
     raise ValueError(f"Unsupported crawl artifact format: {path}")

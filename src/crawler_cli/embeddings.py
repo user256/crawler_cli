@@ -9,7 +9,7 @@ from typing import Any
 import aiohttp
 from bs4 import BeautifulSoup
 
-from .persistence import AsyncpgStore
+from .persistence import AsyncpgStore, SignatureEmbeddingRow
 
 # Default local (sentence-transformers) model — multilingual, essential for the
 # casino.org 350-locale portfolio (intent_overlap.py embed() default).
@@ -145,6 +145,7 @@ async def generate_signature_embeddings_for_store(
     """
     result = EmbeddingJobResult()
 
+    rows: list[SignatureEmbeddingRow]
     if source == "signature":
         rows = await store.fetch_signature_rows_for_embeddings(urls=urls)
     else:
@@ -161,7 +162,7 @@ async def generate_signature_embeddings_for_store(
             for uid, url, html in pages
         ]
 
-    to_embed: list[dict[str, Any]] = []
+    to_embed: list[SignatureEmbeddingRow] = []
     for row in rows:
         text = row.get("text")
         if not text:
