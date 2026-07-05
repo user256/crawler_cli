@@ -7,7 +7,11 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote as _urlquote
+
+if TYPE_CHECKING:
+    from .models import CrawlJobResult
 
 from .archive import audit_archive_urls
 from .auth import AuthConfig
@@ -506,6 +510,11 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         help="Additional seed URL. Repeat to crawl multiple hosts in one run.",
     )
     parser.add_argument(
+        "--intent-signatures",
+        action="store_true",
+        help="After the crawl, compute intent signatures over crawled HTML (ticket 076).",
+    )
+    parser.add_argument(
         "--max-workers",
         type=int,
         default=None,
@@ -903,6 +912,21 @@ async def _run_crawl(args: argparse.Namespace) -> int:
             summary += f", {persist_errors} persist failures (check WARNING logs)"
         print(summary)
 
+        if getattr(args, "intent_signatures", False):
+            if isinstance(store, AsyncpgStore):
+                from .intent_signature import backfill_intent_signatures
+
+                sig_result = await backfill_intent_signatures(store)
+                print(
+                    f"Intent signatures: processed={sig_result.processed} "
+                    f"updated={sig_result.updated} unchanged={sig_result.unchanged}"
+                )
+            else:
+                print(
+                    "Note: --intent-signatures needs PostgreSQL; skipped for in-memory crawl.",
+                    file=sys.stderr,
+                )
+
         if args.archive_org_check and seeds:
             seen_domains: set[str] = set()
             for seed in seeds:
@@ -959,6 +983,34 @@ async def _run_embeddings(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_backfill_signatures(args: argparse.Namespace) -> int:
+    from .intent_signature import backfill_intent_signatures
+
+    store = _store_from_args(args)
+    await store.initialize()
+    try:
+        result = await backfill_intent_signatures(
+            store,
+            urls=args.urls or None,
+            boilerplate_share=args.boilerplate_share,
+            min_words=args.min_words,
+            dry_run=args.dry_run,
+        )
+    finally:
+        await store.close()
+
+    suffix = " (dry-run)" if args.dry_run else ""
+    print(
+        f"Intent signatures{suffix}: processed={result.processed} "
+        f"updated={result.updated} unchanged={result.unchanged} "
+        f"low_confidence={result.low_confidence} no_text={result.no_text}"
+    )
+    if result.by_method:
+        methods = ", ".join(f"{k}={v}" for k, v in sorted(result.by_method.items()))
+        print(f"  extraction: {methods}")
+    return 0
+
+
 def _load_saved_crawl(path: Path) -> "CrawlJobResult":
     from .models import (
         BrowserRuntime,
@@ -970,7 +1022,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         RobotsDirectives,
     )
 
-    def _load_browser_runtime(payload: dict[str, object] | None) -> BrowserRuntime | None:
+    def _load_browser_runtime(payload: dict[str, Any] | None) -> BrowserRuntime | None:
         if not payload:
             return None
         return BrowserRuntime(
@@ -986,7 +1038,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             headless=payload.get("headless"),  # type: ignore[arg-type]
         )
 
-    def _load_extracted(payload: dict[str, object] | None) -> ExtractedContent | None:
+    def _load_extracted(payload: dict[str, Any] | None) -> ExtractedContent | None:
         if not payload:
             return None
         hreflang_links = [
@@ -1014,7 +1066,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             schema_data=list(payload.get("schema_data", []) or []),
         )
 
-    def _load_discovered_links(payload: object) -> list[DiscoveredLink]:
+    def _load_discovered_links(payload: Any) -> list[DiscoveredLink]:
         links: list[DiscoveredLink] = []
         for item in payload or []:
             if not isinstance(item, dict):
@@ -1032,7 +1084,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             )
         return links
 
-    def _load_result(item: dict[str, object]) -> CrawlResult:
+    def _load_result(item: dict[str, Any]) -> CrawlResult:
         return CrawlResult(
             requested_url=str(item["requested_url"]),
             final_url=str(item["final_url"]),
@@ -1063,7 +1115,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         payload = json.loads(raw_text)
     except json.JSONDecodeError:
         lines = [json.loads(line) for line in raw_text.splitlines() if line.strip()]
-        summary = next((line for line in lines if line.get("__type") == "summary"), {})
+        summary: dict[str, Any] = next((line for line in lines if line.get("__type") == "summary"), {})
         results = [_load_result(line) for line in lines if line.get("__type") != "summary"]
         return CrawlJobResult(
             mode=str(summary.get("mode", "open")),  # type: ignore[arg-type]
@@ -1286,6 +1338,26 @@ def _build_parser() -> argparse.ArgumentParser:
     emb_parser.add_argument("--urls", nargs="*", help="Optional URL filter list")
     _add_postgres_args(emb_parser)
 
+    sig_parser = subparsers.add_parser(
+        "backfill-signatures",
+        help="Compute intent signatures (trafilatura main text + unified hash) over stored HTML",
+    )
+    sig_parser.add_argument("--urls", nargs="*", help="Optional URL filter list")
+    sig_parser.add_argument(
+        "--boilerplate-share",
+        type=float,
+        default=0.30,
+        help="Min title share for per-site boilerplate stripping (default 0.30)",
+    )
+    sig_parser.add_argument(
+        "--min-words",
+        type=int,
+        default=50,
+        help="Pages below this word count get signal_confidence=low (default 50)",
+    )
+    sig_parser.add_argument("--dry-run", action="store_true", help="Report counts without writing")
+    _add_postgres_args(sig_parser)
+
     cmp_parser = subparsers.add_parser("compare", help="Compare two saved crawl JSON files")
     cmp_parser.add_argument("baseline_json", help="Baseline crawl JSON path")
     cmp_parser.add_argument("candidate_json", help="Candidate crawl JSON path")
@@ -1446,6 +1518,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_crawl(args)
     if command == "generate-embeddings":
         return await _run_embeddings(args)
+    if command == "backfill-signatures":
+        return await _run_backfill_signatures(args)
     if command == "compare":
         return await _run_compare(args)
     if command == "compact-html":

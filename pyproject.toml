@@ -20,6 +20,12 @@ dependencies = [
 playwright = [
   "playwright>=1.44",
 ]
+# Intent-signature extraction (ticket 076). trafilatura pulls in lxml (already a
+# base dep) for main-text extraction; kept optional so the base install stays
+# slim. The intent-overlap flow installs this together with [embeddings-local].
+intent = [
+  "trafilatura>=1.8",
+]
 test = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",
