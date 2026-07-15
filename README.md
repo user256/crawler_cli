@@ -412,7 +412,7 @@ src/crawler_cli/
 
 ## Default Behavior
 
-- `robots.txt` is checked and honored by default
+- `robots.txt` is checked and honored by default (5xx/network unreachable → session disallow per RFC 9309; 4xx → allow-all)
 - host `Crawl-delay` is honored when present unless you disable it
 - plain `crawler-cli <url>` open crawls are bounded by default at `200` URLs
 - unlimited open crawling requires an explicit `--max-pages 0`

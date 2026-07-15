@@ -38,5 +38,5 @@ Ticket 050 fixed several robots issues, but the current runtime still has gaps:
 - The UA evaluated against robots is the UA sent for that URL.
 
 ## Status
-in_progress (Priority: **P0**) — claimed by `agent/ticket-088-robots-rfc9309-follow-up`; compliance/politeness; found in 2026-07-15 audit.
+done (Priority: **P0**) — claimed by `agent/ticket-088-robots-rfc9309-follow-up`; compliance/politeness; found in 2026-07-15 audit.
 
