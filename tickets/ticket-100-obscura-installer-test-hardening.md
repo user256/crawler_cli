@@ -30,7 +30,7 @@ GitHub assets.
 - Pinned digests are confirmed against the real published assets.
 
 ## Status
-`done` (2026-07-15) — Priority: **P3 security**. Claimed and delivered on
+`done` (2026-07-15, PR #32) — Priority: **P3 security**. Claimed and delivered on
 `agent/ticket-100-obscura-installer-test-hardening`.
 
 ## Delivery notes
