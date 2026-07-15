@@ -1215,9 +1215,12 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
     s = run.result.summary
     tp = s.get("threshold_percentile")
     tnote = f" (threshold {args.threshold} ~ p{tp:.0f} of NN similarity)" if tp is not None else ""
+    relation_counts = s.get("relation_counts") or {}
+    pc_pairs = relation_counts.get("parent-child", 0)
+    pc_note = f" ({pc_pairs} parent-child)" if pc_pairs else ""
     print(
         f"intent-overlap: {s.get('embedded', 0)} embedded pages, "
-        f"{s.get('overlap_pairs', 0)} pairs, {s.get('clusters', 0)} clusters, "
+        f"{s.get('overlap_pairs', 0)} pairs{pc_note}, {s.get('clusters', 0)} clusters, "
         f"{s.get('duplicate_pages', 0)} duplicate pages "
         f"({s.get('suppressed_pairs', 0)} intra-hreflang pairs suppressed){tnote}"
     )

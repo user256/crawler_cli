@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 from .persistence import AsyncpgStore, HreflangIdentityRow
@@ -54,6 +54,83 @@ def normalise_url(url: str) -> str:
     q = _strip_tracking_query(p.query)
     q = f"?{q}" if q else ""
     return f"{p.scheme.lower()}://{p.netloc.lower()}{path}{q}"
+
+
+UrlRelation = Literal["parent-child", "sibling", "same-section", "cross-section"]
+
+
+def _path_segments(path: str) -> list[str]:
+    """Split a URL path into non-empty segments (``/a/b/`` -> ``["a", "b"]``)."""
+    return [seg for seg in path.strip("/").split("/") if seg]
+
+
+def section_of(url: str) -> str:
+    """First path segment of *url* (ticket 101); ``/`` for the homepage.
+
+    Normalises first (``normalise_url``) so trailing slashes / tracking
+    params don't change the answer.
+    """
+    segs = _path_segments(urlparse(normalise_url(url)).path)
+    return segs[0] if segs else "/"
+
+
+def path_depth(url: str) -> int:
+    """Number of non-empty path segments of *url* (ticket 101); ``0`` for the
+    homepage. Used to pick the shallowest ("hub") page as the natural
+    canonical survivor of an all-parent-child cluster.
+    """
+    return len(_path_segments(urlparse(normalise_url(url)).path))
+
+
+def classify_relation(url_a: str, url_b: str) -> UrlRelation:
+    """Classify the URL-path relationship between two same-host URLs (ticket 101).
+
+    Both URLs are normalised first (``normalise_url``) so trailing slashes,
+    tracking query params, and casing don't affect the result; only the path
+    is compared (query strings are ignored beyond that normalisation).  Path
+    comparison is segment-wise, not a raw string prefix, so ``/video`` is not
+    considered a parent of ``/videos`` (intent_overlap.py has no analogue —
+    this is new classification logic per ticket 101).
+
+    Returns:
+      - ``parent-child``: one URL's path is a segment-wise prefix of the
+        other's (either direction). The homepage (``/``) is a trivial prefix
+        of every path, so homepage-vs-anything is parent-child too.
+      - ``sibling``: same immediate parent directory, i.e. same depth and
+        identical path up to the last segment. Depth-1 pages are excluded
+        from this (their "parent directory" is always the root, which would
+        make every pair of top-level pages a false-positive sibling) — two
+        different top-level pages are ``cross-section`` instead, unless they
+        share a first segment (impossible unless identical).  Two URLs that
+        normalise to the exact same path (e.g. differ only by a dropped
+        tracking query param) also count as siblings.
+      - ``same-section``: same first path segment, but not parent-child or
+        sibling (e.g. different sub-directories under the same top-level
+        section).
+      - ``cross-section``: everything else, including cross-host pairs.
+    """
+    pa = urlparse(normalise_url(url_a))
+    pb = urlparse(normalise_url(url_b))
+    if pa.netloc != pb.netloc:
+        return "cross-section"
+
+    segs_a = _path_segments(pa.path)
+    segs_b = _path_segments(pb.path)
+
+    if segs_a == segs_b:
+        return "sibling"
+
+    shorter, longer = (segs_a, segs_b) if len(segs_a) < len(segs_b) else (segs_b, segs_a)
+    if longer[: len(shorter)] == shorter:
+        return "parent-child"
+
+    if len(segs_a) == len(segs_b) and len(segs_a) >= 2 and segs_a[:-1] == segs_b[:-1]:
+        return "sibling"
+
+    if segs_a and segs_b and segs_a[0] == segs_b[0]:
+        return "same-section"
+
+    return "cross-section"
 
 
 def lang_bucket(code: Any) -> str:
