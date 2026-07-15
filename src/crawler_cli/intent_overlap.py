@@ -38,6 +38,7 @@ from .hreflang_groups import (
     reciprocity_issues,
     section_of,
 )
+from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS, is_thin_signature, signature_word_count
 from .persistence import AnalysisRow, UrlVariantRow
 
 if TYPE_CHECKING:
@@ -325,12 +326,24 @@ def analyse_embeddings(
     use_ann: bool = False,
     ann_min_pages: int = 10000,
     ann_k: int = 128,
+    thin_signature_words: int = DEFAULT_THIN_SIGNATURE_WORDS,
 ) -> AnalysisResult:
     """Core analysis over embedded, non-excluded page records.
 
     Each record is a dict with: ``url``, ``vector`` (list[float]), ``group``
     (hreflang group id or None), ``hreflang_code``, ``word_count``,
-    ``signal_confidence``.  Ported from ``analyse()`` (intent_overlap.py:1224).
+    ``signal_confidence``, ``signature_model_input``.  Ported from ``analyse()``
+    (intent_overlap.py:1224).
+
+    Ticket 104: pages whose ``signature_model_input`` has fewer than
+    ``thin_signature_words`` words carry little distinguishing content beyond
+    shared boilerplate. When a page's only >= ``dup_threshold`` pairings are
+    with other thin pages, its risk is downgraded from
+    ``"duplicate — decanonicalisation likely"`` (which prescribes merge/
+    canonicalisation) to ``"thin content — add distinguishing content"``. A
+    pairing where only one side is thin keeps the normal duplicate risk (the
+    rich side is a real decanonicalisation candidate) but is flagged
+    ``"asymmetric"`` in ``overlap_pairs.csv`` so the asymmetry isn't hidden.
     """
     np = _np()
     result = AnalysisResult()
@@ -371,6 +384,9 @@ def analyse_embeddings(
     groups = [r.get("group") for r in emb]
     conf = [r.get("signal_confidence") for r in emb]
     langs = [lang_bucket(r.get("hreflang_code")) for r in emb]
+    sig_inputs = [r.get("signature_model_input") for r in emb]
+    sig_word_counts = [signature_word_count(s) for s in sig_inputs]
+    thin_flags = [is_thin_signature(s, thin_signature_words) for s in sig_inputs]
 
     known = sum(1 for lang in langs if lang != "unknown") / n if n else 0.0
     if lang_split and known < 0.5:
@@ -397,6 +413,13 @@ def analyse_embeddings(
     dup_relations: dict[int, list[str]] = {}
     relation_counts: dict[str, int] = {}
 
+    # Ticket 104: per-page tracking of its >= dup_threshold ("duplicate risk")
+    # edges — whether it has any, and whether at least one of them pairs it
+    # with a non-thin (rich) page. A page downgrades to "thin content" only
+    # when every one of its dup-tier edges is thin-vs-thin.
+    dup_edge_seen = [False] * n
+    dup_edge_has_rich = [False] * n
+
     for lang, idx_list in partitions:
         idxs = np.asarray(idx_list)
         sub = vecs[idxs]
@@ -421,6 +444,13 @@ def analyse_embeddings(
             if s >= threshold:
                 relation = classify_relation(urls[i], urls[j])
                 relation_counts[relation] = relation_counts.get(relation, 0) + 1
+                thin_a, thin_b = thin_flags[i], thin_flags[j]
+                if thin_a and thin_b:
+                    thin_label = "both"
+                elif thin_a or thin_b:
+                    thin_label = "asymmetric"
+                else:
+                    thin_label = ""
                 result.overlap_pairs.append(
                     {
                         "url_a": urls[i],
@@ -430,8 +460,13 @@ def analyse_embeddings(
                         "relation": relation,
                         "section_a": section_of(urls[i]),
                         "section_b": section_of(urls[j]),
+                        "thin": thin_label,
                     }
                 )
+                if s >= dup_threshold:
+                    dup_edge_seen[i] = dup_edge_seen[j] = True
+                    if thin_label != "both":
+                        dup_edge_has_rich[i] = dup_edge_has_rich[j] = True
                 part_edges.append((i, j, s))
                 uf.union(i, j)
                 if s > max_sim[i]:
@@ -474,13 +509,18 @@ def analyse_embeddings(
     for i, r in enumerate(emb):
         ms = float(max_sim[i])
         if ms >= dup_threshold:
-            rels = dup_relations.get(i, [])
-            # "Solely" parent-child: every dup_threshold-crossing pair that
-            # touches this page is a hub/detail relationship, not just its
-            # single nearest neighbour — a page with one parent-child edge
-            # AND one genuine cross-section duplicate edge still gets the
-            # ordinary duplicate label (ticket 101).
-            risk = RISK_PARENT_CHILD if rels and all(rel == "parent-child" for rel in rels) else RISK_DUPLICATE
+            if dup_edge_seen[i] and not dup_edge_has_rich[i]:
+                # Every >= dup_threshold pairing is thin-vs-thin: shared
+                # boilerplate, not a real decanonicalisation risk (ticket 104).
+                risk = "thin content — add distinguishing content"
+            else:
+                rels = dup_relations.get(i, [])
+                # "Solely" parent-child: every dup_threshold-crossing pair that
+                # touches this page is a hub/detail relationship, not just its
+                # single nearest neighbour — a page with one parent-child edge
+                # AND one genuine cross-section duplicate edge still gets the
+                # ordinary duplicate label (ticket 101).
+                risk = RISK_PARENT_CHILD if rels and all(rel == "parent-child" for rel in rels) else RISK_DUPLICATE
         elif ms >= threshold:
             risk = RISK_HIGH_OVERLAP
         else:
@@ -489,6 +529,7 @@ def analyse_embeddings(
         r["_max_similarity"] = round(ms, 4)
         r["_nearest_url"] = nearest[i]
         r["_risk"] = risk
+        r["_signature_words"] = sig_word_counts[i]
 
     # Clusters
     by_cluster: dict[str, list[int]] = {}
@@ -531,6 +572,10 @@ def analyse_embeddings(
         canon_by_cluster[cid] = canon
         note = f"sampled at {CLUSTER_SAMPLE_CAP}" if sampled else ""
         cluster_langs = sorted({lang_bucket(m.get("hreflang_code")) for m in members if m.get("hreflang_code")})
+        # Ticket 104: a cluster driven entirely by thin pages (every member's
+        # signature is below thin_signature_words) is a content-quality
+        # finding, not a decanonicalisation one.
+        cluster_thin = all(thin_flags[i] for i in member_idxs)
         result.cluster_rows.append(
             {
                 "cluster_id": cid,
@@ -540,6 +585,7 @@ def analyse_embeddings(
                 "languages": ",".join(cluster_langs),
                 "urls": " | ".join(m["url"] for m in members),
                 "avg_word_count": int(sum(int(m.get("word_count") or 0) for m in members) / len(members)),
+                "thin": cluster_thin,
                 "min_intra_sim": round(min_s, 4),
                 "mean_intra_sim": round(mean_s, 4),
                 "cohesion": round(cohesion, 4),
@@ -569,17 +615,18 @@ def analyse_embeddings(
                 "hreflang_role": role_map.get(r["url"], ""),
                 "hreflang_code": r.get("hreflang_code") or "",
                 "word_count": r.get("word_count") or 0,
+                "signature_words": r.get("_signature_words", 0),
                 "signal_confidence": r.get("signal_confidence") or "",
             }
         )
 
-    # Counted by max_sim crossing dup_threshold — NOT by the "_risk" label
-    # text, which ticket 101 now splits into RISK_DUPLICATE / RISK_PARENT_CHILD.
-    # --fail-on duplicate gates on this count and must keep counting
-    # parent-child-driven pages by default (ticket 101 constraint: don't
-    # silently change gating semantics); the label split is informational.
-    dup_n = int((max_sim >= dup_threshold).sum())
+    # Thin-only pages are intentionally excluded from duplicate gating; rich
+    # parent-child pages remain counted even though their label is distinct.
+    dup_n = sum(1 for r in emb if r.get("_risk") in {RISK_DUPLICATE, RISK_PARENT_CHILD})
     dup_parent_child_n = sum(1 for r in emb if r.get("_risk") == RISK_PARENT_CHILD)
+    thin_content_n = sum(1 for r in emb if str(r.get("_risk", "")).startswith("thin content"))
+    thin_pages_n = sum(1 for flag in thin_flags if flag)
+    thin_pairs_n = sum(1 for p in result.overlap_pairs if p.get("thin") == "both")
     result.suppressed = suppressed
     result.chained_clusters = chained_n
     result.summary = {
@@ -590,9 +637,13 @@ def analyse_embeddings(
         "chained_clusters": chained_n,
         "duplicate_pages": dup_n,
         "duplicate_pages_parent_child_only": dup_parent_child_n,
+        "thin_content_pages": thin_content_n,
+        "thin_pages": thin_pages_n,
+        "thin_pairs": thin_pairs_n,
         "suppressed_pairs": suppressed,
         "threshold": threshold,
         "dup_threshold": dup_threshold,
+        "thin_signature_words": thin_signature_words,
         "threshold_percentile": round(percentile_rank(threshold, nn_arr), 1) if len(nn_arr) else None,
         "dup_threshold_percentile": round(percentile_rank(dup_threshold, nn_arr), 1) if len(nn_arr) else None,
     }
@@ -709,6 +760,7 @@ _PAGES_FIELDS = [
     "hreflang_role",
     "hreflang_code",
     "word_count",
+    "signature_words",
     "signal_confidence",
     "excluded",
 ]
@@ -717,6 +769,7 @@ _PAIRS_FIELDS = [
     "url_b",
     "similarity",
     "low_confidence",
+    "thin",
     "sim_percentile",
     "relation",
     "section_a",
@@ -730,6 +783,7 @@ _CLUSTER_FIELDS = [
     "languages",
     "urls",
     "avg_word_count",
+    "thin",
     "min_intra_sim",
     "mean_intra_sim",
     "cohesion",
@@ -791,6 +845,7 @@ def write_reports(
             "hreflang_role": "",
             "hreflang_code": r.get("hreflang_code") or "",
             "word_count": r.get("word_count") or 0,
+            "signature_words": signature_word_count(r.get("signature_model_input")),
             "signal_confidence": r.get("signal_confidence") or "",
             "excluded": r.get("excluded", ""),
         }
@@ -872,6 +927,7 @@ async def run_intent_overlap(
     use_ann: bool = False,
     ann_min_pages: int = 10000,
     ann_k: int = 128,
+    thin_signature_words: int = DEFAULT_THIN_SIGNATURE_WORDS,
     run_args: dict[str, Any] | None = None,
 ) -> IntentOverlapRun:
     """Load embeddings + identity from the store, run the analysis, write the
@@ -898,6 +954,7 @@ async def run_intent_overlap(
             "word_count": r.get("word_count"),
             "signal_confidence": r.get("signal_confidence"),
             "url_class": r.get("url_class"),
+            "signature_model_input": r.get("signature_model_input"),
         }
         for r in rows
         if r.get("embedding") is not None and r.get("excluded") is None
@@ -915,6 +972,7 @@ async def run_intent_overlap(
         use_ann=use_ann,
         ann_min_pages=ann_min_pages,
         ann_k=ann_k,
+        thin_signature_words=thin_signature_words,
     )
 
     edges = await store.fetch_hreflang_edges()

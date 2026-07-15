@@ -33,7 +33,7 @@ def _unit(vec):
     return (v / np.linalg.norm(v)).tolist()
 
 
-def _rec(url, vec, *, group=None, code=None, wc=100, conf="high"):
+def _rec(url, vec, *, group=None, code=None, wc=100, conf="high", sig=None):
     return {
         "url": url,
         "vector": _unit(vec),
@@ -41,7 +41,13 @@ def _rec(url, vec, *, group=None, code=None, wc=100, conf="high"):
         "hreflang_code": code,
         "word_count": wc,
         "signal_confidence": conf,
+        "signature_model_input": sig,
     }
+
+
+def _words(n):
+    """A signature_model_input string with exactly *n* words."""
+    return " ".join(f"w{i}" for i in range(n))
 
 
 # --------------------------------------------------------------------------
@@ -266,6 +272,119 @@ def test_cluster_relation_field_mixed_when_not_all_parent_child():
     assert res.cluster_rows[0]["suggested_canonical"] == "https://a.com/x"
 
 
+# Ticket 104: thin content vs true duplicate
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sig,words,expected",
+    [
+        (None, None, False),  # no signature computed at all -> unknown, not thin
+        ("", 0, True),
+        (_words(49), 49, True),
+        (_words(50), 50, False),  # boundary: exactly the threshold is not thin
+        (_words(51), 51, False),
+    ],
+)
+def test_is_thin_signature_boundary(sig, words, expected):
+    from crawler_cli.intent_signature import is_thin_signature, signature_word_count
+
+    assert is_thin_signature(sig, threshold=50) is expected
+    if words is not None:
+        assert signature_word_count(sig) == words
+
+
+def test_both_sides_thin_pair_downgrades_page_risk_to_thin_content():
+    # High raw word_count (like the /videos hub+item pages) but a near-empty
+    # signature (boilerplate only, no distinguishing copy) on both sides.
+    recs = [
+        _rec("https://a.com/videos", [1.0, 0.0], wc=900, sig=_words(5)),
+        _rec("https://a.com/videos/clip-1", [1.0, 0.0], wc=820, sig=_words(3)),
+    ]
+    res = analyse_embeddings(recs, lang_split=False)
+    assert res.summary["duplicate_pages"] == 0
+    assert res.summary["thin_content_pages"] == 2
+    assert res.summary["thin_pages"] == 2
+    assert res.summary["thin_pairs"] == 1
+    risks = {r["url"]: r["risk"] for r in res.pages_rows}
+    assert risks["https://a.com/videos"] == "thin content — add distinguishing content"
+    assert risks["https://a.com/videos/clip-1"] == "thin content — add distinguishing content"
+    pair = res.overlap_pairs[0]
+    assert pair["thin"] == "both"
+    # signature_words is exposed per page, wc kept for contrast.
+    words_by_url = {r["url"]: r["signature_words"] for r in res.pages_rows}
+    assert words_by_url["https://a.com/videos"] == 5
+    assert words_by_url["https://a.com/videos/clip-1"] == 3
+
+
+def test_rich_duplicate_pair_keeps_duplicate_label():
+    recs = [
+        _rec("https://a.com/news/1", [1.0, 0.0], wc=900, sig=_words(300)),
+        _rec("https://a.com/news/1-copy", [1.0, 0.0], wc=880, sig=_words(280)),
+    ]
+    res = analyse_embeddings(recs, lang_split=False)
+    assert res.summary["duplicate_pages"] == 2
+    assert res.summary["thin_content_pages"] == 0
+    risks = {r["url"]: r["risk"] for r in res.pages_rows}
+    assert all(r == "duplicate — decanonicalisation likely" for r in risks.values())
+    assert res.overlap_pairs[0]["thin"] == ""
+
+
+def test_mixed_thin_rich_pair_keeps_duplicate_risk_but_flags_asymmetric():
+    recs = [
+        _rec("https://a.com/rich", [1.0, 0.0], wc=900, sig=_words(300)),
+        _rec("https://a.com/thin", [1.0, 0.0], wc=900, sig=_words(5)),
+    ]
+    res = analyse_embeddings(recs, lang_split=False)
+    # Neither side is downgraded: the rich side is a genuine decanonicalisation
+    # candidate, so both keep duplicate risk -- but the pair notes the asymmetry.
+    assert res.summary["duplicate_pages"] == 2
+    assert res.summary["thin_content_pages"] == 0
+    risks = {r["url"]: r["risk"] for r in res.pages_rows}
+    assert all(r == "duplicate — decanonicalisation likely" for r in risks.values())
+    assert res.overlap_pairs[0]["thin"] == "asymmetric"
+
+
+def test_thin_cluster_carries_thin_label_rich_cluster_does_not():
+    recs = [
+        _rec("https://a.com/videos", [1.0, 0.0, 0.0], wc=900, sig=_words(5)),
+        _rec("https://a.com/videos/clip", [1.0, 0.0, 0.0], wc=820, sig=_words(3)),
+        _rec("https://b.com/rich-1", [0.0, 1.0, 0.0], wc=900, sig=_words(300)),
+        _rec("https://b.com/rich-2", [0.0, 1.0, 0.0], wc=880, sig=_words(280)),
+    ]
+    res = analyse_embeddings(recs, lang_split=False)
+    by_url_set = {frozenset(c["urls"].split(" | ")): c["thin"] for c in res.cluster_rows}
+    thin_cluster = by_url_set[frozenset({"https://a.com/videos", "https://a.com/videos/clip"})]
+    rich_cluster = by_url_set[frozenset({"https://b.com/rich-1", "https://b.com/rich-2"})]
+    assert thin_cluster is True
+    assert rich_cluster is False
+
+
+def test_thin_signature_words_flag_is_configurable():
+    # 45-word signatures: thin at the default 50-word threshold, not thin at 40.
+    recs = [
+        _rec("https://a.com/1", [1.0, 0.0], sig=_words(45)),
+        _rec("https://a.com/2", [1.0, 0.0], sig=_words(45)),
+    ]
+    default_res = analyse_embeddings(recs, lang_split=False)
+    assert default_res.summary["thin_content_pages"] == 2
+    lenient_res = analyse_embeddings(recs, lang_split=False, thin_signature_words=40)
+    assert lenient_res.summary["thin_content_pages"] == 0
+    assert lenient_res.summary["duplicate_pages"] == 2
+
+
+def test_missing_signature_model_input_defaults_to_not_thin():
+    # No signature computed at all (sig=None, the _rec default) -> today's
+    # duplicate behaviour is preserved rather than over-flagging as thin.
+    recs = [
+        _rec("https://a.com/1", [1.0, 0.0]),
+        _rec("https://a.com/2", [1.0, 0.0]),
+    ]
+    res = analyse_embeddings(recs, lang_split=False)
+    assert res.summary["duplicate_pages"] == 2
+    assert res.summary["thin_content_pages"] == 0
+
+
 # --------------------------------------------------------------------------
 # Exclusion reasons
 # --------------------------------------------------------------------------
@@ -432,6 +551,7 @@ def test_write_reports_produces_six_csvs_and_manifest(tmp_path):
         "url_b",
         "similarity",
         "low_confidence",
+        "thin",
         "sim_percentile",
         "relation",
         "section_a",
@@ -480,6 +600,7 @@ def _store_row(url, vec, **over):
         "hreflang_code": None,
         "word_count": 100,
         "signal_confidence": "high",
+        "signature_model_input": None,
         "embedding": _unit(vec),
         "embedding_model": "M",
     }
@@ -607,6 +728,23 @@ async def test_run_intent_overlap_excludes_amp_and_writes_hygiene(tmp_path):
     assert amp_rows[0]["url"] == "https://a.com/p/amp"
     assert amp_rows[0]["base_url"] == "https://a.com/p"
     assert amp_rows[0]["issue"] == "missing-canonical"
+
+
+@pytest.mark.asyncio
+async def test_run_intent_overlap_fail_on_duplicate_excludes_thin_only_pairs(tmp_path):
+    # The thompsons-scotland /videos shape: healthy word_count, near-empty
+    # signature on both sides -> should NOT trip --fail-on duplicate, and the
+    # thin counters should surface the finding instead of hiding it.
+    rows = [
+        _store_row("https://a.com/videos", [1.0, 0.0, 0.0], word_count=900, signature_model_input=_words(5)),
+        _store_row("https://a.com/videos/clip", [1.0, 0.0, 0.0], word_count=820, signature_model_input=_words(3)),
+    ]
+    store = FakeAnalysisStore(rows)
+    run = await run_intent_overlap(store, out_dir=str(tmp_path), lang_split=False, fail_on="duplicate")
+    assert run.exit_code == 0
+    assert run.result.summary["duplicate_pages"] == 0
+    assert run.result.summary["thin_content_pages"] == 2
+    assert run.result.summary["thin_pairs"] == 1
 
 
 @pytest.mark.asyncio

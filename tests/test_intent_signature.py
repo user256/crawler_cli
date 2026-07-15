@@ -10,13 +10,16 @@ from __future__ import annotations
 import pytest
 
 from crawler_cli.intent_signature import (
+    DEFAULT_THIN_SIGNATURE_WORDS,
     backfill_intent_signatures,
     detect_boilerplate,
     extract_main_text,
     intent_text,
+    is_thin_signature,
     resolve_signal_confidence,
     signature_hash,
     signature_text,
+    signature_word_count,
     strip_boilerplate_field,
 )
 
@@ -164,6 +167,43 @@ def test_resolve_signal_confidence():
     assert resolve_signal_confidence(10, "trafilatura", min_words=50) == "low"
     assert resolve_signal_confidence(100, "fallback", min_words=50) == "low"
     assert resolve_signal_confidence(None, "trafilatura", min_words=50) == "low"
+
+
+# --------------------------------------------------------------------------
+# Signature thinness (ticket 104)
+# --------------------------------------------------------------------------
+
+
+def test_signature_word_count():
+    assert signature_word_count(None) == 0
+    assert signature_word_count("") == 0
+    assert signature_word_count("one two three") == 3
+
+
+def test_is_thin_signature_default_threshold():
+    # Calibrated against the thompsons-scotland.co.uk run (ticket 104): a
+    # title+h1+meta+footer-only signature with no real body text runs ~65-90
+    # words there, well above a naive 40-60 guess.
+    assert DEFAULT_THIN_SIGNATURE_WORDS == 88
+    rich = " ".join(f"w{i}" for i in range(150))
+    thin = " ".join(f"w{i}" for i in range(10))
+    assert is_thin_signature(rich) is False
+    assert is_thin_signature(thin) is True
+    assert is_thin_signature("") is True
+
+
+def test_is_thin_signature_boundary_is_not_thin():
+    exactly_at_threshold = " ".join(f"w{i}" for i in range(50))
+    assert is_thin_signature(exactly_at_threshold, threshold=50) is False
+    one_short = " ".join(f"w{i}" for i in range(49))
+    assert is_thin_signature(one_short, threshold=50) is True
+
+
+def test_is_thin_signature_none_is_unknown_not_thin():
+    # No signature computed at all -- callers that don't supply this field
+    # (older data, code paths that never ran the signature step) should not
+    # be flagged thin by default.
+    assert is_thin_signature(None) is False
 
 
 # --------------------------------------------------------------------------

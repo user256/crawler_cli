@@ -90,6 +90,7 @@ class AnalysisRow(TypedDict):
     overall_indexable: bool | None
     signal_confidence: str | None
     extraction_method: str | None
+    signature_model_input: str | None
     embedding: list[float] | None
     embedding_model: str | None
     canonical_url: str | None
@@ -2950,6 +2951,7 @@ class AsyncpgStore:
                        s.signal_confidence AS signal_confidence,
                        s.extraction_method AS extraction_method,
                        s.signature_hash AS signature_hash,
+                       s.signature_model_input AS signature_model_input,
                        e.embedding_json AS embedding_json, e.model AS embedding_model,
                        canu.url AS canonical_url
                 FROM urls u
@@ -2991,6 +2993,7 @@ class AsyncpgStore:
                     "overall_indexable": r["overall_indexable"],
                     "signal_confidence": r["signal_confidence"],
                     "extraction_method": r["extraction_method"],
+                    "signature_model_input": r["signature_model_input"],
                     "embedding": embedding,
                     "embedding_model": r["embedding_model"],
                     "canonical_url": r["canonical_url"],
