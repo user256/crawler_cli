@@ -34,5 +34,5 @@ are recorded as blocked and never stored as content.
 - Ticket 074's original blocked-content assertions are enforced end to end.
 
 ## Status
-done (Priority: **P0**) — unresolved challenges hard-stop before extraction; `skip_reason=bot_challenge`; PostgreSQL `page_metadata.challenge`/`skip_reason` audit without content overwrite; JSONL/job summaries include `challenge_blocked_count`.
+done (2026-07-15, PR #24) (Priority: **P0**) — unresolved challenges hard-stop before extraction; `skip_reason=bot_challenge`; PostgreSQL `page_metadata.challenge`/`skip_reason` audit without content overwrite; JSONL/job summaries include `challenge_blocked_count`.
 

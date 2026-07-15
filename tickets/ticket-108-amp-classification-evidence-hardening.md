@@ -1,6 +1,6 @@
 # Ticket 108: Harden AMP classification evidence and recomputation
 
-**Status:** done (2026-07-15)
+**Status:** done (2026-07-15, PR #23; production recount → 116)
 **Priority:** P1 correctness
 **Depends on:** Ticket 103
 

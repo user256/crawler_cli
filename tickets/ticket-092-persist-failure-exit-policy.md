@@ -26,5 +26,5 @@ incomplete database crawl as successful.
   available only in the saved output.
 
 ## Status
-done (Priority: **P1**) — claimed by `agent/ticket-092-persist-failure-exit-policy`; reliability/automation; found in 2026-07-15 audit.
+done (2026-07-15, PR #25; leftovers → 115) (Priority: **P1**) — non-zero exit on persist failure, `durability` + failed URL lists, pending-for-resume; reliability/automation; found in 2026-07-15 audit.
 

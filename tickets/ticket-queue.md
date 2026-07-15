@@ -6,26 +6,26 @@ Ticket files remain the source of truth for scope and DoD.
 
 ### Current position (2026-07-15)
 
-- Repository review complete: no open pull requests or GitHub issues remain.
-  `master` passed the tracked-project checks (500 passed, 21 skipped; ruff,
-  formatter, and mypy clean).
-- Tickets **101–105** are on `master` and form the intent-overlap reporting
-  baseline (relationship, parameterised-URL, AMP, thin-content, time-sequenced).
-- Review remediations **099 / 109 / 111** merged (PRs #20 / #21 / #19); leftover
-  hygiene/calibration are **112 / 113**. **108** is done and unblocks stable
-  AMP/variant evidence for interactive report work.
-- Ticket **110** was explicitly excluded (rejected / unused); next free
-  number is **114**.
+- Batch review of open PRs **#22–#26** complete: all five merged to `master`
+  (087 / 088 / 089 / 092 / 108). Pre-merge CI blockers fixed in-branch (088
+  ruff format; 089 integration fixture `h2` key). No open PRs remain.
+- MERGE+REMEDIATE leftovers filed as **114** (sitemap budget dedupe/CDN docs),
+  **115** (persist/frontier incompleteness signaling), **116** (thompsons AMP
+  evidence recount). Prior leftovers **112 / 113** unchanged.
+- Tickets **101–105** + **108** form the intent-overlap reporting baseline;
+  **106** / **107** are unblocked on AMP evidence.
+- Ticket **110** remains unused/rejected; next free number is **117**.
 
 ### Ordering rules
 
 - Correctness and evidence hardening precede presentation work that consumes
   the affected fields.
 - Ticket **107** cannot start before **106** defines and tests the JSON contract;
-  **106** should wait on **108** for stable AMP/variant evidence.
+  **106** may proceed now that **108** is on master (production AMP recount is
+  **116**, not a 106 blocker).
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next free number (**114**); do not reuse **110**.
+- New remediation work uses the next free number (**117**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -187,7 +187,7 @@ byte-for-byte on casino_org (1221 pairs) and whiskipedia (198 pairs), Jaccard
 1.0000. Standalone Intent_Overlap repo marked superseded. Batch reviewed
 2026-07-05; three follow-ups filed as 082–084 (see next section). Tickets later
 continued through the 2026-07-15 intent-overlap review batch; 110 remains
-unused (ticket 110 explicitly out of scope / rejected). Next free number: **114**.
+unused (ticket 110 explicitly out of scope / rejected). Next free number: **117**.
 **LANDED ON MASTER 2026-07-05 (ticket 082):** the whole stack is now on `master`
 base-first — `io-integration-base` roll-up as PR #7, then 076–081 as PRs #8/#2–#6
 in order, 24 base commits kept linear (no history rewrite). Suite green on master
@@ -223,12 +223,12 @@ security, CLI behavior, CI, packaging, and documentation. Implementation order:
 proceed independently except where their DoD references earlier behavior.
 
 - `086` `done` (2026-07-15, PR #13) [ticket-086-crawl-run-isolation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-086-crawl-run-isolation.md) — **P0:** isolate frontier/metadata by crawl run; explicit new-vs-resume semantics so old rows cannot suppress unrelated seeds. Reviewed MERGE+REMEDIATE: P0 fix sound, suite green (393 passed / 19 skipped on merged master), ruff+mypy clean; pg integration tests run separately (need `CRAWLER_CLI_TEST_DSN`). Minor follow-ups filed as ticket 099; run-aware reporting owned by 095
-- `087` `done` (2026-07-15, PR #26) [ticket-087-sitemap-scope-budget-politeness.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-087-sitemap-scope-budget-politeness.md) — **P0:** enforce host scope and run-global budget on sitemap URLs; route sitemap fetches through bounded politeness controls
-- `088` `done` (2026-07-15, PR #22) [ticket-088-robots-rfc9309-follow-up.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-088-robots-rfc9309-follow-up.md) — **P0:** fix robots fail-open contradiction, query matching, consecutive UA groups, per-domain UA selection, and proxy routing
-- `089` `done` [ticket-089-challenge-hard-stop-persistence.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-089-challenge-hard-stop-persistence.md) — **P0:** unresolved challenges must not be extracted, persisted as content, linked, or counted as crawled — branch `agent/ticket-089-challenge-hard-stop-persistence`
+- `087` `done` (2026-07-15, PR #26; leftovers → 114) [ticket-087-sitemap-scope-budget-politeness.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-087-sitemap-scope-budget-politeness.md) — **P0:** enforce host scope and run-global budget on sitemap URLs; route sitemap fetches through bounded politeness controls. Reviewed MERGE+REMEDIATE: DoD met; CI green
+- `088` `done` (2026-07-15, PR #22) [ticket-088-robots-rfc9309-follow-up.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-088-robots-rfc9309-follow-up.md) — **P0:** fix robots fail-open contradiction, query matching, consecutive UA groups, per-domain UA selection, and proxy routing. Reviewed MERGE: DoD met; format fix landed before merge
+- `089` `done` (2026-07-15, PR #24) [ticket-089-challenge-hard-stop-persistence.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-089-challenge-hard-stop-persistence.md) — **P0:** unresolved challenges must not be extracted, persisted as content, linked, or counted as crawled. Reviewed MERGE: DoD met; integration fixture `h2` fixed before merge
 - `090` `done` (2026-07-15, PR #12) [ticket-090-safe-default-crawl-bound.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-090-safe-default-crawl-bound.md) — **P1:** restore a finite default open-crawl bound and align config/CLI/docs. Reviewed MERGE: default open crawl now bounded at 200, `--max-pages 0` still explicitly unlimited, fixed-list/CSV uncapped; all DoD met (370 passed). Minor dead-`config.max_pages`-field note → ticket 112 (via 099)
 - `091` `done` (2026-07-15, PR #9) [ticket-091-real-digest-auth.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-091-real-digest-auth.md) — **P1:** implement real Digest authentication across supported backends or remove the misleading option. Reviewed MERGE: chose the ticket-permitted removal path — `digest` gone from CLI/type surface, legacy programmatic use fails clearly, no silent Basic downgrade; added `--auth-password-env/-file`. 30 passed
-- `092` `done` [ticket-092-persist-failure-exit-policy.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-092-persist-failure-exit-policy.md) — **P1:** terminal persistence failures produce a non-zero automation result and durable/partial output metadata — claimed by `agent/ticket-092-persist-failure-exit-policy`
+- `092` `done` (2026-07-15, PR #25; leftovers → 115) [ticket-092-persist-failure-exit-policy.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-092-persist-failure-exit-policy.md) — **P1:** terminal persistence failures produce a non-zero automation result and durable/partial output metadata. Reviewed MERGE+REMEDIATE: DoD met; CI green
 - `093` `proposed` [ticket-093-cli-config-numeric-validation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-093-cli-config-numeric-validation.md) — **P2:** validate numeric and cross-field config at CLI/library boundaries; no raw tracebacks
 - `094` `done` (2026-07-15, PR #11) [ticket-094-obscura-installer-verification.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-094-obscura-installer-verification.md) — **P1 security:** checksum/signature verification, safe staged archive extraction, and atomic install. Reviewed MERGE: adversarial security review found no exploitable holes — real-path containment (not string prefix), pre-extraction symlink/hardlink/device rejection, fail-closed digest verify, atomic replace with rollback; 42 passed. Test-coverage hardening + digest cross-check filed as ticket 100
 - `095` `proposed` [ticket-095-run-aware-snapshots-reporting.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-095-run-aware-snapshots-reporting.md) — **P2, depends on 086:** retain per-run snapshots and require deterministic run selection in reports/enrichment
@@ -269,47 +269,51 @@ Webpage rendering of the intent-overlap results: hoverable cluster map with
 match-type toggles + the core report data as filterable tables, from a JSON
 data export. Land after 101–105 (+108 AMP evidence) so tag fields are stable.
 
-- `106` `planned` (after 108; schema fields from 109 noted) [ticket-106-report-data-json-export.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-106-report-data-json-export.md) — **P2:** `--json-report` → `report_data.json` (pages/pairs/clusters + 2D UMAP/PCA coords via `[viz]` extra, crawler-native cluster labels, centroid-similarity metric); the data layer for 107
+- `106` `planned` [ticket-106-report-data-json-export.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-106-report-data-json-export.md) — **P2:** `--json-report` → `report_data.json` (pages/pairs/clusters + 2D UMAP/PCA coords via `[viz]` extra, crawler-native cluster labels, centroid-similarity metric); the data layer for 107. Unblocked by 108 ✓; schema polish notes in 113
 - `107` `planned` (blocked on 106) [ticket-107-interactive-html-cluster-report.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-107-interactive-html-cluster-report.md) — **P2, depends on 106:** `render-report` subcommand → single self-contained offline HTML — canvas cluster map (hover/zoom/pin), match-type filter toggles (parent-child, time-sequenced, thin, parameterised, amp...), sortable pages/pairs/clusters tables, URL search
 
 ### 2026-07-15 review remediations for tickets 103–104 + CI
 
-- `108` `done` (2026-07-15) [ticket-108-amp-classification-evidence-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-108-amp-classification-evidence-hardening.md) — **P1, depends on 103:** remove base-exists-only AMP confirmation, use intent-signature evidence, and recompute stale variant labels
+- `108` `done` (2026-07-15, PR #23; production recount → 116) [ticket-108-amp-classification-evidence-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-108-amp-classification-evidence-hardening.md) — **P1, depends on 103:** remove base-exists-only AMP confirmation, use intent-signature evidence, and recompute stale variant labels. Reviewed MERGE: DoD met; CI green
 - `109` `done` (2026-07-15, PR #21; leftovers → 113) [ticket-109-thin-content-diagnostic-completeness.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-109-thin-content-diagnostic-completeness.md) — **P2:** `main_text_*` / `signature_chars` diagnostics in `pages.csv`; missing-vs-zero evidence; thin policy unchanged
 - `111` `done` (2026-07-15, PR #19) [ticket-111-ci-artifact-action-runtime-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-111-ci-artifact-action-runtime-hygiene.md) — **P3:** non-empty coverage artifacts + GitHub actions off deprecated Node 20 runtimes
 - `113` `proposed` [ticket-113-thin-diagnostic-schema-calibration.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-113-thin-diagnostic-schema-calibration.md) — **P3:** 109 leftovers — 106 schema field list polish + `/videos` calibration documentation
+
+### 2026-07-15 batch review remediations (PRs #22–#26)
+
+Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
+#25 / #23). All merged MERGE or MERGE+REMEDIATE; none rejected.
+
+- `114` `proposed` [ticket-114-sitemap-budget-dedupe-cdn-docs.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-114-sitemap-budget-dedupe-cdn-docs.md) — **P2:** 087 leftovers — dedupe sitemap locs against frontier budget + document cross-host `Sitemap:` allowlisting
+- `115` `proposed` [ticket-115-persist-frontier-incompleteness-signaling.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-115-persist-frontier-incompleteness-signaling.md) — **P2:** 092 leftovers — signal mark-done failure to automation; align crawl-run status with persist incompleteness
+- `116` `proposed` [ticket-116-amp-evidence-production-recount.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-116-amp-evidence-production-recount.md) — **P3:** 108 follow-up — fresh thompsons-scotland evidence-backed AMP / missing-canonical counts
 
 ### Open work — priority order (2026-07-15)
 
 Implement in this order unless a ticket's dependency blocks it.
 
-**1. Crawl correctness and persistence safety**
+**1. Run-aware reporting and verification**
 
-1. **P0** `087` `done` (PR #26) [sitemap scope/budget/politeness](./ticket-087-sitemap-scope-budget-politeness.md)
-2. **P0** `088` `done` (PR #22) [robots RFC9309 follow-up](./ticket-088-robots-rfc9309-follow-up.md)
-3. **P0** `089` `done` (PR #24) [challenge hard-stop persistence](./ticket-089-challenge-hard-stop-persistence.md)
-4. **P1** `092` `done` [persist-failure exit policy](./ticket-092-persist-failure-exit-policy.md) — `agent/ticket-092-persist-failure-exit-policy`
-5. **P1** `108` `done` (2026-07-15, PR #23) [AMP classification evidence hardening](./ticket-108-amp-classification-evidence-hardening.md) — after 103 ✓; unblocks stable 106 schema
+1. **P2** `095` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — depends 086 ✓
+2. **P2** `096` [persistence coverage gate](./ticket-096-persistence-coverage-gate.md)
+3. **P2** `093` [CLI/config numeric validation](./ticket-093-cli-config-numeric-validation.md)
+4. **P2** `114` [sitemap budget dedupe / CDN docs](./ticket-114-sitemap-budget-dedupe-cdn-docs.md) — from 087
+5. **P2** `115` [persist/frontier incompleteness signaling](./ticket-115-persist-frontier-incompleteness-signaling.md) — from 092
+6. **P3** `112` [run-isolation hygiene leftovers](./ticket-112-run-isolation-hygiene-leftovers.md) — from 099
+7. **P3** `113` [thin-diagnostic schema/calibration](./ticket-113-thin-diagnostic-schema-calibration.md) — from 109
+8. **P3** `116` [AMP evidence production recount](./ticket-116-amp-evidence-production-recount.md) — from 108
 
-**2. Run-aware reporting and verification**
+**2. Interactive intent-overlap reporting**
 
-5. **P2** `095` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — depends 086 ✓
-6. **P2** `096` [persistence coverage gate](./ticket-096-persistence-coverage-gate.md)
-7. **P2** `093` [CLI/config numeric validation](./ticket-093-cli-config-numeric-validation.md)
-8. **P3** `112` [run-isolation hygiene leftovers](./ticket-112-run-isolation-hygiene-leftovers.md) — from 099
-9. **P3** `113` [thin-diagnostic schema/calibration](./ticket-113-thin-diagnostic-schema-calibration.md) — from 109
+9. **P2** `106` [report_data.json export](./ticket-106-report-data-json-export.md) — after 108 ✓; then 107
+10. **P2** `107` [interactive HTML cluster report](./ticket-107-interactive-html-cluster-report.md) — blocked on 106
 
-**3. Interactive intent-overlap reporting**
+**3. Lower-priority hardening**
 
-10. **P2** `106` [report_data.json export](./ticket-106-report-data-json-export.md) — after 108 ✓; then 107
-11. **P2** `107` [interactive HTML cluster report](./ticket-107-interactive-html-cluster-report.md) — blocked on 106
-
-**4. Lower-priority hardening**
-
-12. **P3** `098` [packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md)
-13. **P3** `100` [Obscura installer test hardening](./ticket-100-obscura-installer-test-hardening.md)
+11. **P3** `098` [packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md)
+12. **P3** `100` [Obscura installer test hardening](./ticket-100-obscura-installer-test-hardening.md)
 
 **Deferred lanes**
 
-14. **deferred** `035` [Redis frontier](./ticket-035-redis-frontier-queue.md) — architectural/infra
-15. **proposed** `075` [Casino Guru review ingestion](./ticket-075-casino-guru-review-ingestion.md) — blocked on reliable authorised fetch path
+13. **deferred** `035` [Redis frontier](./ticket-035-redis-frontier-queue.md) — architectural/infra
+14. **proposed** `075` [Casino Guru review ingestion](./ticket-075-casino-guru-review-ingestion.md) — blocked on reliable authorised fetch path

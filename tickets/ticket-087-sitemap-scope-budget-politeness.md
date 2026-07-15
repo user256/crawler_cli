@@ -38,5 +38,5 @@ challenge handling.
 - Sitemap concurrency is bounded by the same operational controls as page fetches.
 
 ## Status
-done (2026-07-15, PR #26) (Priority: **P0**) — `agent/ticket-087-sitemap-scope-budget-politeness`; scope/security/politeness; found in 2026-07-15 audit.
+done (2026-07-15, PR #26; leftovers → 114) (Priority: **P0**) — host scope, run-global budget, bounded sitemap fetches; scope/security/politeness; found in 2026-07-15 audit.
 
