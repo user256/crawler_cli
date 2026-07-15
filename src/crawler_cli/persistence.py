@@ -1029,7 +1029,11 @@ class AsyncpgStore:
     ) -> dict[str, int]:
         if not values:
             return {}
-        unique_values = list(set(values))
+        # Sorted (not just deduped) so concurrent transactions bulk-inserting
+        # overlapping values (e.g. shared nav anchor texts/xpaths across pages)
+        # acquire row locks in the same order — mirrors the fix in
+        # _bulk_get_or_create_urls, which prevents DeadlockDetectedError.
+        unique_values = sorted(set(values))
         rows = await conn.fetch(
             f"""
             WITH input_vals AS (
@@ -1555,6 +1559,16 @@ class AsyncpgStore:
                     if result.extracted.x_canonical:
                         prelock_urls.append(result.extracted.x_canonical)
                     prelock_urls.extend(link.href for link in result.extracted.hreflang_links if link.href)
+                if result.discovered_links:
+                    # Internal links are bulk-locked again later in
+                    # _persist_internal_links; touching them here too means
+                    # ALL url rows this transaction will ever lock go through
+                    # one combined sorted bulk insert. Without this, two
+                    # separate sorted-but-disjoint bulk calls (this one, then
+                    # the internal-links one) can still deadlock against each
+                    # other when their url sets overlap but are locked in two
+                    # different statements.
+                    prelock_urls.extend(link.href for link in result.discovered_links if link.href)
                 await self._bulk_get_or_create_urls(conn, prelock_urls)
 
                 requested_url_id = await self._get_or_create_url(conn, result.requested_url)
