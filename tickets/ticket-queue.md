@@ -10,8 +10,8 @@ Ticket files remain the source of truth for scope and DoD.
   (087 / 088 / 089 / 092 / 108). Pre-merge CI blockers fixed in-branch (088
   ruff format; 089 integration fixture `h2` key).
 - Next lane claimed for parallel worktrees: **095 / 096 / 093 / 112 / 113 /
-  106→107 / 098 / 100** (see Open work). Leftovers **114 / 115 / 116** remain
-  unclaimed.
+  106→107 / 098** (see Open work). Leftovers **114 / 115 / 116** remain
+  unclaimed. Ticket **100** done (installer rejection tests + digest verify).
 - Tickets **101–105** + **108** form the intent-overlap reporting baseline;
   **106** / **107** are unblocked on AMP evidence.
 - Ticket **110** remains unused/rejected; next free number is **117**.
@@ -246,7 +246,7 @@ An unrelated uncommitted bulk-insert deadlock fix found in the working tree was
 committed separately (not a ticket).
 
 - `099` `done` (2026-07-15, PR #20; leftovers → 112) [ticket-099-crawl-run-isolation-followups.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-099-crawl-run-isolation-followups.md) — **P2:** drop no-op `--new-run`, `CrawlRunSelectionError` (no broad RuntimeError swallow), remove dead legacy-run backfill SQL, resume mismatch/not-found tests
-- `100` `in_progress` [ticket-100-obscura-installer-test-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-100-obscura-installer-test-hardening.md) — **P3 security:** ticket-094 test hardening — direct rejection tests for tar symlink/absolute/device + zip-symlink members, and a one-time cross-check of the pinned `v0.1.8` SHA-256 digests against the real published release assets — claimed by `agent/ticket-100-obscura-installer-test-hardening`
+- `100` `done` (2026-07-15) [ticket-100-obscura-installer-test-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-100-obscura-installer-test-hardening.md) — **P3 security:** ticket-094 test hardening — direct rejection tests for tar symlink/absolute/device/FIFO + zip-symlink members; one-time cross-check confirmed all 5 pinned `v0.1.8` SHA-256 digests match published GitHub release assets (fail-closed verify unchanged)
 - `112` `in_progress` [ticket-112-run-isolation-hygiene-leftovers.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-112-run-isolation-hygiene-leftovers.md) — **P3:** 099 leftovers — dead `CrawlConfig.max_pages` field + auth-password guard wording (+ optional single-arg mutex cleanup) — claimed by `agent/ticket-112-run-isolation-hygiene-leftovers`
 
 ### Intent-overlap case handling (from thompsons-scotland.co.uk run review, 2026-07-15)
@@ -311,7 +311,6 @@ Implement in this order unless a ticket's dependency blocks it.
 **3. Lower-priority hardening**
 
 11. **P3** `098` `in_progress` [packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md) — `agent/ticket-098-packaging-docs-release-hygiene`
-12. **P3** `100` `in_progress` [Obscura installer test hardening](./ticket-100-obscura-installer-test-hardening.md) — `agent/ticket-100-obscura-installer-test-hardening`
 
 **Deferred lanes**
 
