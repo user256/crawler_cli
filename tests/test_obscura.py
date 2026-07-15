@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import io
+import os
+import shutil
 import sys
+import tarfile
+import zipfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -772,3 +779,202 @@ def test_find_obscura_uses_install_dir(tmp_path, monkeypatch):
     # Make PATH lookups miss so the install dir is what resolves.
     monkeypatch.setattr(oi.shutil, "which", lambda _name: None)
     assert oi.find_obscura_binary(None) == str(fake)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_obscura_tar(path: Path, entries: dict[str, bytes] | None = None) -> None:
+    entries = entries or {"obscura": b"new-obscura", "obscura-worker": b"new-worker"}
+    with tarfile.open(path, "w:gz") as tf:
+        for name, data in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o755
+            tf.addfile(info, io.BytesIO(data))
+
+
+def _write_obscura_zip(path: Path, entries: dict[str, bytes] | None = None) -> None:
+    entries = entries or {"obscura.exe": b"new-obscura", "obscura-worker.exe": b"new-worker"}
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+
+
+def _configure_linux_install(monkeypatch, oi, install_dir: Path, archive: Path, *, digest: str | None = None) -> None:
+    monkeypatch.setattr(oi, "install_dir", lambda: install_dir)
+    monkeypatch.setattr(oi.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(oi.platform, "machine", lambda: "x86_64")
+    monkeypatch.setitem(
+        oi._ASSET_SHA256,
+        ("v0.1.8", "obscura-x86_64-linux.tar.gz"),
+        digest or _sha256(archive),
+    )
+
+    def fake_download(_url: str, dest: Path) -> None:
+        shutil.copyfile(archive, dest)
+
+    monkeypatch.setattr(oi, "_download", fake_download)
+
+
+def _write_existing_install(install_dir: Path) -> None:
+    install_dir.mkdir(parents=True)
+    (install_dir / "obscura").write_bytes(b"old-obscura")
+    (install_dir / "obscura-worker").write_bytes(b"old-worker")
+
+
+def test_install_obscura_rejects_invalid_version_scope(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-linux.tar.gz"
+    _write_obscura_tar(archive)
+    install_dir = tmp_path / "install"
+    _configure_linux_install(monkeypatch, oi, install_dir, archive)
+
+    with pytest.raises(ValueError, match="Invalid Obscura version"):
+        oi.install_obscura("v0.1.8/../../other", force=True, log=lambda _msg: None)
+
+    assert not install_dir.exists()
+
+
+def test_install_obscura_rejects_unpinned_release_digest(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-linux.tar.gz"
+    _write_obscura_tar(archive)
+    install_dir = tmp_path / "install"
+    _configure_linux_install(monkeypatch, oi, install_dir, archive)
+    monkeypatch.setattr(oi, "_download", MagicMock(side_effect=AssertionError("download should not run")))
+
+    with pytest.raises(RuntimeError, match="No pinned SHA-256 digest"):
+        oi.install_obscura("v9.9.9", force=True, log=lambda _msg: None)
+
+    assert not install_dir.exists()
+
+
+def test_install_obscura_rejects_checksum_mismatch_before_extract(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-linux.tar.gz"
+    _write_obscura_tar(archive)
+    install_dir = tmp_path / "install"
+    _write_existing_install(install_dir)
+    _configure_linux_install(monkeypatch, oi, install_dir, archive, digest="0" * 64)
+    monkeypatch.setattr(oi, "_extract", MagicMock(side_effect=AssertionError("extract should not run")))
+
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
+
+    assert (install_dir / "obscura").read_bytes() == b"old-obscura"
+    assert not (tmp_path / "outside").exists()
+
+
+def test_install_obscura_rejects_malicious_zip_traversal(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-windows.zip"
+    _write_obscura_zip(archive, {"obscura.exe": b"new", "../outside": b"pwn", "obscura-worker.exe": b"worker"})
+    install_dir = tmp_path / "install"
+    monkeypatch.setattr(oi, "install_dir", lambda: install_dir)
+    monkeypatch.setattr(oi.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(oi.platform, "machine", lambda: "AMD64")
+    monkeypatch.setitem(oi._ASSET_SHA256, ("v0.1.8", archive.name), _sha256(archive))
+    monkeypatch.setattr(oi, "_download", lambda _url, dest: shutil.copyfile(archive, dest))
+
+    with pytest.raises(RuntimeError, match="Unsafe Obscura archive member path"):
+        oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
+
+    assert not (tmp_path / "outside").exists()
+    assert not install_dir.exists()
+
+
+def test_install_obscura_rejects_malicious_tar_link(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-linux.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        for name in ("obscura", "obscura-worker"):
+            data = b"new"
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o755
+            tf.addfile(info, io.BytesIO(data))
+        link = tarfile.TarInfo("linked-worker")
+        link.type = tarfile.LNKTYPE
+        link.linkname = "obscura-worker"
+        tf.addfile(link)
+    install_dir = tmp_path / "install"
+    _configure_linux_install(monkeypatch, oi, install_dir, archive)
+
+    with pytest.raises(RuntimeError, match="unsafe Obscura tar member type"):
+        oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
+
+    assert not install_dir.exists()
+
+
+def test_interrupted_install_keeps_existing_install(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-linux.tar.gz"
+    _write_obscura_tar(archive)
+    install_dir = tmp_path / "install"
+    _write_existing_install(install_dir)
+    _configure_linux_install(monkeypatch, oi, install_dir, archive)
+
+    def interrupted_extract(_archive: Path, staging: Path) -> None:
+        (staging / "partial").write_bytes(b"partial")
+        raise RuntimeError("interrupted")
+
+    monkeypatch.setattr(oi, "_extract", interrupted_extract)
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
+
+    assert (install_dir / "obscura").read_bytes() == b"old-obscura"
+    assert (install_dir / "obscura-worker").read_bytes() == b"old-worker"
+
+
+def test_install_obscura_replaces_existing_install_after_validation(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-linux.tar.gz"
+    _write_obscura_tar(archive)
+    install_dir = tmp_path / "install"
+    _write_existing_install(install_dir)
+    (install_dir / "stale").write_bytes(b"stale")
+    _configure_linux_install(monkeypatch, oi, install_dir, archive)
+
+    result = oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
+
+    assert result == str(install_dir / "obscura")
+    assert (install_dir / "obscura").read_bytes() == b"new-obscura"
+    assert (install_dir / "obscura-worker").read_bytes() == b"new-worker"
+    assert not (install_dir / "stale").exists()
+    assert os.access(install_dir / "obscura", os.X_OK)
+
+
+def test_failed_replacement_rolls_back_existing_install(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-linux.tar.gz"
+    _write_obscura_tar(archive)
+    install_dir = tmp_path / "install"
+    _write_existing_install(install_dir)
+    _configure_linux_install(monkeypatch, oi, install_dir, archive)
+    real_replace = os.replace
+
+    def flaky_replace(src, dst):
+        src_path = Path(src)
+        dst_path = Path(dst)
+        if src_path.name == "staging" and dst_path == install_dir:
+            raise OSError("simulated replacement failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(oi.os, "replace", flaky_replace)
+
+    with pytest.raises(OSError, match="simulated replacement failure"):
+        oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
+
+    assert (install_dir / "obscura").read_bytes() == b"old-obscura"
+    assert (install_dir / "obscura-worker").read_bytes() == b"old-worker"
