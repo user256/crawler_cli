@@ -2,7 +2,8 @@
 
 Small synthetic vector fixtures — no model, no DB. Covers suppression modes,
 both linkages, chained-cluster flagging, singleton partitions, risk levels,
-CSV column contracts, and --fail-on exit codes.
+CSV column contracts, --fail-on exit codes, and the ticket-105 time-sequenced
+section policy.
 """
 
 from __future__ import annotations
@@ -18,12 +19,15 @@ np = pytest.importorskip("numpy")
 from crawler_cli.intent_overlap import (  # noqa: E402
     RISK_DUPLICATE,
     RISK_PARENT_CHILD,
+    TIME_SEQUENCED_RISK,
     analyse_embeddings,
     classify_and_fold_parameterised,
     classify_url,
     compute_exclusion,
+    path_in_section,
     run_intent_overlap,
     similarity_pairs,
+    time_sequenced_pair_class,
     write_reports,
 )
 
@@ -449,6 +453,8 @@ def test_compute_exclusion(row, expected):
             {"url": "https://a.com/the-team?type=x", "canonical_url": "https://a.com/the-team"},
             None,
         ),
+        # AMP is the more specific structural classification (ticket 103).
+        ({"url": "https://a.com/article?amp=1", "variant_kind": "amp"}, None),
     ],
 )
 def test_classify_url(row, expected):
@@ -456,8 +462,16 @@ def test_classify_url(row, expected):
 
 
 def _prow(url, **over):
-    row = {"url": url, "kind": "html", "status": 200, "overall_indexable": True, "canonical_url": None,
-           "variant_of": None, "signature_hash": None, "excluded": None}
+    row = {
+        "url": url,
+        "kind": "html",
+        "status": 200,
+        "overall_indexable": True,
+        "canonical_url": None,
+        "variant_of": None,
+        "signature_hash": None,
+        "excluded": None,
+    }
     row.update(over)
     return row
 
@@ -553,6 +567,7 @@ def test_write_reports_produces_six_csvs_and_manifest(tmp_path):
         "low_confidence",
         "thin",
         "sim_percentile",
+        "pair_class",
         "relation",
         "section_a",
         "section_b",
@@ -786,3 +801,201 @@ async def test_run_intent_overlap_manifest_has_relation_counts(tmp_path):
     assert run.result.summary["relation_counts"] == {"parent-child": 1}
     manifest = json.loads((tmp_path / "run_manifest.json").read_text())
     assert manifest["summary"]["relation_counts"] == {"parent-child": 1}
+
+
+# --------------------------------------------------------------------------
+# Ticket 105: time-sequenced sections (news/blog QDF policy)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url,prefix,expected",
+    [
+        ("https://a.com/news", "/news", True),
+        ("https://a.com/news/", "/news", True),
+        ("https://a.com/news/archived/foo", "/news", True),  # nested path
+        ("https://a.com/news/archived/foo/", "/news", True),  # trailing slash on url
+        ("https://a.com/news", "/news/", True),  # trailing slash on prefix
+        ("https://a.com/newsletter", "/news", False),  # segment-boundary, not substring
+        ("https://a.com/newsletter/signup", "/news", False),
+        ("https://a.com/blog/post", "/news", False),
+        ("https://a.com/NEWS/Archived/Foo", "/news", True),  # case-insensitive
+    ],
+)
+def test_path_in_section_prefix_matching(url, prefix, expected):
+    assert path_in_section(url, prefix) is expected
+
+
+def test_time_sequenced_pair_class_requires_both_sides():
+    sections = ["/news"]
+    # Both under /news -> time-sequenced.
+    assert time_sequenced_pair_class("https://a.com/news/1", "https://a.com/news/2", sections) == "time-sequenced"
+    # One in /news, one outside -> cross-section, unaffected.
+    assert time_sequenced_pair_class("https://a.com/news/1", "https://a.com/services/x", sections) == ""
+    # Neither in /news.
+    assert time_sequenced_pair_class("https://a.com/services/x", "https://a.com/services/y", sections) == ""
+
+
+def test_time_sequenced_pair_class_no_sections_configured():
+    # No --time-sequenced-section given -> never classified, existing behaviour untouched.
+    assert time_sequenced_pair_class("https://a.com/news/1", "https://a.com/news/2", []) == ""
+
+
+def test_intra_news_pair_gets_softer_label_and_pair_class():
+    recs = [
+        _rec("https://a.com/news/archived/frankly-legal-health-and-safety", [1.0, 0.0, 0.0]),
+        _rec("https://a.com/news/archived/frankly-legal-how-health-safety-helps-you", [0.999, 0.044, 0.0]),
+    ]
+    res = analyse_embeddings(recs, lang_split=False, time_sequenced_sections=["/news"])
+    assert len(res.overlap_pairs) == 1
+    assert res.overlap_pairs[0]["pair_class"] == "time-sequenced"
+    assert res.summary["time_sequenced_pairs"] == 1
+    assert res.summary["time_sequenced_pages"] == 2
+    # Softer label replaces the duplicate label, and duplicate_pages excludes them.
+    assert all(row["risk"] == TIME_SEQUENCED_RISK for row in res.pages_rows)
+    assert res.summary["duplicate_pages"] == 0
+    # Cluster gets the hub/roundup suggestion, not a canonical pick.
+    assert len(res.cluster_rows) == 1
+    assert "hub/roundup" in res.cluster_rows[0]["suggested_canonical"]
+    assert res.cluster_rows[0]["time_sequenced"] is True
+
+
+def test_thin_content_takes_precedence_over_time_sequenced_policy():
+    recs = [
+        _rec("https://a.com/news/one", [1.0, 0.0], sig=_words(5)),
+        _rec("https://a.com/news/two", [1.0, 0.0], sig=_words(5)),
+    ]
+    res = analyse_embeddings(recs, lang_split=False, time_sequenced_sections=["/news"])
+    assert res.overlap_pairs[0]["pair_class"] == "time-sequenced"
+    assert all(row["risk"].startswith("thin content") for row in res.pages_rows)
+    assert res.cluster_rows[0]["thin"] is True
+    assert "thin content" in res.cluster_rows[0]["suggested_canonical"]
+    assert res.summary["duplicate_pages"] == 0
+    assert res.summary["time_sequenced_pages"] == 0
+
+
+def test_cross_section_overlap_is_not_masked_by_closer_time_sequenced_pair():
+    recs = [
+        _rec("https://a.com/news/one", [1.0, 0.0]),
+        _rec("https://a.com/news/two", [1.0, 0.0]),
+        _rec("https://a.com/services/topic", [0.9, 0.4358899]),
+    ]
+    res = analyse_embeddings(recs, lang_split=False, time_sequenced_sections=["/news"])
+    news_rows = [row for row in res.pages_rows if "/news/" in row["url"]]
+    assert all(row["risk"] == "high intent overlap" for row in news_rows)
+    assert res.summary["time_sequenced_pairs"] == 1
+    assert res.summary["time_sequenced_pages"] == 0
+
+
+def test_cross_section_pair_keeps_full_duplicate_treatment():
+    # A news page vs. an evergreen service page -> real cannibalisation risk,
+    # NOT covered by --time-sequenced-section even with near-identical content.
+    recs = [
+        _rec("https://a.com/news/archived/foo", [1.0, 0.0, 0.0]),
+        _rec("https://a.com/services/health-and-safety", [0.999, 0.044, 0.0]),
+    ]
+    res = analyse_embeddings(recs, lang_split=False, time_sequenced_sections=["/news"])
+    assert res.overlap_pairs[0]["pair_class"] == ""
+    assert res.summary["time_sequenced_pairs"] == 0
+    assert all(row["risk"] == "duplicate — decanonicalisation likely" for row in res.pages_rows)
+    assert res.summary["duplicate_pages"] == 2
+
+
+def test_non_news_findings_unchanged_when_no_time_sequenced_sections_configured():
+    recs = [
+        _rec("https://a.com/news/archived/foo", [1.0, 0.0, 0.0]),
+        _rec("https://a.com/news/archived/bar", [0.999, 0.044, 0.0]),
+    ]
+    # No --time-sequenced-section at all -> identical to pre-ticket-105 behaviour.
+    res = analyse_embeddings(recs, lang_split=False)
+    assert res.overlap_pairs[0]["pair_class"] == ""
+    assert all(row["risk"] == "duplicate — decanonicalisation likely" for row in res.pages_rows)
+    assert res.summary["time_sequenced_pairs"] == 0
+    assert res.summary["time_sequenced_pages"] == 0
+
+
+def test_chained_cluster_label_wins_over_time_sequenced():
+    # Same chained-cluster fixture as test_chained_cluster_flagged_when_min_intra_below_threshold,
+    # but all three URLs are under the same time-sequenced section. The graph-quality
+    # "chained cluster" review label is existing, more specific precedence and must still win
+    # (there is no "thin content" label on current master to defer to instead — see ticket 105's
+    # test task note).
+    a = [1.0, 0.0, 0.0]
+    b = [0.75, 0.66, 0.0]
+    c = [0.2, 0.98, 0.0]
+    recs = [
+        _rec("https://a.com/news/a", a),
+        _rec("https://a.com/news/b", b),
+        _rec("https://a.com/news/c", c),
+    ]
+    res = analyse_embeddings(
+        recs, threshold=0.6, dup_threshold=0.99, lang_split=False, time_sequenced_sections=["/news"]
+    )
+    chained = [c for c in res.cluster_rows if c["chained"]]
+    assert chained
+    assert chained[0]["suggested_canonical"] == "review — chained cluster"
+    assert chained[0]["time_sequenced"] is False  # chained precedence, not double-counted
+
+
+@pytest.mark.asyncio
+async def test_run_intent_overlap_fail_on_duplicate_excludes_time_sequenced(tmp_path):
+    rows = [
+        _store_row("https://a.com/news/1", [1.0, 0.0, 0.0]),
+        _store_row("https://a.com/news/2", [1.0, 0.0, 0.0]),
+    ]
+    store = FakeAnalysisStore(rows)
+    run = await run_intent_overlap(
+        store,
+        out_dir=str(tmp_path),
+        lang_split=False,
+        fail_on="duplicate",
+        time_sequenced_sections=["/news"],
+    )
+    # Would have failed under plain --fail-on duplicate (see
+    # test_run_intent_overlap_fail_on_duplicate); time-sequenced opt-in clears it.
+    assert run.exit_code == 0
+    assert run.result.summary["duplicate_pages"] == 0
+    assert run.result.summary["time_sequenced_pairs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_intent_overlap_fail_on_overlap_still_counts_time_sequenced(tmp_path):
+    # --fail-on overlap is untouched by ticket 105 — only the duplicate gate is
+    # softened, since the ticket scope is decanonicalisation gating specifically.
+    rows = [
+        _store_row("https://a.com/news/1", [1.0, 0.0, 0.0]),
+        _store_row("https://a.com/news/2", [1.0, 0.0, 0.0]),
+    ]
+    store = FakeAnalysisStore(rows)
+    run = await run_intent_overlap(
+        store,
+        out_dir=str(tmp_path),
+        lang_split=False,
+        fail_on="overlap",
+        time_sequenced_sections=["/news"],
+    )
+    assert run.exit_code == 3
+
+
+def test_cli_time_sequenced_section_flag_is_repeatable():
+    from crawler_cli.__main__ import _build_parser
+
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "intent-overlap",
+            "--time-sequenced-section",
+            "/news",
+            "--time-sequenced-section",
+            "/blog",
+        ]
+    )
+    assert args.time_sequenced_section == ["/news", "/blog"]
+
+
+def test_cli_time_sequenced_section_defaults_to_none():
+    from crawler_cli.__main__ import _build_parser
+
+    parser = _build_parser()
+    args = parser.parse_args(["intent-overlap"])
+    assert args.time_sequenced_section is None

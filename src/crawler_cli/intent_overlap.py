@@ -86,6 +86,15 @@ DIST_LOW = 0.80  # distribution buckets are defined on the 0.80 grid
 RISK_DUPLICATE = "duplicate — decanonicalisation likely"
 RISK_PARENT_CHILD = "parent-child overlap — differentiate or consolidate deliberately"
 RISK_HIGH_OVERLAP = "high intent overlap"
+# Ticket 105: news/blog archives naturally accumulate semantically-close pages
+# on recurring topics (query-deserves-freshness — a fresh post on last month's
+# topic is often the *correct* editorial outcome, not a decanonicalisation
+# bug). Intra-section pairs in operator-designated time-sequenced sections get
+# this softer label instead of "duplicate"/"high intent overlap", and are
+# excluded from `--fail-on duplicate` gating by default (see
+# ``run_intent_overlap``'s ``time_sequenced_pages``/``duplicate_pages`` split).
+TIME_SEQUENCED_PAIR_CLASS = "time-sequenced"
+TIME_SEQUENCED_RISK = "topical overlap (time-sequenced) — review editorially; consider hub or internal linking"
 
 
 def _np() -> Any:
@@ -281,6 +290,71 @@ def complete_linkage_clusters(edges: list[tuple[int, int, float]], vecs: Any, th
 
 
 # --------------------------------------------------------------------------
+# Time-sequenced sections (ticket 105)
+# --------------------------------------------------------------------------
+#
+# Standalone / self-contained: this deliberately does NOT depend on ticket
+# 101's pair-relation/section-column plumbing (parallel work-in-progress on
+# another branch at the time this was written). It reuses ``normalise_url``
+# for consistent path comparison and does its own simple prefix matching.
+# Worth reconciling with ticket 101's relationship-classification helper once
+# both are merged — see the PR description.
+
+
+def _normalise_section_prefix(prefix: str) -> str:
+    """Normalise an operator-supplied ``--time-sequenced-section`` value for
+    segment-boundary matching: lowercase, single leading slash, no trailing
+    slash (except the root ``/``)."""
+    p = prefix.strip().lower()
+    if not p.startswith("/"):
+        p = "/" + p
+    if len(p) > 1:
+        p = p.rstrip("/") or "/"
+    return p
+
+
+def _url_path(url: str) -> str:
+    """Path component of *url* after :func:`normalise_url` (lowercased,
+    trailing slash stripped), for prefix matching independent of
+    scheme/host/query."""
+    return urlparse(normalise_url(url)).path or "/"
+
+
+def path_in_section(url: str, prefix: str) -> bool:
+    """True if *url*'s path falls under *prefix*, matching on path segment
+    boundaries: ``/news`` matches ``/news`` and ``/news/archived/foo`` but not
+    ``/newsletter``. Nested prefixes and a trailing slash on *prefix* are both
+    handled."""
+    path = _url_path(url)
+    section = _normalise_section_prefix(prefix)
+    if section == "/":
+        return True
+    return path == section or path.startswith(section + "/")
+
+
+def time_sequenced_pair_class(url_a: str, url_b: str, sections: Sequence[str]) -> str:
+    """``TIME_SEQUENCED_PAIR_CLASS`` when *url_a* and *url_b* both fall under
+    the SAME configured time-sequenced prefix, else ``""``. Cross-section
+    pairs (one URL in ``/news``, the other outside it, or in a different
+    configured section) are unaffected — those often are real cannibalisation
+    and keep full duplicate/overlap treatment."""
+    for prefix in sections:
+        if path_in_section(url_a, prefix) and path_in_section(url_b, prefix):
+            return TIME_SEQUENCED_PAIR_CLASS
+    return ""
+
+
+def _cluster_time_sequenced_section(urls: Sequence[str], sections: Sequence[str]) -> str | None:
+    """The (normalised) time-sequenced prefix under which EVERY member of
+    *urls* falls, if one exists, else ``None``. Mirrors the pair-level
+    both-sides rule extended to a whole cluster."""
+    for prefix in sections:
+        if all(path_in_section(u, prefix) for u in urls):
+            return _normalise_section_prefix(prefix)
+    return None
+
+
+# --------------------------------------------------------------------------
 # Analysis over structured records (no DB, no pandas)
 # --------------------------------------------------------------------------
 
@@ -327,6 +401,7 @@ def analyse_embeddings(
     ann_min_pages: int = 10000,
     ann_k: int = 128,
     thin_signature_words: int = DEFAULT_THIN_SIGNATURE_WORDS,
+    time_sequenced_sections: Sequence[str] = (),
 ) -> AnalysisResult:
     """Core analysis over embedded, non-excluded page records.
 
@@ -344,6 +419,16 @@ def analyse_embeddings(
     pairing where only one side is thin keeps the normal duplicate risk (the
     rich side is a real decanonicalisation candidate) but is flagged
     ``"asymmetric"`` in ``overlap_pairs.csv`` so the asymmetry isn't hidden.
+
+    ``time_sequenced_sections`` (ticket 105) is a list of operator-supplied
+    path prefixes (e.g. ``["/news"]``) for recurring-topic archives where the
+    query-deserves-freshness dynamic means near-duplicate pages are usually
+    editorially correct, not decanonicalisation candidates. Pairs where BOTH
+    URLs fall under the SAME prefix get the softer
+    :data:`TIME_SEQUENCED_RISK` label instead of "duplicate"/"high intent
+    overlap", and are excluded from the ``duplicate_pages``/``high_overlap``
+    counts (and therefore from default ``--fail-on duplicate`` gating) — see
+    ``result.summary["time_sequenced_pairs"]`` for their own count.
     """
     np = _np()
     result = AnalysisResult()
@@ -419,6 +504,10 @@ def analyse_embeddings(
     # when every one of its dup-tier edges is thin-vs-thin.
     dup_edge_seen = [False] * n
     dup_edge_has_rich = [False] * n
+    time_sequenced_pairs = 0
+    time_sequenced_seen = [False] * n
+    non_time_overlap_seen = [False] * n
+    non_time_duplicate_seen = [False] * n
 
     for lang, idx_list in partitions:
         idxs = np.asarray(idx_list)
@@ -451,6 +540,12 @@ def analyse_embeddings(
                     thin_label = "asymmetric"
                 else:
                     thin_label = ""
+                pair_class = time_sequenced_pair_class(urls[i], urls[j], time_sequenced_sections)
+                if pair_class:
+                    time_sequenced_pairs += 1
+                    time_sequenced_seen[i] = time_sequenced_seen[j] = True
+                else:
+                    non_time_overlap_seen[i] = non_time_overlap_seen[j] = True
                 result.overlap_pairs.append(
                     {
                         "url_a": urls[i],
@@ -461,19 +556,22 @@ def analyse_embeddings(
                         "section_a": section_of(urls[i]),
                         "section_b": section_of(urls[j]),
                         "thin": thin_label,
+                        "pair_class": pair_class,
                     }
                 )
                 if s >= dup_threshold:
                     dup_edge_seen[i] = dup_edge_seen[j] = True
                     if thin_label != "both":
                         dup_edge_has_rich[i] = dup_edge_has_rich[j] = True
+                    if not pair_class:
+                        non_time_duplicate_seen[i] = non_time_duplicate_seen[j] = True
                 part_edges.append((i, j, s))
                 uf.union(i, j)
                 if s > max_sim[i]:
                     max_sim[i], nearest[i] = s, urls[j]
                 if s > max_sim[j]:
                     max_sim[j], nearest[j] = s, urls[i]
-                if s >= dup_threshold:
+                if s >= dup_threshold and not pair_class:
                     dup_relations.setdefault(i, []).append(relation)
                     dup_relations.setdefault(j, []).append(relation)
         result.distribution_rows.append(build_similarity_distribution(lang, nn, part_pair_sims, pages=part_n))
@@ -508,19 +606,19 @@ def analyse_embeddings(
     # Risk + per-page rows
     for i, r in enumerate(emb):
         ms = float(max_sim[i])
-        if ms >= dup_threshold:
-            if dup_edge_seen[i] and not dup_edge_has_rich[i]:
-                # Every >= dup_threshold pairing is thin-vs-thin: shared
-                # boilerplate, not a real decanonicalisation risk (ticket 104).
-                risk = "thin content — add distinguishing content"
-            else:
-                rels = dup_relations.get(i, [])
-                # "Solely" parent-child: every dup_threshold-crossing pair that
-                # touches this page is a hub/detail relationship, not just its
-                # single nearest neighbour — a page with one parent-child edge
-                # AND one genuine cross-section duplicate edge still gets the
-                # ordinary duplicate label (ticket 101).
-                risk = RISK_PARENT_CHILD if rels and all(rel == "parent-child" for rel in rels) else RISK_DUPLICATE
+        if ms >= dup_threshold and dup_edge_seen[i] and not dup_edge_has_rich[i]:
+            # Thin content wins over time-sequenced policy: a thin news page is
+            # still a content-quality finding, not merely editorial overlap.
+            risk = "thin content — add distinguishing content"
+        elif non_time_duplicate_seen[i]:
+            rels = dup_relations.get(i, [])
+            risk = RISK_PARENT_CHILD if rels and all(rel == "parent-child" for rel in rels) else RISK_DUPLICATE
+        elif non_time_overlap_seen[i]:
+            # A cross-section or other ordinary overlap must remain visible
+            # even when the same page also has a closer time-sequenced match.
+            risk = RISK_HIGH_OVERLAP
+        elif time_sequenced_seen[i]:
+            risk = TIME_SEQUENCED_RISK
         elif ms >= threshold:
             risk = RISK_HIGH_OVERLAP
         else:
@@ -562,9 +660,18 @@ def analyse_embeddings(
             relation_summary = edge_rels[0]
         else:
             relation_summary = "mixed" if edge_rels else ""
+        ts_section = _cluster_time_sequenced_section([m["url"] for m in members], time_sequenced_sections)
+        cluster_thin = all(thin_flags[i] for i in member_idxs)
         if chained:
+            # A chained (non-complete-linkage) cluster is a graph-quality issue
+            # independent of section — keep existing precedence over the
+            # softer time-sequenced label.
             chained_n += 1
             canon = "review — chained cluster"
+        elif cluster_thin:
+            canon = "review — thin content; add distinguishing content"
+        elif ts_section:
+            canon = f"review — time-sequenced section ({ts_section}); suggest hub/roundup page"
         elif parent_child_only:
             canon = _pick_parent_canonical(members)
         else:
@@ -575,7 +682,6 @@ def analyse_embeddings(
         # Ticket 104: a cluster driven entirely by thin pages (every member's
         # signature is below thin_signature_words) is a content-quality
         # finding, not a decanonicalisation one.
-        cluster_thin = all(thin_flags[i] for i in member_idxs)
         result.cluster_rows.append(
             {
                 "cluster_id": cid,
@@ -591,6 +697,7 @@ def analyse_embeddings(
                 "cohesion": round(cohesion, 4),
                 "chained": chained,
                 "cohesion_note": note,
+                "time_sequenced": bool(ts_section) and not chained,
             }
         )
     result.cluster_rows.sort(key=lambda c: c["size"], reverse=True)
@@ -627,6 +734,7 @@ def analyse_embeddings(
     thin_content_n = sum(1 for r in emb if str(r.get("_risk", "")).startswith("thin content"))
     thin_pages_n = sum(1 for flag in thin_flags if flag)
     thin_pairs_n = sum(1 for p in result.overlap_pairs if p.get("thin") == "both")
+    time_sequenced_pages = sum(1 for r in emb if r.get("_risk") == TIME_SEQUENCED_RISK)
     result.suppressed = suppressed
     result.chained_clusters = chained_n
     result.summary = {
@@ -641,6 +749,12 @@ def analyse_embeddings(
         "thin_pages": thin_pages_n,
         "thin_pairs": thin_pairs_n,
         "suppressed_pairs": suppressed,
+        # ticket 105: time-sequenced (news/blog) intra-section pairs/pages get
+        # the softer topical-overlap label and are excluded from
+        # duplicate_pages/--fail-on duplicate above — reported here as their
+        # own count so nothing disappears silently.
+        "time_sequenced_pairs": time_sequenced_pairs,
+        "time_sequenced_pages": time_sequenced_pages,
         "threshold": threshold,
         "dup_threshold": dup_threshold,
         "thin_signature_words": thin_signature_words,
@@ -703,6 +817,10 @@ def classify_url(row: Mapping[str, Any]) -> str | None:
     out here too and are left to ticket 103's ``amp-variant`` handling — no AMP
     params are special-cased here.
     """
+    # Ticket 103 wins over the general query-string class: ``?amp=1`` pages
+    # remain AMP variants in both the page report and summary counts.
+    if row.get("variant_kind") == "amp":
+        return None
     url = str(row["url"])
     if not _strip_tracking_query(urlparse(url).query):
         return None
@@ -771,6 +889,7 @@ _PAIRS_FIELDS = [
     "low_confidence",
     "thin",
     "sim_percentile",
+    "pair_class",
     "relation",
     "section_a",
     "section_b",
@@ -789,6 +908,7 @@ _CLUSTER_FIELDS = [
     "cohesion",
     "chained",
     "cohesion_note",
+    "time_sequenced",
 ]
 _ISSUE_FIELDS = ["url", "declares_alternate", "hreflang", "issue"]
 _VARIANT_FIELDS = ["norm_url", "representative", "variants", "count"]
@@ -928,10 +1048,16 @@ async def run_intent_overlap(
     ann_min_pages: int = 10000,
     ann_k: int = 128,
     thin_signature_words: int = DEFAULT_THIN_SIGNATURE_WORDS,
+    time_sequenced_sections: Sequence[str] = (),
     run_args: dict[str, Any] | None = None,
 ) -> IntentOverlapRun:
     """Load embeddings + identity from the store, run the analysis, write the
-    six CSVs + manifest, and return a run summary (ticket 079)."""
+    six CSVs + manifest, and return a run summary (ticket 079).
+
+    ``time_sequenced_sections`` (ticket 105): repeatable ``--time-sequenced-
+    section`` path prefixes for news/blog archives — see
+    :func:`analyse_embeddings` and :data:`TIME_SEQUENCED_RISK`.
+    """
     from datetime import datetime, timezone
 
     # Classify AMP variants structurally first (ticket 103) so variant_kind is
@@ -973,6 +1099,7 @@ async def run_intent_overlap(
         ann_min_pages=ann_min_pages,
         ann_k=ann_k,
         thin_signature_words=thin_signature_words,
+        time_sequenced_sections=time_sequenced_sections,
     )
 
     edges = await store.fetch_hreflang_edges()

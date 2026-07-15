@@ -758,9 +758,7 @@ def _amp_page(url: str, *, amphtml: str | None = None, canonical: str | None = N
 @pytest.mark.asyncio
 async def test_amphtml_edge_persisted(store: AsyncpgStore) -> None:
     """A <link rel=amphtml> edge lands in the amphtml_urls table (ticket 103)."""
-    await store.persist(
-        _amp_page("https://amp.example/foo", amphtml="https://amp.example/foo/amp")
-    )
+    await store.persist(_amp_page("https://amp.example/foo", amphtml="https://amp.example/foo/amp"))
     assert store.pool is not None
     async with store.pool.acquire() as conn:
         target = await conn.fetchval(
@@ -781,9 +779,7 @@ async def test_classify_amp_variants_marks_variant_kind_and_hygiene(store: Async
     """classify_amp_variants classifies via every evidence path and records the
     canonical-hygiene rows (ticket 103)."""
     # Base page declaring an amphtml edge to an otherwise unshaped target.
-    await store.persist(
-        _amp_page("https://amp.example/base", amphtml="https://amp.example/base/amp")
-    )
+    await store.persist(_amp_page("https://amp.example/base", amphtml="https://amp.example/base/amp"))
     # AMP page confirmed by canonical-to-base (base also crawled).
     await store.persist(_amp_page("https://amp.example/base/amp", canonical="https://amp.example/base"))
     # AMP page confirmed by base-exists but with NO canonical -> hygiene issue.
@@ -809,9 +805,7 @@ async def test_classify_amp_variants_marks_variant_kind_and_hygiene(store: Async
 
     assert store.pool is not None
     async with store.pool.acquire() as conn:
-        amp_kinds = await conn.fetch(
-            "SELECT url, variant_kind FROM urls WHERE variant_kind IS NOT NULL ORDER BY url"
-        )
+        amp_kinds = await conn.fetch("SELECT url, variant_kind FROM urls WHERE variant_kind IS NOT NULL ORDER BY url")
     marked = {r["url"]: r["variant_kind"] for r in amp_kinds}
     assert marked == {
         "https://amp.example/base/amp": "amp",

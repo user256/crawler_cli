@@ -106,7 +106,13 @@ def _expected_archive_digest(version: str, asset_file: str) -> str:
 def _validate_release_url(url: str, version: str, asset_file: str) -> None:
     parsed = urllib.parse.urlparse(url)
     expected_path = f"/{OBSCURA_REPO}/releases/download/{version}/{asset_file}"
-    if parsed.scheme != "https" or parsed.netloc != _GITHUB_HOST or parsed.path != expected_path or parsed.query or parsed.fragment:
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != _GITHUB_HOST
+        or parsed.path != expected_path
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ValueError(f"Refusing to download Obscura from unexpected release URL: {url}")
 
 

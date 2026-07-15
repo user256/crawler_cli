@@ -1192,6 +1192,7 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
         "ann_min_pages": args.ann_min_pages,
         "ann_k": args.ann_k,
         "thin_signature_words": args.thin_signature_words,
+        "time_sequenced_section": args.time_sequenced_section,
     }
 
     store = _store_from_args(args)
@@ -1211,6 +1212,7 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
             ann_min_pages=args.ann_min_pages,
             ann_k=args.ann_k,
             thin_signature_words=args.thin_signature_words,
+            time_sequenced_sections=args.time_sequenced_section or (),
             run_args=run_args,
         )
     except MixedModelError as exc:
@@ -1229,11 +1231,16 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
     relation_counts = s.get("relation_counts") or {}
     pc_pairs = relation_counts.get("parent-child", 0)
     pc_note = f" ({pc_pairs} parent-child)" if pc_pairs else ""
+    ts_note = (
+        f", {s.get('time_sequenced_pairs', 0)} time-sequenced pairs excluded from duplicate gating"
+        if args.time_sequenced_section
+        else ""
+    )
     print(
         f"intent-overlap: {s.get('embedded', 0)} embedded pages, "
         f"{s.get('overlap_pairs', 0)} pairs{pc_note}, {s.get('clusters', 0)} clusters, "
         f"{s.get('duplicate_pages', 0)} duplicate pages "
-        f"({s.get('suppressed_pairs', 0)} intra-hreflang pairs suppressed){tnote}"
+        f"({s.get('suppressed_pairs', 0)} intra-hreflang pairs suppressed){ts_note}{tnote}"
     )
     param_pages = s.get("parameterised_pages", 0)
     if param_pages:
@@ -1785,6 +1792,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     io_parser.add_argument("--ann-min-pages", type=int, default=10000, help="Page count before ANN activates")
     io_parser.add_argument("--ann-k", type=int, default=128, help="hnswlib k neighbours")
+    io_parser.add_argument(
+        "--time-sequenced-section",
+        action="append",
+        dest="time_sequenced_section",
+        metavar="PATH_PREFIX",
+        default=None,
+        help=(
+            "Repeatable path prefix (e.g. /news) for a recurring-topic archive "
+            "where near-duplicate pairs are usually editorially correct (QDF), "
+            "not decanonicalisation candidates: intra-section pairs get a "
+            "softer 'topical overlap (time-sequenced)' label and are excluded "
+            "from --fail-on duplicate by default. Explicit opt-in only."
+        ),
+    )
     _add_postgres_args(io_parser)
 
     cmp_parser = subparsers.add_parser("compare", help="Compare two saved crawl JSON files")

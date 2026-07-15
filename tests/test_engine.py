@@ -226,7 +226,7 @@ async def test_skip_amp_variants_does_not_enqueue_amp_shapes(tmp_path):
     """--skip-amp-variants keeps AMP URL shapes out of the frontier (ticket 103)."""
     pages = {
         "https://example.com/": (
-            '<html><body>'
+            "<html><body>"
             '<a href="/article">A</a>'
             '<a href="/article/amp">AMP</a>'
             '<a href="/article?amp=1">AMP-q</a>'
