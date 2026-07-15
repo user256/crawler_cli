@@ -127,6 +127,8 @@ class CrawlJobResult:
     results: list[CrawlResult]
     saved_to: str | None = None
     max_urls: int | None = None
+    run_id: str | None = None
+    """Explicit crawl-run identity for resumable open crawls (ticket 086)."""
     retry_attempts: int = 0
     """Total transient-error attempts that were retried and do not appear in
     *results* (ticket-062).  Surfaced in the CLI summary."""

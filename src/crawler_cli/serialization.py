@@ -116,6 +116,7 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
 def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> dict[str, object]:
     payload: dict[str, object] = {
         "mode": job.mode,
+        "run_id": job.run_id,
         "seed_urls": job.seed_urls,
         "saved_to": job.saved_to if saved_to is None else saved_to,
         "crawled_count": job.crawled_count,

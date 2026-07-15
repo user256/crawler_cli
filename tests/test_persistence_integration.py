@@ -14,13 +14,15 @@ from __future__ import annotations
 
 import os
 
+import asyncpg
 import pytest
 import pytest_asyncio
 
 from crawler_cli.detection.analytics import AnalyticsDetectionResult, AnalyticsHit
 from crawler_cli.models import DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
-from crawler_cli.models import CrawlResult
-from crawler_cli.persistence import AsyncpgStore
+from crawler_cli.models import CrawlResult, FetchResponse
+from crawler_cli import CrawlConfig, CrawlEngine
+from crawler_cli.persistence import AsyncpgStore, CRAWL_TABLES, SCHEMA_STATEMENTS
 
 
 _DSN = os.environ.get("CRAWLER_CLI_TEST_DSN", "")
@@ -44,11 +46,91 @@ async def store(dsn: str) -> AsyncpgStore:
     await s.close()
 
 
+class FakeBackend:
+    def __init__(self, pages: dict[str, str]) -> None:
+        self.pages = pages
+
+    async def fetch(self, url: str) -> FetchResponse:
+        html = self.pages[url]
+        return FetchResponse(
+            url=url,
+            requested_url=url,
+            status=200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=html.encode("utf-8"),
+            text=html,
+        )
+
+
 @pytest.mark.asyncio
 async def test_initialize_is_idempotent(store: AsyncpgStore) -> None:
     """Running initialize() twice must not raise."""
     await store.initialize()
     await store.initialize()
+
+
+@pytest.mark.asyncio
+async def test_initialize_migrates_legacy_frontier_to_run_scoped_unique(dsn: str) -> None:
+    legacy_url = "https://legacy.example/"
+    conn = await asyncpg.connect(dsn)
+    try:
+        table_list = ", ".join(CRAWL_TABLES)
+        await conn.execute(f"DROP TABLE IF EXISTS {table_list} CASCADE")
+        await conn.execute(SCHEMA_STATEMENTS[0])
+        url_id = await conn.fetchval(
+            """
+            INSERT INTO urls (url, kind, classification, first_seen, last_seen)
+            VALUES ($1, 'html', 'internal', 1, 1)
+            RETURNING id
+            """,
+            legacy_url,
+        )
+        await conn.execute(
+            """
+            CREATE TABLE frontier (
+                id SERIAL PRIMARY KEY,
+                url_id INTEGER NOT NULL UNIQUE REFERENCES urls(id),
+                depth INTEGER NOT NULL,
+                parent_id INTEGER REFERENCES urls(id),
+                status TEXT NOT NULL CHECK (status IN ('queued','pending','done')),
+                enqueued_at INTEGER,
+                updated_at INTEGER,
+                priority_score DOUBLE PRECISION DEFAULT 0.0,
+                sitemap_priority DOUBLE PRECISION DEFAULT 0.5,
+                inlinks_count INTEGER DEFAULT 0,
+                content_type_score DOUBLE PRECISION DEFAULT 1.0,
+                reset_count INTEGER DEFAULT 0,
+                retry_count INTEGER DEFAULT 0,
+                retry_at INTEGER DEFAULT 0
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO frontier (url_id, depth, status, enqueued_at, updated_at)
+            VALUES ($1, 0, 'done', 1, 1)
+            """,
+            int(url_id),
+        )
+    finally:
+        await conn.close()
+
+    store = AsyncpgStore(dsn)
+    await store.initialize()
+    try:
+        assert await store.frontier_stats(run_id="legacy") == (0, 0, 1)
+        await store.create_crawl_run(
+            "pg-post-migration-run",
+            seed_urls=[legacy_url],
+            config_hash="post-migration",
+            config={"seed_urls": [legacy_url]},
+        )
+        assert await store.enqueue_frontier([(legacy_url, 0, None)], run_id="pg-post-migration-run") == 1
+        assert await store.frontier_stats(run_id="legacy") == (0, 0, 1)
+        assert await store.frontier_stats(run_id="pg-post-migration-run") == (1, 0, 0)
+    finally:
+        await store.truncate_crawl_tables()
+        await store.close()
 
 
 @pytest.mark.asyncio
@@ -70,6 +152,80 @@ async def test_frontier_round_trip(store: AsyncpgStore) -> None:
     assert done == 2
     assert queued == 0
     assert pending == 0
+
+
+@pytest.mark.asyncio
+async def test_frontier_run_scope_allows_unrelated_new_seed(store: AsyncpgStore) -> None:
+    await store.create_crawl_run(
+        "pg-old-run",
+        seed_urls=["https://old.example/"],
+        config_hash="old",
+        config={"seed_urls": ["https://old.example/"]},
+    )
+    await store.enqueue_frontier([("https://old.example/", 0, None)], run_id="pg-old-run")
+    await store.frontier_mark_done(["https://old.example/"], run_id="pg-old-run")
+
+    engine = CrawlEngine(
+        CrawlConfig(max_concurrency=1, default_open_crawl_limit=1, discover_sitemaps=False, respect_robots_txt=False),
+        store=store,
+    )
+    engine.backend = FakeBackend({"https://new.example/": "<html><body>new</body></html>"})
+    job = await engine.crawl_open(["https://new.example/"], max_urls=1, run_id="pg-new-run")
+
+    assert job.run_id == "pg-new-run"
+    assert [result.final_url for result in job.results] == ["https://new.example/"]
+    assert await store.frontier_stats(run_id="pg-old-run") == (0, 0, 1)
+    assert await store.frontier_stats(run_id="pg-new-run") == (0, 0, 1)
+
+
+@pytest.mark.asyncio
+async def test_open_crawl_postgres_valid_resume_selected_run(store: AsyncpgStore) -> None:
+    pages = {
+        "https://resume.example/a": "<html><body>a</body></html>",
+        "https://resume.example/b": "<html><body>b</body></html>",
+    }
+    config = CrawlConfig(
+        max_concurrency=1,
+        default_open_crawl_limit=1,
+        discover_sitemaps=False,
+        respect_robots_txt=False,
+    )
+    first = CrawlEngine(config, store=store)
+    first.backend = FakeBackend(pages)
+
+    first_job = await first.crawl_open(list(pages), max_urls=1, run_id="pg-resume-run")
+
+    assert first_job.run_id == "pg-resume-run"
+    assert len(first_job.results) == 1
+    assert await store.frontier_stats(run_id="pg-resume-run") == (1, 0, 1)
+
+    second = CrawlEngine(config, store=store)
+    second.backend = FakeBackend(pages)
+    second_job = await second.crawl_open(list(pages), max_urls=2, run_id="pg-resume-run", resume=True)
+
+    assert second_job.run_id == "pg-resume-run"
+    assert len(second_job.results) == 1
+    assert await store.frontier_stats(run_id="pg-resume-run") == (0, 0, 2)
+
+
+@pytest.mark.asyncio
+async def test_frontier_same_url_can_be_claimed_in_distinct_runs(store: AsyncpgStore) -> None:
+    url = "https://same.example/"
+    await store.create_crawl_run("pg-run-a", seed_urls=[url], config_hash="a", config={"seed_urls": [url]})
+    await store.create_crawl_run("pg-run-b", seed_urls=[url], config_hash="b", config={"seed_urls": [url]})
+    assert await store.enqueue_frontier([(url, 0, None)], run_id="pg-run-a") == 1
+    assert await store.enqueue_frontier([(url, 0, None)], run_id="pg-run-b") == 1
+
+    assert await store.frontier_next_batch(1, run_id="pg-run-a") == [(url, 0, None, 0)]
+    assert await store.frontier_stats(run_id="pg-run-a") == (0, 1, 0)
+    assert await store.frontier_stats(run_id="pg-run-b") == (1, 0, 0)
+
+    await store.frontier_reset_all_pending_to_queued(run_id="pg-run-a")
+
+    assert await store.frontier_stats(run_id="pg-run-a") == (1, 0, 0)
+    assert await store.frontier_next_batch(1, run_id="pg-run-b") == [(url, 0, None, 0)]
+    assert await store.frontier_stats(run_id="pg-run-a") == (1, 0, 0)
+    assert await store.frontier_stats(run_id="pg-run-b") == (0, 1, 0)
 
 
 @pytest.mark.asyncio

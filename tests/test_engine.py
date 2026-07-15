@@ -6,6 +6,7 @@ import pytest
 
 from crawler_cli import CrawlConfig, CrawlEngine
 from crawler_cli.models import FetchResponse
+from crawler_cli.persistence import MemoryStore
 
 
 class FakeBackend:
@@ -268,10 +269,82 @@ async def test_open_crawl_resets_pending_rows_on_resume():
     engine.backend = FakeBackend(pages)
     engine._robots = FakeRobots()
 
-    job = await engine.crawl_open(["https://example.com/stale"], max_urls=1)
+    job = await engine.crawl_open(["https://example.com/stale"], max_urls=1, run_id="legacy", resume=True)
 
     assert len(job.results) == 1
     assert store.frontier["https://example.com/stale"]["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_memory_open_crawl_new_seed_ignores_unrelated_completed_run():
+    store = MemoryStore()
+    store.set_active_crawl_run("old-run")
+    await store.enqueue_frontier([("https://old.example/", 0, None)], source="seed")
+    await store.frontier_mark_done(["https://old.example/"])
+
+    pages = {
+        "https://new.example/": "<html><body>new</body></html>",
+    }
+    engine = CrawlEngine(
+        CrawlConfig(max_concurrency=1, default_open_crawl_limit=1, discover_sitemaps=False, respect_robots_txt=False),
+        store=store,
+    )
+    engine.backend = FakeBackend(pages)
+
+    job = await engine.crawl_open(["https://new.example/"], max_urls=1, run_id="new-run")
+
+    assert job.run_id == "new-run"
+    assert [result.final_url for result in job.results] == ["https://new.example/"]
+    assert await store.frontier_stats(run_id="old-run") == (0, 0, 1)
+    assert await store.frontier_stats(run_id="new-run") == (0, 0, 1)
+
+
+@pytest.mark.asyncio
+async def test_memory_open_crawl_valid_resume_uses_selected_run_only():
+    store = MemoryStore()
+    pages = {
+        "https://resume.example/a": "<html><body>a</body></html>",
+        "https://resume.example/b": "<html><body>b</body></html>",
+    }
+    config = CrawlConfig(
+        max_concurrency=1,
+        default_open_crawl_limit=1,
+        discover_sitemaps=False,
+        respect_robots_txt=False,
+    )
+    first = CrawlEngine(config, store=store)
+    first.backend = FakeBackend(pages)
+
+    first_job = await first.crawl_open(list(pages), max_urls=1, run_id="resume-run")
+
+    assert first_job.run_id == "resume-run"
+    assert len(first_job.results) == 1
+    assert await store.frontier_stats(run_id="resume-run") == (1, 0, 1)
+
+    second = CrawlEngine(config, store=store)
+    second.backend = FakeBackend(pages)
+    second_job = await second.crawl_open(list(pages), max_urls=2, run_id="resume-run", resume=True)
+
+    assert second_job.run_id == "resume-run"
+    assert len(second_job.results) == 1
+    assert await store.frontier_stats(run_id="resume-run") == (0, 0, 2)
+
+
+@pytest.mark.asyncio
+async def test_memory_frontier_same_url_is_distinct_per_run():
+    store = MemoryStore()
+    url = "https://same.example/"
+    await store.enqueue_frontier([(url, 0, None)], run_id="run-a")
+    await store.enqueue_frontier([(url, 0, None)], run_id="run-b")
+
+    assert await store.frontier_next_batch(1, run_id="run-a") == [(url, 0, None, 0)]
+    assert await store.frontier_stats(run_id="run-a") == (0, 1, 0)
+    assert await store.frontier_stats(run_id="run-b") == (1, 0, 0)
+
+    await store.frontier_mark_done([url], run_id="run-a")
+
+    assert await store.frontier_stats(run_id="run-a") == (0, 0, 1)
+    assert await store.frontier_next_batch(1, run_id="run-b") == [(url, 0, None, 0)]
 
 
 @pytest.mark.asyncio

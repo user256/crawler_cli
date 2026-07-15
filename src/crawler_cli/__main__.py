@@ -548,6 +548,27 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         default=[],
         help="Additional seed URL. Repeat to crawl multiple hosts in one run.",
     )
+    run_group = parser.add_argument_group("Crawl run/resume")
+    run_mode = run_group.add_mutually_exclusive_group()
+    run_mode.add_argument(
+        "--new-run",
+        action="store_true",
+        help="Start a fresh open-crawl run (default). Existing unrelated frontier rows are ignored.",
+    )
+    run_mode.add_argument(
+        "--resume",
+        metavar="RUN_ID",
+        help="Resume the selected crawl run id; pending rows from other runs are never claimed.",
+    )
+    run_group.add_argument(
+        "--crawl-run-id",
+        help="Run id to assign to a new open crawl. Defaults to a generated crawl-YYYYMMDDTHHMMSSZ-xxxxxxxx id.",
+    )
+    run_group.add_argument(
+        "--allow-run-config-mismatch",
+        action="store_true",
+        help="Allow --resume when the saved seed/scope/config fingerprint differs from this invocation.",
+    )
     parser.add_argument(
         "--intent-signatures",
         action="store_true",
@@ -911,6 +932,9 @@ async def _run_crawl(args: argparse.Namespace) -> int:
     if args.csv_file and not seeds and not args.csv_seed:
         args.url = load_urls_from_csv(args.csv_file, column=args.csv_column)[0]
         seeds = _collect_seed_urls(args)
+    if args.resume and args.crawl_run_id:
+        print("Error: use --resume RUN_ID or --crawl-run-id for a new run, not both", file=sys.stderr)
+        return 2
 
     config = _build_config(args)
     config.default_open_crawl_limit = args.max_pages
@@ -959,7 +983,13 @@ async def _run_crawl(args: argparse.Namespace) -> int:
         if config.csv_urls and not config.csv_seed_mode:
             job = await engine.crawl_list(config.csv_urls, save_to=args.save_to)
         else:
-            job = await engine.crawl_open(seeds, save_to=args.save_to)
+            job = await engine.crawl_open(
+                seeds,
+                save_to=args.save_to,
+                run_id=args.resume or args.crawl_run_id,
+                resume=bool(args.resume),
+                allow_run_config_mismatch=args.allow_run_config_mismatch,
+            )
         if job.interrupted:
             _exit_code = 130
         persist_errors = job.persist_error_count
@@ -973,6 +1003,8 @@ async def _run_crawl(args: argparse.Namespace) -> int:
             summary += f", {job.challenge_blocked_count} blocked by bot-challenge"
         if persist_errors:
             summary += f", {persist_errors} persist failures (check WARNING logs)"
+        if job.run_id:
+            summary += f" (run {job.run_id})"
         print(summary)
 
         if getattr(args, "intent_signatures", False):
@@ -1003,6 +1035,9 @@ async def _run_crawl(args: argparse.Namespace) -> int:
                 logger.info("  Legacy issues: %d", len(audit.legacy_issues))
                 if args.output_dir:
                     logger.info("  CSVs written to %s", args.output_dir)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        _exit_code = 2
     finally:
         _signal.signal(_signal.SIGINT, _orig_sigint)
         _signal.signal(_signal.SIGTERM, _orig_sigterm)
