@@ -900,7 +900,7 @@ async def test_challenge_persist_does_not_overwrite_prior_content(store: Asyncpg
             x_canonical=None,
             hreflang_links=[],
             html_lang="en",
-            headings={"h1": ["Keep Me"]},
+            headings={"h1": ["Keep Me"], "h2": []},
             text="real body",
             word_count=2,
             metadata={},
