@@ -45,6 +45,7 @@ of truth for scope and acceptance criteria.
 
 1. [098 — Packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md).
 2. [100 — Obscura installer test hardening](./ticket-100-obscura-installer-test-hardening.md).
+3. [111 — CI artifact/action runtime hygiene](./ticket-111-ci-artifact-action-runtime-hygiene.md).
 
 ## Deferred lanes
 
@@ -56,4 +57,4 @@ of truth for scope and acceptance criteria.
 - Correctness and evidence hardening precede presentation work that consumes the affected fields.
 - Ticket 107 cannot start before Ticket 106 defines and tests the JSON contract.
 - External/manual evidence is recorded as a blocker; it is never inferred from unit tests.
-- New remediation work uses the next free number, 111; number 110 was left unused in this pass to avoid collision with the explicitly excluded PR reference.
+- New remediation work uses the next free number, 112; number 110 was left unused in this pass to avoid collision with the explicitly excluded PR reference.

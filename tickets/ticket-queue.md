@@ -161,7 +161,7 @@ byte-for-byte on casino_org (1221 pairs) and whiskipedia (198 pairs), Jaccard
 1.0000. Standalone Intent_Overlap repo marked superseded. Batch reviewed
 2026-07-05; three follow-ups filed as 082–084 (see next section). Tickets later
 continued through the 2026-07-15 intent-overlap review batch; the next free
-number is 111 (110 is left unused in this pass because PR #110 was explicitly
+number is 112 (110 is left unused in this pass because PR #110 was explicitly
 out of scope).
 **LANDED ON MASTER 2026-07-05 (ticket 082):** the whole stack is now on `master`
 base-first — `io-integration-base` roll-up as PR #7, then 076–081 as PRs #8/#2–#6
@@ -250,3 +250,4 @@ data export. Land after 101–105 merge so their tag fields are in the schema.
 
 - `108` `proposed` [ticket-108-amp-classification-evidence-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-108-amp-classification-evidence-hardening.md) — **P1, depends on 103:** remove base-exists-only AMP confirmation, use intent-signature evidence, and recompute stale variant labels
 - `109` `proposed` [ticket-109-thin-content-diagnostic-completeness.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-109-thin-content-diagnostic-completeness.md) — **P2, depends on 104:** add signature-character and extracted-main-text diagnostic lengths without changing thin risk/gating policy
+- `111` `proposed` [ticket-111-ci-artifact-action-runtime-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-111-ci-artifact-action-runtime-hygiene.md) — **P3:** restore non-empty coverage artifacts and migrate GitHub actions off deprecated runtimes without weakening CI

@@ -22,6 +22,7 @@
 | Real Playwright smoke | Pass — 2 tests |
 | Local PostgreSQL integration selection | 19 skipped because `CRAWLER_CLI_TEST_DSN` was not configured |
 | PR PostgreSQL integration jobs | Pass on each reviewed PR |
+| Pushed `master` CI | Pass — all five jobs |
 
 The individual PR lint jobs were red only because of a pre-existing format
 drift in `obscura_install.py`; PRs #15 and #18 also had formatting-only test
@@ -44,6 +45,8 @@ drift. The combined merge formats those files and the final format check passes.
   evidence and clear stale classifications.
 - [109](./ticket-109-thin-content-diagnostic-completeness.md): expose the
   remaining signature-character and extracted-main-text diagnostic lengths.
+- [111](./ticket-111-ci-artifact-action-runtime-hygiene.md): restore the
+  currently empty coverage uploads and migrate deprecated action runtimes.
 - The broader active queue and dependency order are in [ROADMAP.md](./ROADMAP.md).
 
 ## Local workspace state
