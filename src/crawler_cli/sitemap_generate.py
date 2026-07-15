@@ -15,8 +15,27 @@ MAX_URLS_PER_FILE = 50_000
 
 
 # Indexable, self-canonical (or no canonical), final status 200, HTML URLs.
-# A URL is excluded when it canonicalises to a *different* URL.
+# Scoped to one crawl run via page_run_snapshots (ticket 095).
 INDEXABLE_URLS_QUERY = """
+    SELECT u.url
+    FROM page_run_snapshots s
+    JOIN urls u ON u.id = s.url_id
+    WHERE s.run_id = $1
+      AND u.kind = 'html'
+      AND s.final_status_code = 200
+      AND (s.overall_indexable IS NULL OR s.overall_indexable = TRUE)
+      AND NOT EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(COALESCE(s.canonicals_json, '[]'::jsonb)) c
+          WHERE c->>'url' IS NOT NULL
+            AND c->>'url' <> u.url
+      )
+    ORDER BY u.url
+"""
+
+# Legacy current-state query used only when no run_id is supplied (tests /
+# programmatic callers that still want the latest-write-wins view).
+INDEXABLE_URLS_CURRENT_QUERY = """
     SELECT u.url
     FROM urls u
     JOIN page_metadata pm ON pm.url_id = u.id
@@ -32,11 +51,18 @@ INDEXABLE_URLS_QUERY = """
 """
 
 
-async def fetch_indexable_urls(store) -> list[str]:
-    """Return the sorted list of sitemap-eligible URLs from the store."""
+async def fetch_indexable_urls(store, *, run_id: str | None = None) -> list[str]:
+    """Return the sorted list of sitemap-eligible URLs from the store.
+
+    Prefer ``run_id`` (snapshot-scoped). Omitting it falls back to the
+    current-state tables for backward-compatible programmatic use.
+    """
     assert store.pool is not None
     async with store.pool.acquire() as conn:
-        rows = await conn.fetch(INDEXABLE_URLS_QUERY)
+        if run_id is not None:
+            rows = await conn.fetch(INDEXABLE_URLS_QUERY, run_id)
+        else:
+            rows = await conn.fetch(INDEXABLE_URLS_CURRENT_QUERY)
     return [row["url"] for row in rows]
 
 

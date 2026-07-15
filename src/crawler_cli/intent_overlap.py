@@ -1073,6 +1073,7 @@ async def run_intent_overlap(
     thin_signature_words: int = DEFAULT_THIN_SIGNATURE_WORDS,
     time_sequenced_sections: Sequence[str] = (),
     run_args: dict[str, Any] | None = None,
+    run_id: str | None = None,
 ) -> IntentOverlapRun:
     """Load embeddings + identity from the store, run the analysis, write the
     six CSVs + manifest, and return a run summary (ticket 079).
@@ -1087,7 +1088,7 @@ async def run_intent_overlap(
     # populated before the analysis rows are loaded and compute_exclusion runs.
     amp_hygiene = await store.classify_amp_variants()
 
-    fetched = await store.fetch_analysis_rows()
+    fetched = await store.fetch_analysis_rows(run_id=run_id)
     rows: list[AnalysedRow] = [{**r, "excluded": compute_exclusion(r)} for r in fetched]
     # Classify parameterised URLs and fold content-confirmed duplicates onto
     # their base URL before partitioning records (ticket 102).

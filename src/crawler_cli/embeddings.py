@@ -135,6 +135,7 @@ async def generate_signature_embeddings_for_store(
     force: bool = False,
     urls: list[str] | None = None,
     source: str = "signature",
+    run_id: str | None = None,
 ) -> EmbeddingJobResult:
     """Embed ticket-076 intent signatures with a local model, skipping pages
     whose ``signature_hash`` and ``model`` already match a stored embedding
@@ -148,8 +149,12 @@ async def generate_signature_embeddings_for_store(
     rows: list[SignatureEmbeddingRow]
     if source == "signature":
         rows = await store.fetch_signature_rows_for_embeddings(urls=urls)
+        if run_id is not None:
+            # Signature rows are current-state; scope to URLs present in the run.
+            allowed = {row["url"] for row in await store.list_page_run_snapshots(run_id)}
+            rows = [row for row in rows if row["url"] in allowed]
     else:
-        pages = await store.fetch_pages_for_embeddings(urls=urls)
+        pages = await store.fetch_pages_for_embeddings(urls=urls, run_id=run_id)
         rows = [
             {
                 "url_id": uid,
@@ -218,8 +223,9 @@ async def generate_embeddings_for_store(
     delay_seconds: float = 1.0,
     skip_existing: bool = True,
     urls: list[str] | None = None,
+    run_id: str | None = None,
 ) -> EmbeddingJobResult:
-    pages = await store.fetch_pages_for_embeddings(urls=urls)
+    pages = await store.fetch_pages_for_embeddings(urls=urls, run_id=run_id)
     existing_ids: set[int] = set()
     if skip_existing:
         existing_ids = await store.embedding_url_ids(model=model)

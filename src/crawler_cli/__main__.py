@@ -39,10 +39,33 @@ from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
 from .exit_codes import EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
-from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
+from .persistence import DEFAULT_CRAWL_RUN_ID, AsyncpgStore, MemoryStore, database_name_from_dsn
 from .reports import CrawlReports
+from .run_scope import RunSelectionError, resolve_reporting_run_id
 
 logger = logging.getLogger(__name__)
+
+
+def _add_run_scope_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--crawl-run-id",
+        dest="reporting_run_id",
+        default=None,
+        help=(
+            "Crawl run to scope this command to. Required when the database has "
+            "multiple non-legacy runs; otherwise the sole run (or legacy) is selected."
+        ),
+    )
+
+
+async def _resolve_cli_run_id(store: AsyncpgStore, args: argparse.Namespace) -> str:
+    """Resolve and announce the crawl run used by a report/enrichment command."""
+    run_id = await resolve_reporting_run_id(
+        store,
+        getattr(args, "reporting_run_id", None),
+    )
+    print(f"Using crawl run: {run_id}")
+    return run_id
 
 
 def _env_or_default(prefix: str, key: str, default: str | None = None) -> str | None:
@@ -1094,6 +1117,7 @@ async def _run_embeddings(args: argparse.Namespace) -> int:
     await store.initialize()
 
     try:
+        run_id = await _resolve_cli_run_id(store, args)
         urls = None
         if args.urls:
             urls = args.urls
@@ -1105,12 +1129,16 @@ async def _run_embeddings(args: argparse.Namespace) -> int:
             delay_seconds=args.delay,
             skip_existing=not args.force,
             urls=urls,
+            run_id=run_id,
         )
         print(f"Embeddings complete: processed={result.processed} skipped={result.skipped} failed={result.failed}")
         if result.errors:
             print("Errors:")
             for error in result.errors[:10]:
                 print(f"  - {error}")
+    except RunSelectionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     finally:
         await store.close()
     return 0
@@ -1129,6 +1157,7 @@ async def _run_local_embeddings(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
+        run_id = await _resolve_cli_run_id(store, args)
         result = await generate_signature_embeddings_for_store(
             store,
             model=model,
@@ -1137,7 +1166,11 @@ async def _run_local_embeddings(args: argparse.Namespace) -> int:
             force=args.force,
             urls=args.urls or None,
             source=source,
+            run_id=run_id,
         )
+    except RunSelectionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     finally:
         await store.close()
 
@@ -1158,13 +1191,18 @@ async def _run_backfill_signatures(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
+        run_id = await _resolve_cli_run_id(store, args)
         result = await backfill_intent_signatures(
             store,
             urls=args.urls or None,
             boilerplate_share=args.boilerplate_share,
             min_words=args.min_words,
             dry_run=args.dry_run,
+            run_id=run_id,
         )
+    except RunSelectionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     finally:
         await store.close()
 
@@ -1186,14 +1224,18 @@ async def _run_hreflang_groups(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
+        run_id = await _resolve_cli_run_id(store, args)
         result = await build_and_store_identity(store)
+    except RunSelectionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     finally:
         await store.close()
 
     print(
-        f"Hreflang identity: {result.groups} groups covering {result.grouped_urls} "
-        f"of {result.pages} pages; {result.variants} URL variants folded into "
-        f"{result.representatives} representatives; "
+        f"Hreflang identity (selected run {run_id}): {result.groups} groups covering "
+        f"{result.grouped_urls} of {result.pages} pages; {result.variants} URL variants "
+        f"folded into {result.representatives} representatives; "
         f"{result.reciprocity_issues} reciprocity issues."
     )
     return 0
@@ -1222,6 +1264,8 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
+        run_id = await _resolve_cli_run_id(store, args)
+        run_args["crawl_run_id"] = run_id
         run = await run_intent_overlap(
             store,
             out_dir=args.out,
@@ -1238,7 +1282,11 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
             thin_signature_words=args.thin_signature_words,
             time_sequenced_sections=args.time_sequenced_section or (),
             run_args=run_args,
+            run_id=run_id,
         )
+    except RunSelectionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     except MixedModelError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
@@ -1544,7 +1592,9 @@ async def _run_compare(args: argparse.Namespace) -> int:
                 rows=comparison_rows(diff),
             )
             await store.initialize_comparison_views()
-            reports = CrawlReports(store)
+            # Comparison rows are session-scoped; run_id is only required by the
+            # constructor for page/frontier reports (ticket 095).
+            reports = CrawlReports(store, run_id=DEFAULT_CRAWL_RUN_ID)
             summary = await reports.comparison_summary(session_id)
             print(json.dumps(summary, indent=2))
         finally:
@@ -1571,9 +1621,11 @@ async def _run_compact_html(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
+        run_id = await _resolve_cli_run_id(store, args)
         stats = await store.html_storage_stats()
         print(f"Pages with HTML: {stats['pages_with_html']}")
         print(f"Legacy uncompressed rows: {stats['pages_legacy_uncompressed']}")
+        print(f"Selected run for snapshot compaction: {run_id}")
         if (code := _require_confirm(args, dsn)) is not None:
             return code
         result = await store.compact_html_storage(
@@ -1581,6 +1633,34 @@ async def _run_compact_html(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
         )
         print(json.dumps(result, indent=2))
+        if not args.dry_run:
+            from .compression import compress_html, decompress_html, is_compressed
+
+            assert store.pool is not None
+            async with store.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, html_compressed FROM page_run_snapshots
+                    WHERE run_id = $1 AND html_compressed IS NOT NULL
+                      AND (length(html_compressed) = 0 OR get_byte(html_compressed, 0) <> 1)
+                    """,
+                    run_id,
+                )
+                updated = 0
+                for row in rows:
+                    raw = bytes(row["html_compressed"])
+                    if is_compressed(raw):
+                        continue
+                    await conn.execute(
+                        "UPDATE page_run_snapshots SET html_compressed = $2 WHERE id = $1",
+                        int(row["id"]),
+                        compress_html(decompress_html(raw)),
+                    )
+                    updated += 1
+            print(json.dumps({"snapshot_rows_compressed": updated, "run_id": run_id}))
+    except RunSelectionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     finally:
         await store.close()
     return 0
@@ -1593,13 +1673,15 @@ async def _run_delete_crawl(args: argparse.Namespace) -> int:
     db_name = database_name_from_dsn(dsn)
     try:
         counts = await store.table_row_counts()
-        queued, pending, done = await store.frontier_stats()
+        # Aggregate across every run so printed frontier status matches the
+        # raw frontier row count (ticket 095 / 086 leftover).
+        queued, pending, done = await store.frontier_stats_all()
         print(f"Database: {db_name}")
         print(f"Mode: {args.mode}")
-        for table in ("pages", "urls", "frontier", "content", "page_analytics_hits"):
+        for table in ("pages", "urls", "frontier", "content", "page_analytics_hits", "page_run_snapshots"):
             if table in counts:
                 print(f"  {table}: {counts[table]:,}")
-        print(f"  frontier: {done:,} done, {pending:,} pending, {queued:,} queued")
+        print(f"  frontier (all runs): {done:,} done, {pending:,} pending, {queued:,} queued")
         if args.dry_run:
             print("Dry run — no changes made.")
             return 0
@@ -1625,6 +1707,7 @@ async def _run_compact_crawl(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
+        run_id = await _resolve_cli_run_id(store, args)
         stats = await store.html_storage_stats()
         print(json.dumps(stats, indent=2))
         missing = stats["pages_with_html_missing_hash"]
@@ -1654,8 +1737,14 @@ async def _run_compact_crawl(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
         )
         print(json.dumps(result, indent=2))
+        if not args.dry_run:
+            snap = await store.prune_page_run_snapshots(run_id, drop_html_only=True)
+            print(json.dumps({"snapshot_prune": snap, "run_id": run_id}))
         if args.dry_run:
             print("Dry run — HTML not purged.")
+    except RunSelectionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     finally:
         await store.close()
     return 0
@@ -1667,7 +1756,11 @@ async def _run_generate_sitemap(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
-        urls = await fetch_indexable_urls(store)
+        run_id = await _resolve_cli_run_id(store, args)
+        urls = await fetch_indexable_urls(store, run_id=run_id)
+    except RunSelectionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     finally:
         await store.close()
 
@@ -1681,7 +1774,7 @@ async def _run_generate_sitemap(args: argparse.Namespace) -> int:
         base_url=getattr(args, "base_url", None),
         max_urls_per_file=args.max_urls_per_file,
     )
-    print(f"Wrote {len(urls)} URLs to {len(written)} file(s):")
+    print(f"Wrote {len(urls)} URLs to {len(written)} file(s) (run {run_id}):")
     for path in written:
         print(f"  {path}")
     return 0
@@ -1743,6 +1836,7 @@ def _build_parser() -> argparse.ArgumentParser:
     emb_parser.add_argument("--delay", type=float, default=1.0, help="Delay between batches (seconds, openai)")
     emb_parser.add_argument("--force", action="store_true", help="Regenerate existing embeddings")
     emb_parser.add_argument("--urls", nargs="*", help="Optional URL filter list")
+    _add_run_scope_arg(emb_parser)
     _add_postgres_args(emb_parser)
 
     sig_parser = subparsers.add_parser(
@@ -1763,12 +1857,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pages below this word count get signal_confidence=low (default 50)",
     )
     sig_parser.add_argument("--dry-run", action="store_true", help="Report counts without writing")
+    _add_run_scope_arg(sig_parser)
     _add_postgres_args(sig_parser)
 
     hreflang_parser = subparsers.add_parser(
         "hreflang-groups",
         help="Build hreflang alternate groups + resolve URL variants from crawler-captured edges",
     )
+    _add_run_scope_arg(hreflang_parser)
     _add_postgres_args(hreflang_parser)
 
     io_parser = subparsers.add_parser(
@@ -1830,6 +1926,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "from --fail-on duplicate by default. Explicit opt-in only."
         ),
     )
+    _add_run_scope_arg(io_parser)
     _add_postgres_args(io_parser)
 
     cmp_parser = subparsers.add_parser("compare", help="Compare two saved crawl JSON files")
@@ -1847,6 +1944,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Gzip-compress legacy uncompressed HTML in pages.html_compressed",
     )
     compact_html_parser.add_argument("--batch-size", type=int, default=500)
+    _add_run_scope_arg(compact_html_parser)
     _add_confirm_args(compact_html_parser)
     _add_postgres_args(compact_html_parser)
 
@@ -1893,6 +1991,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run VACUUM ANALYZE pages after purge (can be slow)",
     )
+    _add_run_scope_arg(compact_parser)
     _add_confirm_args(compact_parser)
     _add_postgres_args(compact_parser)
 
@@ -1916,6 +2015,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=50_000,
         help="Split into a sitemap index above this many URLs (default 50000)",
     )
+    _add_run_scope_arg(sitemap_parser)
     _add_postgres_args(sitemap_parser)
 
     install_parser = subparsers.add_parser(

@@ -6,40 +6,53 @@ from .persistence import AsyncpgStore
 
 
 class CrawlReports:
-    def __init__(self, store: AsyncpgStore) -> None:
+    """SQL reports scoped to a single crawl run (ticket 095).
+
+    Frontier-derived metrics always filter by ``run_id``. Page-level metrics
+    read ``page_run_snapshots`` so historical values stay distinguishable when
+    the same URL is crawled in multiple runs.
+    """
+
+    def __init__(self, store: AsyncpgStore, *, run_id: str) -> None:
         self.store = store
+        self.run_id = run_id
 
     async def orphan_pages(self) -> list[dict[str, object]]:
         return await self._fetch(
             """
             SELECT u.url
             FROM urls u
-            LEFT JOIN frontier f ON f.url_id = u.id
+            JOIN frontier f ON f.url_id = u.id AND f.run_id = $1
             WHERE u.kind = 'html' AND f.parent_id IS NULL
             ORDER BY u.url
-            """
+            """,
+            self.run_id,
         )
 
     async def indexability_reasons(self) -> list[dict[str, object]]:
         return await self._fetch(
             """
-            SELECT u.url, i.html_meta_allows, i.http_header_allows, i.overall_indexable
-            FROM indexability i
-            JOIN urls u ON u.id = i.url_id
+            SELECT u.url, s.html_meta_allows, s.http_header_allows, s.overall_indexable
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1
             ORDER BY u.url
-            """
+            """,
+            self.run_id,
         )
 
     async def redirect_chains(self) -> list[dict[str, object]]:
         return await self._fetch(
             """
-            SELECT src.url AS requested_url, dst.url AS final_url, pm.initial_status_code, pm.final_status_code
-            FROM page_metadata pm
-            JOIN urls src ON src.id = pm.url_id
-            JOIN urls dst ON dst.id = pm.final_url_id
-            WHERE pm.url_id <> pm.final_url_id
+            SELECT src.url AS requested_url, dst.url AS final_url,
+                   s.initial_status_code, s.final_status_code
+            FROM page_run_snapshots s
+            JOIN urls src ON src.id = s.url_id
+            JOIN urls dst ON dst.id = s.final_url_id
+            WHERE s.run_id = $1 AND s.url_id <> s.final_url_id
             ORDER BY src.url
-            """
+            """,
+            self.run_id,
         )
 
     async def site_hub_pages(self, min_outlinks: int = 5) -> list[dict[str, object]]:
@@ -48,11 +61,12 @@ class CrawlReports:
             SELECT p.url AS parent_url, COUNT(*)::INT AS outlinks
             FROM frontier f
             JOIN urls p ON p.id = f.parent_id
-            WHERE f.parent_id IS NOT NULL
+            WHERE f.run_id = $1 AND f.parent_id IS NOT NULL
             GROUP BY p.url
-            HAVING COUNT(*) >= $1
+            HAVING COUNT(*) >= $2
             ORDER BY outlinks DESC, p.url
             """,
+            self.run_id,
             min_outlinks,
         )
 
@@ -60,13 +74,14 @@ class CrawlReports:
         """Pages ranked by total fetch duration (ticket 029 perf metrics)."""
         return await self._fetch(
             """
-            SELECT u.url, pm.ttfb_seconds, pm.total_duration_seconds, pm.final_status_code
-            FROM page_metadata pm
-            JOIN urls u ON u.id = pm.url_id
-            WHERE pm.total_duration_seconds IS NOT NULL
-            ORDER BY pm.total_duration_seconds DESC
-            LIMIT $1
+            SELECT u.url, s.ttfb_seconds, s.total_duration_seconds, s.final_status_code
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1 AND s.total_duration_seconds IS NOT NULL
+            ORDER BY s.total_duration_seconds DESC
+            LIMIT $2
             """,
+            self.run_id,
             limit,
         )
 
@@ -79,18 +94,21 @@ class CrawlReports:
         """
         return await self._fetch(
             """
-            SELECT u.url, pm.lcp_ms, pm.cls, pm.inp_ms, pm.final_status_code
-            FROM page_metadata pm
-            JOIN urls u ON u.id = pm.url_id
-            WHERE pm.lcp_ms IS NOT NULL OR pm.cls IS NOT NULL OR pm.inp_ms IS NOT NULL
-            ORDER BY pm.lcp_ms DESC NULLS LAST, pm.cls DESC NULLS LAST
-            LIMIT $1
+            SELECT u.url, s.lcp_ms, s.cls, s.inp_ms, s.final_status_code
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1
+              AND (s.lcp_ms IS NOT NULL OR s.cls IS NOT NULL OR s.inp_ms IS NOT NULL)
+            ORDER BY s.lcp_ms DESC NULLS LAST, s.cls DESC NULLS LAST
+            LIMIT $2
             """,
+            self.run_id,
             limit,
         )
 
     async def as_json(self) -> str:
         payload = {
+            "run_id": self.run_id,
             "orphans": await self.orphan_pages(),
             "indexability": await self.indexability_reasons(),
             "redirect_chains": await self.redirect_chains(),
@@ -155,30 +173,37 @@ class CrawlReports:
             return await self._fetch(
                 """
                 SELECT u.url
-                FROM urls u
-                JOIN pages p ON p.url_id = u.id
-                WHERE u.kind = 'html'
-                  AND NOT EXISTS (
-                      SELECT 1 FROM page_analytics_hits h
-                      JOIN analytics_vendors v ON v.id = h.vendor_id
-                      WHERE h.page_id = p.id AND v.vendor = $1
+                FROM page_run_snapshots s
+                JOIN urls u ON u.id = s.url_id
+                WHERE s.run_id = $1
+                  AND u.kind = 'html'
+                  AND (
+                      s.analytics_json IS NULL
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements(s.analytics_json) hit
+                          WHERE hit->>'vendor' = $2
+                      )
                   )
                 ORDER BY u.url
                 """,
+                self.run_id,
                 vendor,
             )
         return await self._fetch(
             """
             SELECT u.url
-            FROM urls u
-            JOIN pages p ON p.url_id = u.id
-            WHERE u.kind = 'html'
-              AND NOT EXISTS (
-                  SELECT 1 FROM page_analytics_hits h
-                  WHERE h.page_id = p.id
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1
+              AND u.kind = 'html'
+              AND (
+                  s.analytics_json IS NULL
+                  OR jsonb_array_length(s.analytics_json) = 0
               )
             ORDER BY u.url
-            """
+            """,
+            self.run_id,
         )
 
     async def pages_missing_expected_id(self, expected_id: str) -> list[dict[str, object]]:
@@ -186,43 +211,60 @@ class CrawlReports:
         return await self._fetch(
             """
             SELECT u.url
-            FROM urls u
-            JOIN pages p ON p.url_id = u.id
-            WHERE u.kind = 'html'
-              AND NOT EXISTS (
-                  SELECT 1 FROM page_analytics_hits h
-                  WHERE h.page_id = p.id AND h.identifier = $1
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1
+              AND u.kind = 'html'
+              AND (
+                  s.analytics_json IS NULL
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM jsonb_array_elements(s.analytics_json) hit
+                      WHERE hit->>'identifier' = $2
+                  )
               )
             ORDER BY u.url
             """,
+            self.run_id,
             expected_id,
         )
 
     async def analytics_inventory(self) -> list[dict[str, object]]:
-        """Rollup of (vendor, identifier, page_count)."""
+        """Rollup of (vendor, identifier, page_count) for this run."""
         return await self._fetch(
             """
-            SELECT v.vendor, v.category, h.identifier, COUNT(DISTINCT h.page_id)::INT AS page_count
-            FROM page_analytics_hits h
-            JOIN analytics_vendors v ON v.id = h.vendor_id
-            GROUP BY v.vendor, v.category, h.identifier
-            ORDER BY page_count DESC, v.vendor, h.identifier
-            """
+            SELECT hit->>'vendor' AS vendor,
+                   hit->>'category' AS category,
+                   hit->>'identifier' AS identifier,
+                   COUNT(DISTINCT s.url_id)::INT AS page_count
+            FROM page_run_snapshots s
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.analytics_json, '[]'::jsonb)) hit
+            WHERE s.run_id = $1
+            GROUP BY hit->>'vendor', hit->>'category', hit->>'identifier'
+            ORDER BY page_count DESC, vendor, identifier
+            """,
+            self.run_id,
         )
 
     async def analytics_per_page(self, url: str) -> list[dict[str, object]]:
-        """Full hit list for a single URL."""
+        """Full hit list for a single URL within this run."""
         return await self._fetch(
             """
-            SELECT u.url, v.vendor, v.category, h.identifier,
-                   h.evidence_type, h.evidence_snippet, h.confidence, h.detected_at
-            FROM page_analytics_hits h
-            JOIN analytics_vendors v ON v.id = h.vendor_id
-            JOIN pages p ON p.id = h.page_id
-            JOIN urls u ON u.id = p.url_id
-            WHERE u.url = $1
-            ORDER BY h.confidence DESC, v.vendor
+            SELECT u.url,
+                   hit->>'vendor' AS vendor,
+                   hit->>'category' AS category,
+                   hit->>'identifier' AS identifier,
+                   hit->>'evidence_type' AS evidence_type,
+                   NULL::text AS evidence_snippet,
+                   (hit->>'confidence')::real AS confidence,
+                   NULL::timestamptz AS detected_at
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.analytics_json, '[]'::jsonb)) hit
+            WHERE s.run_id = $1 AND u.url = $2
+            ORDER BY confidence DESC NULLS LAST, vendor
             """,
+            self.run_id,
             url,
         )
 
@@ -233,9 +275,9 @@ class CrawlReports:
             await conn.execute(
                 """
                 CREATE MATERIALIZED VIEW IF NOT EXISTS crawler_orphan_pages AS
-                SELECT u.url
+                SELECT u.url, f.run_id
                 FROM urls u
-                LEFT JOIN frontier f ON f.url_id = u.id
+                JOIN frontier f ON f.url_id = u.id
                 WHERE u.kind = 'html' AND f.parent_id IS NULL
                 """
             )

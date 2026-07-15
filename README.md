@@ -168,6 +168,29 @@ negotiation and will not downgrade Digest credentials to Basic.
 
 Page HTML is **gzip-compressed by default** in `pages.html_compressed`. Use `--no-html-compression` only for debugging. Legacy uncompressed rows can be migrated with `compact-html`.
 
+#### Crawl runs, snapshots, and reporting scope
+
+Each open crawl is a distinct **crawl run** (`--crawl-run-id` / `--resume`). Ticket 095 keeps two layers of page data:
+
+| Layer | Tables | Semantics |
+| --- | --- | --- |
+| **Immutable per run** | `page_run_snapshots` (+ frontier / crawl metadata keyed by `run_id`) | Page metadata, extracted content, hashes, detections, links, schema, canonicals/hreflang, and indexability as observed in that fetch/run. Two crawls of the same URL keep distinguishable rows. |
+| **URL identity / lookups** | `urls`, `meta_descriptions`, `html_languages`, `schema_instances`, `analytics_vendors`, … | Deduplicated identity shared across runs. |
+| **Current-state convenience** | `pages`, `content`, `page_metadata`, satellite fact tables, `url_current_state` | Latest-write-wins view for ad-hoc SQL. Prefer snapshots whenever a concrete run is selected. |
+
+Reporting and enrichment commands that read the database take `--crawl-run-id` when more than one non-legacy run is present (otherwise the sole run, or `legacy`, is selected automatically). That includes `generate-embeddings`, `backfill-signatures`, `hreflang-groups`, `intent-overlap`, `generate-sitemap`, `compact-html`, and `compact-crawl`.
+
+**Retention / storage cost.** Snapshot HTML follows `--no-store-html` / `store_snapshot_html`. Prune with `AsyncpgStore.prune_page_run_snapshots(run_id, drop_html_only=True)` (drop HTML only) or `drop_html_only=False` (delete the run's snapshot rows), or `prune_old_crawl_run_snapshots(keep_latest=N)` to keep only the newest N non-legacy runs. `delete-crawl` prints frontier counts aggregated across **all** runs so they match the raw `frontier` row total.
+
+```bash
+# Re-crawl without overwriting the previous run's snapshot history
+crawler-cli crawl https://example.com --postgres-dsn ... --crawl-run-id audit-2026-07-15
+
+# Scope sitemap / embeddings to that run when the DB has several
+crawler-cli generate-sitemap --postgres-dsn ... --crawl-run-id audit-2026-07-15
+crawler-cli generate-embeddings --provider sentence-transformers --postgres-dsn ... --crawl-run-id audit-2026-07-15
+```
+
 #### Advanced crawl options
 
 ```bash
@@ -738,17 +761,16 @@ asyncio.run(main())
 The store initializes and writes the main normalized tables used by the extracted module:
 
 - `urls`
-- `pages`
-- `content`
+- `pages` / `content` / `page_metadata` (current-state convenience)
+- `page_run_snapshots` / `url_current_state` (per-run history + latest pointer)
 - `robots_directives`
 - `canonical_urls`
 - `hreflang_http_header`
 - `hreflang_html_head`
 - `hreflang_sitemap`
-- `page_metadata`
 - `indexability`
-- `frontier`
-- `crawl_metadata`
+- `frontier` (keyed by `run_id`)
+- `crawl_runs` / `crawl_metadata`
 
 ## Open Crawl With Upper Limit
 

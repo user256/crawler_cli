@@ -285,6 +285,7 @@ async def backfill_intent_signatures(
     boilerplate_share: float = DEFAULT_BOILERPLATE_SHARE,
     min_words: int = DEFAULT_MIN_WORDS,
     dry_run: bool = False,
+    run_id: str | None = None,
 ) -> SignatureBackfillResult:
     """Compute and persist intent signatures over stored HTML.
 
@@ -294,8 +295,10 @@ async def backfill_intent_signatures(
     ``signature_hash`` actually changed are written, so re-running on an
     unchanged crawl rewrites zero hashes (the IO ticket-114 zero-re-embed
     proof).
+
+    When ``run_id`` is set, HTML is read from that run's page snapshots.
     """
-    pages = await store.fetch_pages_for_signatures(urls=urls)
+    pages = await store.fetch_pages_for_signatures(urls=urls, run_id=run_id)
 
     # Pass 1: extract main text and gather titles per site.
     extracted: list[dict[str, Any]] = []

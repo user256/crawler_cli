@@ -39,5 +39,4 @@ ticket builds durable snapshot semantics on top of that identity.
 - Current-state convenience and historical retention are both documented.
 
 ## Status
-in_progress (Priority: **P2**, depends on ticket 086) — claimed by `agent/ticket-095-run-aware-snapshots-reporting`; architecture/product gap; found in 2026-07-15 audit.
-
+done (Priority: **P2**, depends on ticket 086) — `agent/ticket-095-run-aware-snapshots-reporting`; architecture/product gap; found in 2026-07-15 audit.

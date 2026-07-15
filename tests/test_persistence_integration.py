@@ -277,7 +277,7 @@ async def test_web_vitals_round_trip(store: AsyncpgStore) -> None:
     )
     await store.persist(result)
 
-    rows = await CrawlReports(store).worst_cwv_pages(limit=10)
+    rows = await CrawlReports(store, run_id="legacy").worst_cwv_pages(limit=10)
     by_url = {r["url"]: r for r in rows}
     assert "https://example.com/slow" in by_url
     assert by_url["https://example.com/slow"]["lcp_ms"] == 2500.0
@@ -1086,3 +1086,154 @@ async def test_engine_challenge_hard_stop_end_to_end(store: AsyncpgStore) -> Non
     assert meta["challenge"] == "cloudflare"
     assert meta["skip_reason"] == "bot_challenge"
     assert content_count == 0
+
+
+def _snapshot_page(url: str, title: str, *, parent: str | None = None) -> CrawlResult:
+    links = []
+    if parent is None:
+        # Seed page discovering a child so hub-page reports have outlinks.
+        links = [
+            DiscoveredLink(
+                href=f"{url.rstrip('/')}/child",
+                anchor_text="child",
+                xpath="/html/body/a[1]",
+                is_image=False,
+            )
+        ]
+    return CrawlResult(
+        requested_url=url,
+        final_url=url,
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=ExtractedContent(
+            title=title,
+            meta_description=f"{title} meta",
+            meta_robots=RobotsDirectives(),
+            x_robots_tag=RobotsDirectives(),
+            canonical=url,
+            x_canonical=None,
+            hreflang_links=[],
+            html_lang="en",
+            headings={"h1": [title], "h2": []},
+            text=title,
+            word_count=10,
+            metadata={},
+        ),
+        raw_html=f"<html><head><title>{title}</title></head><body><h1>{title}</h1></body></html>",
+        discovered_links=links,
+        content_hash_sha256=f"hash-{title}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_runs_retain_distinguishable_page_snapshots(store: AsyncpgStore) -> None:
+    """Two crawls of the same URL keep distinct historical snapshots (ticket 095)."""
+    url = "https://snap.example/"
+    await store.create_crawl_run(
+        "snap-run-a",
+        seed_urls=[url],
+        config_hash="a",
+        config={"seed_urls": [url]},
+    )
+    store.set_active_crawl_run("snap-run-a")
+    await store.persist(_snapshot_page(url, "Title A"))
+
+    await store.create_crawl_run(
+        "snap-run-b",
+        seed_urls=[url],
+        config_hash="b",
+        config={"seed_urls": [url]},
+    )
+    store.set_active_crawl_run("snap-run-b")
+    await store.persist(_snapshot_page(url, "Title B"))
+
+    snap_a = await store.get_page_run_snapshot("snap-run-a", url)
+    snap_b = await store.get_page_run_snapshot("snap-run-b", url)
+    assert snap_a is not None and snap_b is not None
+    assert snap_a["title"] == "Title A"
+    assert snap_b["title"] == "Title B"
+    assert snap_a["content_hash_sha256"] == "hash-Title A"
+    assert snap_b["content_hash_sha256"] == "hash-Title B"
+
+    # Current-state convenience reflects the latest write.
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        current_title = await conn.fetchval(
+            """
+            SELECT c.title FROM content c
+            JOIN urls u ON u.id = c.url_id
+            WHERE u.url = $1
+            """,
+            url,
+        )
+        current_pointer = await conn.fetchval(
+            """
+            SELECT uc.run_id FROM url_current_state uc
+            JOIN urls u ON u.id = uc.url_id
+            WHERE u.url = $1
+            """,
+            url,
+        )
+    assert current_title == "Title B"
+    assert current_pointer == "snap-run-b"
+
+
+@pytest.mark.asyncio
+async def test_reports_never_mix_runs_accidentally(store: AsyncpgStore) -> None:
+    """Hub/report queries scoped to a run do not inflate across runs (ticket 095)."""
+    from crawler_cli.reports import CrawlReports
+
+    home = "https://hub.example/"
+    child_a = "https://hub.example/a"
+    child_b = "https://hub.example/b"
+
+    await store.create_crawl_run(
+        "hub-run-1",
+        seed_urls=[home],
+        config_hash="1",
+        config={"seed_urls": [home]},
+    )
+    await store.enqueue_frontier([(home, 0, None)], run_id="hub-run-1", source="seed")
+    await store.enqueue_frontier(
+        [(child_a, 1, home), (child_b, 1, home)],
+        run_id="hub-run-1",
+        source="link",
+    )
+    store.set_active_crawl_run("hub-run-1")
+    await store.persist(_snapshot_page(home, "Hub One"))
+    await store.persist(_snapshot_page(child_a, "Child A", parent=home))
+    await store.persist(_snapshot_page(child_b, "Child B", parent=home))
+
+    await store.create_crawl_run(
+        "hub-run-2",
+        seed_urls=[home],
+        config_hash="2",
+        config={"seed_urls": [home]},
+    )
+    await store.enqueue_frontier([(home, 0, None)], run_id="hub-run-2", source="seed")
+    await store.enqueue_frontier([(child_a, 1, home)], run_id="hub-run-2", source="link")
+    store.set_active_crawl_run("hub-run-2")
+    await store.persist(_snapshot_page(home, "Hub Two"))
+    await store.persist(_snapshot_page(child_a, "Child A v2", parent=home))
+
+    hubs_1 = await CrawlReports(store, run_id="hub-run-1").site_hub_pages(min_outlinks=1)
+    hubs_2 = await CrawlReports(store, run_id="hub-run-2").site_hub_pages(min_outlinks=1)
+    by_1 = {row["parent_url"]: int(row["outlinks"]) for row in hubs_1}
+    by_2 = {row["parent_url"]: int(row["outlinks"]) for row in hubs_2}
+    assert by_1[home] == 2
+    assert by_2[home] == 1
+
+    titles_1 = {row["url"]: row["title"] for row in await store.list_page_run_snapshots("hub-run-1")}
+    titles_2 = {row["url"]: row["title"] for row in await store.list_page_run_snapshots("hub-run-2")}
+    assert titles_1[home] == "Hub One"
+    assert titles_2[home] == "Hub Two"
+    assert titles_1[child_a] == "Child A"
+    assert titles_2[child_a] == "Child A v2"
+
+    # All-run frontier stats must equal the sum of per-run counts.
+    q1, p1, d1 = await store.frontier_stats(run_id="hub-run-1")
+    q2, p2, d2 = await store.frontier_stats(run_id="hub-run-2")
+    qa, pa, da = await store.frontier_stats_all()
+    assert (qa, pa, da) == (q1 + q2, p1 + p2, d1 + d2)
