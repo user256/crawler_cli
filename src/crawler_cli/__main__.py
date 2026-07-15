@@ -68,12 +68,42 @@ def _build_dsn(args: argparse.Namespace) -> str:
     return f"postgresql://{safe_user}:{safe_password}@{host}:{port}/{dbname}"
 
 
+def _resolve_secret_sources(*, value: str, env_var: str, file_path: str, label: str) -> str:
+    sources = [bool(value), bool(env_var), bool(file_path)]
+    if sum(sources) > 1:
+        raise ValueError(f"Provide only one of --{label}, --{label}-env, or --{label}-file")
+    if env_var:
+        secret = os.environ.get(env_var)
+        if not secret:
+            raise ValueError(f"Environment variable {env_var!r} for --{label}-env is not set or is empty")
+        return secret
+    if file_path:
+        path = Path(file_path)
+        try:
+            return path.read_text(encoding="utf-8").rstrip("\r\n")
+        except OSError as exc:
+            raise ValueError(f"Unable to read --{label}-file {file_path!r}: {exc}") from exc
+    return value
+
+
 def _build_auth(args: argparse.Namespace) -> AuthConfig | None:
     auth_type = getattr(args, "auth_type", "") or ""
     username = getattr(args, "auth_username", "") or ""
     token = getattr(args, "auth_token", "") or ""
-    password = getattr(args, "auth_password", "") or token
+    password_source_provided = any(
+        bool(getattr(args, attr, "") or "") for attr in ("auth_password", "auth_password_env", "auth_password_file")
+    )
+    password = _resolve_secret_sources(
+        value=getattr(args, "auth_password", "") or "",
+        env_var=getattr(args, "auth_password_env", "") or "",
+        file_path=getattr(args, "auth_password_file", "") or "",
+        label="auth-password",
+    )
+    if not password:
+        password = token
     if not auth_type and not username and not token:
+        if password_source_provided:
+            raise ValueError("--auth-password requires --auth-username or --auth-type basic")
         return None
     if not auth_type:
         auth_type = "basic" if username else "bearer"
@@ -854,9 +884,11 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "ignoring their domain/path attributes (legacy ticket-028 behaviour).",
     )
     auth = parser.add_argument_group("HTTP authentication")
-    auth.add_argument("--auth-type", choices=["basic", "digest", "bearer"], help="Authentication type")
-    auth.add_argument("--auth-username", help="Username for basic/digest auth")
-    auth.add_argument("--auth-password", help="Password for basic/digest auth")
+    auth.add_argument("--auth-type", choices=["basic", "bearer"], help="Authentication type")
+    auth.add_argument("--auth-username", help="Username for basic auth")
+    auth.add_argument("--auth-password", help="Password for basic auth")
+    auth.add_argument("--auth-password-env", help="Read the basic auth password from this environment variable")
+    auth.add_argument("--auth-password-file", help="Read the basic auth password from this file")
     auth.add_argument("--auth-token", help="Bearer token or password fallback")
     _add_postgres_args(parser)
 
