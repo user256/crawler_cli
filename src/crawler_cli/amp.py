@@ -1,4 +1,4 @@
-"""AMP / page-variant classification (ticket 103).
+"""AMP / page-variant classification (tickets 103 / 108).
 
 The crawler discovers and fetches AMP variants but historically nothing in the
 pipeline *knew* they were AMP: keeping them out of intent-overlap pairing
@@ -9,9 +9,13 @@ from crawler-captured evidence:
 * the ``rel="amphtml"`` link edge extracted in :mod:`crawler_cli.extract`
   (the authoritative page->AMP pairing signal), and
 * AMP URL shape (a trailing ``/amp`` path segment as produced by Joomla's
-  wbAMP, or an ``amp=1`` query parameter) confirmed by content — a matching
-  content hash, a canonical pointing to the base page, or simply the base page
-  existing in the crawl.
+  wbAMP, or an ``amp=1`` query parameter) confirmed by positive content
+  evidence — a canonical pointing to the base page, or equality of the
+  crawler's intent-signature hash with the crawled base.
+
+Mere existence of the base URL in the crawl is not sufficient confirmation
+(ticket 108): a legitimate non-AMP ``/amp`` route must not be excluded from
+intent analysis on URL shape alone.
 
 Everything here is a pure function so it can be unit-tested without a database
 and reused by the engine (crawl-budget skipping), persistence (classification
@@ -114,7 +118,7 @@ class AmpClassification:
     url_id: int
     url: str
     base_url: str | None
-    confirmed_by: str  # amphtml-target | canonical-to-base | content-hash | base-exists
+    confirmed_by: str  # amphtml-target | canonical-to-base | signature-hash
 
 
 def classify_amp_variants(
@@ -124,7 +128,7 @@ def classify_amp_variants(
     """Classify AMP variants from crawler-captured evidence.
 
     *pages* is an iterable of mappings with keys ``url_id``, ``url``,
-    ``canonical_url`` (``str | None``) and ``content_hash`` (``str | None``).
+    ``canonical_url`` (``str | None``) and ``signature_hash`` (``str | None``).
     *amphtml_base_by_target* maps a page's ``url_id`` to the base URL of a page
     that declared ``<link rel="amphtml">`` pointing at it (the authoritative
     signal).
@@ -133,25 +137,23 @@ def classify_amp_variants(
 
     a. it is the target of another page's ``rel="amphtml"`` edge
        (unconditional — the authoritative pairing signal), **or**
-    b. it has an AMP URL shape *and* that shape is confirmed by content — its
-       canonical points to the derived base, its content hash matches the base
-       page's, or the base page exists in the crawl.
+    b. it has an AMP URL shape *and* that shape is confirmed by positive
+       content evidence — its canonical points to the derived base, or its
+       intent-signature hash equals the crawled base page's.
 
-    The content confirmation in (b) is what keeps a page whose slug merely
-    contains ``amp`` (already excluded by the URL-shape parser) or a stray
-    literal ``/amp`` path from being misclassified.
+    Base-page existence alone is never sufficient (ticket 108): a literal
+    ``/amp`` route with a crawled parent but no amphtml edge, canonical match,
+    or signature-hash match is left unclassified.
     """
     page_list = list(pages)
 
-    fetched_keys: set[str] = set()
     hash_by_key: dict[str, str] = {}
     for page in page_list:
         url = str(page["url"])
         key = _normalise_for_match(url)
-        fetched_keys.add(key)
-        content_hash = page.get("content_hash")
-        if content_hash:
-            hash_by_key[key] = str(content_hash)
+        signature_hash = page.get("signature_hash")
+        if signature_hash:
+            hash_by_key[key] = str(signature_hash)
 
     results: list[AmpClassification] = []
     for page in page_list:
@@ -169,15 +171,13 @@ def classify_amp_variants(
 
         base_key = _normalise_for_match(base)
         canonical = page.get("canonical_url")
-        content_hash = page.get("content_hash")
+        signature_hash = page.get("signature_hash")
 
         confirmed_by: str | None = None
         if canonical and _normalise_for_match(str(canonical)) == base_key:
             confirmed_by = "canonical-to-base"
-        elif content_hash and hash_by_key.get(base_key) == str(content_hash):
-            confirmed_by = "content-hash"
-        elif base_key in fetched_keys:
-            confirmed_by = "base-exists"
+        elif signature_hash and hash_by_key.get(base_key) == str(signature_hash):
+            confirmed_by = "signature-hash"
 
         if confirmed_by is not None:
             results.append(AmpClassification(url_id, url, base, confirmed_by))

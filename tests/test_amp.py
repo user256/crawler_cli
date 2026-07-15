@@ -1,4 +1,4 @@
-"""AMP variant extraction + classification (ticket 103)."""
+"""AMP variant extraction + classification (tickets 103 / 108)."""
 
 from __future__ import annotations
 
@@ -73,8 +73,13 @@ def test_amp_base_url(url, expected_base):
 # --------------------------------------------------------------------------
 
 
-def _page(url_id, url, canonical=None, content_hash=None):
-    return {"url_id": url_id, "url": url, "canonical_url": canonical, "content_hash": content_hash}
+def _page(url_id, url, canonical=None, signature_hash=None):
+    return {
+        "url_id": url_id,
+        "url": url,
+        "canonical_url": canonical,
+        "signature_hash": signature_hash,
+    }
 
 
 def test_classify_amphtml_target_is_authoritative():
@@ -85,12 +90,12 @@ def test_classify_amphtml_target_is_authoritative():
     assert result == [AmpClassification(2, "https://x.co/weird", "https://x.co/base", "amphtml-target")]
 
 
-def test_classify_url_shape_confirmed_by_base_exists():
+def test_classify_url_shape_plus_base_exists_alone_is_not_amp():
+    # Ticket 108: a literal /amp page with a crawled base but no canonical,
+    # signature match, or amphtml edge must NOT be classified AMP.
     pages = [_page(1, "https://x.co/foo"), _page(2, "https://x.co/foo/amp")]
     result = classify_amp_variants(pages, {})
-    assert [c.url_id for c in result] == [2]
-    assert result[0].base_url == "https://x.co/foo"
-    assert result[0].confirmed_by == "base-exists"
+    assert result == []
 
 
 def test_classify_url_shape_confirmed_by_canonical_to_base():
@@ -101,14 +106,14 @@ def test_classify_url_shape_confirmed_by_canonical_to_base():
     assert result[0].confirmed_by == "canonical-to-base"
 
 
-def test_classify_url_shape_confirmed_by_content_hash():
+def test_classify_url_shape_confirmed_by_signature_hash():
     pages = [
-        _page(1, "https://x.co/foo", content_hash="deadbeef"),
-        _page(2, "https://x.co/foo/amp", content_hash="deadbeef"),
+        _page(1, "https://x.co/foo", signature_hash="deadbeef"),
+        _page(2, "https://x.co/foo/amp", signature_hash="deadbeef"),
     ]
     result = classify_amp_variants(pages, {})
     assert [c.url_id for c in result] == [2]
-    assert result[0].confirmed_by == "content-hash"
+    assert result[0].confirmed_by == "signature-hash"
 
 
 def test_classify_url_shape_unconfirmed_is_not_amp():
@@ -118,23 +123,53 @@ def test_classify_url_shape_unconfirmed_is_not_amp():
     assert result == []
 
 
-def test_classify_revamp_never_matches():
-    # A real content page whose slug ends in "amp" must never be classified,
-    # even when a plausible "base" (its parent) exists.
-    pages = [_page(1, "https://x.co/design"), _page(2, "https://x.co/design/revamp")]
+def test_classify_mismatched_signature_hash_is_not_amp():
+    pages = [
+        _page(1, "https://x.co/foo", signature_hash="aaaa"),
+        _page(2, "https://x.co/foo/amp", signature_hash="bbbb"),
+    ]
     result = classify_amp_variants(pages, {})
     assert result == []
 
 
-def test_classify_query_form_confirmed_by_base_exists():
-    pages = [_page(1, "https://x.co/team?x=1"), _page(2, "https://x.co/team?x=1&amp=1")]
+def test_classify_revamp_never_matches():
+    # A real content page whose slug ends in "amp" must never be classified,
+    # even when a plausible "base" (its parent) exists with a matching hash.
+    pages = [
+        _page(1, "https://x.co/design", signature_hash="same"),
+        _page(2, "https://x.co/design/revamp", signature_hash="same"),
+    ]
+    result = classify_amp_variants(pages, {})
+    assert result == []
+
+
+def test_classify_query_form_confirmed_by_signature_hash():
+    pages = [
+        _page(1, "https://x.co/team?x=1", signature_hash="sig1"),
+        _page(2, "https://x.co/team?x=1&amp=1", signature_hash="sig1"),
+    ]
     result = classify_amp_variants(pages, {})
     assert [c.url_id for c in result] == [2]
     assert result[0].base_url == "https://x.co/team?x=1"
+    assert result[0].confirmed_by == "signature-hash"
 
 
 def test_classify_homepage_amp_matches_trailing_slash_base():
     # /amp base is https://x.co ; homepage is crawled as https://x.co/ .
-    pages = [_page(1, "https://x.co/"), _page(2, "https://x.co/amp")]
+    # Confirmation is via signature-hash equality under URL normalisation.
+    pages = [
+        _page(1, "https://x.co/", signature_hash="home"),
+        _page(2, "https://x.co/amp", signature_hash="home"),
+    ]
     result = classify_amp_variants(pages, {})
     assert [c.url_id for c in result] == [2]
+    assert result[0].confirmed_by == "signature-hash"
+
+
+def test_classify_canonical_preferred_over_signature_hash():
+    pages = [
+        _page(1, "https://x.co/foo", signature_hash="same"),
+        _page(2, "https://x.co/foo/amp", canonical="https://x.co/foo", signature_hash="same"),
+    ]
+    result = classify_amp_variants(pages, {})
+    assert result[0].confirmed_by == "canonical-to-base"
