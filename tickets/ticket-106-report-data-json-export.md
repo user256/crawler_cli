@@ -75,7 +75,6 @@ from URL paths and stored signatures only. Output lands in the run's `--out`
 dir (never committed; runs/ is untracked).
 
 ## Status
-planned (2026-07-15) — prerequisites 101–105 and 109 diagnostic columns are
-merged. Still wait on ticket 108 (AMP evidence hardening) before implementing
-so AMP/variant fields are stable for ticket 107. Ticket 113 tracks the
+in_progress (claimed by `agent/ticket-106-report-data-json-export`) — prerequisites 101–105, 108, and 109 diagnostic columns are
+merged. Unblocked for implementation; ticket 113 tracks the
 remaining calibration note and any schema-contract polish.

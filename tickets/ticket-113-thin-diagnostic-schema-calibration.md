@@ -1,6 +1,6 @@
 # Ticket 113: Thin-diagnostic schema + calibration leftovers
 
-**Status:** proposed (2026-07-15 MERGE+REMEDIATE from ticket 109 / PR #21)
+**Status:** in_progress (claimed by `agent/ticket-113-thin-diagnostic-schema-calibration`; 2026-07-15 MERGE+REMEDIATE from ticket 109 / PR #21)
 **Priority:** P3 reporting
 **Depends on:** Ticket 109 (done)
 **Related:** Ticket 106

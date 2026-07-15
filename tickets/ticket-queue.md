@@ -8,10 +8,10 @@ Ticket files remain the source of truth for scope and DoD.
 
 - Batch review of open PRs **#22–#26** complete: all five merged to `master`
   (087 / 088 / 089 / 092 / 108). Pre-merge CI blockers fixed in-branch (088
-  ruff format; 089 integration fixture `h2` key). No open PRs remain.
-- MERGE+REMEDIATE leftovers filed as **114** (sitemap budget dedupe/CDN docs),
-  **115** (persist/frontier incompleteness signaling), **116** (thompsons AMP
-  evidence recount). Prior leftovers **112 / 113** unchanged.
+  ruff format; 089 integration fixture `h2` key).
+- Next lane claimed for parallel worktrees: **095 / 096 / 093 / 112 / 113 /
+  106→107 / 098 / 100** (see Open work). Leftovers **114 / 115 / 116** remain
+  unclaimed.
 - Tickets **101–105** + **108** form the intent-overlap reporting baseline;
   **106** / **107** are unblocked on AMP evidence.
 - Ticket **110** remains unused/rejected; next free number is **117**.
@@ -229,12 +229,12 @@ proceed independently except where their DoD references earlier behavior.
 - `090` `done` (2026-07-15, PR #12) [ticket-090-safe-default-crawl-bound.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-090-safe-default-crawl-bound.md) — **P1:** restore a finite default open-crawl bound and align config/CLI/docs. Reviewed MERGE: default open crawl now bounded at 200, `--max-pages 0` still explicitly unlimited, fixed-list/CSV uncapped; all DoD met (370 passed). Minor dead-`config.max_pages`-field note → ticket 112 (via 099)
 - `091` `done` (2026-07-15, PR #9) [ticket-091-real-digest-auth.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-091-real-digest-auth.md) — **P1:** implement real Digest authentication across supported backends or remove the misleading option. Reviewed MERGE: chose the ticket-permitted removal path — `digest` gone from CLI/type surface, legacy programmatic use fails clearly, no silent Basic downgrade; added `--auth-password-env/-file`. 30 passed
 - `092` `done` (2026-07-15, PR #25; leftovers → 115) [ticket-092-persist-failure-exit-policy.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-092-persist-failure-exit-policy.md) — **P1:** terminal persistence failures produce a non-zero automation result and durable/partial output metadata. Reviewed MERGE+REMEDIATE: DoD met; CI green
-- `093` `proposed` [ticket-093-cli-config-numeric-validation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-093-cli-config-numeric-validation.md) — **P2:** validate numeric and cross-field config at CLI/library boundaries; no raw tracebacks
+- `093` `in_progress` [ticket-093-cli-config-numeric-validation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-093-cli-config-numeric-validation.md) — **P2:** validate numeric and cross-field config at CLI/library boundaries; no raw tracebacks — claimed by `agent/ticket-093-cli-config-numeric-validation`
 - `094` `done` (2026-07-15, PR #11) [ticket-094-obscura-installer-verification.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-094-obscura-installer-verification.md) — **P1 security:** checksum/signature verification, safe staged archive extraction, and atomic install. Reviewed MERGE: adversarial security review found no exploitable holes — real-path containment (not string prefix), pre-extraction symlink/hardlink/device rejection, fail-closed digest verify, atomic replace with rollback; 42 passed. Test-coverage hardening + digest cross-check filed as ticket 100
-- `095` `proposed` [ticket-095-run-aware-snapshots-reporting.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-095-run-aware-snapshots-reporting.md) — **P2, depends on 086:** retain per-run snapshots and require deterministic run selection in reports/enrichment
-- `096` `proposed` [ticket-096-persistence-coverage-gate.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-096-persistence-coverage-gate.md) — **P2:** combine/gate PostgreSQL integration coverage and exercise migrations/concurrency/failure paths
+- `095` `in_progress` [ticket-095-run-aware-snapshots-reporting.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-095-run-aware-snapshots-reporting.md) — **P2, depends on 086:** retain per-run snapshots and require deterministic run selection in reports/enrichment — claimed by `agent/ticket-095-run-aware-snapshots-reporting`
+- `096` `in_progress` [ticket-096-persistence-coverage-gate.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-096-persistence-coverage-gate.md) — **P2:** combine/gate PostgreSQL integration coverage and exercise migrations/concurrency/failure paths — claimed by `agent/ticket-096-persistence-coverage-gate`
 - `097` `done` (2026-07-15, PR #10) [ticket-097-real-playwright-ci-smoke.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-097-real-playwright-ci-smoke.md) — **P2:** install and launch real Chromium in a required CI smoke job. Reviewed MERGE: dedicated `playwright-smoke` job installs `.[test,playwright]` + pinned/cached Chromium with `continue-on-error` removed (hard-fails on broken browser); real JS-rendered end-to-end crawl through `CrawlEngine`, cleanup-on-success/failure asserted; heavy tests marker-gated so local unit runs stay fast. Real browser ran in review (2 passed)
-- `098` `proposed` [ticket-098-packaging-docs-release-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-098-packaging-docs-release-hygiene.md) — **P3:** fix nonexistent `[api]` extra docs; add license/project metadata/install-matrix/release checks
+- `098` `in_progress` [ticket-098-packaging-docs-release-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-098-packaging-docs-release-hygiene.md) — **P3:** fix nonexistent `[api]` extra docs; add license/project metadata/install-matrix/release checks — claimed by `agent/ticket-098-packaging-docs-release-hygiene`
 
 ### 2026-07-15 PR-review remediation follow-ups
 
@@ -246,8 +246,8 @@ An unrelated uncommitted bulk-insert deadlock fix found in the working tree was
 committed separately (not a ticket).
 
 - `099` `done` (2026-07-15, PR #20; leftovers → 112) [ticket-099-crawl-run-isolation-followups.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-099-crawl-run-isolation-followups.md) — **P2:** drop no-op `--new-run`, `CrawlRunSelectionError` (no broad RuntimeError swallow), remove dead legacy-run backfill SQL, resume mismatch/not-found tests
-- `100` `proposed` [ticket-100-obscura-installer-test-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-100-obscura-installer-test-hardening.md) — **P3 security:** ticket-094 test hardening — direct rejection tests for tar symlink/absolute/device + zip-symlink members, and a one-time cross-check of the pinned `v0.1.8` SHA-256 digests against the real published release assets
-- `112` `proposed` [ticket-112-run-isolation-hygiene-leftovers.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-112-run-isolation-hygiene-leftovers.md) — **P3:** 099 leftovers — dead `CrawlConfig.max_pages` field + auth-password guard wording (+ optional single-arg mutex cleanup)
+- `100` `in_progress` [ticket-100-obscura-installer-test-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-100-obscura-installer-test-hardening.md) — **P3 security:** ticket-094 test hardening — direct rejection tests for tar symlink/absolute/device + zip-symlink members, and a one-time cross-check of the pinned `v0.1.8` SHA-256 digests against the real published release assets — claimed by `agent/ticket-100-obscura-installer-test-hardening`
+- `112` `in_progress` [ticket-112-run-isolation-hygiene-leftovers.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-112-run-isolation-hygiene-leftovers.md) — **P3:** 099 leftovers — dead `CrawlConfig.max_pages` field + auth-password guard wording (+ optional single-arg mutex cleanup) — claimed by `agent/ticket-112-run-isolation-hygiene-leftovers`
 
 ### Intent-overlap case handling (from thompsons-scotland.co.uk run review, 2026-07-15)
 
@@ -269,15 +269,15 @@ Webpage rendering of the intent-overlap results: hoverable cluster map with
 match-type toggles + the core report data as filterable tables, from a JSON
 data export. Land after 101–105 (+108 AMP evidence) so tag fields are stable.
 
-- `106` `planned` [ticket-106-report-data-json-export.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-106-report-data-json-export.md) — **P2:** `--json-report` → `report_data.json` (pages/pairs/clusters + 2D UMAP/PCA coords via `[viz]` extra, crawler-native cluster labels, centroid-similarity metric); the data layer for 107. Unblocked by 108 ✓; schema polish notes in 113
-- `107` `planned` (blocked on 106) [ticket-107-interactive-html-cluster-report.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-107-interactive-html-cluster-report.md) — **P2, depends on 106:** `render-report` subcommand → single self-contained offline HTML — canvas cluster map (hover/zoom/pin), match-type filter toggles (parent-child, time-sequenced, thin, parameterised, amp...), sortable pages/pairs/clusters tables, URL search
+- `106` `in_progress` [ticket-106-report-data-json-export.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-106-report-data-json-export.md) — **P2:** `--json-report` → `report_data.json` (pages/pairs/clusters + 2D UMAP/PCA coords via `[viz]` extra, crawler-native cluster labels, centroid-similarity metric); the data layer for 107. Unblocked by 108 ✓; schema polish notes in 113 — claimed by `agent/ticket-106-report-data-json-export`
+- `107` `in_progress` (blocked on 106 PR) [ticket-107-interactive-html-cluster-report.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-107-interactive-html-cluster-report.md) — **P2, depends on 106:** `render-report` subcommand → single self-contained offline HTML — canvas cluster map (hover/zoom/pin), match-type filter toggles (parent-child, time-sequenced, thin, parameterised, amp...), sortable pages/pairs/clusters tables, URL search — claimed by `agent/ticket-107-interactive-html-cluster-report` (same agent as 106; starts after 106 PR)
 
 ### 2026-07-15 review remediations for tickets 103–104 + CI
 
 - `108` `done` (2026-07-15, PR #23; production recount → 116) [ticket-108-amp-classification-evidence-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-108-amp-classification-evidence-hardening.md) — **P1, depends on 103:** remove base-exists-only AMP confirmation, use intent-signature evidence, and recompute stale variant labels. Reviewed MERGE: DoD met; CI green
 - `109` `done` (2026-07-15, PR #21; leftovers → 113) [ticket-109-thin-content-diagnostic-completeness.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-109-thin-content-diagnostic-completeness.md) — **P2:** `main_text_*` / `signature_chars` diagnostics in `pages.csv`; missing-vs-zero evidence; thin policy unchanged
 - `111` `done` (2026-07-15, PR #19) [ticket-111-ci-artifact-action-runtime-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-111-ci-artifact-action-runtime-hygiene.md) — **P3:** non-empty coverage artifacts + GitHub actions off deprecated Node 20 runtimes
-- `113` `proposed` [ticket-113-thin-diagnostic-schema-calibration.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-113-thin-diagnostic-schema-calibration.md) — **P3:** 109 leftovers — 106 schema field list polish + `/videos` calibration documentation
+- `113` `in_progress` [ticket-113-thin-diagnostic-schema-calibration.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-113-thin-diagnostic-schema-calibration.md) — **P3:** 109 leftovers — 106 schema field list polish + `/videos` calibration documentation — claimed by `agent/ticket-113-thin-diagnostic-schema-calibration`
 
 ### 2026-07-15 batch review remediations (PRs #22–#26)
 
@@ -294,24 +294,24 @@ Implement in this order unless a ticket's dependency blocks it.
 
 **1. Run-aware reporting and verification**
 
-1. **P2** `095` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — depends 086 ✓
-2. **P2** `096` [persistence coverage gate](./ticket-096-persistence-coverage-gate.md)
-3. **P2** `093` [CLI/config numeric validation](./ticket-093-cli-config-numeric-validation.md)
+1. **P2** `095` `in_progress` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — depends 086 ✓ — `agent/ticket-095-run-aware-snapshots-reporting`
+2. **P2** `096` `in_progress` [persistence coverage gate](./ticket-096-persistence-coverage-gate.md) — `agent/ticket-096-persistence-coverage-gate`
+3. **P2** `093` `in_progress` [CLI/config numeric validation](./ticket-093-cli-config-numeric-validation.md) — `agent/ticket-093-cli-config-numeric-validation`
 4. **P2** `114` [sitemap budget dedupe / CDN docs](./ticket-114-sitemap-budget-dedupe-cdn-docs.md) — from 087
 5. **P2** `115` [persist/frontier incompleteness signaling](./ticket-115-persist-frontier-incompleteness-signaling.md) — from 092
-6. **P3** `112` [run-isolation hygiene leftovers](./ticket-112-run-isolation-hygiene-leftovers.md) — from 099
-7. **P3** `113` [thin-diagnostic schema/calibration](./ticket-113-thin-diagnostic-schema-calibration.md) — from 109
+6. **P3** `112` `in_progress` [run-isolation hygiene leftovers](./ticket-112-run-isolation-hygiene-leftovers.md) — from 099 — `agent/ticket-112-run-isolation-hygiene-leftovers`
+7. **P3** `113` `in_progress` [thin-diagnostic schema/calibration](./ticket-113-thin-diagnostic-schema-calibration.md) — from 109 — `agent/ticket-113-thin-diagnostic-schema-calibration`
 8. **P3** `116` [AMP evidence production recount](./ticket-116-amp-evidence-production-recount.md) — from 108
 
 **2. Interactive intent-overlap reporting**
 
-9. **P2** `106` [report_data.json export](./ticket-106-report-data-json-export.md) — after 108 ✓; then 107
-10. **P2** `107` [interactive HTML cluster report](./ticket-107-interactive-html-cluster-report.md) — blocked on 106
+9. **P2** `106` `in_progress` [report_data.json export](./ticket-106-report-data-json-export.md) — after 108 ✓ — `agent/ticket-106-report-data-json-export`
+10. **P2** `107` `in_progress` [interactive HTML cluster report](./ticket-107-interactive-html-cluster-report.md) — after 106 PR (same agent) — `agent/ticket-107-interactive-html-cluster-report`
 
 **3. Lower-priority hardening**
 
-11. **P3** `098` [packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md)
-12. **P3** `100` [Obscura installer test hardening](./ticket-100-obscura-installer-test-hardening.md)
+11. **P3** `098` `in_progress` [packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md) — `agent/ticket-098-packaging-docs-release-hygiene`
+12. **P3** `100` `in_progress` [Obscura installer test hardening](./ticket-100-obscura-installer-test-hardening.md) — `agent/ticket-100-obscura-installer-test-hardening`
 
 **Deferred lanes**
 

@@ -1,6 +1,6 @@
 # Ticket 112: Crawl-run isolation hygiene leftovers
 
-**Status:** proposed (2026-07-15 MERGE+REMEDIATE from ticket 099 / PR #20)
+**Status:** in_progress (claimed by `agent/ticket-112-run-isolation-hygiene-leftovers`; 2026-07-15 MERGE+REMEDIATE from ticket 099 / PR #20)
 **Priority:** P3 hygiene
 **Related:** Tickets 090, 091, 099
 
