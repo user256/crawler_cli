@@ -1,0 +1,18 @@
+# Explicit sdist policy (ticket 098): ship installable source + tests for
+# verification. Exclude local run artifacts, ticket register, and lockfiles.
+include LICENSE
+include README.md
+include CHANGELOG.md
+include RELEASING.md
+include pyproject.toml
+graft src
+graft tests
+global-exclude *.py[cod] *.so .DS_Store
+global-exclude */__pycache__/*
+prune runs
+prune tickets
+exclude uv.lock
+exclude SWOT.md
+exclude SKILL.md
+exclude summary.md
+exclude AGENTS.md

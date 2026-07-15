@@ -35,5 +35,5 @@ The package builds successfully, but release/docs hygiene has visible gaps:
 - A clean build and metadata check are CI-green.
 
 ## Status
-in_progress (Priority: **P3**) — claimed by `agent/ticket-098-packaging-docs-release-hygiene`; release/documentation hygiene; found in 2026-07-15 audit.
+done (2026-07-15) (Priority: **P3**) — MIT LICENSE; pyproject metadata (readme/license/authors/URLs/classifiers); README install matrix without `[api]`; CHANGELOG + RELEASING; MANIFEST.in sdist policy; CI `packaging` + `extras` jobs (`build`/`twine check`, clean-env extras; embeddings-local resolve-only).
 

@@ -10,8 +10,8 @@ Ticket files remain the source of truth for scope and DoD.
   (087 / 088 / 089 / 092 / 108). Pre-merge CI blockers fixed in-branch (088
   ruff format; 089 integration fixture `h2` key).
 - Next lane claimed for parallel worktrees: **095 / 096 / 093 / 112 / 113 /
-  106→107 / 098 / 100** (see Open work). Leftovers **114 / 115 / 116** remain
-  unclaimed.
+  106→107 / 100** (see Open work). **098** done. Leftovers **114 / 115 / 116**
+  remain unclaimed.
 - Tickets **101–105** + **108** form the intent-overlap reporting baseline;
   **106** / **107** are unblocked on AMP evidence.
 - Ticket **110** remains unused/rejected; next free number is **117**.
@@ -234,7 +234,7 @@ proceed independently except where their DoD references earlier behavior.
 - `095` `in_progress` [ticket-095-run-aware-snapshots-reporting.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-095-run-aware-snapshots-reporting.md) — **P2, depends on 086:** retain per-run snapshots and require deterministic run selection in reports/enrichment — claimed by `agent/ticket-095-run-aware-snapshots-reporting`
 - `096` `in_progress` [ticket-096-persistence-coverage-gate.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-096-persistence-coverage-gate.md) — **P2:** combine/gate PostgreSQL integration coverage and exercise migrations/concurrency/failure paths — claimed by `agent/ticket-096-persistence-coverage-gate`
 - `097` `done` (2026-07-15, PR #10) [ticket-097-real-playwright-ci-smoke.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-097-real-playwright-ci-smoke.md) — **P2:** install and launch real Chromium in a required CI smoke job. Reviewed MERGE: dedicated `playwright-smoke` job installs `.[test,playwright]` + pinned/cached Chromium with `continue-on-error` removed (hard-fails on broken browser); real JS-rendered end-to-end crawl through `CrawlEngine`, cleanup-on-success/failure asserted; heavy tests marker-gated so local unit runs stay fast. Real browser ran in review (2 passed)
-- `098` `in_progress` [ticket-098-packaging-docs-release-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-098-packaging-docs-release-hygiene.md) — **P3:** fix nonexistent `[api]` extra docs; add license/project metadata/install-matrix/release checks — claimed by `agent/ticket-098-packaging-docs-release-hygiene`
+- `098` `done` (2026-07-15) [ticket-098-packaging-docs-release-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-098-packaging-docs-release-hygiene.md) — **P3:** fix nonexistent `[api]` extra docs; add license/project metadata/install-matrix/release checks — MIT LICENSE + pyproject metadata; README install matrix; CHANGELOG/RELEASING; CI packaging + extras jobs
 
 ### 2026-07-15 PR-review remediation follow-ups
 
@@ -310,7 +310,7 @@ Implement in this order unless a ticket's dependency blocks it.
 
 **3. Lower-priority hardening**
 
-11. **P3** `098` `in_progress` [packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md) — `agent/ticket-098-packaging-docs-release-hygiene`
+11. **P3** `098` `done` [packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md)
 12. **P3** `100` `in_progress` [Obscura installer test hardening](./ticket-100-obscura-installer-test-hardening.md) — `agent/ticket-100-obscura-installer-test-hardening`
 
 **Deferred lanes**
