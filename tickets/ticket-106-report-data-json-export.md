@@ -31,11 +31,13 @@ Postgres or re-parsing CSVs.
 - Envelope: `version`, `generated_at`, `embedding_model`, `thresholds`,
   the existing summary block, plus:
   - `pages[]`: url, cluster_id, coords (see below), risk, excluded reason,
-    url_class, variant_kind, signature_words, word_count, section,
-    signal_confidence, max_similarity, nearest_url, suggested_canonical,
-    centroid_similarity (cosine to the site centroid — the Colab
-    "authority score"), off_topic flag (bottom percentile of
-    centroid_similarity, threshold in the envelope).
+    url_class, variant_kind, word_count, main_text_words, main_text_chars,
+    signature_words, signature_chars, section, signal_confidence,
+    max_similarity, nearest_url, suggested_canonical, centroid_similarity
+    (cosine to the site centroid — the Colab "authority score"), off_topic
+    flag (bottom percentile of centroid_similarity, threshold in the
+    envelope). Diagnostic length fields match `pages.csv` from ticket 109;
+    missing evidence must stay distinct from measured zeros (ticket 113).
   - `pairs[]`: url_a, url_b, similarity, relation, pair_class, thin,
     sim_percentile.
   - `clusters[]`: id, member urls, size, suggested_canonical/action,
@@ -73,6 +75,7 @@ from URL paths and stored signatures only. Output lands in the run's `--out`
 dir (never committed; runs/ is untracked).
 
 ## Status
-planned (2026-07-15) — prerequisites 101–105 are merged. Finalise the page and
-variant schema after the bounded 108/109 evidence/diagnostic remediations so
-ticket 107 can consume a stable contract.
+planned (2026-07-15) — prerequisites 101–105 and 109 diagnostic columns are
+merged. Still wait on ticket 108 (AMP evidence hardening) before implementing
+so AMP/variant fields are stable for ticket 107. Ticket 113 tracks the
+remaining calibration note and any schema-contract polish.

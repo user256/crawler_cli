@@ -1,6 +1,6 @@
 # Ticket 111: Restore CI coverage artifacts and supported action runtimes
 
-**Status:** in progress (claimed 2026-07-15 on `agent/ticket-111-ci-artifact-runtime-hygiene`)
+**Status:** done (2026-07-15, PR #19)
 **Priority:** P3 CI hygiene
 **Related:** Tickets 056, 066, and 096
 
@@ -34,3 +34,11 @@ were being forced onto Node.js 24 by the runner.
 Both Python matrix jobs publish a non-empty coverage artifact, every required CI
 job remains green, and the workflow emits no deprecated-action-runtime or
 missing-artifact annotation.
+
+## Done
+
+Shipped in PR #19: stable `coverage/` XML + data artifacts per Python matrix
+job, assert-non-empty before upload (`if-no-files-found: error`), and
+checkout/setup-python/cache/upload-artifact moved off deprecated Node 20
+generations. Coverage gate and Playwright cache key unchanged; CI green on
+the PR.
