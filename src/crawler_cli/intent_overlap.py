@@ -710,6 +710,8 @@ def analyse_embeddings(
     # Per-page report rows (embedded pages)
     for r in emb:
         cid = r.get("_cluster_id")
+        sig_text = r.get("signature_model_input")
+        main_text = r.get("main_text")
         result.pages_rows.append(
             {
                 "url": r["url"],
@@ -722,7 +724,10 @@ def analyse_embeddings(
                 "hreflang_role": role_map.get(r["url"], ""),
                 "hreflang_code": r.get("hreflang_code") or "",
                 "word_count": r.get("word_count") or 0,
-                "signature_words": r.get("_signature_words", 0),
+                "main_text_words": _text_words(main_text),
+                "main_text_chars": _text_chars(main_text),
+                "signature_words": _text_words(sig_text),
+                "signature_chars": _text_chars(sig_text),
                 "signal_confidence": r.get("signal_confidence") or "",
             }
         )
@@ -863,6 +868,18 @@ def classify_and_fold_parameterised(rows: list[AnalysedRow]) -> None:
             r["suggested_canonical"] = str(base["url"])
 
 
+def _text_chars(text: str | None) -> int | None:
+    if text is None:
+        return None
+    return len(text)
+
+
+def _text_words(text: str | None) -> int | None:
+    if text is None:
+        return None
+    return len(text.split())
+
+
 # --------------------------------------------------------------------------
 # CSV writing
 # --------------------------------------------------------------------------
@@ -878,7 +895,10 @@ _PAGES_FIELDS = [
     "hreflang_role",
     "hreflang_code",
     "word_count",
+    "main_text_words",
+    "main_text_chars",
     "signature_words",
+    "signature_chars",
     "signal_confidence",
     "excluded",
 ]
@@ -965,7 +985,10 @@ def write_reports(
             "hreflang_role": "",
             "hreflang_code": r.get("hreflang_code") or "",
             "word_count": r.get("word_count") or 0,
-            "signature_words": signature_word_count(r.get("signature_model_input")),
+            "main_text_words": _text_words(r.get("main_text")),
+            "main_text_chars": _text_chars(r.get("main_text")),
+            "signature_words": _text_words(r.get("signature_model_input")),
+            "signature_chars": _text_chars(r.get("signature_model_input")),
             "signal_confidence": r.get("signal_confidence") or "",
             "excluded": r.get("excluded", ""),
         }
@@ -1078,6 +1101,7 @@ async def run_intent_overlap(
             "group": r.get("hreflang_group"),
             "hreflang_code": r.get("hreflang_code"),
             "word_count": r.get("word_count"),
+            "main_text": r.get("main_text"),
             "signal_confidence": r.get("signal_confidence"),
             "url_class": r.get("url_class"),
             "signature_model_input": r.get("signature_model_input"),

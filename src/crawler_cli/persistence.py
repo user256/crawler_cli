@@ -87,6 +87,7 @@ class AnalysisRow(TypedDict):
     title: str | None
     h1: str | None
     word_count: int | None
+    main_text: str | None
     overall_indexable: bool | None
     signal_confidence: str | None
     extraction_method: str | None
@@ -2671,7 +2672,7 @@ class AsyncpgStore:
         batch = [
             (
                 int(r["url_id"]),
-                compress_html(r["main_text"]) if r.get("main_text") else None,
+                compress_html(r["main_text"]) if r.get("main_text") is not None else None,
                 r.get("extraction_method"),
                 r.get("signal_confidence"),
                 r.get("signature_hash"),
@@ -2932,6 +2933,7 @@ class AsyncpgStore:
                        vu.url AS variant_of,
                        pm.final_status_code AS status,
                        c.title AS title, c.h1_tags AS h1, c.word_count AS word_count,
+                       s.main_text_compressed AS main_text_compressed,
                        ix.overall_indexable AS overall_indexable,
                        s.signal_confidence AS signal_confidence,
                        s.extraction_method AS extraction_method,
@@ -2962,6 +2964,10 @@ class AsyncpgStore:
             raw = r["embedding_json"]
             if raw is not None:
                 embedding = json.loads(raw) if isinstance(raw, str) else raw
+            main_text = None
+            raw_main_text = r["main_text_compressed"]
+            if raw_main_text is not None:
+                main_text = decompress_html(bytes(raw_main_text))
             out.append(
                 {
                     "url_id": int(r["url_id"]),
@@ -2975,6 +2981,7 @@ class AsyncpgStore:
                     "title": r["title"],
                     "h1": r["h1"],
                     "word_count": r["word_count"],
+                    "main_text": main_text,
                     "overall_indexable": r["overall_indexable"],
                     "signal_confidence": r["signal_confidence"],
                     "extraction_method": r["extraction_method"],

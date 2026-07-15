@@ -12,6 +12,7 @@ Local usage:
 
 from __future__ import annotations
 
+import csv
 import os
 
 import asyncpg
@@ -475,6 +476,12 @@ async def test_full_intent_overlap_pipeline(store: AsyncpgStore, tmp_path) -> No
     assert run.result.summary["overlap_pairs"] == 1
     assert (tmp_path / "pages.csv").exists()
     assert (tmp_path / "run_manifest.json").exists()
+    with open(tmp_path / "pages.csv", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows
+    assert {"main_text_words", "main_text_chars", "signature_words", "signature_chars"} <= set(rows[0])
+    assert any(int(row["main_text_words"]) > 0 for row in rows if row["main_text_words"])
+    assert any(int(row["signature_chars"]) > 0 for row in rows if row["signature_chars"])
 
 
 @pytest.mark.asyncio
