@@ -1,6 +1,6 @@
 # Ticket 108: Harden AMP classification evidence and recomputation
 
-**Status:** proposed (2026-07-15 review remediation)
+**Status:** in_progress — claimed by `agent/ticket-108-amp-classification-evidence-hardening` (2026-07-15 review remediation)
 **Priority:** P1 correctness
 **Depends on:** Ticket 103
 

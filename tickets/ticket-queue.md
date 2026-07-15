@@ -223,12 +223,12 @@ security, CLI behavior, CI, packaging, and documentation. Implementation order:
 proceed independently except where their DoD references earlier behavior.
 
 - `086` `done` (2026-07-15, PR #13) [ticket-086-crawl-run-isolation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-086-crawl-run-isolation.md) — **P0:** isolate frontier/metadata by crawl run; explicit new-vs-resume semantics so old rows cannot suppress unrelated seeds. Reviewed MERGE+REMEDIATE: P0 fix sound, suite green (393 passed / 19 skipped on merged master), ruff+mypy clean; pg integration tests run separately (need `CRAWLER_CLI_TEST_DSN`). Minor follow-ups filed as ticket 099; run-aware reporting owned by 095
-- `087` `proposed` [ticket-087-sitemap-scope-budget-politeness.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-087-sitemap-scope-budget-politeness.md) — **P0:** enforce host scope and run-global budget on sitemap URLs; route sitemap fetches through bounded politeness controls
-- `088` `proposed` [ticket-088-robots-rfc9309-follow-up.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-088-robots-rfc9309-follow-up.md) — **P0:** fix robots fail-open contradiction, query matching, consecutive UA groups, per-domain UA selection, and proxy routing
-- `089` `proposed` [ticket-089-challenge-hard-stop-persistence.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-089-challenge-hard-stop-persistence.md) — **P0:** unresolved challenges must not be extracted, persisted as content, linked, or counted as crawled
+- `087` `in_progress` [ticket-087-sitemap-scope-budget-politeness.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-087-sitemap-scope-budget-politeness.md) — **P0:** enforce host scope and run-global budget on sitemap URLs; route sitemap fetches through bounded politeness controls — claimed by `agent/ticket-087-sitemap-scope-budget-politeness`
+- `088` `in_progress` [ticket-088-robots-rfc9309-follow-up.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-088-robots-rfc9309-follow-up.md) — **P0:** fix robots fail-open contradiction, query matching, consecutive UA groups, per-domain UA selection, and proxy routing — claimed by `agent/ticket-088-robots-rfc9309-follow-up`
+- `089` `in_progress` [ticket-089-challenge-hard-stop-persistence.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-089-challenge-hard-stop-persistence.md) — **P0:** unresolved challenges must not be extracted, persisted as content, linked, or counted as crawled — claimed by `agent/ticket-089-challenge-hard-stop-persistence`
 - `090` `done` (2026-07-15, PR #12) [ticket-090-safe-default-crawl-bound.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-090-safe-default-crawl-bound.md) — **P1:** restore a finite default open-crawl bound and align config/CLI/docs. Reviewed MERGE: default open crawl now bounded at 200, `--max-pages 0` still explicitly unlimited, fixed-list/CSV uncapped; all DoD met (370 passed). Minor dead-`config.max_pages`-field note → ticket 112 (via 099)
 - `091` `done` (2026-07-15, PR #9) [ticket-091-real-digest-auth.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-091-real-digest-auth.md) — **P1:** implement real Digest authentication across supported backends or remove the misleading option. Reviewed MERGE: chose the ticket-permitted removal path — `digest` gone from CLI/type surface, legacy programmatic use fails clearly, no silent Basic downgrade; added `--auth-password-env/-file`. 30 passed
-- `092` `proposed` [ticket-092-persist-failure-exit-policy.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-092-persist-failure-exit-policy.md) — **P1:** terminal persistence failures produce a non-zero automation result and durable/partial output metadata
+- `092` `in_progress` [ticket-092-persist-failure-exit-policy.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-092-persist-failure-exit-policy.md) — **P1:** terminal persistence failures produce a non-zero automation result and durable/partial output metadata — claimed by `agent/ticket-092-persist-failure-exit-policy`
 - `093` `proposed` [ticket-093-cli-config-numeric-validation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-093-cli-config-numeric-validation.md) — **P2:** validate numeric and cross-field config at CLI/library boundaries; no raw tracebacks
 - `094` `done` (2026-07-15, PR #11) [ticket-094-obscura-installer-verification.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-094-obscura-installer-verification.md) — **P1 security:** checksum/signature verification, safe staged archive extraction, and atomic install. Reviewed MERGE: adversarial security review found no exploitable holes — real-path containment (not string prefix), pre-extraction symlink/hardlink/device rejection, fail-closed digest verify, atomic replace with rollback; 42 passed. Test-coverage hardening + digest cross-check filed as ticket 100
 - `095` `proposed` [ticket-095-run-aware-snapshots-reporting.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-095-run-aware-snapshots-reporting.md) — **P2, depends on 086:** retain per-run snapshots and require deterministic run selection in reports/enrichment
@@ -274,7 +274,7 @@ data export. Land after 101–105 (+108 AMP evidence) so tag fields are stable.
 
 ### 2026-07-15 review remediations for tickets 103–104 + CI
 
-- `108` `proposed` [ticket-108-amp-classification-evidence-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-108-amp-classification-evidence-hardening.md) — **P1, depends on 103:** remove base-exists-only AMP confirmation, use intent-signature evidence, and recompute stale variant labels
+- `108` `in_progress` [ticket-108-amp-classification-evidence-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-108-amp-classification-evidence-hardening.md) — **P1, depends on 103:** remove base-exists-only AMP confirmation, use intent-signature evidence, and recompute stale variant labels — claimed by `agent/ticket-108-amp-classification-evidence-hardening`
 - `109` `done` (2026-07-15, PR #21; leftovers → 113) [ticket-109-thin-content-diagnostic-completeness.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-109-thin-content-diagnostic-completeness.md) — **P2:** `main_text_*` / `signature_chars` diagnostics in `pages.csv`; missing-vs-zero evidence; thin policy unchanged
 - `111` `done` (2026-07-15, PR #19) [ticket-111-ci-artifact-action-runtime-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-111-ci-artifact-action-runtime-hygiene.md) — **P3:** non-empty coverage artifacts + GitHub actions off deprecated Node 20 runtimes
 - `113` `proposed` [ticket-113-thin-diagnostic-schema-calibration.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-113-thin-diagnostic-schema-calibration.md) — **P3:** 109 leftovers — 106 schema field list polish + `/videos` calibration documentation
@@ -285,11 +285,11 @@ Implement in this order unless a ticket's dependency blocks it.
 
 **1. Crawl correctness and persistence safety**
 
-1. **P0** `087` [sitemap scope/budget/politeness](./ticket-087-sitemap-scope-budget-politeness.md)
-2. **P0** `088` [robots RFC9309 follow-up](./ticket-088-robots-rfc9309-follow-up.md)
-3. **P0** `089` [challenge hard-stop persistence](./ticket-089-challenge-hard-stop-persistence.md)
-4. **P1** `092` [persist-failure exit policy](./ticket-092-persist-failure-exit-policy.md)
-5. **P1** `108` [AMP classification evidence hardening](./ticket-108-amp-classification-evidence-hardening.md) — after 103 ✓; unblocks stable 106 schema
+1. **P0** `087` `in_progress` [sitemap scope/budget/politeness](./ticket-087-sitemap-scope-budget-politeness.md) — `agent/ticket-087-sitemap-scope-budget-politeness`
+2. **P0** `088` `in_progress` [robots RFC9309 follow-up](./ticket-088-robots-rfc9309-follow-up.md) — `agent/ticket-088-robots-rfc9309-follow-up`
+3. **P0** `089` `in_progress` [challenge hard-stop persistence](./ticket-089-challenge-hard-stop-persistence.md) — `agent/ticket-089-challenge-hard-stop-persistence`
+4. **P1** `092` `in_progress` [persist-failure exit policy](./ticket-092-persist-failure-exit-policy.md) — `agent/ticket-092-persist-failure-exit-policy`
+5. **P1** `108` `in_progress` [AMP classification evidence hardening](./ticket-108-amp-classification-evidence-hardening.md) — after 103 ✓; unblocks stable 106 schema — `agent/ticket-108-amp-classification-evidence-hardening`
 
 **2. Run-aware reporting and verification**
 
