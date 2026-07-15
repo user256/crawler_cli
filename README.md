@@ -486,10 +486,13 @@ Obscura is a **native binary**, not a Python dependency, so it can't ship inside
 crawler-cli install-obscura
 ```
 
-This downloads the prebuilt Obscura release for your OS/architecture from GitHub and
-unpacks `obscura` + `obscura-worker` into `~/.local/share/crawler_cli/obscura/`.
-`--obscura` then finds it automatically — no `--obscura-binary` needed. Pin a version
-with `--obscura-version vX.Y.Z` or re-fetch with `--force`.
+This downloads the prebuilt Obscura release for your OS/architecture from GitHub,
+verifies its pinned SHA-256 digest, safely unpacks `obscura` + `obscura-worker`
+into `~/.local/share/crawler_cli/obscura/`, and swaps it into place only after the
+staged binaries validate. `--obscura` then finds it automatically — no
+`--obscura-binary` needed. Pin a supported version with `--obscura-version vX.Y.Z`
+or re-fetch with `--force`; unpinned versions fail closed until their release
+digests are added to `crawler_cli`.
 
 **Binary resolution order** (first hit wins), so any of these work:
 
