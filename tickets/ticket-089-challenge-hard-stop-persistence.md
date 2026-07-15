@@ -34,5 +34,5 @@ are recorded as blocked and never stored as content.
 - Ticket 074's original blocked-content assertions are enforced end to end.
 
 ## Status
-in_progress (Priority: **P0**) — claimed by `agent/ticket-089-challenge-hard-stop-persistence`; data correctness; regression found in 2026-07-15 audit.
+done (Priority: **P0**) — unresolved challenges hard-stop before extraction; `skip_reason=bot_challenge`; PostgreSQL `page_metadata.challenge`/`skip_reason` audit without content overwrite; JSONL/job summaries include `challenge_blocked_count`.
 

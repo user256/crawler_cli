@@ -121,8 +121,11 @@ def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> 
         "saved_to": job.saved_to if saved_to is None else saved_to,
         "crawled_count": job.crawled_count,
         "blocked_count": job.blocked_count,
+        "challenge_blocked_count": job.challenge_blocked_count,
+        "persist_error_count": job.persist_error_count,
         "retry_attempts": job.retry_attempts,
         "interrupted": job.interrupted,
+        "refresh_skipped_count": job.refresh_skipped_count,
         "results": [serialize_crawl_result(result) for result in job.results],
     }
     if job.max_urls is not None:
