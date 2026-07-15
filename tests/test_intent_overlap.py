@@ -19,6 +19,8 @@ from crawler_cli.intent_overlap import (  # noqa: E402
     RISK_DUPLICATE,
     RISK_PARENT_CHILD,
     analyse_embeddings,
+    classify_and_fold_parameterised,
+    classify_url,
     compute_exclusion,
     run_intent_overlap,
     similarity_pairs,
@@ -288,6 +290,95 @@ def test_compute_exclusion(row, expected):
 
 
 # --------------------------------------------------------------------------
+# Parameterised-URL classification + folding (ticket 102)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "row,expected",
+    [
+        # Real query, no canonical -> parameterised.
+        ({"url": "https://a.com/the-team?type=x"}, "parameterised"),
+        # Self-canonical that still carries the params -> parameterised.
+        (
+            {"url": "https://a.com/the-team?type=x", "canonical_url": "https://a.com/the-team?type=x"},
+            "parameterised",
+        ),
+        # No query at all -> not our class.
+        ({"url": "https://a.com/the-team"}, None),
+        # Only tracking params -> effective query empty -> not parameterised.
+        ({"url": "https://a.com/the-team?gclid=1&utm_source=g"}, None),
+        # Canonical to a different (clean) URL -> site handled it; caught by
+        # compute_exclusion as canonicalised-elsewhere instead.
+        (
+            {"url": "https://a.com/the-team?type=x", "canonical_url": "https://a.com/the-team"},
+            None,
+        ),
+    ],
+)
+def test_classify_url(row, expected):
+    assert classify_url(row) == expected
+
+
+def _prow(url, **over):
+    row = {"url": url, "kind": "html", "status": 200, "overall_indexable": True, "canonical_url": None,
+           "variant_of": None, "signature_hash": None, "excluded": None}
+    row.update(over)
+    return row
+
+
+def test_fold_parameterised_folds_on_signature_hash_match():
+    rows = [
+        _prow("https://a.com/the-team", signature_hash="H1"),
+        _prow("https://a.com/the-team?type=lawyers", signature_hash="H1"),
+    ]
+    classify_and_fold_parameterised(rows)
+    base, param = rows
+    assert base["url_class"] is None
+    assert param["url_class"] == "parameterised"
+    # Content-confirmed: excluded from pairing, base suggested as canonical.
+    assert param["excluded"] == "parameterised-duplicate"
+    assert param["suggested_canonical"] == "https://a.com/the-team"
+    # Base stays eligible.
+    assert base["excluded"] is None
+
+
+def test_fold_parameterised_keeps_distinct_content_eligible():
+    # Same base path but the signature hashes differ -> a genuine filtered view.
+    rows = [
+        _prow("https://a.com/the-team", signature_hash="BASE"),
+        _prow("https://a.com/the-team?type=lawyers", signature_hash="DIFFERENT"),
+    ]
+    classify_and_fold_parameterised(rows)
+    param = rows[1]
+    assert param["url_class"] == "parameterised"
+    # Not folded: distinct content stays in the analysis.
+    assert param["excluded"] is None
+    assert "suggested_canonical" not in param or not param["suggested_canonical"]
+
+
+def test_fold_parameterised_no_base_crawled_stays_eligible():
+    rows = [_prow("https://a.com/the-team?type=lawyers", signature_hash="H1")]
+    classify_and_fold_parameterised(rows)
+    param = rows[0]
+    assert param["url_class"] == "parameterised"
+    assert param["excluded"] is None
+
+
+def test_fold_parameterised_folds_index_document_base():
+    # /index.php folds onto / via normalise_url, so a param page whose base is
+    # /index.php content-confirms against the crawled home page.
+    rows = [
+        _prow("https://a.com/", signature_hash="HOME"),
+        _prow("https://a.com/index.php?lang=en", signature_hash="HOME"),
+    ]
+    classify_and_fold_parameterised(rows)
+    param = rows[1]
+    assert param["excluded"] == "parameterised-duplicate"
+    assert param["suggested_canonical"] == "https://a.com/"
+
+
+# --------------------------------------------------------------------------
 # CSV contracts
 # --------------------------------------------------------------------------
 
@@ -410,6 +501,49 @@ async def test_run_intent_overlap_excludes_noindex(tmp_path):
     # Only one eligible page -> no pairs; the noindex page is excluded.
     assert run.result.summary["overlap_pairs"] == 0
     assert run.result.summary["pages_excluded"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_intent_overlap_folds_parameterised_duplicate(tmp_path):
+    # Base + a sim-1.0 parameterised variant sharing one signature hash: the
+    # variant folds out of pairing and reports a missing-canonical action, so no
+    # overlap pair survives (ticket 102).
+    rows = [
+        _store_row("https://a.com/the-team", [1.0, 0.0, 0.0], signature_hash="TEAM"),
+        _store_row("https://a.com/the-team?type=lawyers", [1.0, 0.0, 0.0], signature_hash="TEAM"),
+    ]
+    store = FakeAnalysisStore(rows)
+    run = await run_intent_overlap(store, out_dir=str(tmp_path), lang_split=False)
+    s = run.result.summary
+    assert s["overlap_pairs"] == 0
+    assert s["parameterised_pages"] == 1
+    assert s["parameterised_duplicates"] == 1
+    assert s["missing_canonical"] == 1
+    assert s["excluded_by_reason"].get("parameterised-duplicate") == 1
+
+    with open(tmp_path / "pages.csv") as fh:
+        page_rows = list(csv.DictReader(fh))
+    assert "url_class" in page_rows[0]
+    folded = [r for r in page_rows if r["url"] == "https://a.com/the-team?type=lawyers"][0]
+    assert folded["excluded"] == "parameterised-duplicate"
+    assert folded["url_class"] == "parameterised"
+    assert folded["suggested_canonical"] == "https://a.com/the-team"
+
+
+@pytest.mark.asyncio
+async def test_run_intent_overlap_distinct_parameterised_view_still_pairs(tmp_path):
+    # Different signature hashes: the parameterised view keeps its class but is
+    # NOT folded, so it stays available to pair as a genuine content finding.
+    rows = [
+        _store_row("https://a.com/the-team", [1.0, 0.0, 0.0], signature_hash="BASE"),
+        _store_row("https://a.com/the-team?type=lawyers", [1.0, 0.0, 0.0], signature_hash="OTHER"),
+    ]
+    store = FakeAnalysisStore(rows)
+    run = await run_intent_overlap(store, out_dir=str(tmp_path), lang_split=False)
+    s = run.result.summary
+    assert s["overlap_pairs"] == 1
+    assert s["parameterised_pages"] == 1
+    assert s["parameterised_duplicates"] == 0
 
 
 @pytest.mark.asyncio

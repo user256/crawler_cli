@@ -25,10 +25,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
+from urllib.parse import urlparse
 
 from .embeddings import ensure_single_model
 from .hreflang_groups import (
     UnionFind,
+    _strip_tracking_query,
     classify_relation,
     lang_bucket,
     normalise_url,
@@ -52,6 +54,11 @@ class AnalysedRow(AnalysisRow, total=False):
     runtime under ``from __future__ import annotations``."""
 
     excluded: str | None
+    # ``url_class`` labels non-canonicalised parameterised URLs (ticket 102);
+    # ``suggested_canonical`` carries the base URL for a folded
+    # ``parameterised-duplicate``.  Both are analysis-time, not SELECT columns.
+    url_class: str | None
+    suggested_canonical: str
 
 
 class VariantReportRow(TypedDict):
@@ -558,6 +565,7 @@ def analyse_embeddings(
                 "nearest_url": r.get("_nearest_url") or "",
                 "risk": r.get("_risk", ""),
                 "suggested_canonical": canon_by_cluster.get(cid, "") if cid else "",
+                "url_class": r.get("url_class") or "",
                 "hreflang_role": role_map.get(r["url"], ""),
                 "hreflang_code": r.get("hreflang_code") or "",
                 "word_count": r.get("word_count") or 0,
@@ -616,6 +624,71 @@ def compute_exclusion(row: AnalysisRow) -> str | None:
 
 
 # --------------------------------------------------------------------------
+# Parameterised-URL classification + content-confirmed folding (ticket 102)
+# --------------------------------------------------------------------------
+
+
+def _base_url(url: str) -> str:
+    """The query- and fragment-free base of *url* (scheme://netloc/path)."""
+    p = urlparse(url)
+    return f"{p.scheme}://{p.netloc}{p.path}"
+
+
+def classify_url(row: Mapping[str, Any]) -> str | None:
+    """Return ``"parameterised"`` when the URL carries a non-tracking query
+    string and declares no *effective* canonical to a different URL, else
+    ``None`` (ticket 102).
+
+    A page that canonicalises to a different URL has already been handled by the
+    site (``compute_exclusion`` labels it ``canonicalised-elsewhere``); a
+    self-canonical that still carries the params is not effective, so it counts
+    as parameterised.  AMP query variants that declare their base canonical fall
+    out here too and are left to ticket 103's ``amp-variant`` handling — no AMP
+    params are special-cased here.
+    """
+    url = str(row["url"])
+    if not _strip_tracking_query(urlparse(url).query):
+        return None
+    canonical = row.get("canonical_url")
+    if canonical and normalise_url(str(canonical)) != normalise_url(url):
+        return None
+    return "parameterised"
+
+
+def classify_and_fold_parameterised(rows: list[AnalysedRow]) -> None:
+    """Annotate each row's ``url_class`` and content-confirm parameterised
+    duplicates against their base URL (ticket 102), mutating *rows* in place.
+
+    A parameterised page whose query-free base URL was also crawled and whose
+    ``signature_hash`` matches the base is folded out of pairing: ``excluded``
+    becomes ``parameterised-duplicate`` and ``suggested_canonical`` is set to the
+    base URL (the "add canonical → base" site action).  Folding rests on
+    signature-hash equality only — never URL shape alone — so a genuine
+    filtered/paginated view with distinct content keeps ``url_class`` but stays
+    eligible for pairing.
+    """
+    # Base candidates: crawled pages that themselves carry no real query,
+    # keyed by their normalised URL (which folds index docs + trailing slash).
+    base_by_norm: dict[str, AnalysedRow] = {}
+    for r in rows:
+        if not _strip_tracking_query(urlparse(str(r["url"])).query):
+            base_by_norm.setdefault(normalise_url(str(r["url"])), r)
+
+    for r in rows:
+        url_class = classify_url(r)
+        r["url_class"] = url_class
+        if url_class != "parameterised" or r.get("excluded") is not None:
+            continue
+        base = base_by_norm.get(normalise_url(_base_url(str(r["url"]))))
+        if base is None or str(base["url"]) == str(r["url"]):
+            continue
+        sig = r.get("signature_hash")
+        if sig and sig == base.get("signature_hash"):
+            r["excluded"] = "parameterised-duplicate"
+            r["suggested_canonical"] = str(base["url"])
+
+
+# --------------------------------------------------------------------------
 # CSV writing
 # --------------------------------------------------------------------------
 
@@ -626,6 +699,7 @@ _PAGES_FIELDS = [
     "nearest_url",
     "risk",
     "suggested_canonical",
+    "url_class",
     "hreflang_role",
     "hreflang_code",
     "word_count",
@@ -696,7 +770,8 @@ def write_reports(
             "max_similarity": "",
             "nearest_url": "",
             "risk": "",
-            "suggested_canonical": "",
+            "suggested_canonical": r.get("suggested_canonical", ""),
+            "url_class": r.get("url_class") or "",
             "hreflang_role": "",
             "hreflang_code": r.get("hreflang_code") or "",
             "word_count": r.get("word_count") or 0,
@@ -783,6 +858,9 @@ async def run_intent_overlap(
 
     fetched = await store.fetch_analysis_rows()
     rows: list[AnalysedRow] = [{**r, "excluded": compute_exclusion(r)} for r in fetched]
+    # Classify parameterised URLs and fold content-confirmed duplicates onto
+    # their base URL before partitioning records (ticket 102).
+    classify_and_fold_parameterised(rows)
     model = ensure_single_model([r.get("embedding_model") for r in rows if r.get("embedding_model")])
 
     records = [
@@ -793,6 +871,7 @@ async def run_intent_overlap(
             "hreflang_code": r.get("hreflang_code"),
             "word_count": r.get("word_count"),
             "signal_confidence": r.get("signal_confidence"),
+            "url_class": r.get("url_class"),
         }
         for r in rows
         if r.get("embedding") is not None and r.get("excluded") is None
@@ -816,6 +895,11 @@ async def run_intent_overlap(
     issues = reciprocity_issues(edges)
     variant_rows = _variant_rows_from_store(await store.fetch_url_variant_rows())
 
+    parameterised_pages = sum(1 for r in rows if r.get("url_class") == "parameterised")
+    parameterised_duplicates = sum(1 for r in rows if r.get("excluded") == "parameterised-duplicate")
+    # The actionable site finding: parameterised pages with no canonical declared.
+    missing_canonical = sum(1 for r in rows if r.get("url_class") == "parameterised" and not r.get("canonical_url"))
+
     summary = dict(result.summary)
     summary.update(
         {
@@ -823,6 +907,9 @@ async def run_intent_overlap(
             "pages_excluded": len(excluded_rows),
             "excluded_by_reason": _count_reasons(excluded_rows),
             "hreflang_issues": len(issues),
+            "parameterised_pages": parameterised_pages,
+            "parameterised_duplicates": parameterised_duplicates,
+            "missing_canonical": missing_canonical,
             "model": model,
         }
     )

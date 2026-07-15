@@ -30,6 +30,22 @@ from .persistence import AsyncpgStore, HreflangIdentityRow
 # to one representative (intent_overlap.py:209, IO ticket 108).
 TRACKING_QUERY_KEYS = frozenset({"gclid", "fbclid", "msclkid", "mc_cid", "mc_eid", "dclid", "gbraid", "wbraid"})
 
+# Default-document filenames folded onto their directory URL so ``/index.php``
+# and ``/`` are one identity (ticket 102).  Longest suffix first so ``.html``
+# never loses to a ``.htm`` prefix match.
+INDEX_DOCUMENT_TAILS = ("/index.php", "/index.html", "/index.htm")
+
+
+def _fold_index_document(path: str) -> str:
+    """Fold a default-document tail (``/index.php`` / ``.html`` / ``.htm``) onto
+    its directory, mirroring the trailing-slash rule (ticket 102).  Expects an
+    already-lowercased path and returns the directory with a trailing slash so
+    the caller's ``rstrip('/')`` collapses it exactly like a directory URL."""
+    for tail in INDEX_DOCUMENT_TAILS:
+        if path.endswith(tail):
+            return path[: -len(tail)] + "/"
+    return path
+
 
 def _strip_tracking_query(query: str) -> str:
     if not query:
@@ -44,13 +60,15 @@ def _strip_tracking_query(query: str) -> str:
 
 def normalise_url(url: str) -> str:
     """Light normalisation: drop fragment, trailing slash, lowercase
-    scheme/host/path, strip known tracking query params (intent_overlap.py:222).
+    scheme/host/path, fold default-document tails (``/index.php`` → ``/``,
+    ticket 102), strip known tracking query params (intent_overlap.py:222).
     """
     if not url or not isinstance(url, str):
         return ""
     url = url.strip().split("#", 1)[0]
     p = urlparse(url)
-    path = (p.path.rstrip("/") or "/").lower()
+    path = _fold_index_document(p.path.lower())
+    path = path.rstrip("/") or "/"
     q = _strip_tracking_query(p.query)
     q = f"?{q}" if q else ""
     return f"{p.scheme.lower()}://{p.netloc.lower()}{path}{q}"
