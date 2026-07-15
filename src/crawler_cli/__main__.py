@@ -508,6 +508,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         csv_seed_mode=bool(getattr(args, "csv_seed", False)),
         cms_detection=getattr(args, "cms_detection", False),
         analytics_detection=getattr(args, "analytics_detection", False),
+        skip_amp_variants=getattr(args, "skip_amp_variants", False),
         analytics_expected_ids=getattr(args, "analytics_expected_id", []) or [],
         circuit_breaker_enabled=cb_enabled,
         circuit_breaker_failure_threshold=cb_threshold,
@@ -770,6 +771,13 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "--extraction-rules",
         help="Path to a JSON file of custom extraction rules (CSS/XPath/regex). "
         "Results are stored in the content.custom_data JSONB column.",
+    )
+    parser.add_argument(
+        "--skip-amp-variants",
+        action="store_true",
+        help="Do not enqueue AMP-shaped URLs (a /amp path tail or amp=1 query param) at "
+        "discovery time, saving crawl budget (ticket 103). Default OFF: crawl-and-classify "
+        "so AMP canonical-hygiene reporting keeps working.",
     )
     parser.add_argument("--cms-detection", action="store_true", help="Enable CMS platform detection")
     parser.add_argument(
@@ -1221,6 +1229,12 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
         f"{s.get('duplicate_pages', 0)} duplicate pages "
         f"({s.get('suppressed_pairs', 0)} intra-hreflang pairs suppressed){tnote}"
     )
+    amp_variants = s.get("amp_variants", 0)
+    if amp_variants:
+        print(
+            f"amp variants: {amp_variants} classified "
+            f"({s.get('amp_missing_canonical', 0)} missing a canonical — see amp_issues.csv)"
+        )
     print(f"Reports written to {args.out}/ ({len(run.written)} files)")
     if run.exit_code:
         print(

@@ -726,3 +726,96 @@ async def test_persist_recrawl_replaces_page_scoped_facts(store: AsyncpgStore) -
     }
     assert canonical_target == "https://example.com/second-canonical"
     assert analytics_vendor == "ga4"
+
+
+def _amp_page(url: str, *, amphtml: str | None = None, canonical: str | None = None) -> CrawlResult:
+    return CrawlResult(
+        requested_url=url,
+        final_url=url,
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=ExtractedContent(
+            title="t",
+            meta_description="m",
+            meta_robots=RobotsDirectives(),
+            x_robots_tag=RobotsDirectives(),
+            canonical=canonical,
+            x_canonical=None,
+            amphtml=amphtml,
+            hreflang_links=[],
+            html_lang="en",
+            headings={"h1": ["t"], "h2": []},
+            text="b",
+            word_count=10,
+            metadata={},
+        ),
+        raw_html="<html><head><title>t</title></head><body>b</body></html>",
+    )
+
+
+@pytest.mark.asyncio
+async def test_amphtml_edge_persisted(store: AsyncpgStore) -> None:
+    """A <link rel=amphtml> edge lands in the amphtml_urls table (ticket 103)."""
+    await store.persist(
+        _amp_page("https://amp.example/foo", amphtml="https://amp.example/foo/amp")
+    )
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        target = await conn.fetchval(
+            """
+            SELECT t.url
+            FROM amphtml_urls au
+            JOIN urls s ON s.id = au.url_id
+            JOIN urls t ON t.id = au.amphtml_url_id
+            WHERE s.url = $1 AND au.source = 'html_head'
+            """,
+            "https://amp.example/foo",
+        )
+    assert target == "https://amp.example/foo/amp"
+
+
+@pytest.mark.asyncio
+async def test_classify_amp_variants_marks_variant_kind_and_hygiene(store: AsyncpgStore) -> None:
+    """classify_amp_variants classifies via every evidence path and records the
+    canonical-hygiene rows (ticket 103)."""
+    # Base page declaring an amphtml edge to an otherwise unshaped target.
+    await store.persist(
+        _amp_page("https://amp.example/base", amphtml="https://amp.example/base/amp")
+    )
+    # AMP page confirmed by canonical-to-base (base also crawled).
+    await store.persist(_amp_page("https://amp.example/base/amp", canonical="https://amp.example/base"))
+    # AMP page confirmed by base-exists but with NO canonical -> hygiene issue.
+    await store.persist(_amp_page("https://amp.example/blog"))
+    await store.persist(_amp_page("https://amp.example/blog/amp"))
+    # A decoy: slug ends in "amp" but is a real page -> must NOT be classified.
+    await store.persist(_amp_page("https://amp.example/revamp"))
+
+    hygiene = await store.classify_amp_variants()
+    hygiene_by_url = {row["url"]: row for row in hygiene}
+
+    assert set(hygiene_by_url) == {
+        "https://amp.example/base/amp",
+        "https://amp.example/blog/amp",
+    }
+    # Missing-canonical AMP page surfaces with its paired base.
+    blog_amp = hygiene_by_url["https://amp.example/blog/amp"]
+    assert blog_amp["issue"] == "missing-canonical"
+    assert blog_amp["base_url"] == "https://amp.example/blog"
+    assert blog_amp["has_canonical"] is False
+    # AMP page that canonicals to its base is healthy (no issue).
+    assert hygiene_by_url["https://amp.example/base/amp"]["issue"] == ""
+
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        amp_kinds = await conn.fetch(
+            "SELECT url, variant_kind FROM urls WHERE variant_kind IS NOT NULL ORDER BY url"
+        )
+    marked = {r["url"]: r["variant_kind"] for r in amp_kinds}
+    assert marked == {
+        "https://amp.example/base/amp": "amp",
+        "https://amp.example/blog/amp": "amp",
+    }
+    # The /revamp decoy was never marked.
+    assert "https://amp.example/revamp" not in marked

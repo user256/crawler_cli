@@ -191,6 +191,22 @@ def test_pick_canonical_prefers_word_count_then_shortest_url():
         ),
         ({"url": "u", "kind": "html", "status": 200, "variant_of": "https://a.com/rep"}, "url-variant"),
         ({"url": "https://a.com/p", "kind": "html", "status": 200, "canonical_url": "https://a.com/p/"}, None),
+        # AMP variant with NO canonical still reports as amp-variant (ticket 103).
+        ({"url": "https://a.com/p/amp", "kind": "html", "status": 200, "variant_kind": "amp"}, "amp-variant"),
+        # AMP variant that DOES declare a canonical still reports amp-variant,
+        # i.e. amp-variant is ranked before canonicalised-elsewhere.
+        (
+            {
+                "url": "https://a.com/p/amp",
+                "kind": "html",
+                "status": 200,
+                "variant_kind": "amp",
+                "canonical_url": "https://a.com/p",
+            },
+            "amp-variant",
+        ),
+        # non-200 still wins over amp-variant (no content to pair regardless).
+        ({"url": "https://a.com/p/amp", "kind": "html", "status": 404, "variant_kind": "amp"}, "non-200"),
     ],
 )
 def test_compute_exclusion(row, expected):
@@ -223,6 +239,7 @@ def test_write_reports_produces_six_csvs_and_manifest(tmp_path):
         "clusters.csv",
         "hreflang_issues.csv",
         "url_variants.csv",
+        "amp_issues.csv",
         "similarity_distribution.csv",
         "run_manifest.json",
     }
@@ -243,8 +260,9 @@ def test_write_reports_produces_six_csvs_and_manifest(tmp_path):
 
 
 class FakeAnalysisStore:
-    def __init__(self, rows):
+    def __init__(self, rows, amp_hygiene=None):
         self._rows = rows
+        self._amp_hygiene = amp_hygiene or []
 
     async def fetch_analysis_rows(self):
         return [dict(r) for r in self._rows]
@@ -254,6 +272,9 @@ class FakeAnalysisStore:
 
     async def fetch_url_variant_rows(self):
         return []
+
+    async def classify_amp_variants(self):
+        return [dict(r) for r in self._amp_hygiene]
 
 
 def _store_row(url, vec, **over):
@@ -311,6 +332,48 @@ async def test_run_intent_overlap_excludes_noindex(tmp_path):
     # Only one eligible page -> no pairs; the noindex page is excluded.
     assert run.result.summary["overlap_pairs"] == 0
     assert run.result.summary["pages_excluded"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_intent_overlap_excludes_amp_and_writes_hygiene(tmp_path):
+    # Two identical eligible pages plus an AMP variant with the SAME embedding.
+    # Without amp-variant classification the AMP page would pair as a duplicate;
+    # with it, it is excluded and never reaches overlap_pairs.csv (ticket 103).
+    rows = [
+        _store_row("https://a.com/p", [1.0, 0.0, 0.0]),
+        _store_row("https://a.com/q", [1.0, 0.0, 0.0]),
+        _store_row("https://a.com/p/amp", [1.0, 0.0, 0.0], variant_kind="amp"),
+    ]
+    amp_hygiene = [
+        {
+            "url": "https://a.com/p/amp",
+            "base_url": "https://a.com/p",
+            "variant_kind": "amp",
+            "confirmed_by": "base-exists",
+            "canonical_url": "",
+            "has_canonical": False,
+            "issue": "missing-canonical",
+        }
+    ]
+    store = FakeAnalysisStore(rows, amp_hygiene=amp_hygiene)
+    run = await run_intent_overlap(store, out_dir=str(tmp_path), lang_split=False)
+
+    assert run.result.summary["amp_variants"] == 1
+    assert run.result.summary["amp_missing_canonical"] == 1
+    assert run.result.summary["excluded_by_reason"].get("amp-variant") == 1
+
+    # No AMP URL in overlap_pairs.csv.
+    with open(tmp_path / "overlap_pairs.csv") as fh:
+        pair_rows = list(csv.DictReader(fh))
+    assert all("/amp" not in r["url_a"] and "/amp" not in r["url_b"] for r in pair_rows)
+
+    # The missing-canonical AMP page surfaces in amp_issues.csv with its base.
+    with open(tmp_path / "amp_issues.csv") as fh:
+        amp_rows = list(csv.DictReader(fh))
+    assert len(amp_rows) == 1
+    assert amp_rows[0]["url"] == "https://a.com/p/amp"
+    assert amp_rows[0]["base_url"] == "https://a.com/p"
+    assert amp_rows[0]["issue"] == "missing-canonical"
 
 
 @pytest.mark.asyncio

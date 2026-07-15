@@ -152,6 +152,11 @@ class CrawlConfig:
     column (ticket 026). Typed as ``list`` to avoid a config→extract import cycle."""
     cms_detection: bool = False
     analytics_detection: bool = False
+    skip_amp_variants: bool = False
+    """When True, AMP-shaped discovered URLs (a ``/amp`` path tail or an
+    ``amp=1`` query param) are not enqueued at discovery time, so no crawl
+    budget is spent on them (ticket 103).  Default OFF: crawl-and-classify
+    remains the default so AMP canonical-hygiene reporting keeps working."""
     analytics_expected_ids: list[str] = field(default_factory=list)
     discover_sitemaps: bool = True
     sitemap_max_urls: int = 50_000

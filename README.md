@@ -254,9 +254,24 @@ crawler-cli hreflang-groups --postgres-dsn ...
 crawler-cli intent-overlap --postgres-dsn ... --out ./out
 ```
 
-`intent-overlap` writes six CSVs plus `run_manifest.json` to `--out`:
+`intent-overlap` writes seven CSVs plus `run_manifest.json` to `--out`:
 `pages.csv`, `overlap_pairs.csv`, `clusters.csv`, `hreflang_issues.csv`,
-`url_variants.csv`, `similarity_distribution.csv`.
+`url_variants.csv`, `amp_issues.csv`, `similarity_distribution.csv`.
+
+**AMP / page-variant awareness.** AMP variants (a `/amp` path tail or an
+`amp=1` query param, plus any page targeted by a `<link rel="amphtml">` edge)
+are classified structurally from crawler-captured evidence and recorded as
+`variant_kind='amp'` on the URL identity. They are excluded from pairing with an
+`amp-variant` reason ranked ahead of `canonicalised-elsewhere`, so an AMP page
+is reported as AMP whether or not it declares a canonical (previously an AMP
+page missing a canonical leaked into the analysis as duplicate noise).
+`amp_issues.csv` is the AMP canonical-hygiene report — AMP pages missing a
+canonical to their base page, or canonicalling somewhere else, with the paired
+base URL and the evidence that confirmed the classification. The run summary and
+`run_manifest.json` count `amp_variants` and `amp_missing_canonical`. Pass
+`crawl --skip-amp-variants` to skip enqueuing AMP URL shapes at discovery time
+and save crawl budget (default OFF — crawl-and-classify keeps hygiene reporting
+working).
 
 **Threshold calibration.** `--threshold` (default `0.85`) flags "high intent
 overlap"; `--dup-threshold` (default `0.92`) flags "duplicate —

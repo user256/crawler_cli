@@ -118,6 +118,14 @@ def extract_page_data(
     if x_canonical:
         x_canonical = urljoin(base_url, x_canonical.strip())
 
+    # AMP variant edge (ticket 103): mirror the canonical extraction for
+    # <link rel="amphtml" href=...>.  This is the authoritative page->AMP
+    # pairing signal and was previously dropped at extraction time.
+    amphtml = None
+    amphtml_tag = soup.find("link", attrs={"rel": lambda value: "amphtml" in _rel_tokens(value)})
+    if amphtml_tag and amphtml_tag.get("href"):
+        amphtml = urljoin(base_url, amphtml_tag["href"].strip())
+
     hreflang_links = _extract_header_hreflang(headers, base_url)
     for link in soup.find_all("link", href=True):
         rel = _rel_tokens(link.get("rel"))
@@ -147,6 +155,7 @@ def extract_page_data(
         x_robots_tag=x_robots_tag,
         canonical=canonical,
         x_canonical=x_canonical,
+        amphtml=amphtml,
         hreflang_links=hreflang_links,
         html_lang=soup.html.get("lang") if soup.html else None,
         headings=headings,

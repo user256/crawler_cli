@@ -532,6 +532,12 @@ def compute_exclusion(row: AnalysisRow) -> str | None:
         return "non-200"
     if row.get("overall_indexable") is False:
         return "noindex"
+    # AMP variants are excluded structurally (ticket 103), ranked BEFORE
+    # canonicalised-elsewhere so an AMP page reports as amp-variant whether or
+    # not its canonical tag is present — previously an AMP page missing a
+    # canonical fell through to eligible and leaked into pairing as noise.
+    if row.get("variant_kind") == "amp":
+        return "amp-variant"
     canonical_url = row.get("canonical_url")
     if canonical_url and normalise_url(str(canonical_url)) != normalise_url(str(row["url"])):
         return "canonicalised-elsewhere"
@@ -573,6 +579,15 @@ _CLUSTER_FIELDS = [
 ]
 _ISSUE_FIELDS = ["url", "declares_alternate", "hreflang", "issue"]
 _VARIANT_FIELDS = ["norm_url", "representative", "variants", "count"]
+_AMP_FIELDS = [
+    "url",
+    "base_url",
+    "variant_kind",
+    "confirmed_by",
+    "canonical_url",
+    "has_canonical",
+    "issue",
+]
 
 
 def _write_csv(path: Path, fieldnames: list[str], rows: Iterable[Mapping[str, Any]]) -> None:
@@ -599,6 +614,7 @@ def write_reports(
     excluded_rows: list[AnalysedRow],
     hreflang_issues: list[dict[str, Any]],
     variant_rows: list[VariantReportRow],
+    amp_issues: Sequence[Mapping[str, Any]] | None = None,
     manifest: dict[str, Any] | None = None,
 ) -> list[str]:
     out = Path(out_dir)
@@ -626,6 +642,11 @@ def write_reports(
     _write_csv(out / "hreflang_issues.csv", _ISSUE_FIELDS, hreflang_issues)
     _write_csv(out / "url_variants.csv", _VARIANT_FIELDS, variant_rows)
 
+    # AMP canonical-hygiene report (ticket 103): AMP variants missing a
+    # canonical to their base page, or canonicalling somewhere other than it.
+    amp_hygiene_rows = [row for row in (amp_issues or []) if row.get("issue")]
+    _write_csv(out / "amp_issues.csv", _AMP_FIELDS, amp_hygiene_rows)
+
     dist_fields = _distribution_fieldnames(result.distribution_rows) or ["language", "pages"]
     _write_csv(out / "similarity_distribution.csv", dist_fields, result.distribution_rows)
 
@@ -635,6 +656,7 @@ def write_reports(
         "clusters.csv",
         "hreflang_issues.csv",
         "url_variants.csv",
+        "amp_issues.csv",
         "similarity_distribution.csv",
     ]
     if manifest is not None:
@@ -696,6 +718,10 @@ async def run_intent_overlap(
     six CSVs + manifest, and return a run summary (ticket 079)."""
     from datetime import datetime, timezone
 
+    # Classify AMP variants structurally first (ticket 103) so variant_kind is
+    # populated before the analysis rows are loaded and compute_exclusion runs.
+    amp_hygiene = await store.classify_amp_variants()
+
     fetched = await store.fetch_analysis_rows()
     rows: list[AnalysedRow] = [{**r, "excluded": compute_exclusion(r)} for r in fetched]
     model = ensure_single_model([r.get("embedding_model") for r in rows if r.get("embedding_model")])
@@ -731,6 +757,7 @@ async def run_intent_overlap(
     issues = reciprocity_issues(edges)
     variant_rows = _variant_rows_from_store(await store.fetch_url_variant_rows())
 
+    amp_missing_canonical = sum(1 for r in amp_hygiene if r["issue"] == "missing-canonical")
     summary = dict(result.summary)
     summary.update(
         {
@@ -738,6 +765,8 @@ async def run_intent_overlap(
             "pages_excluded": len(excluded_rows),
             "excluded_by_reason": _count_reasons(excluded_rows),
             "hreflang_issues": len(issues),
+            "amp_variants": len(amp_hygiene),
+            "amp_missing_canonical": amp_missing_canonical,
             "model": model,
         }
     )
@@ -760,6 +789,7 @@ async def run_intent_overlap(
         excluded_rows=excluded_rows,
         hreflang_issues=issues,
         variant_rows=variant_rows,
+        amp_issues=list(amp_hygiene),
         manifest=manifest,
     )
 
