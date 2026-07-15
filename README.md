@@ -279,6 +279,25 @@ Above ~50k embedded pages, pairs below `--json-min-similarity` (default:
 | `pairs[]` | url_a/b, similarity, relation, pair_class, thin, sim_percentile |
 | `clusters[]` | id, urls, size, suggested_canonical/action, relation/thin/time_sequenced flags, crawler-native `label` (shared path prefix + signature terms — no LLM) |
 
+**Interactive HTML report (`render-report` / `--html-report`).** After a JSON
+export exists, render a single self-contained offline HTML file (no CDN, opens
+from `file://`):
+
+```bash
+crawler-cli render-report --data ./out/report_data.json -o ./out/report.html
+# or chain both steps:
+crawler-cli intent-overlap --postgres-dsn ... --out ./out --html-report
+```
+
+The page includes a canvas cluster map (hover / zoom / pan / pin), match-type
+filter toggles (parent-child, sibling, same-/cross-section, time-sequenced,
+thin, parameterised, AMP, excluded, off-topic), risk + cluster pickers, URL
+search, and sortable pages/pairs/clusters tables. AMP and excluded pages are
+hidden by default. Tested target: ~3–5k pages and ~2k pairs stay comfortable on
+a laptop; larger runs still open but the map may drop below 60fps. Report HTML
+and JSON contain client URLs — keep them in the run `--out` dir (untracked);
+do not commit them.
+
 **AMP / page-variant awareness.** AMP variants are classified structurally from
 crawler-captured evidence and recorded as `variant_kind='amp'` on the URL
 identity. A page is AMP when it is the target of a `<link rel="amphtml">` edge

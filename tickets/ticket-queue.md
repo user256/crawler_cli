@@ -269,8 +269,8 @@ Webpage rendering of the intent-overlap results: hoverable cluster map with
 match-type toggles + the core report data as filterable tables, from a JSON
 data export. Land after 101–105 (+108 AMP evidence) so tag fields are stable.
 
-- `106` `done` (2026-07-15) [ticket-106-report-data-json-export.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-106-report-data-json-export.md) — **P2:** `--json-report` → `report_data.json` (pages/pairs/clusters + 2D UMAP/PCA coords via `[viz]` extra, crawler-native cluster labels, centroid-similarity metric); the data layer for 107. Unblocked by 108 ✓; schema polish notes in 113
-- `107` `in_progress` (blocked on 106 PR) [ticket-107-interactive-html-cluster-report.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-107-interactive-html-cluster-report.md) — **P2, depends on 106:** `render-report` subcommand → single self-contained offline HTML — canvas cluster map (hover/zoom/pin), match-type filter toggles (parent-child, time-sequenced, thin, parameterised, amp...), sortable pages/pairs/clusters tables, URL search — claimed by `agent/ticket-107-interactive-html-cluster-report` (same agent as 106; starts after 106 PR)
+- `106` `done` (2026-07-15, PR #28) [ticket-106-report-data-json-export.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-106-report-data-json-export.md) — **P2:** `--json-report` → `report_data.json` (pages/pairs/clusters + 2D UMAP/PCA coords via `[viz]` extra, crawler-native cluster labels, centroid-similarity metric); the data layer for 107. Unblocked by 108 ✓; schema polish notes in 113
+- `107` `done` (2026-07-15) [ticket-107-interactive-html-cluster-report.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-107-interactive-html-cluster-report.md) — **P2, depends on 106:** `render-report` subcommand → single self-contained offline HTML — canvas cluster map (hover/zoom/pin), match-type filter toggles (parent-child, time-sequenced, thin, parameterised, amp...), sortable pages/pairs/clusters tables, URL search
 
 ### 2026-07-15 review remediations for tickets 103–104 + CI
 
@@ -305,8 +305,8 @@ Implement in this order unless a ticket's dependency blocks it.
 
 **2. Interactive intent-overlap reporting**
 
-9. **P2** `106` `done` [report_data.json export](./ticket-106-report-data-json-export.md) — after 108 ✓
-10. **P2** `107` `in_progress` [interactive HTML cluster report](./ticket-107-interactive-html-cluster-report.md) — after 106 PR (same agent) — `agent/ticket-107-interactive-html-cluster-report`
+9. **P2** `106` `done` [report_data.json export](./ticket-106-report-data-json-export.md) — after 108 ✓ — PR #28
+10. **P2** `107` `done` [interactive HTML cluster report](./ticket-107-interactive-html-cluster-report.md) — after 106 PR (same agent)
 
 **3. Lower-priority hardening**
 
