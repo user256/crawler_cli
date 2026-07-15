@@ -94,6 +94,20 @@ class AnalysisRow(TypedDict):
     canonical_url: str | None
 
 
+DEFAULT_CRAWL_RUN_ID = "legacy"
+
+
+class CrawlRunRecord(TypedDict):
+    run_id: str
+    mode: str
+    status: str
+    seed_urls: list[str]
+    config_hash: str
+    config: dict[str, Any]
+    created_at: int
+    updated_at: int
+
+
 SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS urls (
@@ -241,9 +255,22 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS crawl_runs (
+        run_id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL DEFAULT 'open',
+        status TEXT NOT NULL DEFAULT 'created',
+        seed_urls_json TEXT NOT NULL DEFAULT '[]',
+        config_hash TEXT NOT NULL DEFAULT '',
+        config_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS frontier (
         id SERIAL PRIMARY KEY,
-        url_id INTEGER NOT NULL UNIQUE,
+        run_id TEXT NOT NULL DEFAULT 'legacy',
+        url_id INTEGER NOT NULL,
         depth INTEGER NOT NULL,
         parent_id INTEGER,
         status TEXT NOT NULL CHECK (status IN ('queued','pending','done')),
@@ -257,7 +284,8 @@ SCHEMA_STATEMENTS = [
         retry_count INTEGER DEFAULT 0,
         retry_at INTEGER DEFAULT 0,
         FOREIGN KEY (url_id) REFERENCES urls (id),
-        FOREIGN KEY (parent_id) REFERENCES urls (id)
+        FOREIGN KEY (parent_id) REFERENCES urls (id),
+        UNIQUE (run_id, url_id)
     )
     """,
     """
@@ -285,6 +313,21 @@ SCHEMA_STATEMENTS = [
     ALTER TABLE content ADD COLUMN IF NOT EXISTS custom_data JSONB
     """,
     """
+    ALTER TABLE frontier ADD COLUMN IF NOT EXISTS run_id TEXT
+    """,
+    """
+    UPDATE frontier SET run_id = 'legacy' WHERE run_id IS NULL
+    """,
+    """
+    ALTER TABLE frontier ALTER COLUMN run_id SET DEFAULT 'legacy'
+    """,
+    """
+    ALTER TABLE frontier ALTER COLUMN run_id SET NOT NULL
+    """,
+    """
+    ALTER TABLE frontier DROP CONSTRAINT IF EXISTS frontier_url_id_key
+    """,
+    """
     ALTER TABLE frontier ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0
     """,
     """
@@ -297,11 +340,53 @@ SCHEMA_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_frontier_priority ON frontier(priority_score DESC, enqueued_at ASC)
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_frontier_run_status ON frontier(run_id, status)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_frontier_run_priority ON frontier(run_id, priority_score DESC, enqueued_at ASC)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_frontier_run_url ON frontier(run_id, url_id)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS crawl_metadata (
         key TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL DEFAULT 'legacy',
         value_json TEXT NOT NULL,
         updated_at INTEGER NOT NULL
     )
+    """,
+    """
+    ALTER TABLE crawl_metadata ADD COLUMN IF NOT EXISTS run_id TEXT
+    """,
+    """
+    UPDATE crawl_metadata SET run_id = 'legacy' WHERE run_id IS NULL
+    """,
+    """
+    ALTER TABLE crawl_metadata ALTER COLUMN run_id SET DEFAULT 'legacy'
+    """,
+    """
+    ALTER TABLE crawl_metadata ALTER COLUMN run_id SET NOT NULL
+    """,
+    """
+    INSERT INTO crawl_runs (run_id, mode, status, seed_urls_json, config_hash, config_json, created_at, updated_at)
+    VALUES ('legacy', 'open', 'legacy', '[]', '', '{}', EXTRACT(EPOCH FROM NOW())::INTEGER, EXTRACT(EPOCH FROM NOW())::INTEGER)
+    ON CONFLICT (run_id) DO NOTHING
+    """,
+    """
+    INSERT INTO crawl_runs (run_id, mode, status, seed_urls_json, config_hash, config_json, created_at, updated_at)
+    SELECT
+        'legacy',
+        'open',
+        'legacy',
+        '[]',
+        '',
+        '{}',
+        COALESCE(MIN(enqueued_at), EXTRACT(EPOCH FROM NOW())::INTEGER),
+        EXTRACT(EPOCH FROM NOW())::INTEGER
+    FROM frontier
+    WHERE run_id = 'legacy'
+    ON CONFLICT (run_id) DO NOTHING
     """,
     """
     CREATE TABLE IF NOT EXISTS url_sources (
@@ -722,6 +807,7 @@ CRAWL_TABLES: tuple[str, ...] = (
     "analytics_vendors",
     "crawl_comparison_sessions",
     "crawl_metadata",
+    "crawl_runs",
 )
 
 
@@ -744,9 +830,72 @@ class MemoryStore:
     """Lightweight frontier store for local crawls that do not need Postgres."""
 
     def __init__(self) -> None:
+        now = int(time.time())
+        self.active_run_id = DEFAULT_CRAWL_RUN_ID
         self.frontier: dict[str, dict[str, Any]] = {}
+        self.frontiers: dict[str, dict[str, dict[str, Any]]] = {DEFAULT_CRAWL_RUN_ID: self.frontier}
         self.saved_metadata: dict[str, dict[str, object]] = {}
+        self.run_metadata: dict[tuple[str, str], dict[str, object]] = {}
+        self.crawl_runs: dict[str, CrawlRunRecord] = {
+            DEFAULT_CRAWL_RUN_ID: {
+                "run_id": DEFAULT_CRAWL_RUN_ID,
+                "mode": "open",
+                "status": "legacy",
+                "seed_urls": [],
+                "config_hash": "",
+                "config": {},
+                "created_at": now,
+                "updated_at": now,
+            }
+        }
         self.sources: dict[str, set[tuple[str, str | None]]] = {}
+
+    def _resolve_run_id(self, run_id: str | None = None) -> str:
+        return run_id or self.active_run_id
+
+    def _frontier_for(self, run_id: str | None = None) -> dict[str, dict[str, Any]]:
+        resolved = self._resolve_run_id(run_id)
+        if resolved == DEFAULT_CRAWL_RUN_ID:
+            return self.frontier
+        return self.frontiers.setdefault(resolved, {})
+
+    def set_active_crawl_run(self, run_id: str) -> None:
+        self.active_run_id = run_id
+        self._frontier_for(run_id)
+
+    async def create_crawl_run(
+        self,
+        run_id: str,
+        *,
+        seed_urls: Sequence[str],
+        config_hash: str,
+        config: dict[str, object],
+        status: str = "running",
+    ) -> None:
+        if run_id in self.crawl_runs:
+            raise ValueError(f"crawl run already exists: {run_id}")
+        now = int(time.time())
+        self.crawl_runs[run_id] = {
+            "run_id": run_id,
+            "mode": "open",
+            "status": status,
+            "seed_urls": list(seed_urls),
+            "config_hash": config_hash,
+            "config": dict(config),
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.set_active_crawl_run(run_id)
+
+    async def get_crawl_run(self, run_id: str) -> CrawlRunRecord | None:
+        return self.crawl_runs.get(run_id)
+
+    async def update_crawl_run_status(self, run_id: str, status: str) -> None:
+        run = self.crawl_runs.get(run_id)
+        if run is None:
+            return
+        run["status"] = status
+        run["updated_at"] = int(time.time())
 
     async def connect(self) -> None:
         return None
@@ -758,7 +907,9 @@ class MemoryStore:
         return None
 
     async def save_metadata(self, key: str, value: dict[str, object]) -> None:
+        value = {**value, "run_id": self.active_run_id}
         self.saved_metadata[key] = value
+        self.run_metadata[(self.active_run_id, key)] = value
 
     async def persist(self, result: CrawlResult) -> None:
         return None
@@ -769,15 +920,17 @@ class MemoryStore:
         *,
         source: str | None = None,
         source_detail: str | None = None,
+        run_id: str | None = None,
     ) -> int:
         inserted = 0
         current_time = int(time.time())
+        frontier = self._frontier_for(run_id)
         for item in frontier_data:
             url, depth, parent_url = item[0], item[1], item[2]
             priority_score = float(item[3]) if len(item) > 3 and item[3] is not None else 0.0
-            if url in self.frontier:
+            if url in frontier:
                 continue
-            self.frontier[url] = {
+            frontier[url] = {
                 "depth": depth,
                 "parent_url": parent_url,
                 "status": "queued",
@@ -793,10 +946,13 @@ class MemoryStore:
             inserted += 1
         return inserted
 
-    async def frontier_next_batch(self, batch_size: int) -> list[tuple[str, int, str | None, int]]:
+    async def frontier_next_batch(
+        self, batch_size: int, *, run_id: str | None = None
+    ) -> list[tuple[str, int, str | None, int]]:
         now = int(time.time())
+        frontier = self._frontier_for(run_id)
         rows: list[tuple[str, int, str | None, int, float, int]] = []
-        for url, state in self.frontier.items():
+        for url, state in frontier.items():
             if state["status"] != "queued" or int(state.get("retry_at", 0)) > now:
                 continue
             rows.append(
@@ -812,12 +968,15 @@ class MemoryStore:
         rows.sort(key=lambda row: (-row[4], row[5], row[0]))
         batch = rows[:batch_size]
         for url, *_ in batch:
-            self.frontier[url]["status"] = "pending"
-            self.frontier[url]["updated_at"] = now
+            frontier[url]["status"] = "pending"
+            frontier[url]["updated_at"] = now
         return [(url, depth, parent_url, retry_count) for url, depth, parent_url, retry_count, _, _ in batch]
 
-    async def frontier_mark_retry(self, url: str, retry_count: int, delay_seconds: float) -> None:
-        state = self.frontier.setdefault(
+    async def frontier_mark_retry(
+        self, url: str, retry_count: int, delay_seconds: float, *, run_id: str | None = None
+    ) -> None:
+        frontier = self._frontier_for(run_id)
+        state = frontier.setdefault(
             url,
             {
                 "depth": 0,
@@ -836,10 +995,11 @@ class MemoryStore:
         state["retry_at"] = int(time.time() + max(0.0, delay_seconds))
         state["updated_at"] = int(time.time())
 
-    async def frontier_mark_done(self, urls: list[str]) -> None:
+    async def frontier_mark_done(self, urls: list[str], *, run_id: str | None = None) -> None:
         current_time = int(time.time())
+        frontier = self._frontier_for(run_id)
         for url in urls:
-            state = self.frontier.setdefault(
+            state = frontier.setdefault(
                 url,
                 {
                     "depth": 0,
@@ -858,19 +1018,21 @@ class MemoryStore:
             state["retry_count"] = 0
             state["retry_at"] = 0
 
-    async def frontier_reset_pending_to_queued(self, urls: list[str]) -> None:
+    async def frontier_reset_pending_to_queued(self, urls: list[str], *, run_id: str | None = None) -> None:
         current_time = int(time.time())
+        frontier = self._frontier_for(run_id)
         for url in urls:
-            state = self.frontier.get(url)
+            state = frontier.get(url)
             if state is None or state["status"] != "pending":
                 continue
             state["status"] = "queued"
             state["updated_at"] = current_time
 
-    async def frontier_reset_all_pending_to_queued(self) -> int:
+    async def frontier_reset_all_pending_to_queued(self, *, run_id: str | None = None) -> int:
         reset = 0
         current_time = int(time.time())
-        for state in self.frontier.values():
+        frontier = self._frontier_for(run_id)
+        for state in frontier.values():
             if state["status"] != "pending":
                 continue
             state["status"] = "queued"
@@ -903,10 +1065,11 @@ class MemoryStore:
         # MemoryStore keeps no fetch history, so nothing is ever "fresh".
         return set()
 
-    async def frontier_stats(self) -> tuple[int, int, int]:
-        queued = sum(1 for state in self.frontier.values() if state["status"] == "queued")
-        pending = sum(1 for state in self.frontier.values() if state["status"] == "pending")
-        done = sum(1 for state in self.frontier.values() if state["status"] == "done")
+    async def frontier_stats(self, *, run_id: str | None = None) -> tuple[int, int, int]:
+        frontier = self._frontier_for(run_id)
+        queued = sum(1 for state in frontier.values() if state["status"] == "queued")
+        pending = sum(1 for state in frontier.values() if state["status"] == "pending")
+        done = sum(1 for state in frontier.values() if state["status"] == "done")
         return queued, pending, done
 
 
@@ -921,7 +1084,14 @@ class AsyncpgStore:
         self.dsn = dsn
         self.compress_html = compress_html
         self.store_html = store_html
+        self.active_run_id = DEFAULT_CRAWL_RUN_ID
         self.pool: asyncpg.Pool | None = None
+
+    def _resolve_run_id(self, run_id: str | None = None) -> str:
+        return run_id or self.active_run_id
+
+    def set_active_crawl_run(self, run_id: str) -> None:
+        self.active_run_id = run_id
 
     async def connect(self) -> None:
         if self.pool is None:
@@ -946,19 +1116,105 @@ class AsyncpgStore:
             for statement in COMPARISON_VIEW_STATEMENTS:
                 await conn.execute(statement)
 
-    async def save_metadata(self, key: str, value: dict[str, object]) -> None:
+    async def create_crawl_run(
+        self,
+        run_id: str,
+        *,
+        seed_urls: Sequence[str],
+        config_hash: str,
+        config: dict[str, object],
+        status: str = "running",
+    ) -> None:
+        await self.connect()
+        assert self.pool is not None
+        now = int(time.time())
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                INSERT INTO crawl_runs (
+                    run_id, mode, status, seed_urls_json, config_hash, config_json, created_at, updated_at
+                )
+                VALUES ($1, 'open', $2, $3, $4, $5, $6, $6)
+                ON CONFLICT (run_id) DO NOTHING
+                """,
+                run_id,
+                status,
+                json.dumps(list(seed_urls), sort_keys=True),
+                config_hash,
+                json.dumps(config, sort_keys=True),
+                now,
+            )
+        if result.split()[-1] == "0":
+            raise ValueError(f"crawl run already exists: {run_id}")
+        self.set_active_crawl_run(run_id)
+
+    async def get_crawl_run(self, run_id: str) -> CrawlRunRecord | None:
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT run_id, mode, status, seed_urls_json, config_hash, config_json, created_at, updated_at
+                FROM crawl_runs
+                WHERE run_id = $1
+                """,
+                run_id,
+            )
+        if row is None:
+            return None
+        try:
+            seed_urls = json.loads(str(row["seed_urls_json"]))
+        except json.JSONDecodeError:
+            seed_urls = []
+        try:
+            config = json.loads(str(row["config_json"]))
+        except json.JSONDecodeError:
+            config = {}
+        return {
+            "run_id": str(row["run_id"]),
+            "mode": str(row["mode"]),
+            "status": str(row["status"]),
+            "seed_urls": [str(seed) for seed in seed_urls] if isinstance(seed_urls, list) else [],
+            "config_hash": str(row["config_hash"]),
+            "config": config if isinstance(config, dict) else {},
+            "created_at": int(row["created_at"]),
+            "updated_at": int(row["updated_at"]),
+        }
+
+    async def update_crawl_run_status(self, run_id: str, status: str) -> None:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO crawl_metadata (key, value_json, updated_at)
-                VALUES ($1, $2, $3)
+                UPDATE crawl_runs
+                SET status = $2,
+                    updated_at = $3
+                WHERE run_id = $1
+                """,
+                run_id,
+                status,
+                int(time.time()),
+            )
+
+    async def save_metadata(self, key: str, value: dict[str, object]) -> None:
+        await self.connect()
+        assert self.pool is not None
+        run_id = self.active_run_id
+        metadata_key = key if run_id == DEFAULT_CRAWL_RUN_ID else f"{run_id}:{key}"
+        value = {**value, "run_id": run_id}
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO crawl_metadata (key, run_id, value_json, updated_at)
+                VALUES ($1, $2, $3, $4)
                 ON CONFLICT (key) DO UPDATE
                 SET value_json = EXCLUDED.value_json,
+                    run_id = EXCLUDED.run_id,
                     updated_at = EXCLUDED.updated_at
                 """,
-                key,
+                metadata_key,
+                run_id,
                 json.dumps(value, sort_keys=True),
                 int(time.time()),
             )
@@ -1073,6 +1329,7 @@ class AsyncpgStore:
         *,
         source: str | None = None,
         source_detail: str | None = None,
+        run_id: str | None = None,
     ) -> int:
         """Lifted in shape from WIP batch_enqueue_frontier, narrowed to asyncpg only."""
         if not frontier_data:
@@ -1085,6 +1342,7 @@ class AsyncpgStore:
             frontier_data,
             source=source,
             source_detail=source_detail,
+            run_id=self._resolve_run_id(run_id),
         )
 
     async def _enqueue_frontier_once(
@@ -1093,8 +1351,10 @@ class AsyncpgStore:
         *,
         source: str | None = None,
         source_detail: str | None = None,
+        run_id: str | None = None,
     ) -> int:
         assert self.pool is not None
+        resolved_run_id = self._resolve_run_id(run_id)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 urls_to_resolve: list[str] = []
@@ -1118,8 +1378,9 @@ class AsyncpgStore:
                     """
                     SELECT url_id, status
                     FROM frontier
-                    WHERE url_id = ANY($1::int[])
+                    WHERE run_id = $1 AND url_id = ANY($2::int[])
                     """,
+                    resolved_run_id,
                     child_ids,
                 )
                 existing_ids = {int(row["url_id"]) for row in existing_rows}
@@ -1134,6 +1395,7 @@ class AsyncpgStore:
                     priority_score = float(item[3]) if len(item) > 3 and item[3] is not None else 0.0
                     batch_data.append(
                         (
+                            resolved_run_id,
                             url_to_id[child_url],
                             depth,
                             url_to_id[parent_url] if parent_url else None,
@@ -1153,12 +1415,12 @@ class AsyncpgStore:
                 await conn.executemany(
                     """
                     INSERT INTO frontier (
-                        url_id, depth, parent_id, status, enqueued_at, updated_at,
+                        run_id, url_id, depth, parent_id, status, enqueued_at, updated_at,
                         priority_score, sitemap_priority, inlinks_count, content_type_score, reset_count,
                         retry_count, retry_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-                    ON CONFLICT (url_id) DO NOTHING
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    ON CONFLICT (run_id, url_id) DO NOTHING
                     """,
                     batch_data,
                 )
@@ -1174,10 +1436,13 @@ class AsyncpgStore:
                     )
                 return len(batch_data)
 
-    async def frontier_next_batch(self, batch_size: int) -> list[tuple[str, int, str | None, int]]:
+    async def frontier_next_batch(
+        self, batch_size: int, *, run_id: str | None = None
+    ) -> list[tuple[str, int, str | None, int]]:
         """Lifted from WIP frontier_next_batch: atomically claim queued URLs as pending."""
         await self.connect()
         assert self.pool is not None
+        resolved_run_id = self._resolve_run_id(run_id)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 rows = await conn.fetch(
@@ -1186,12 +1451,13 @@ class AsyncpgStore:
                     FROM frontier f
                     JOIN urls u ON f.url_id = u.id
                     LEFT JOIN urls p ON f.parent_id = p.id
-                    WHERE f.status = 'queued' AND f.retry_at <= $2
+                    WHERE f.run_id = $2 AND f.status = 'queued' AND f.retry_at <= $3
                     ORDER BY f.priority_score DESC, f.enqueued_at ASC
                     LIMIT $1
                     FOR UPDATE OF f SKIP LOCKED
                     """,
                     batch_size * 2,
+                    resolved_run_id,
                     int(time.time()),
                 )
                 if not rows:
@@ -1213,9 +1479,10 @@ class AsyncpgStore:
                     """
                     UPDATE frontier
                     SET status = 'pending', updated_at = $1
-                    WHERE url_id = ANY($2::int[])
+                    WHERE run_id = $2 AND url_id = ANY($3::int[])
                     """,
                     int(time.time()),
+                    resolved_run_id,
                     claimed_ids,
                 )
                 return [
@@ -1228,9 +1495,12 @@ class AsyncpgStore:
                     for row in unique_rows
                 ]
 
-    async def frontier_mark_retry(self, url: str, retry_count: int, delay_seconds: float) -> None:
+    async def frontier_mark_retry(
+        self, url: str, retry_count: int, delay_seconds: float, *, run_id: str | None = None
+    ) -> None:
         await self.connect()
         assert self.pool is not None
+        resolved_run_id = self._resolve_run_id(run_id)
         async with self.pool.acquire() as conn:
             url_id = await self._get_or_create_url(conn, url)
             retry_at = int(time.time() + max(0.0, delay_seconds))
@@ -1241,30 +1511,35 @@ class AsyncpgStore:
                     retry_count = $2,
                     retry_at = $3,
                     updated_at = $4
-                WHERE url_id = $1
+                WHERE run_id = $5 AND url_id = $1
                 """,
                 url_id,
                 retry_count,
                 retry_at,
                 int(time.time()),
+                resolved_run_id,
             )
 
-    async def frontier_mark_done(self, urls: list[str]) -> None:
+    async def frontier_mark_done(self, urls: list[str], *, run_id: str | None = None) -> None:
         if not urls:
             return
 
         await self.connect()
         assert self.pool is not None
+        resolved_run_id = self._resolve_run_id(run_id)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 url_ids = [await self._get_or_create_url(conn, url) for url in urls]
                 current_time = int(time.time())
                 await conn.execute(
                     """
-                    INSERT INTO frontier (url_id, depth, status, enqueued_at, updated_at, priority_score, reset_count)
-                    SELECT unnest_id, 0, 'done', $1, $1, 0.0, 0
-                    FROM UNNEST($2::int[]) AS unnest_id
-                    ON CONFLICT (url_id) DO UPDATE
+                    INSERT INTO frontier (
+                        run_id, url_id, depth, status, enqueued_at, updated_at,
+                        priority_score, reset_count
+                    )
+                    SELECT $2, ids.url_id, 0, 'done', $1, $1, 0.0, 0
+                    FROM UNNEST($3::int[]) AS ids(url_id)
+                    ON CONFLICT (run_id, url_id) DO UPDATE
                     SET status = 'done',
                         updated_at = EXCLUDED.updated_at,
                         reset_count = 0,
@@ -1273,14 +1548,16 @@ class AsyncpgStore:
                     WHERE frontier.status IN ('pending', 'queued')
                     """,
                     current_time,
+                    resolved_run_id,
                     url_ids,
                 )
 
-    async def frontier_reset_pending_to_queued(self, urls: list[str]) -> None:
+    async def frontier_reset_pending_to_queued(self, urls: list[str], *, run_id: str | None = None) -> None:
         if not urls:
             return
         await self.connect()
         assert self.pool is not None
+        resolved_run_id = self._resolve_run_id(run_id)
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 url_ids = [await self._get_or_create_url(conn, url) for url in urls]
@@ -1288,23 +1565,26 @@ class AsyncpgStore:
                     """
                     UPDATE frontier
                     SET status = 'queued', updated_at = $1
-                    WHERE url_id = ANY($2::int[]) AND status = 'pending'
+                    WHERE run_id = $2 AND url_id = ANY($3::int[]) AND status = 'pending'
                     """,
                     int(time.time()),
+                    resolved_run_id,
                     url_ids,
                 )
 
-    async def frontier_reset_all_pending_to_queued(self) -> int:
+    async def frontier_reset_all_pending_to_queued(self, *, run_id: str | None = None) -> int:
         await self.connect()
         assert self.pool is not None
+        resolved_run_id = self._resolve_run_id(run_id)
         async with self.pool.acquire() as conn:
             result = await conn.execute(
                 """
                 UPDATE frontier
                 SET status = 'queued', updated_at = $1, reset_count = reset_count + 1
-                WHERE status = 'pending'
+                WHERE run_id = $2 AND status = 'pending'
                 """,
                 int(time.time()),
+                resolved_run_id,
             )
         return int(result.split()[-1])
 
@@ -1494,13 +1774,20 @@ class AsyncpgStore:
         results.sort(key=lambda x: x[1])
         return results
 
-    async def frontier_stats(self) -> tuple[int, int, int]:
+    async def frontier_stats(self, *, run_id: str | None = None) -> tuple[int, int, int]:
         await self.connect()
         assert self.pool is not None
+        resolved_run_id = self._resolve_run_id(run_id)
         async with self.pool.acquire() as conn:
-            queued = await conn.fetchval("SELECT COUNT(*) FROM frontier WHERE status = 'queued'")
-            pending = await conn.fetchval("SELECT COUNT(*) FROM frontier WHERE status = 'pending'")
-            done = await conn.fetchval("SELECT COUNT(*) FROM frontier WHERE status = 'done'")
+            queued = await conn.fetchval(
+                "SELECT COUNT(*) FROM frontier WHERE run_id = $1 AND status = 'queued'", resolved_run_id
+            )
+            pending = await conn.fetchval(
+                "SELECT COUNT(*) FROM frontier WHERE run_id = $1 AND status = 'pending'", resolved_run_id
+            )
+            done = await conn.fetchval(
+                "SELECT COUNT(*) FROM frontier WHERE run_id = $1 AND status = 'done'", resolved_run_id
+            )
         return int(queued or 0), int(pending or 0), int(done or 0)
 
     async def persist(self, result: CrawlResult) -> None:

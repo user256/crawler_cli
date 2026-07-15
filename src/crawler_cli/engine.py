@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
+import time
+import uuid
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from .archive import discover_historical_urls
@@ -61,6 +65,38 @@ def _archive_seed_target(seed: str) -> str | None:
     parsed = urlparse(seed)
     target = (parsed.netloc or seed).lower().strip()
     return target or None
+
+
+def _new_crawl_run_id() -> str:
+    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    return f"crawl-{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _crawl_run_config_snapshot(config: CrawlConfig, seeds: list[str]) -> dict[str, Any]:
+    """Return the material run-compatibility inputs for resume validation.
+
+    Runtime knobs such as concurrency, retry backoff, and max-pages can change
+    safely across resumes. Seed and scope choices cannot: changing them would
+    make a resumed frontier represent a different crawl.
+    """
+    return {
+        "seed_urls": list(dict.fromkeys(seeds)),
+        "same_host_only": config.same_host_only,
+        "allowed_hosts": sorted({host.lower() for host in config.allowed_hosts}),
+        "path_restriction": config.path_restriction,
+        "path_exclude": sorted(config.path_exclude),
+        "respect_robots_txt": config.respect_robots_txt,
+        "discover_sitemaps": config.discover_sitemaps,
+        "skip_sitemaps": config.skip_sitemaps,
+        "seed_from_archive": config.seed_from_archive,
+        "csv_seed_mode": config.csv_seed_mode,
+        "csv_urls": list(dict.fromkeys(config.csv_urls)),
+    }
+
+
+def _crawl_run_config_hash(snapshot: dict[str, Any]) -> str:
+    payload = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class CrawlEngine:
@@ -575,12 +611,82 @@ class CrawlEngine:
             logger.info("Stealth: %s", stealth)
             logger.info("Managed process: %s", "yes" if runtime.managed else "no")
 
+    async def _prepare_crawl_run(
+        self,
+        seeds: list[str],
+        *,
+        run_id: str | None,
+        resume: bool,
+        allow_run_config_mismatch: bool,
+    ) -> tuple[str, dict[str, Any], str]:
+        if self.store is None:
+            raise RuntimeError("crawl_open requires a frontier store")
+        selected_run_id = run_id or _new_crawl_run_id()
+        if resume and not run_id:
+            raise RuntimeError("resume requires an explicit crawl run id")
+
+        snapshot = _crawl_run_config_snapshot(self.config, seeds)
+        config_hash = _crawl_run_config_hash(snapshot)
+        set_active = getattr(self.store, "set_active_crawl_run", None)
+        get_run = getattr(self.store, "get_crawl_run", None)
+        create_run = getattr(self.store, "create_crawl_run", None)
+        update_status = getattr(self.store, "update_crawl_run_status", None)
+
+        existing_run = await get_run(selected_run_id) if get_run is not None else None
+        if resume:
+            if existing_run is None and get_run is not None:
+                raise RuntimeError(f"crawl run not found: {selected_run_id}")
+            stored_hash = str(existing_run.get("config_hash", "")) if isinstance(existing_run, dict) else ""
+            if stored_hash and stored_hash != config_hash and not allow_run_config_mismatch:
+                raise RuntimeError(
+                    "crawl run config mismatch; use --allow-run-config-mismatch only if you intend to "
+                    f"resume {selected_run_id} with different seeds/scope/config"
+                )
+            if stored_hash and stored_hash != config_hash:
+                logger.warning("Resuming crawl run %s despite seed/scope/config mismatch", selected_run_id)
+            if set_active is not None:
+                set_active(selected_run_id)
+            if update_status is not None:
+                await update_status(selected_run_id, "running")
+            logger.info("Resuming crawl run %s", selected_run_id)
+            return selected_run_id, snapshot, config_hash
+
+        if existing_run is not None:
+            raise RuntimeError(
+                f"crawl run already exists: {selected_run_id}; choose a new --crawl-run-id or use --resume"
+            )
+        if create_run is not None:
+            try:
+                await create_run(
+                    selected_run_id,
+                    seed_urls=seeds,
+                    config_hash=config_hash,
+                    config=snapshot,
+                    status="running",
+                )
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+        elif set_active is not None:
+            set_active(selected_run_id)
+        logger.info("Starting crawl run %s", selected_run_id)
+        return selected_run_id, snapshot, config_hash
+
+    async def _set_crawl_run_status(self, run_id: str, status: str) -> None:
+        if self.store is None:
+            return
+        update_status = getattr(self.store, "update_crawl_run_status", None)
+        if update_status is not None:
+            await update_status(run_id, status)
+
     async def crawl_open(
         self,
         seed_urls: Iterable[str],
         *,
         max_urls: int | None = None,
         save_to: str | None = None,
+        run_id: str | None = None,
+        resume: bool = False,
+        allow_run_config_mismatch: bool = False,
     ) -> CrawlJobResult:
         if self.store is None:
             raise RuntimeError("crawl_open requires a frontier store")
@@ -598,11 +704,17 @@ class CrawlEngine:
                 archive_candidates.extend(await discover_historical_urls(archive_target, self.config))
             seeds = list(dict.fromkeys([*seeds, *archive_candidates]))
         if not seeds:
-            job = CrawlJobResult(mode="open", seed_urls=[], results=[], saved_to=save_to)
+            job = CrawlJobResult(mode="open", seed_urls=[], results=[], saved_to=save_to, run_id=run_id)
             if save_to:
                 await self._save_results(job, save_to)
             return job
         limit = max_urls if max_urls is not None else self.config.default_open_crawl_limit
+        crawl_run_id, run_snapshot, run_config_hash = await self._prepare_crawl_run(
+            seeds,
+            run_id=run_id,
+            resume=resume,
+            allow_run_config_mismatch=allow_run_config_mismatch,
+        )
         results: list[CrawlResult] = []
         # Open the JSONL output file early so results stream out incrementally
         # rather than buffering the whole crawl in RAM (ticket-059).
@@ -615,19 +727,28 @@ class CrawlEngine:
         await self.store.save_metadata(
             "crawl_open",
             {
+                "run_id": crawl_run_id,
+                "resume": resume,
                 "seed_urls": seeds,
                 "max_urls": limit,
                 "same_host_only": self.config.same_host_only,
                 "respect_robots_txt": self.config.respect_robots_txt,
                 "path_restriction": self.config.path_restriction,
                 "path_exclude": self.config.path_exclude,
+                "config_hash": run_config_hash,
+                "compatibility_config": run_snapshot,
             },
         )
-        # Check if this is a resume (frontier already has items from previous run)
         queued_count, pending_count, done_count = await self.store.frontier_stats()
-        is_resume = (queued_count + pending_count + done_count) > 0
+        logger.info(
+            "Crawl run %s frontier before start: %d queued, %d pending, %d done",
+            crawl_run_id,
+            queued_count,
+            pending_count,
+            done_count,
+        )
 
-        if not is_resume:
+        if not resume:
             # Fresh crawl: enqueue seeds (record out-of-scope seeds without fetching)
             seed_enqueue = [
                 (url, 0, None, self._priority_score(url, 0)) for url in seeds if self.config.should_crawl_url(url)
@@ -643,7 +764,7 @@ class CrawlEngine:
             # Resume: reset stale pending items back to queued
             reset_count = await self.store.frontier_reset_all_pending_to_queued()
             if reset_count:
-                logger.info("Resumed crawl: reset %d pending URLs to queued", reset_count)
+                logger.info("Resumed crawl run %s: reset %d pending URLs to queued", crawl_run_id, reset_count)
 
         session_crawled = 0
         session_retry_attempts = 0
@@ -796,12 +917,14 @@ class CrawlEngine:
                 seed_urls=seeds,
                 results=results if limit <= 0 else results[:limit],
                 saved_to=save_to,
+                run_id=crawl_run_id,
                 retry_attempts=session_retry_attempts,
                 interrupted=interrupted,
                 refresh_skipped_count=self._refresh_skipped,
             )
             if interrupted:
                 logger.warning("Crawl interrupted: %d URLs crawled before stop", session_crawled)
+            await self._set_crawl_run_status(crawl_run_id, "interrupted" if interrupted else "complete")
             if _jsonl_fh is not None:
                 # Append a summary record as the last line so tooling can
                 # detect a complete crawl and read aggregate counts without
@@ -809,6 +932,7 @@ class CrawlEngine:
                 summary = {
                     "__type": "summary",
                     "mode": job.mode,
+                    "run_id": job.run_id,
                     "seed_urls": job.seed_urls,
                     "crawled_count": job.crawled_count,
                     "blocked_count": job.blocked_count,
@@ -821,6 +945,9 @@ class CrawlEngine:
                 _jsonl_fh.close()
                 _jsonl_fh = None
             return job
+        except Exception:
+            await self._set_crawl_run_status(crawl_run_id, "failed")
+            raise
         finally:
             if _jsonl_fh is not None:
                 _jsonl_fh.close()

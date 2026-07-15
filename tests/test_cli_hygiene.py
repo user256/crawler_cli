@@ -285,8 +285,18 @@ async def test_run_crawl_uses_memory_store_when_postgres_not_configured(monkeypa
         def request_stop(self) -> None:
             return None
 
-        async def crawl_open(self, seeds, save_to=None):
+        async def crawl_open(
+            self,
+            seeds,
+            save_to=None,
+            run_id=None,
+            resume=False,
+            allow_run_config_mismatch=False,
+        ):
             observed["seeds"] = list(seeds)
+            observed["run_id"] = run_id
+            observed["resume"] = resume
+            observed["allow_run_config_mismatch"] = allow_run_config_mismatch
             return CrawlJobResult(mode="open", seed_urls=list(seeds), results=[])
 
         async def close(self) -> None:
