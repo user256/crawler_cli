@@ -195,7 +195,33 @@ async def test_crawl_respects_robots_txt_disallow():
 
 
 @pytest.mark.asyncio
-async def test_open_crawl_is_bounded_and_saves_output(tmp_path):
+async def test_open_crawl_default_limit_is_safe_bound_and_saves_metadata(tmp_path):
+    pages = {"https://example.com/": '<html><body><a href="/1">1</a></body></html>'}
+    for idx in range(1, 205):
+        next_link = f'<a href="/{idx + 1}">next</a>' if idx < 204 else ""
+        pages[f"https://example.com/{idx}"] = f"<html><body>{next_link}</body></html>"
+
+    store = FakeStore()
+    engine = CrawlEngine(CrawlConfig(max_concurrency=1, discover_sitemaps=False), store=store)
+    engine.backend = FakeBackend(pages)
+    engine._robots = FakeRobots()
+
+    output_path = tmp_path / "crawl.jsonl"
+    job = await engine.crawl_open(["https://example.com/"], save_to=str(output_path))
+
+    assert job.mode == "open"
+    assert job.max_urls == 200
+    assert len(job.results) == 200
+    lines = [json.loads(ln) for ln in output_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    summary = next(ln for ln in lines if ln.get("__type") == "summary")
+    assert summary["max_urls"] == 200
+    assert summary["crawled_count"] == 200
+    assert store.saved_metadata["crawl_open"]["max_urls"] == 200
+    assert store.saved_metadata["crawl_open"]["crawled_count"] == 200
+
+
+@pytest.mark.asyncio
+async def test_open_crawl_explicit_finite_limit_saves_output(tmp_path):
     pages = {
         "https://example.com/": '<html><body><a href="/a">A</a><a href="/b">B</a></body></html>',
         "https://example.com/a": '<html><body><a href="/c">C</a></body></html>',
@@ -204,14 +230,15 @@ async def test_open_crawl_is_bounded_and_saves_output(tmp_path):
         "https://example.com/d": "<html><body>D</body></html>",
     }
     store = FakeStore()
-    engine = CrawlEngine(CrawlConfig(max_concurrency=2, default_open_crawl_limit=3), store=store)
+    engine = CrawlEngine(CrawlConfig(max_concurrency=2, discover_sitemaps=False), store=store)
     engine.backend = FakeBackend(pages)
     engine._robots = FakeRobots()
 
     output_path = tmp_path / "crawl.json"
-    job = await engine.crawl_open(["https://example.com/"], save_to=str(output_path))
+    job = await engine.crawl_open(["https://example.com/"], max_urls=3, save_to=str(output_path))
 
     assert job.mode == "open"
+    assert job.max_urls == 3
     assert len(job.results) == 3
     assert output_path.exists()
 
@@ -219,6 +246,7 @@ async def test_open_crawl_is_bounded_and_saves_output(tmp_path):
     lines = [json.loads(ln) for ln in output_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     summary = next(ln for ln in lines if ln.get("__type") == "summary")
     assert summary["mode"] == "open"
+    assert summary["max_urls"] == 3
     assert summary["crawled_count"] == 3
     result_lines = [ln for ln in lines if ln.get("__type") != "summary"]
     assert len(result_lines) == 3
@@ -391,7 +419,7 @@ async def test_open_crawl_archive_seed_dedupes_same_host_csv_urls(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unlimited_open_crawl_follows_discovered_links():
+async def test_unlimited_open_crawl_follows_discovered_links(tmp_path):
     """limit=0 (unlimited) must enqueue links discovered during crawling.
 
     Regression for the bug where max(0, 0 - total) == 0 meant discovered
@@ -410,12 +438,18 @@ async def test_unlimited_open_crawl_follows_discovered_links():
     engine.backend = FakeBackend(pages)
     engine._robots = FakeRobots()
 
-    job = await engine.crawl_open(["https://example.com/"], max_urls=0)
+    output_path = tmp_path / "crawl.jsonl"
+    job = await engine.crawl_open(["https://example.com/"], max_urls=0, save_to=str(output_path))
 
     crawled_urls = {r.final_url for r in job.results}
+    assert job.max_urls == 0
     assert "https://example.com/b" in crawled_urls, "link from seed was not followed"
     assert "https://example.com/c" in crawled_urls, "link from depth-1 page was not followed"
     assert len(job.results) == 3
+    lines = [json.loads(ln) for ln in output_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    summary = next(ln for ln in lines if ln.get("__type") == "summary")
+    assert summary["max_urls"] == 0
+    assert store.saved_metadata["crawl_open"]["max_urls"] == 0
 
 
 @pytest.mark.asyncio

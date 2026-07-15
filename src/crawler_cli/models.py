@@ -126,6 +126,7 @@ class CrawlJobResult:
     seed_urls: list[str]
     results: list[CrawlResult]
     saved_to: str | None = None
+    max_urls: int | None = None
     retry_attempts: int = 0
     """Total transient-error attempts that were retried and do not appear in
     *results* (ticket-062).  Surfaced in the CLI summary."""

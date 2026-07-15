@@ -21,6 +21,7 @@ CB_RECOVERY_SECONDS_DEFAULT = 30.0
 # (often >5 MB) so they parse intact, while still capping runaway downloads.
 # Overridable per run via the --max-response-bytes CLI flag.
 MAX_RESPONSE_BYTES_DEFAULT = 25_000_000
+DEFAULT_OPEN_CRAWL_LIMIT = 200
 
 
 def _env_bool(name: str) -> bool | None:
@@ -89,8 +90,8 @@ class CrawlConfig:
     respect_robots_txt: bool = True
     robots_cache_ttl_seconds: float = 3600.0
     honor_robots_crawl_delay: bool = True
-    default_open_crawl_limit: int = 0
-    max_pages: int = 0
+    default_open_crawl_limit: int = DEFAULT_OPEN_CRAWL_LIMIT
+    max_pages: int = DEFAULT_OPEN_CRAWL_LIMIT
     same_host_only: bool = True
     enable_content_hashing: bool = False
     compress_html: bool = True

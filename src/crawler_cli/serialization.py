@@ -114,7 +114,7 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
 
 
 def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "mode": job.mode,
         "seed_urls": job.seed_urls,
         "saved_to": job.saved_to if saved_to is None else saved_to,
@@ -124,3 +124,6 @@ def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> 
         "interrupted": job.interrupted,
         "results": [serialize_crawl_result(result) for result in job.results],
     }
+    if job.max_urls is not None:
+        payload["max_urls"] = job.max_urls
+    return payload

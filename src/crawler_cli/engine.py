@@ -586,6 +586,11 @@ class CrawlEngine:
             raise RuntimeError("crawl_open requires a frontier store")
         if self.config.csv_urls and not self.config.csv_seed_mode:
             return await self.crawl_list(self.config.csv_urls, save_to=save_to)
+        limit = max_urls if max_urls is not None else self.config.default_open_crawl_limit
+        if limit > 0:
+            logger.info("Open crawl limit: %d URLs", limit)
+        else:
+            logger.info("Open crawl limit: unlimited (0)")
         seeds = list(seed_urls)
         if self.config.csv_urls and self.config.csv_seed_mode:
             seeds = list(dict.fromkeys([*self.config.csv_urls, *seeds]))
@@ -597,12 +602,37 @@ class CrawlEngine:
             for archive_target in archive_targets:
                 archive_candidates.extend(await discover_historical_urls(archive_target, self.config))
             seeds = list(dict.fromkeys([*seeds, *archive_candidates]))
+
+        def _open_crawl_metadata(job: CrawlJobResult | None = None) -> dict[str, object]:
+            payload: dict[str, object] = {
+                "seed_urls": seeds,
+                "max_urls": limit,
+                "same_host_only": self.config.same_host_only,
+                "respect_robots_txt": self.config.respect_robots_txt,
+                "path_restriction": self.config.path_restriction,
+                "path_exclude": self.config.path_exclude,
+            }
+            if job is not None:
+                payload.update(
+                    {
+                        "crawled_count": job.crawled_count,
+                        "blocked_count": job.blocked_count,
+                        "persist_error_count": job.persist_error_count,
+                        "retry_attempts": job.retry_attempts,
+                        "interrupted": job.interrupted,
+                        "saved_to": save_to,
+                        "refresh_skipped_count": job.refresh_skipped_count,
+                        "challenge_blocked_count": job.challenge_blocked_count,
+                    }
+                )
+            return payload
+
         if not seeds:
-            job = CrawlJobResult(mode="open", seed_urls=[], results=[], saved_to=save_to)
+            job = CrawlJobResult(mode="open", seed_urls=[], results=[], saved_to=save_to, max_urls=limit)
+            await self.store.save_metadata("crawl_open", _open_crawl_metadata(job))
             if save_to:
                 await self._save_results(job, save_to)
             return job
-        limit = max_urls if max_urls is not None else self.config.default_open_crawl_limit
         results: list[CrawlResult] = []
         # Open the JSONL output file early so results stream out incrementally
         # rather than buffering the whole crawl in RAM (ticket-059).
@@ -612,17 +642,7 @@ class CrawlEngine:
             _out_path.parent.mkdir(parents=True, exist_ok=True)
             _jsonl_fh = _out_path.open("w", encoding="utf-8")
         self._log_browser_runtime()
-        await self.store.save_metadata(
-            "crawl_open",
-            {
-                "seed_urls": seeds,
-                "max_urls": limit,
-                "same_host_only": self.config.same_host_only,
-                "respect_robots_txt": self.config.respect_robots_txt,
-                "path_restriction": self.config.path_restriction,
-                "path_exclude": self.config.path_exclude,
-            },
-        )
+        await self.store.save_metadata("crawl_open", _open_crawl_metadata())
         # Check if this is a resume (frontier already has items from previous run)
         queued_count, pending_count, done_count = await self.store.frontier_stats()
         is_resume = (queued_count + pending_count + done_count) > 0
@@ -796,6 +816,7 @@ class CrawlEngine:
                 seed_urls=seeds,
                 results=results if limit <= 0 else results[:limit],
                 saved_to=save_to,
+                max_urls=limit,
                 retry_attempts=session_retry_attempts,
                 interrupted=interrupted,
                 refresh_skipped_count=self._refresh_skipped,
@@ -810,6 +831,7 @@ class CrawlEngine:
                     "__type": "summary",
                     "mode": job.mode,
                     "seed_urls": job.seed_urls,
+                    "max_urls": job.max_urls,
                     "crawled_count": job.crawled_count,
                     "blocked_count": job.blocked_count,
                     "persist_error_count": job.persist_error_count,
@@ -820,6 +842,7 @@ class CrawlEngine:
                 _jsonl_fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
                 _jsonl_fh.close()
                 _jsonl_fh = None
+            await self.store.save_metadata("crawl_open", _open_crawl_metadata(job))
             return job
         finally:
             if _jsonl_fh is not None:
