@@ -15,6 +15,7 @@ from crawler_cli.__main__ import (
     _run_crawl,
 )
 from crawler_cli.config import DEFAULT_OPEN_CRAWL_LIMIT, CrawlConfig
+from crawler_cli.engine import CrawlRunSelectionError
 from crawler_cli.models import CrawlJobResult
 from crawler_cli.persistence import MemoryStore
 
@@ -360,3 +361,48 @@ async def test_run_crawl_rejects_archive_audit_without_postgres():
     args = _build_parser().parse_args(["crawl", "https://x.com", "--archive-org-check"])
     rc = await _run_crawl(args)
     assert rc == 2
+
+
+@pytest.mark.asyncio
+async def test_run_crawl_returns_exit_2_for_run_selection_errors(monkeypatch):
+    class StubEngine:
+        def __init__(self, config, store=None) -> None:
+            return None
+
+        def request_stop(self) -> None:
+            return None
+
+        async def crawl_open(self, *args, **kwargs):
+            raise CrawlRunSelectionError("crawl run not found: missing-run")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("crawler_cli.__main__.CrawlEngine", StubEngine)
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--resume", "missing-run"])
+
+    rc = await _run_crawl(args)
+
+    assert rc == 2
+
+
+@pytest.mark.asyncio
+async def test_run_crawl_does_not_swallow_unrelated_runtime_errors(monkeypatch):
+    class StubEngine:
+        def __init__(self, config, store=None) -> None:
+            return None
+
+        def request_stop(self) -> None:
+            return None
+
+        async def crawl_open(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("crawler_cli.__main__.CrawlEngine", StubEngine)
+    args = _build_parser().parse_args(["crawl", "https://x.com"])
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _run_crawl(args)

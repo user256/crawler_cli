@@ -36,7 +36,7 @@ from .cookies import (
 )
 from .csv_urls import load_urls_from_csv
 from .embeddings import generate_embeddings_for_store
-from .engine import CrawlEngine
+from .engine import CrawlEngine, CrawlRunSelectionError
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .reports import CrawlReports
@@ -553,11 +553,6 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     run_group = parser.add_argument_group("Crawl run/resume")
     run_mode = run_group.add_mutually_exclusive_group()
     run_mode.add_argument(
-        "--new-run",
-        action="store_true",
-        help="Start a fresh open-crawl run (default). Existing unrelated frontier rows are ignored.",
-    )
-    run_mode.add_argument(
         "--resume",
         metavar="RUN_ID",
         help="Resume the selected crawl run id; pending rows from other runs are never claimed.",
@@ -992,13 +987,17 @@ async def _run_crawl(args: argparse.Namespace) -> int:
         if config.csv_urls and not config.csv_seed_mode:
             job = await engine.crawl_list(config.csv_urls, save_to=args.save_to)
         else:
-            job = await engine.crawl_open(
-                seeds,
-                save_to=args.save_to,
-                run_id=args.resume or args.crawl_run_id,
-                resume=bool(args.resume),
-                allow_run_config_mismatch=args.allow_run_config_mismatch,
-            )
+            try:
+                job = await engine.crawl_open(
+                    seeds,
+                    save_to=args.save_to,
+                    run_id=args.resume or args.crawl_run_id,
+                    resume=bool(args.resume),
+                    allow_run_config_mismatch=args.allow_run_config_mismatch,
+                )
+            except CrawlRunSelectionError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 2
         if job.interrupted:
             _exit_code = 130
         persist_errors = job.persist_error_count
@@ -1044,9 +1043,6 @@ async def _run_crawl(args: argparse.Namespace) -> int:
                 logger.info("  Legacy issues: %d", len(audit.legacy_issues))
                 if args.output_dir:
                     logger.info("  CSVs written to %s", args.output_dir)
-    except RuntimeError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        _exit_code = 2
     finally:
         _signal.signal(_signal.SIGINT, _orig_sigint)
         _signal.signal(_signal.SIGTERM, _orig_sigterm)
