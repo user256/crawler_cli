@@ -1,6 +1,6 @@
 # Ticket 111: Restore CI coverage artifacts and supported action runtimes
 
-**Status:** proposed (2026-07-15 master-CI remediation)
+**Status:** in progress (claimed 2026-07-15 on `agent/ticket-111-ci-artifact-runtime-hygiene`)
 **Priority:** P3 CI hygiene
 **Related:** Tickets 056, 066, and 096
 

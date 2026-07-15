@@ -13,11 +13,14 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+    env:
+      COVERAGE_DIR: coverage
+      COVERAGE_FILE: coverage/coverage-${{ matrix.python-version }}.data
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: "pip"
@@ -26,14 +29,38 @@ jobs:
         run: pip install -e ".[test]"
 
       - name: Run tests with coverage
-        run: pytest -x -q --tb=short -m "not playwright_smoke" --cov=crawler_cli --cov-report=term-missing --cov-fail-under=60
+        run: |
+          mkdir -p "$COVERAGE_DIR"
+          pytest -x -q --tb=short -m "not playwright_smoke" --cov=crawler_cli --cov-report=term-missing --cov-report=xml:${COVERAGE_DIR}/coverage-${{ matrix.python-version }}.xml --cov-fail-under=60
+
+      - name: Assert coverage artifacts exist
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          paths = [
+              Path("coverage/coverage-${{ matrix.python-version }}.data"),
+              Path("coverage/coverage-${{ matrix.python-version }}.xml"),
+          ]
+          missing = [str(path) for path in paths if not path.exists()]
+          empty = [str(path) for path in paths if path.exists() and path.stat().st_size == 0]
+          if missing or empty:
+              problems = []
+              if missing:
+                  problems.append(f"missing: {', '.join(missing)}")
+              if empty:
+                  problems.append(f"empty: {', '.join(empty)}")
+              raise SystemExit("; ".join(problems))
+          PY
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: coverage-${{ matrix.python-version }}
-          path: .coverage
+          path: coverage/
+          if-no-files-found: error
 
   integration:
     name: "Integration tests (Postgres)"
@@ -55,9 +82,9 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -77,9 +104,9 @@ jobs:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -107,7 +134,7 @@ jobs:
           PY
 
       - name: Cache supported Chromium
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: playwright-${{ runner.os }}-${{ steps.playwright-meta.outputs.playwright_version }}-${{ steps.playwright-meta.outputs.chromium_revision }}
@@ -123,9 +150,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
