@@ -776,7 +776,7 @@ async def test_run_intent_overlap_excludes_amp_and_writes_hygiene(tmp_path):
             "url": "https://a.com/p/amp",
             "base_url": "https://a.com/p",
             "variant_kind": "amp",
-            "confirmed_by": "base-exists",
+            "confirmed_by": "signature-hash",
             "canonical_url": "",
             "has_canonical": False,
             "issue": "missing-canonical",
