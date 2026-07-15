@@ -2827,12 +2827,14 @@ class AsyncpgStore:
 
     async def classify_amp_variants(self) -> list[AmpHygieneRow]:
         """Classify AMP variants structurally and record ``variant_kind='amp'``
-        on their URL identity (ticket 103).
+        on their URL identity (tickets 103 / 108).
 
         Uses only crawler-captured evidence — the ``rel="amphtml"`` edges in
-        ``amphtml_urls``, AMP URL shape, canonical edges and content hashes —
-        via the pure :func:`crawler_cli.amp.classify_amp_variants`.  Idempotent:
-        re-running only ever (re)sets ``variant_kind`` to ``'amp'``.
+        ``amphtml_urls``, AMP URL shape, canonical edges and intent-signature
+        hashes — via the pure :func:`crawler_cli.amp.classify_amp_variants`.
+        Recomputes deterministically each run: clears prior ``'amp'`` labels
+        then writes the current classification set, so stale AMP labels drop
+        when a page no longer satisfies the classifier.
 
         Returns one :class:`AmpHygieneRow` per classified AMP page for the
         canonical-hygiene report (``amp_issues.csv``)."""
@@ -2842,11 +2844,11 @@ class AsyncpgStore:
             page_rows = await conn.fetch(
                 """
                 SELECT u.id AS url_id, u.url AS url,
-                       c.content_hash_sha256 AS content_hash,
+                       s.signature_hash AS signature_hash,
                        canu.url AS canonical_url
                 FROM urls u
                 JOIN page_metadata pm ON pm.url_id = u.id
-                LEFT JOIN content c ON c.url_id = u.id
+                LEFT JOIN intent_signatures s ON s.url_id = u.id
                 LEFT JOIN LATERAL (
                     SELECT cu.canonical_url_id
                     FROM canonical_urls cu
@@ -2874,7 +2876,7 @@ class AsyncpgStore:
                 "url_id": int(r["url_id"]),
                 "url": str(r["url"]),
                 "canonical_url": r["canonical_url"],
-                "content_hash": r["content_hash"],
+                "signature_hash": r["signature_hash"],
             }
             for r in page_rows
         ]
@@ -2882,17 +2884,24 @@ class AsyncpgStore:
         canonical_by_id = {int(r["url_id"]): r["canonical_url"] for r in page_rows}
 
         classifications = classify_amp_variants(pages, amphtml_base_by_target)
-        if not classifications:
-            return []
-
         amp_ids = [c.url_id for c in classifications]
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # Clear every prior amp label, then write the current set so a
+                # page that lost its evidence no longer carries variant_kind.
                 await conn.execute(
-                    "UPDATE urls SET variant_kind = $1 WHERE id = ANY($2::int[])",
+                    "UPDATE urls SET variant_kind = NULL WHERE variant_kind = $1",
                     VARIANT_KIND_AMP,
-                    sorted(amp_ids),
                 )
+                if amp_ids:
+                    await conn.execute(
+                        "UPDATE urls SET variant_kind = $1 WHERE id = ANY($2::int[])",
+                        VARIANT_KIND_AMP,
+                        sorted(amp_ids),
+                    )
+
+        if not classifications:
+            return []
 
         hygiene: list[AmpHygieneRow] = []
         for c in classifications:
