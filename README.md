@@ -273,8 +273,33 @@ Useful flags: `--hreflang-mode {suppress,primary-only,off}` (default `suppress`
 skips same-group pairs), `--no-lang-split` (compare across languages),
 `--linkage {single,complete}`, `--fail-on {duplicate,overlap}` (non-zero exit
 for CI — `duplicate` triggers on pages at duplicate risk, `overlap` on any
-overlap pair), and `--ann` (hnswlib approximate pairing above `--ann-min-pages`,
-≥0.99 recall vs exact; needs the `[ann]` extra).
+overlap pair), `--ann` (hnswlib approximate pairing above `--ann-min-pages`,
+≥0.99 recall vs exact; needs the `[ann]` extra), and `--time-sequenced-section
+PATH_PREFIX` (repeatable — see below).
+
+**Time-sequenced sections (news/blog).** News and blog archives naturally
+accumulate semantically-close pages on recurring topics — a monthly "here's
+what changed in health & safety law" column, say. That's usually *correct*
+editorially, not a decanonicalisation bug: the query deserves freshness (QDF),
+so a new post covering last month's topic again is the right outcome, not
+something to merge or canonicalise away. The default `duplicate —
+decanonicalisation likely` label overstates this. Opt in per section with
+repeatable `--time-sequenced-section /news` (path-prefix match on segment
+boundaries, e.g. `/news` matches `/news/archived/foo` but not `/newsletter`);
+this is explicit opt-in only — the tool does not auto-detect sections from URL
+keywords, since only the operator knows their site's structure. Pairs where
+**both** URLs fall under the same configured prefix get pair class
+`time-sequenced` (see `overlap_pairs.csv`'s `pair_class` column) and the
+softer risk label `topical overlap (time-sequenced) — review editorially;
+consider hub or internal linking` instead of the duplicate/overlap label;
+whole clusters confined to one time-sequenced section get a "suggest
+hub/roundup page" `suggested_canonical` in `clusters.csv` instead of a
+canonical pick. These pairs/pages are excluded from `--fail-on duplicate`
+gating by default but are never silently dropped — `run_manifest.json` and
+the summary line report `time_sequenced_pairs`/`time_sequenced_pages` as
+their own count. Cross-section pairs (e.g. a news post vs. an evergreen
+service page) are unaffected and keep full duplicate/overlap treatment, since
+those often are real cannibalisation.
 
 Periodic re-runs: `crawl --refresh-days 30` skips URLs fetched successfully
 within the window, and `--ua "domain=User Agent"` sets a per-domain User-Agent

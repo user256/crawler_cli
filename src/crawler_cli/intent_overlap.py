@@ -25,6 +25,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
+from urllib.parse import urlparse
 
 from .embeddings import ensure_single_model
 from .hreflang_groups import UnionFind, lang_bucket, normalise_url, reciprocity_issues
@@ -62,6 +63,16 @@ CLUSTER_SAMPLE_CAP = 50
 DEFAULT_THRESHOLD = 0.85
 DEFAULT_DUP_THRESHOLD = 0.92
 DIST_LOW = 0.80  # distribution buckets are defined on the 0.80 grid
+
+# Ticket 105: news/blog archives naturally accumulate semantically-close pages
+# on recurring topics (query-deserves-freshness — a fresh post on last month's
+# topic is often the *correct* editorial outcome, not a decanonicalisation
+# bug). Intra-section pairs in operator-designated time-sequenced sections get
+# this softer label instead of "duplicate"/"high intent overlap", and are
+# excluded from `--fail-on duplicate` gating by default (see
+# ``run_intent_overlap``'s ``time_sequenced_pages``/``duplicate_pages`` split).
+TIME_SEQUENCED_PAIR_CLASS = "time-sequenced"
+TIME_SEQUENCED_RISK = "topical overlap (time-sequenced) — review editorially; consider hub or internal linking"
 
 
 def _np() -> Any:
@@ -257,6 +268,71 @@ def complete_linkage_clusters(edges: list[tuple[int, int, float]], vecs: Any, th
 
 
 # --------------------------------------------------------------------------
+# Time-sequenced sections (ticket 105)
+# --------------------------------------------------------------------------
+#
+# Standalone / self-contained: this deliberately does NOT depend on ticket
+# 101's pair-relation/section-column plumbing (parallel work-in-progress on
+# another branch at the time this was written). It reuses ``normalise_url``
+# for consistent path comparison and does its own simple prefix matching.
+# Worth reconciling with ticket 101's relationship-classification helper once
+# both are merged — see the PR description.
+
+
+def _normalise_section_prefix(prefix: str) -> str:
+    """Normalise an operator-supplied ``--time-sequenced-section`` value for
+    segment-boundary matching: lowercase, single leading slash, no trailing
+    slash (except the root ``/``)."""
+    p = prefix.strip().lower()
+    if not p.startswith("/"):
+        p = "/" + p
+    if len(p) > 1:
+        p = p.rstrip("/") or "/"
+    return p
+
+
+def _url_path(url: str) -> str:
+    """Path component of *url* after :func:`normalise_url` (lowercased,
+    trailing slash stripped), for prefix matching independent of
+    scheme/host/query."""
+    return urlparse(normalise_url(url)).path or "/"
+
+
+def path_in_section(url: str, prefix: str) -> bool:
+    """True if *url*'s path falls under *prefix*, matching on path segment
+    boundaries: ``/news`` matches ``/news`` and ``/news/archived/foo`` but not
+    ``/newsletter``. Nested prefixes and a trailing slash on *prefix* are both
+    handled."""
+    path = _url_path(url)
+    section = _normalise_section_prefix(prefix)
+    if section == "/":
+        return True
+    return path == section or path.startswith(section + "/")
+
+
+def time_sequenced_pair_class(url_a: str, url_b: str, sections: Sequence[str]) -> str:
+    """``TIME_SEQUENCED_PAIR_CLASS`` when *url_a* and *url_b* both fall under
+    the SAME configured time-sequenced prefix, else ``""``. Cross-section
+    pairs (one URL in ``/news``, the other outside it, or in a different
+    configured section) are unaffected — those often are real cannibalisation
+    and keep full duplicate/overlap treatment."""
+    for prefix in sections:
+        if path_in_section(url_a, prefix) and path_in_section(url_b, prefix):
+            return TIME_SEQUENCED_PAIR_CLASS
+    return ""
+
+
+def _cluster_time_sequenced_section(urls: Sequence[str], sections: Sequence[str]) -> str | None:
+    """The (normalised) time-sequenced prefix under which EVERY member of
+    *urls* falls, if one exists, else ``None``. Mirrors the pair-level
+    both-sides rule extended to a whole cluster."""
+    for prefix in sections:
+        if all(path_in_section(u, prefix) for u in urls):
+            return _normalise_section_prefix(prefix)
+    return None
+
+
+# --------------------------------------------------------------------------
 # Analysis over structured records (no DB, no pandas)
 # --------------------------------------------------------------------------
 
@@ -292,12 +368,23 @@ def analyse_embeddings(
     use_ann: bool = False,
     ann_min_pages: int = 10000,
     ann_k: int = 128,
+    time_sequenced_sections: Sequence[str] = (),
 ) -> AnalysisResult:
     """Core analysis over embedded, non-excluded page records.
 
     Each record is a dict with: ``url``, ``vector`` (list[float]), ``group``
     (hreflang group id or None), ``hreflang_code``, ``word_count``,
     ``signal_confidence``.  Ported from ``analyse()`` (intent_overlap.py:1224).
+
+    ``time_sequenced_sections`` (ticket 105) is a list of operator-supplied
+    path prefixes (e.g. ``["/news"]``) for recurring-topic archives where the
+    query-deserves-freshness dynamic means near-duplicate pages are usually
+    editorially correct, not decanonicalisation candidates. Pairs where BOTH
+    URLs fall under the SAME prefix get the softer
+    :data:`TIME_SEQUENCED_RISK` label instead of "duplicate"/"high intent
+    overlap", and are excluded from the ``duplicate_pages``/``high_overlap``
+    counts (and therefore from default ``--fail-on duplicate`` gating) — see
+    ``result.summary["time_sequenced_pairs"]`` for their own count.
     """
     np = _np()
     result = AnalysisResult()
@@ -353,10 +440,12 @@ def analyse_embeddings(
     uf = UnionFind(n)
     max_sim = np.zeros(n)
     nearest: list[str | None] = [None] * n
+    nearest_pair_class: list[str] = [""] * n
     partition_edges: list[tuple[str, list[tuple[int, int, float]]]] = []
     suppressed = 0
     all_nn: list[float] = []
     scan_low = min(DIST_LOW, threshold)  # IO ticket 115 floor
+    time_sequenced_pairs = 0
 
     for lang, idx_list in partitions:
         idxs = np.asarray(idx_list)
@@ -380,20 +469,24 @@ def analyse_embeddings(
             if s >= DIST_LOW:
                 part_pair_sims.append(s)
             if s >= threshold:
+                pair_class = time_sequenced_pair_class(urls[i], urls[j], time_sequenced_sections)
+                if pair_class:
+                    time_sequenced_pairs += 1
                 result.overlap_pairs.append(
                     {
                         "url_a": urls[i],
                         "url_b": urls[j],
                         "similarity": round(s, 4),
                         "low_confidence": conf[i] == "low" or conf[j] == "low",
+                        "pair_class": pair_class,
                     }
                 )
                 part_edges.append((i, j, s))
                 uf.union(i, j)
                 if s > max_sim[i]:
-                    max_sim[i], nearest[i] = s, urls[j]
+                    max_sim[i], nearest[i], nearest_pair_class[i] = s, urls[j], pair_class
                 if s > max_sim[j]:
-                    max_sim[j], nearest[j] = s, urls[i]
+                    max_sim[j], nearest[j], nearest_pair_class[j] = s, urls[i], pair_class
         result.distribution_rows.append(build_similarity_distribution(lang, nn, part_pair_sims, pages=part_n))
         if linkage == "complete":
             partition_edges.append((lang, part_edges))
@@ -426,7 +519,13 @@ def analyse_embeddings(
     # Risk + per-page rows
     for i, r in enumerate(emb):
         ms = float(max_sim[i])
-        if ms >= dup_threshold:
+        if ms >= threshold and nearest_pair_class[i] == TIME_SEQUENCED_PAIR_CLASS:
+            # ticket 105: the pairing driving this page's risk is an intra-section
+            # time-sequenced (news/blog) pair — QDF makes near-duplicates here
+            # usually editorially correct, so use the softer review label
+            # instead of "duplicate"/"high intent overlap".
+            risk = TIME_SEQUENCED_RISK
+        elif ms >= dup_threshold:
             risk = "duplicate — decanonicalisation likely"
         elif ms >= threshold:
             risk = "high intent overlap"
@@ -450,9 +549,15 @@ def analyse_embeddings(
         members = [emb[i] for i in member_idxs]
         min_s, mean_s, cohesion, sampled = intra_cluster_stats(vecs, member_idxs)
         chained = min_s < threshold
+        ts_section = _cluster_time_sequenced_section([m["url"] for m in members], time_sequenced_sections)
         if chained:
+            # A chained (non-complete-linkage) cluster is a graph-quality issue
+            # independent of section — keep existing precedence over the
+            # softer time-sequenced label.
             chained_n += 1
             canon = "review — chained cluster"
+        elif ts_section:
+            canon = f"review — time-sequenced section ({ts_section}); suggest hub/roundup page"
         else:
             canon = _pick_canonical(members)
         canon_by_cluster[cid] = canon
@@ -471,6 +576,7 @@ def analyse_embeddings(
                 "cohesion": round(cohesion, 4),
                 "chained": chained,
                 "cohesion_note": note,
+                "time_sequenced": bool(ts_section) and not chained,
             }
         )
     result.cluster_rows.sort(key=lambda c: c["size"], reverse=True)
@@ -499,6 +605,7 @@ def analyse_embeddings(
         )
 
     dup_n = sum(1 for r in emb if str(r.get("_risk", "")).startswith("duplicate"))
+    time_sequenced_pages = sum(1 for r in emb if r.get("_risk") == TIME_SEQUENCED_RISK)
     result.suppressed = suppressed
     result.chained_clusters = chained_n
     result.summary = {
@@ -508,6 +615,12 @@ def analyse_embeddings(
         "chained_clusters": chained_n,
         "duplicate_pages": dup_n,
         "suppressed_pairs": suppressed,
+        # ticket 105: time-sequenced (news/blog) intra-section pairs/pages get
+        # the softer topical-overlap label and are excluded from
+        # duplicate_pages/--fail-on duplicate above — reported here as their
+        # own count so nothing disappears silently.
+        "time_sequenced_pairs": time_sequenced_pairs,
+        "time_sequenced_pages": time_sequenced_pages,
         "threshold": threshold,
         "dup_threshold": dup_threshold,
         "threshold_percentile": round(percentile_rank(threshold, nn_arr), 1) if len(nn_arr) else None,
@@ -557,7 +670,7 @@ _PAGES_FIELDS = [
     "signal_confidence",
     "excluded",
 ]
-_PAIRS_FIELDS = ["url_a", "url_b", "similarity", "low_confidence", "sim_percentile"]
+_PAIRS_FIELDS = ["url_a", "url_b", "similarity", "low_confidence", "sim_percentile", "pair_class"]
 _CLUSTER_FIELDS = [
     "cluster_id",
     "size",
@@ -570,6 +683,7 @@ _CLUSTER_FIELDS = [
     "cohesion",
     "chained",
     "cohesion_note",
+    "time_sequenced",
 ]
 _ISSUE_FIELDS = ["url", "declares_alternate", "hreflang", "issue"]
 _VARIANT_FIELDS = ["norm_url", "representative", "variants", "count"]
@@ -690,10 +804,16 @@ async def run_intent_overlap(
     use_ann: bool = False,
     ann_min_pages: int = 10000,
     ann_k: int = 128,
+    time_sequenced_sections: Sequence[str] = (),
     run_args: dict[str, Any] | None = None,
 ) -> IntentOverlapRun:
     """Load embeddings + identity from the store, run the analysis, write the
-    six CSVs + manifest, and return a run summary (ticket 079)."""
+    six CSVs + manifest, and return a run summary (ticket 079).
+
+    ``time_sequenced_sections`` (ticket 105): repeatable ``--time-sequenced-
+    section`` path prefixes for news/blog archives — see
+    :func:`analyse_embeddings` and :data:`TIME_SEQUENCED_RISK`.
+    """
     from datetime import datetime, timezone
 
     fetched = await store.fetch_analysis_rows()
@@ -725,6 +845,7 @@ async def run_intent_overlap(
         use_ann=use_ann,
         ann_min_pages=ann_min_pages,
         ann_k=ann_k,
+        time_sequenced_sections=time_sequenced_sections,
     )
 
     edges = await store.fetch_hreflang_edges()
