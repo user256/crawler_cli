@@ -6,12 +6,15 @@ Ticket files remain the source of truth for scope and DoD.
 
 ### Current position (2026-07-15)
 
+- Repository review complete: no open pull requests or GitHub issues remain.
+  `master` passed the tracked-project checks (500 passed, 21 skipped; ruff,
+  formatter, and mypy clean).
 - Tickets **101–105** are on `master` and form the intent-overlap reporting
   baseline (relationship, parameterised-URL, AMP, thin-content, time-sequenced).
 - Review remediations **099 / 109 / 111** merged (PRs #20 / #21 / #19); leftover
   hygiene/calibration are **112 / 113**. **108** remains open and should land
   before interactive report work consumes AMP classifications.
-- PR / ticket **110** was explicitly excluded (rejected / unused); next free
+- Ticket **110** was explicitly excluded (rejected / unused); next free
   number is **114**.
 
 ### Ordering rules
@@ -184,7 +187,7 @@ byte-for-byte on casino_org (1221 pairs) and whiskipedia (198 pairs), Jaccard
 1.0000. Standalone Intent_Overlap repo marked superseded. Batch reviewed
 2026-07-05; three follow-ups filed as 082–084 (see next section). Tickets later
 continued through the 2026-07-15 intent-overlap review batch; 110 remains
-unused (PR #110 explicitly out of scope / rejected). Next free number: **114**.
+unused (ticket 110 explicitly out of scope / rejected). Next free number: **114**.
 **LANDED ON MASTER 2026-07-05 (ticket 082):** the whole stack is now on `master`
 base-first — `io-integration-base` roll-up as PR #7, then 076–081 as PRs #8/#2–#6
 in order, 24 base commits kept linear (no history rewrite). Suite green on master
