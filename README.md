@@ -142,9 +142,15 @@ crawler-cli https://www.example.com \
 # Skip storing raw HTML (structured fields + optional hashes only)
 crawler-cli https://www.example.com --no-store-html --content-hashing
 
-# Crawl with CSV ingestion and HTTP Auth
-crawler-cli --csv-file urls.csv --auth-type basic --auth-username admin --auth-password secret
+# Crawl with CSV ingestion and HTTP Auth. Use env/file inputs to avoid putting
+# passwords in process arguments.
+export CRAWLER_AUTH_PASSWORD='secret'
+crawler-cli --csv-file urls.csv --auth-type basic --auth-username admin --auth-password-env CRAWLER_AUTH_PASSWORD
 ```
+
+HTTP authentication supports Basic and Bearer credentials. Digest authentication
+is not advertised because the crawler does not perform Digest challenge/nonce
+negotiation and will not downgrade Digest credentials to Basic.
 
 Page HTML is **gzip-compressed by default** in `pages.html_compressed`. Use `--no-html-compression` only for debugging. Legacy uncompressed rows can be migrated with `compact-html`.
 

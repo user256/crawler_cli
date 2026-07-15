@@ -5,7 +5,7 @@ from typing import Literal
 from urllib.parse import urlparse
 
 
-AuthType = Literal["basic", "digest", "bearer", ""]
+AuthType = Literal["basic", "bearer", ""]
 
 
 @dataclass(slots=True)
@@ -17,11 +17,18 @@ class AuthConfig:
     domain: str = ""
     custom_headers: dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        if str(self.auth_type) == "digest":
+            raise ValueError(
+                "HTTP Digest authentication is not supported. "
+                "Use --auth-type basic or bearer; Digest is never downgraded to Basic."
+            )
+
     @property
     def enabled(self) -> bool:
         if self.auth_type == "bearer" and self.token:
             return True
-        if self.auth_type in {"basic", "digest"} and self.username and self.password:
+        if self.auth_type == "basic" and self.username and self.password:
             return True
         return bool(self.custom_headers)
 
@@ -39,6 +46,6 @@ class AuthConfig:
         return headers
 
     def basic_credentials(self) -> tuple[str, str] | None:
-        if self.auth_type in {"basic", "digest"} and self.username and self.password:
+        if self.auth_type == "basic" and self.username and self.password:
             return self.username, self.password
         return None
