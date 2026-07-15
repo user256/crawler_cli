@@ -136,14 +136,7 @@ def test_ua_falls_back_to_wildcard_when_no_group_matches():
 
 
 def test_consecutive_user_agent_lines_share_rules():
-    content = (
-        "User-agent: a\n"
-        "User-agent: b\n"
-        "Disallow: /private/\n"
-        "Crawl-delay: 2.5\n"
-        "User-agent: *\n"
-        "Disallow:\n"
-    )
+    content = "User-agent: a\nUser-agent: b\nDisallow: /private/\nCrawl-delay: 2.5\nUser-agent: *\nDisallow:\n"
     rules = _RobotsRules("example.com", content)
     assert rules.check("/private/x", "a").allowed is False
     assert rules.check("/private/x", "b").allowed is False
@@ -155,12 +148,7 @@ def test_consecutive_user_agent_lines_share_rules():
 
 
 def test_sitemap_between_user_agents_does_not_split_group():
-    content = (
-        "User-agent: a\n"
-        "Sitemap: https://example.com/sitemap.xml\n"
-        "User-agent: b\n"
-        "Disallow: /g\n"
-    )
+    content = "User-agent: a\nSitemap: https://example.com/sitemap.xml\nUser-agent: b\nDisallow: /g\n"
     rules = _RobotsRules("example.com", content)
     assert rules.check("/g/page", "a").allowed is False
     assert rules.check("/g/page", "b").allowed is False
@@ -314,13 +302,7 @@ async def test_policy_cache_matches_query_rules(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_policy_cache_consecutive_ua_groups(monkeypatch):
-    body = (
-        "User-agent: AlphaBot\n"
-        "User-agent: BetaBot\n"
-        "Disallow: /secret/\n"
-        "User-agent: *\n"
-        "Disallow:\n"
-    )
+    body = "User-agent: AlphaBot\nUser-agent: BetaBot\nDisallow: /secret/\nUser-agent: *\nDisallow:\n"
     config = CrawlConfig(respect_robots_txt=True, user_agent="AlphaBot/1.0")
     cache = RobotsPolicyCache(config)
 
@@ -343,12 +325,7 @@ async def test_policy_cache_consecutive_ua_groups(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_policy_cache_uses_per_url_user_agent(monkeypatch):
-    body = (
-        "User-agent: SpecialBot\n"
-        "Disallow: /blocked/\n"
-        "User-agent: *\n"
-        "Disallow:\n"
-    )
+    body = "User-agent: SpecialBot\nDisallow: /blocked/\nUser-agent: *\nDisallow:\n"
     config = CrawlConfig(
         respect_robots_txt=True,
         user_agent="DefaultBot/1.0",
@@ -369,14 +346,7 @@ async def test_policy_cache_uses_per_url_user_agent(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_policy_cache_crawl_delay_uses_per_url_ua(monkeypatch):
-    body = (
-        "User-agent: SpecialBot\n"
-        "Crawl-delay: 7\n"
-        "Disallow:\n"
-        "User-agent: *\n"
-        "Crawl-delay: 1\n"
-        "Disallow:\n"
-    )
+    body = "User-agent: SpecialBot\nCrawl-delay: 7\nDisallow:\nUser-agent: *\nCrawl-delay: 1\nDisallow:\n"
     config = CrawlConfig(
         respect_robots_txt=True,
         user_agent="DefaultBot/1.0",

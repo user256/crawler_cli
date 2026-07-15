@@ -224,11 +224,7 @@ class _RobotsRules:
         )
 
     def crawl_delay(self, user_agent: str) -> float | None:
-        delays = [
-            self._crawl_delays[key]
-            for key in self._matching_group_keys(user_agent)
-            if key in self._crawl_delays
-        ]
+        delays = [self._crawl_delays[key] for key in self._matching_group_keys(user_agent) if key in self._crawl_delays]
         if not delays:
             return None
         # Prefer the most conservative delay when multiple matching groups set one.
