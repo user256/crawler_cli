@@ -63,6 +63,7 @@ testpaths = ["tests"]
 # integration-only CI job, failing both (ticket-067).
 markers = [
     "integration: requires a real PostgreSQL database (set CRAWLER_CLI_TEST_DSN)",
+    "playwright_smoke: real Chromium-backed Playwright smoke tests (run with --run-playwright-smoke)",
     "slow: long-running (e.g. 10k-vector ANN recall evidence, ticket 081)",
 ]
 
