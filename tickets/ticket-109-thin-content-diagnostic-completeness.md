@@ -23,4 +23,6 @@ Shipped in PR #21:
 - Thin risk / gating / `--fail-on duplicate` behaviour unchanged.
 
 Leftovers filed as ticket 113: Ticket 106 JSON schema field list, and
-`/videos` calibration documentation.
+`/videos` calibration documentation — completed in ticket 113 (hub/category
+sample: `word_count` 820–1042 vs identical `main_text_words=52` /
+`main_text_chars=360` / `signature_words=77` / `signature_chars=545`).

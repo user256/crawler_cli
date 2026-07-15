@@ -36,8 +36,26 @@ Postgres or re-parsing CSVs.
     max_similarity, nearest_url, suggested_canonical, centroid_similarity
     (cosine to the site centroid — the Colab "authority score"), off_topic
     flag (bottom percentile of centroid_similarity, threshold in the
-    envelope). Diagnostic length fields match `pages.csv` from ticket 109;
-    missing evidence must stay distinct from measured zeros (ticket 113).
+    envelope).
+
+#### `pages[]` diagnostic length contract (shared with `pages.csv`)
+
+Ticket 109 / 113: JSON export and the interactive report must expose the
+same thin-content diagnostic surface as `pages.csv`. Required fields:
+
+| Field | Meaning |
+| --- | --- |
+| `word_count` | Raw crawled page word count (chrome-inflated; contrast only) |
+| `main_text_words` | Word count of extracted `main_text` |
+| `main_text_chars` | Character length of extracted `main_text` |
+| `signature_words` | Word count of `signature_model_input` (embedded text) |
+| `signature_chars` | Character length of `signature_model_input` |
+| `signal_confidence` | Extraction confidence (`high` / `low`) |
+
+Missing evidence stays distinct from measured zeros (null/absent vs `0`).
+Do not omit the three post-109 fields (`main_text_words`,
+`main_text_chars`, `signature_chars`) from the exporter or report viewer.
+
   - `pairs[]`: url_a, url_b, similarity, relation, pair_class, thin,
     sim_percentile.
   - `clusters[]`: id, member urls, size, suggested_canonical/action,
@@ -76,5 +94,6 @@ dir (never committed; runs/ is untracked).
 
 ## Status
 in_progress (claimed by `agent/ticket-106-report-data-json-export`) — prerequisites 101–105, 108, and 109 diagnostic columns are
-merged. Unblocked for implementation; ticket 113 tracks the
-remaining calibration note and any schema-contract polish.
+merged. Unblocked for implementation. Ticket 113 documented the
+`pages[]` diagnostic length contract (above) and `/videos` calibration;
+exporter implementation remains this ticket's job.
