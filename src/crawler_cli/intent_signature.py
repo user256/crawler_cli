@@ -37,6 +37,31 @@ _TEXT_CAP = 1500
 DEFAULT_BOILERPLATE_SHARE = 0.30
 DEFAULT_MIN_WORDS = 50
 
+# Ticket 104: a page whose *signature* text (title + h1 + meta + extracted
+# body, the same string that gets embedded and hashed above) has fewer than
+# this many words carries little content beyond boilerplate/template, even
+# when the raw crawled page is long (nav/footer/player chrome inflate
+# ``word_count`` without adding anything distinguishing).
+#
+# 88, not the ~40-60 first guessed at ticket-writing time, because a title +
+# h1 + generic meta description + a site-wide footer disclaimer alone (no
+# real body text at all — the pathological case this ticket targets) already
+# runs ~65-90 words on a real site (thompsons-scotland.co.uk: the /videos hub
+# + category pages that motivated this ticket all carry the *identical*
+# 77-word signature "Video Gallery\nVideo Gallery\n<generic meta>\n<footer
+# legal boilerplate>" and pair at cosine 1.0 purely on that boilerplate). A
+# 40-60 cut would miss them entirely. 88 was chosen as the tightest value
+# that still excludes a real, intentional decanonicalisation case sitting
+# just above the /videos band on the same site (11 `/the-team?...` query-
+# param variants at signature_words=88, all-boilerplate signature too, but
+# whose correct fix is a canonical tag, not "add content" — the real page
+# is a 2299-word JS-rendered listing extraction just couldn't reach). Treat
+# this as a starting point, not a universal constant: recalibrate
+# --thin-signature-words per site by comparing pages.csv's word_count
+# (raw) against signature_words (distinguishing content) — a real gap
+# between the two, like the /videos rows, is the tell.
+DEFAULT_THIN_SIGNATURE_WORDS = 88
+
 
 def _split_title_part(title: str, which: str) -> str:
     """Return the prefix or suffix segment of *title* around the first
@@ -217,6 +242,30 @@ def resolve_signal_confidence(
     if (word_count or 0) < min_words or extraction_method == "fallback":
         return "low"
     return "high"
+
+
+def signature_word_count(signature_model_input: str | None) -> int:
+    """Word count of the stored ``signature_model_input`` (ticket 104): the
+    exact string embedded and hashed, so this directly measures how much
+    distinguishing content (title/h1/meta + the first 1500 chars of extracted
+    body) a page actually carries — independent of the raw crawl-time
+    ``word_count``, which includes nav/footer/template text."""
+    if not signature_model_input:
+        return 0
+    return len(signature_model_input.split())
+
+
+def is_thin_signature(signature_model_input: str | None, threshold: int = DEFAULT_THIN_SIGNATURE_WORDS) -> bool:
+    """True when *signature_model_input* has fewer than *threshold* words —
+    the page pairs on shared boilerplate rather than real content (ticket
+    104: the thompsons-scotland ``/videos`` cluster, wc 820-1040 but a near
+    empty extracted signature). ``None`` — no signature computed at all —
+    is treated as *unknown*, not thin, so callers that don't supply this
+    field (older data, synthetic records) keep today's behaviour rather than
+    being flagged thin by default."""
+    if signature_model_input is None:
+        return False
+    return signature_word_count(signature_model_input) < threshold
 
 
 @dataclass(slots=True)

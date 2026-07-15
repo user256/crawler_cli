@@ -276,6 +276,29 @@ for CI — `duplicate` triggers on pages at duplicate risk, `overlap` on any
 overlap pair), and `--ann` (hnswlib approximate pairing above `--ann-min-pages`,
 ≥0.99 recall vs exact; needs the `[ann]` extra).
 
+**Thin content vs true duplicates.** Pages whose *signature* text (title + h1
++ meta description + extracted body — the same string that gets embedded)
+has fewer than `--thin-signature-words` words (default `88`) carry little
+distinguishing content, even when the raw crawled page is long — nav/footer/
+player chrome inflates `word_count` without adding anything unique. When a
+page's only `>= --dup-threshold` pairings are with other thin pages, its risk
+is downgraded from `duplicate — decanonicalisation likely` (which prescribes
+canonical/merge) to `thin content — add distinguishing content`; a pair where
+only one side is thin keeps the normal duplicate risk on both pages but is
+flagged `thin: asymmetric` in `overlap_pairs.csv` so the asymmetry isn't
+hidden. `pages.csv` gains `signature_words` next to `word_count` for the
+contrast, `clusters.csv` gains a `thin` column, and `--fail-on duplicate`
+excludes thin-only pairs from the duplicate count by default (the run summary
+reports thin page/pair counts separately, so nothing is hidden). The `88`
+default came from calibrating against a real run
+(thompsons-scotland.co.uk): its `/videos` hub + category pages all share an
+*identical* 77-word signature — title, h1, a generic meta description, and a
+site-wide footer disclaimer, no real body text — and pair at cosine 1.0
+purely on that boilerplate, despite 820-1040 raw words each. A naive 40-60
+word guess would miss that entirely. Recalibrate per site by comparing
+`pages.csv`'s `word_count` against `signature_words`: a persistent gap
+between the two (high `word_count`, low `signature_words`) is the tell.
+
 Periodic re-runs: `crawl --refresh-days 30` skips URLs fetched successfully
 within the window, and `--ua "domain=User Agent"` sets a per-domain User-Agent
 (matches subdomains) for portfolio crawls.

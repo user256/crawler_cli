@@ -37,6 +37,7 @@ from .cookies import (
 from .csv_urls import load_urls_from_csv
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine
+from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .reports import CrawlReports
 
@@ -1182,6 +1183,7 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
         "ann": args.ann,
         "ann_min_pages": args.ann_min_pages,
         "ann_k": args.ann_k,
+        "thin_signature_words": args.thin_signature_words,
     }
 
     store = _store_from_args(args)
@@ -1200,6 +1202,7 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
             use_ann=args.ann,
             ann_min_pages=args.ann_min_pages,
             ann_k=args.ann_k,
+            thin_signature_words=args.thin_signature_words,
             run_args=run_args,
         )
     except MixedModelError as exc:
@@ -1220,6 +1223,12 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
         f"{s.get('overlap_pairs', 0)} pairs, {s.get('clusters', 0)} clusters, "
         f"{s.get('duplicate_pages', 0)} duplicate pages "
         f"({s.get('suppressed_pairs', 0)} intra-hreflang pairs suppressed){tnote}"
+    )
+    print(
+        f"  thin content: {s.get('thin_content_pages', 0)} pages downgraded from duplicate risk "
+        f"({s.get('thin_pages', 0)} pages below --thin-signature-words "
+        f"{s.get('thin_signature_words', args.thin_signature_words)}, "
+        f"{s.get('thin_pairs', 0)} thin-vs-thin pairs excluded from --fail-on duplicate)"
     )
     print(f"Reports written to {args.out}/ ({len(run.written)} files)")
     if run.exit_code:
@@ -1727,6 +1736,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--linkage", choices=("single", "complete"), default="single", help="Clustering linkage (default single)"
     )
     io_parser.add_argument("--out", default="./out", help="Output directory for CSV reports")
+    io_parser.add_argument(
+        "--thin-signature-words",
+        type=int,
+        default=DEFAULT_THIN_SIGNATURE_WORDS,
+        help=(
+            "Pages whose signature text (title+h1+meta+extracted body) has fewer than this "
+            f"many words are 'thin' (default {DEFAULT_THIN_SIGNATURE_WORDS}); a duplicate-risk page "
+            "whose only high-similarity pairings are thin-vs-thin is relabelled 'thin content' "
+            "instead of decanonicalisation risk. Calibrate per-site: compare pages.csv word_count "
+            "(raw) against signature_words (distinguishing content)"
+        ),
+    )
     io_parser.add_argument(
         "--fail-on",
         choices=("duplicate", "overlap"),
