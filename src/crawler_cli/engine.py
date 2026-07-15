@@ -100,6 +100,10 @@ def _crawl_run_config_hash(snapshot: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+class CrawlRunSelectionError(RuntimeError):
+    """Invalid run selection or resume state for crawl_open()."""
+
+
 class CrawlEngine:
     def __init__(self, config: CrawlConfig, store: AsyncpgStore | MemoryStore | None = None) -> None:
         self.config = config
@@ -636,10 +640,10 @@ class CrawlEngine:
         existing_run = await get_run(selected_run_id) if get_run is not None else None
         if resume:
             if existing_run is None and get_run is not None:
-                raise RuntimeError(f"crawl run not found: {selected_run_id}")
+                raise CrawlRunSelectionError(f"crawl run not found: {selected_run_id}")
             stored_hash = str(existing_run.get("config_hash", "")) if isinstance(existing_run, dict) else ""
             if stored_hash and stored_hash != config_hash and not allow_run_config_mismatch:
-                raise RuntimeError(
+                raise CrawlRunSelectionError(
                     "crawl run config mismatch; use --allow-run-config-mismatch only if you intend to "
                     f"resume {selected_run_id} with different seeds/scope/config"
                 )
@@ -653,7 +657,7 @@ class CrawlEngine:
             return selected_run_id, snapshot, config_hash
 
         if existing_run is not None:
-            raise RuntimeError(
+            raise CrawlRunSelectionError(
                 f"crawl run already exists: {selected_run_id}; choose a new --crawl-run-id or use --resume"
             )
         if create_run is not None:
@@ -666,7 +670,7 @@ class CrawlEngine:
                     status="running",
                 )
             except ValueError as exc:
-                raise RuntimeError(str(exc)) from exc
+                raise CrawlRunSelectionError(str(exc)) from exc
         elif set_active is not None:
             set_active(selected_run_id)
         logger.info("Starting crawl run %s", selected_run_id)

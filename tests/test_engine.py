@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
 from crawler_cli import CrawlConfig, CrawlEngine
+from crawler_cli.engine import CrawlRunSelectionError
 from crawler_cli.models import FetchResponse
 from crawler_cli.persistence import MemoryStore
 
@@ -364,6 +366,84 @@ async def test_memory_open_crawl_valid_resume_uses_selected_run_only():
     assert second_job.run_id == "resume-run"
     assert len(second_job.results) == 1
     assert await store.frontier_stats(run_id="resume-run") == (0, 0, 2)
+
+
+@pytest.mark.asyncio
+async def test_memory_open_crawl_resume_missing_run_raises_not_found():
+    store = MemoryStore()
+    engine = CrawlEngine(
+        CrawlConfig(max_concurrency=1, default_open_crawl_limit=1, discover_sitemaps=False, respect_robots_txt=False),
+        store=store,
+    )
+    engine.backend = FakeBackend({"https://resume.example/a": "<html><body>a</body></html>"})
+
+    with pytest.raises(CrawlRunSelectionError, match="crawl run not found: missing-run"):
+        await engine.crawl_open(["https://resume.example/a"], max_urls=1, run_id="missing-run", resume=True)
+
+
+@pytest.mark.asyncio
+async def test_memory_open_crawl_resume_config_mismatch_raises_without_override():
+    store = MemoryStore()
+    first = CrawlEngine(
+        CrawlConfig(max_concurrency=1, default_open_crawl_limit=1, discover_sitemaps=False, respect_robots_txt=False),
+        store=store,
+    )
+    first.backend = FakeBackend({"https://resume.example/a": "<html><body>a</body></html>"})
+    await first.crawl_open(["https://resume.example/a"], max_urls=1, run_id="resume-run")
+
+    second = CrawlEngine(
+        CrawlConfig(
+            max_concurrency=1,
+            default_open_crawl_limit=1,
+            discover_sitemaps=False,
+            respect_robots_txt=False,
+            same_host_only=False,
+        ),
+        store=store,
+    )
+    second.backend = FakeBackend({"https://resume.example/a": "<html><body>a</body></html>"})
+
+    with pytest.raises(CrawlRunSelectionError, match="crawl run config mismatch"):
+        await second.crawl_open(["https://resume.example/a"], max_urls=1, run_id="resume-run", resume=True)
+
+
+@pytest.mark.asyncio
+async def test_memory_open_crawl_resume_config_mismatch_warns_with_override(caplog: pytest.LogCaptureFixture):
+    store = MemoryStore()
+    pages = {
+        "https://resume.example/a": "<html><body>a</body></html>",
+        "https://resume.example/b": "<html><body>b</body></html>",
+    }
+    first = CrawlEngine(
+        CrawlConfig(max_concurrency=1, default_open_crawl_limit=1, discover_sitemaps=False, respect_robots_txt=False),
+        store=store,
+    )
+    first.backend = FakeBackend(pages)
+    await first.crawl_open(["https://resume.example/a", "https://resume.example/b"], max_urls=1, run_id="resume-run")
+
+    second = CrawlEngine(
+        CrawlConfig(
+            max_concurrency=1,
+            default_open_crawl_limit=1,
+            discover_sitemaps=False,
+            respect_robots_txt=False,
+            same_host_only=False,
+        ),
+        store=store,
+    )
+    second.backend = FakeBackend(pages)
+
+    with caplog.at_level(logging.WARNING):
+        job = await second.crawl_open(
+            ["https://resume.example/a", "https://resume.example/b"],
+            max_urls=2,
+            run_id="resume-run",
+            resume=True,
+            allow_run_config_mismatch=True,
+        )
+
+    assert job.run_id == "resume-run"
+    assert "Resuming crawl run resume-run despite seed/scope/config mismatch" in caplog.text
 
 
 @pytest.mark.asyncio

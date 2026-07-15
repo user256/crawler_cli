@@ -408,21 +408,6 @@ SCHEMA_STATEMENTS = [
     ON CONFLICT (run_id) DO NOTHING
     """,
     """
-    INSERT INTO crawl_runs (run_id, mode, status, seed_urls_json, config_hash, config_json, created_at, updated_at)
-    SELECT
-        'legacy',
-        'open',
-        'legacy',
-        '[]',
-        '',
-        '{}',
-        COALESCE(MIN(enqueued_at), EXTRACT(EPOCH FROM NOW())::INTEGER),
-        EXTRACT(EPOCH FROM NOW())::INTEGER
-    FROM frontier
-    WHERE run_id = 'legacy'
-    ON CONFLICT (run_id) DO NOTHING
-    """,
-    """
     CREATE TABLE IF NOT EXISTS url_sources (
         url_id INTEGER NOT NULL REFERENCES urls(id),
         source TEXT NOT NULL CHECK (source IN ('seed', 'link', 'sitemap', 'archive_org', 'robots_sitemap')),
