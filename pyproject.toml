@@ -40,6 +40,11 @@ embeddings-local = [
 ann = [
   "hnswlib>=0.7",
 ]
+# 2D/3D embedding projection for report_data.json (ticket 106). Optional —
+# without it, intent-overlap --json-report falls back to PCA via numpy.
+viz = [
+  "umap-learn>=0.5",
+]
 test = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",

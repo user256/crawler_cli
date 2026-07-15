@@ -1217,6 +1217,9 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
         "ann_k": args.ann_k,
         "thin_signature_words": args.thin_signature_words,
         "time_sequenced_section": args.time_sequenced_section,
+        "json_report": args.json_report,
+        "json_min_similarity": args.json_min_similarity,
+        "projection_seed": args.projection_seed,
     }
 
     store = _store_from_args(args)
@@ -1238,6 +1241,9 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
             thin_signature_words=args.thin_signature_words,
             time_sequenced_sections=args.time_sequenced_section or (),
             run_args=run_args,
+            json_report=args.json_report,
+            json_min_similarity=args.json_min_similarity,
+            projection_seed=args.projection_seed,
         )
     except MixedModelError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -1829,6 +1835,30 @@ def _build_parser() -> argparse.ArgumentParser:
             "softer 'topical overlap (time-sequenced)' label and are excluded "
             "from --fail-on duplicate by default. Explicit opt-in only."
         ),
+    )
+    io_parser.add_argument(
+        "--json-report",
+        action="store_true",
+        help=(
+            "Also write report_data.json (pages/pairs/clusters + 2D projection "
+            "coords) for interactive viewers (ticket 106). Default off."
+        ),
+    )
+    io_parser.add_argument(
+        "--json-min-similarity",
+        type=float,
+        default=None,
+        help=(
+            "When embedded page count >= 50000, omit pairs below this similarity "
+            "from report_data.json (default: --threshold). Linear pages/clusters "
+            "are always included."
+        ),
+    )
+    io_parser.add_argument(
+        "--projection-seed",
+        type=int,
+        default=42,
+        help="Deterministic seed for UMAP/PCA 2D projection in report_data.json (default 42)",
     )
     _add_postgres_args(io_parser)
 

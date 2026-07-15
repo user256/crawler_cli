@@ -75,6 +75,9 @@ from URL paths and stored signatures only. Output lands in the run's `--out`
 dir (never committed; runs/ is untracked).
 
 ## Status
-in_progress (claimed by `agent/ticket-106-report-data-json-export`) — prerequisites 101–105, 108, and 109 diagnostic columns are
-merged. Unblocked for implementation; ticket 113 tracks the
-remaining calibration note and any schema-contract polish.
+`done` (2026-07-15) — `intent-overlap --json-report` writes `report_data.json`
+(pages/pairs/clusters + 2D UMAP-or-PCA coords, crawler-native cluster labels,
+centroid-similarity / off-topic). Schema includes `main_text_words` /
+`main_text_chars` / `signature_chars` alongside signature/word diagnostics.
+Optional `[viz]` extra for umap-learn; PCA fallback via numpy. ruff/mypy/tests
+green.
