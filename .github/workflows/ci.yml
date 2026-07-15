@@ -65,6 +65,9 @@ jobs:
   integration:
     name: "Integration tests (Postgres)"
     runs-on: ubuntu-latest
+    env:
+      COVERAGE_DIR: coverage
+      COVERAGE_FILE: coverage/coverage-integration.data
 
     services:
       postgres:
@@ -92,10 +95,114 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[test]"
 
-      - name: Run integration tests
+      - name: Run integration tests with coverage
         env:
           CRAWLER_CLI_TEST_DSN: "postgresql://crawler:crawler@localhost:5432/crawler_test"
-        run: pytest -x -q --tb=short -m integration
+        run: |
+          mkdir -p "$COVERAGE_DIR"
+          pytest -x -q --tb=short -m integration \
+            --cov=crawler_cli \
+            --cov-report=term-missing \
+            --cov-report=xml:${COVERAGE_DIR}/coverage-integration.xml \
+            --cov-report=html:${COVERAGE_DIR}/html
+
+      - name: Enforce persistence coverage gate
+        run: |
+          # Dedicated gate: integration suite must exercise a meaningful share of
+          # persistence.py (ticket 096). Overall floor stays in the unit job /
+          # combine job; this catches SQL-layer regressions the unit job misses.
+          python -m coverage report \
+            --data-file="$COVERAGE_FILE" \
+            --include='*/crawler_cli/persistence.py' \
+            --show-missing \
+            --fail-under=65
+
+      - name: Assert integration coverage artifacts exist
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          paths = [
+              Path("coverage/coverage-integration.data"),
+              Path("coverage/coverage-integration.xml"),
+              Path("coverage/html/index.html"),
+          ]
+          missing = [str(path) for path in paths if not path.exists()]
+          empty = [str(path) for path in paths if path.exists() and path.stat().st_size == 0]
+          if missing or empty:
+              problems = []
+              if missing:
+                  problems.append(f"missing: {', '.join(missing)}")
+              if empty:
+                  problems.append(f"empty: {', '.join(empty)}")
+              raise SystemExit("; ".join(problems))
+          PY
+
+      - name: Upload integration coverage report
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: coverage-integration
+          path: coverage/
+          if-no-files-found: error
+
+  coverage-combine:
+    name: "Combined coverage (unit + Postgres)"
+    needs: [test, integration]
+    runs-on: ubuntu-latest
+    env:
+      COVERAGE_DIR: coverage-combined
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install coverage tooling
+        run: pip install -e ".[test]"
+
+      - name: Download unit coverage (3.12)
+        uses: actions/download-artifact@v6
+        with:
+          name: coverage-3.12
+          path: cov-unit
+
+      - name: Download integration coverage
+        uses: actions/download-artifact@v6
+        with:
+          name: coverage-integration
+          path: cov-integration
+
+      - name: Combine coverage and publish reports
+        run: |
+          mkdir -p "$COVERAGE_DIR"
+          cp cov-unit/coverage-3.12.data "$COVERAGE_DIR/coverage-unit.data"
+          cp cov-integration/coverage-integration.data "$COVERAGE_DIR/coverage-integration.data"
+          cd "$COVERAGE_DIR"
+          python -m coverage combine coverage-unit.data coverage-integration.data
+          python -m coverage xml -o coverage-combined.xml
+          python -m coverage html -d html
+          python -m coverage report --show-missing
+          # Persistence gate on the combined picture (unit MemoryStore + PG paths).
+          python -m coverage report \
+            --include='*/crawler_cli/persistence.py' \
+            --show-missing \
+            --fail-under=70
+          # Keep the package-wide floor stable; raise only after critical branches
+          # are covered (ticket 096). Combined measurement must still clear 60%.
+          python -m coverage report --fail-under=60
+
+      - name: Upload combined coverage report
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: coverage-combined
+          path: coverage-combined/
+          if-no-files-found: error
 
   playwright-smoke:
     name: "Playwright smoke (real Chromium)"
