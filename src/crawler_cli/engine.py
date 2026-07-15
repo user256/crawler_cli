@@ -487,14 +487,125 @@ class CrawlEngine:
             await self._save_results(job, save_to)
         return job
 
+    def _sitemap_url_reject_reason(
+        self,
+        url: str,
+        seeds: list[str],
+        *,
+        check_path: bool = True,
+    ) -> str | None:
+        """Return a provenance detail when *url* must not be fetched/enqueued.
+
+        Rejects unsupported schemes, malformed URLs, credential-bearing URLs,
+        host-scope violations, and (when *check_path*) path exclusions
+        (ticket 087).
+        """
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            if parsed.scheme and parsed.scheme not in {"http", "https"}:
+                return "unsupported_scheme"
+            return "malformed_url"
+        if parsed.username is not None or parsed.password is not None:
+            return "credential_url"
+        if self.config.same_host_only and not self.config.is_host_allowed(url, seeds):
+            return "host_out_of_scope"
+        if check_path and not self.config.should_crawl_url(url):
+            return self.config.path_skip_detail(url) or "path_out_of_scope"
+        return None
+
+    async def _bounded_fetch_response(self, url: str):
+        """Fetch *url* under the same politeness controls as page crawls.
+
+        Honours global concurrency, crawl-delay, rate limiting, per-host
+        concurrency, circuit breaking, resilient/proxy retries, response
+        caps (via the backend), and challenge handling (ticket 087).
+        Returns None when the fetch is skipped or fails.
+        """
+        from .models import FetchResponse
+
+        async with self._semaphore:
+            try:
+                if self.config.respect_robots_txt and self.config.honor_robots_crawl_delay:
+                    await self._wait_for_host_delay(url)
+                await self._rate_limiter.wait()
+                host = urlparse(url).netloc.lower()
+                if self.config.circuit_breaker_enabled:
+                    circuit = self._circuit_breakers.for_host(host)
+                    if not circuit.should_allow():
+                        logger.info("Skipping sitemap fetch for %s: circuit_breaker_open", url)
+                        return None
+                host_sem = self._host_semaphore(host)
+                if host_sem is not None:
+                    await host_sem.acquire()
+                try:
+                    fetch_resilient = getattr(self.backend, "fetch_resilient", None)
+                    if fetch_resilient is not None:
+                        response = await fetch_resilient(url)
+                    else:
+                        response = await self.backend.fetch(url)
+                finally:
+                    if host_sem is not None:
+                        host_sem.release()
+
+                challenge_kind = None
+                if self.config.detect_challenges:
+                    response, challenge_kind = await self._handle_challenge(url, response)
+                if challenge_kind is not None:
+                    logger.warning(
+                        "Skipping sitemap fetch for %s: bot challenge (%s)",
+                        url,
+                        challenge_kind,
+                    )
+                    if self.config.circuit_breaker_enabled:
+                        circuit = self._circuit_breakers.for_host(host)
+                        self._record_breaker_failure(circuit, host, f"challenge:{challenge_kind}")
+                    return None
+
+                if self.config.circuit_breaker_enabled:
+                    circuit = self._circuit_breakers.for_host(host)
+                    if response.status >= 500 or response.status == 429:
+                        self._record_breaker_failure(circuit, host, f"http_{response.status}")
+                    else:
+                        circuit.record_success()
+                return response if isinstance(response, FetchResponse) else None
+            except Exception as exc:
+                host = urlparse(url).netloc.lower()
+                logger.warning("sitemap fetch_error for %s: %s: %s", url, type(exc).__name__, exc)
+                if self.config.circuit_breaker_enabled:
+                    circuit = self._circuit_breakers.for_host(host)
+                    self._record_breaker_failure(circuit, host, f"fetch_error:{type(exc).__name__}")
+                return None
+
+    async def _remaining_frontier_budget(self, limit: int) -> int | None:
+        """Return remaining run-global frontier slots, or None when unlimited."""
+        if limit <= 0 or self.store is None:
+            return None
+        queued_count, pending_count, done_count = await self.store.frontier_stats()
+        return max(0, limit - (queued_count + pending_count + done_count))
+
+    async def _record_sitemap_rejects(self, rejects: list[tuple[str, str]]) -> None:
+        """Record rejected sitemap URLs as provenance without consuming frontier budget."""
+        if not rejects or self.store is None:
+            return
+        # Preserve first-seen detail per URL.
+        by_url: dict[str, str] = {}
+        for url, detail in rejects:
+            by_url.setdefault(url, detail)
+        await self.store.record_sources_bulk(list(by_url.items()), source="sitemap")
+
     async def _discover_and_enqueue_sitemaps(
         self,
         seeds: list[str],
         limit: int,
     ) -> list[tuple[str, int, str | None, float]]:
-        """Fetch robots.txt + well-known sitemaps, parse them, enqueue URLs."""
+        """Fetch robots.txt + well-known sitemaps, parse them, enqueue URLs.
+
+        Applies the same host-scope, URL-safety, frontier-budget, and
+        politeness controls as ordinary link discovery (ticket 087).
+        """
         sitemap_urls: list[tuple[str, str]] = []
         parser = SitemapParser()
+        rejects: list[tuple[str, str]] = []
         for seed in seeds:
             # 1. robots.txt sitemap directives
             robots_sitemaps = await self._robots.sitemaps(seed)
@@ -504,24 +615,32 @@ class CrawlEngine:
             for candidate in discover_sitemap_paths(seed):
                 sitemap_urls.append((candidate, "sitemap"))
 
-        # Deduplicate while preserving order
+        # Deduplicate while preserving order; drop out-of-scope sitemap docs
+        # before any fetch (ticket 087).
         seen: set[str] = set()
         unique_sitemaps: list[tuple[str, str]] = []
         for sm_url, source_kind in sitemap_urls:
             if sm_url in seen:
                 continue
             seen.add(sm_url)
+            reason = self._sitemap_url_reject_reason(sm_url, seeds, check_path=False)
+            if reason is not None:
+                rejects.append((sm_url, reason))
+                continue
             unique_sitemaps.append((sm_url, source_kind))
 
         all_page_urls: list[tuple[str, str]] = []  # (url, detail=sitemap_url)
-        hreflang_data: list[tuple[str, list]] = []  # (sitemap_url, hreflang_links)
+        hreflang_data: list[tuple[str, list]] = []  # (page_url, hreflang_links)
+        page_budget = await self._remaining_frontier_budget(limit)
 
         # BFS over sitemap indexes — fetch each level's shards concurrently
         # rather than one at a time to speed up large sitemap hierarchies
-        # (ticket-065).
+        # (ticket-065). Fetches go through the bounded request path (ticket 087).
         current_level = [(sm_url, source_kind, 0) for sm_url, source_kind in unique_sitemaps]
         fetched: set[str] = set()
         while current_level:
+            if page_budget is not None and len(all_page_urls) >= page_budget:
+                break
             # Filter out already-fetched or too-deep items.
             to_fetch_now = [
                 (sm_url, source_kind, depth)
@@ -542,14 +661,13 @@ class CrawlEngine:
             async def _fetch_one(
                 sm_url: str, source_kind: str, depth: int
             ) -> tuple[str, str, int, _FetchResponse | None]:
-                try:
-                    response = await self.backend.fetch(sm_url)
-                    return (sm_url, source_kind, depth, response)
-                except Exception:
-                    return (sm_url, source_kind, depth, None)
+                response = await self._bounded_fetch_response(sm_url)
+                return (sm_url, source_kind, depth, response)
 
             # Process in bounded batches to respect worker limit.
             for i in range(0, len(to_fetch_now), fetch_limit):
+                if page_budget is not None and len(all_page_urls) >= page_budget:
+                    break
                 batch = to_fetch_now[i : i + fetch_limit]
                 batch_results = await asyncio.gather(*[_fetch_one(sm_url, sk, depth) for sm_url, sk, depth in batch])
                 for sm_url, source_kind, depth, response in batch_results:
@@ -564,27 +682,45 @@ class CrawlEngine:
                         continue
                     if doc.kind == "sitemap_index":
                         for child in doc.children:
-                            if child not in fetched:
-                                next_level.append((child, source_kind, depth + 1))
+                            if child in fetched:
+                                continue
+                            reason = self._sitemap_url_reject_reason(child, seeds, check_path=False)
+                            if reason is not None:
+                                rejects.append((child, reason))
+                                continue
+                            next_level.append((child, source_kind, depth + 1))
                     else:
                         for su in doc.urls[: self.config.sitemap_max_urls]:
+                            if page_budget is not None and len(all_page_urls) >= page_budget:
+                                break
+                            reason = self._sitemap_url_reject_reason(su.loc, seeds, check_path=True)
+                            if reason is not None:
+                                rejects.append((su.loc, reason))
+                                continue
                             all_page_urls.append((su.loc, sm_url))
                             if su.hreflang_links:
-                                hreflang_data.append((su.loc, su.hreflang_links))
+                                kept_hreflang = []
+                                for hl in su.hreflang_links:
+                                    hl_reason = self._sitemap_url_reject_reason(hl.href, seeds, check_path=True)
+                                    if hl_reason is not None:
+                                        rejects.append((hl.href, hl_reason))
+                                        continue
+                                    kept_hreflang.append(hl)
+                                if kept_hreflang:
+                                    hreflang_data.append((su.loc, kept_hreflang))
 
             current_level = next_level
 
-        # Enqueue and persist hreflang
-        frontier_data: list[tuple[str, int, str | None, float]] = []
-        out_of_scope: list[str] = []
-        for url, sm_url in all_page_urls:
-            if self.config.should_crawl_url(url):
-                frontier_data.append((url, 0, None, self._priority_score(url, 0)))
-            else:
-                out_of_scope.append(url)
+        await self._record_sitemap_rejects(rejects)
 
-        if out_of_scope:
-            await self._record_out_of_scope_urls(out_of_scope, source="sitemap", detail="path_out_of_scope")
+        # Enqueue under the active run's remaining frontier budget (ticket 087).
+        frontier_data: list[tuple[str, int, str | None, float]] = [
+            (url, 0, None, self._priority_score(url, 0)) for url, _sm_url in all_page_urls
+        ]
+        remaining = await self._remaining_frontier_budget(limit)
+        if remaining is not None:
+            frontier_data = frontier_data[:remaining]
+        enqueued_urls = {item[0] for item in frontier_data}
 
         if frontier_data:
             await self._enqueue_frontier(
@@ -592,8 +728,7 @@ class CrawlEngine:
                 source="sitemap",
                 source_detail=None,
             )
-            # Record source detail for all in-scope URLs in one bulk call.
-            in_scope_pairs = [(url, sm_url) for url, sm_url in all_page_urls if self.config.should_crawl_url(url)]
+            in_scope_pairs = [(url, sm_url) for url, sm_url in all_page_urls if url in enqueued_urls]
             if in_scope_pairs:
                 await self.store.record_sources_bulk(in_scope_pairs, source="sitemap")
 
