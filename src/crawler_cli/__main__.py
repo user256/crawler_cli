@@ -89,13 +89,22 @@ def _resolve_secret_sources(*, value: str, env_var: str, file_path: str, label: 
     return value
 
 
+def _password_source_flag(args: argparse.Namespace) -> str | None:
+    """Return the CLI flag name for the supplied auth-password source, if any."""
+    if getattr(args, "auth_password", "") or "":
+        return "--auth-password"
+    if getattr(args, "auth_password_env", "") or "":
+        return "--auth-password-env"
+    if getattr(args, "auth_password_file", "") or "":
+        return "--auth-password-file"
+    return None
+
+
 def _build_auth(args: argparse.Namespace) -> AuthConfig | None:
     auth_type = getattr(args, "auth_type", "") or ""
     username = getattr(args, "auth_username", "") or ""
     token = getattr(args, "auth_token", "") or ""
-    password_source_provided = any(
-        bool(getattr(args, attr, "") or "") for attr in ("auth_password", "auth_password_env", "auth_password_file")
-    )
+    password_flag = _password_source_flag(args)
     password = _resolve_secret_sources(
         value=getattr(args, "auth_password", "") or "",
         env_var=getattr(args, "auth_password_env", "") or "",
@@ -105,8 +114,8 @@ def _build_auth(args: argparse.Namespace) -> AuthConfig | None:
     if not password:
         password = token
     if not auth_type and not username and not token:
-        if password_source_provided:
-            raise ValueError("--auth-password requires --auth-username or --auth-type basic")
+        if password_flag is not None:
+            raise ValueError(f"{password_flag} requires --auth-username or --auth-type basic")
         return None
     if not auth_type:
         auth_type = "basic" if username else "bearer"
@@ -465,7 +474,6 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         max_concurrency=_concurrency,
         max_requests_per_context=args.max_requests_per_context,
         default_open_crawl_limit=args.max_pages,
-        max_pages=args.max_pages,
         max_response_bytes=getattr(args, "max_response_bytes", MAX_RESPONSE_BYTES_DEFAULT),
         timeout_seconds=args.timeout,
         playwright_network_idle_timeout_seconds=(
@@ -552,8 +560,7 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         help="Additional seed URL. Repeat to crawl multiple hosts in one run.",
     )
     run_group = parser.add_argument_group("Crawl run/resume")
-    run_mode = run_group.add_mutually_exclusive_group()
-    run_mode.add_argument(
+    run_group.add_argument(
         "--resume",
         metavar="RUN_ID",
         help="Resume the selected crawl run id; pending rows from other runs are never claimed.",
@@ -951,7 +958,6 @@ async def _run_crawl(args: argparse.Namespace) -> int:
 
     config = _build_config(args)
     config.default_open_crawl_limit = args.max_pages
-    config.max_pages = args.max_pages
 
     if config.circuit_breaker_enabled:
         logger.info(

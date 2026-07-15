@@ -247,7 +247,7 @@ committed separately (not a ticket).
 
 - `099` `done` (2026-07-15, PR #20; leftovers → 112) [ticket-099-crawl-run-isolation-followups.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-099-crawl-run-isolation-followups.md) — **P2:** drop no-op `--new-run`, `CrawlRunSelectionError` (no broad RuntimeError swallow), remove dead legacy-run backfill SQL, resume mismatch/not-found tests
 - `100` `in_progress` [ticket-100-obscura-installer-test-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-100-obscura-installer-test-hardening.md) — **P3 security:** ticket-094 test hardening — direct rejection tests for tar symlink/absolute/device + zip-symlink members, and a one-time cross-check of the pinned `v0.1.8` SHA-256 digests against the real published release assets — claimed by `agent/ticket-100-obscura-installer-test-hardening`
-- `112` `in_progress` [ticket-112-run-isolation-hygiene-leftovers.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-112-run-isolation-hygiene-leftovers.md) — **P3:** 099 leftovers — dead `CrawlConfig.max_pages` field + auth-password guard wording (+ optional single-arg mutex cleanup) — claimed by `agent/ticket-112-run-isolation-hygiene-leftovers`
+- `112` `done` (2026-07-15) [ticket-112-run-isolation-hygiene-leftovers.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-112-run-isolation-hygiene-leftovers.md) — **P3:** 099 leftovers — removed dead `CrawlConfig.max_pages`; auth-password guard names supplied source flag; `--resume` plain arg (mutex collapsed)
 
 ### Intent-overlap case handling (from thompsons-scotland.co.uk run review, 2026-07-15)
 

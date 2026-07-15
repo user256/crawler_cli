@@ -162,7 +162,7 @@ def test_max_pages_default_is_safe_open_crawl_bound():
     config = _build_config(args)
     assert args.max_pages == DEFAULT_OPEN_CRAWL_LIMIT
     assert config.default_open_crawl_limit == DEFAULT_OPEN_CRAWL_LIMIT
-    assert config.max_pages == DEFAULT_OPEN_CRAWL_LIMIT
+    assert not hasattr(config, "max_pages")
 
 
 def test_max_pages_explicit_finite_value_is_preserved():
@@ -170,7 +170,7 @@ def test_max_pages_explicit_finite_value_is_preserved():
     config = _build_config(args)
     assert args.max_pages == 25
     assert config.default_open_crawl_limit == 25
-    assert config.max_pages == 25
+    assert not hasattr(config, "max_pages")
 
 
 def test_max_pages_zero_preserves_explicit_unlimited_mode():
@@ -178,25 +178,25 @@ def test_max_pages_zero_preserves_explicit_unlimited_mode():
     config = _build_config(args)
     assert args.max_pages == 0
     assert config.default_open_crawl_limit == 0
-    assert config.max_pages == 0
+    assert not hasattr(config, "max_pages")
 
 
 def test_crawl_config_default_open_limit_matches_safe_bound():
     config = CrawlConfig()
     assert config.default_open_crawl_limit == DEFAULT_OPEN_CRAWL_LIMIT
-    assert config.max_pages == DEFAULT_OPEN_CRAWL_LIMIT
+    assert not hasattr(config, "max_pages")
 
 
 def test_crawl_config_explicit_unlimited_mode_is_preserved():
-    config = CrawlConfig(default_open_crawl_limit=0, max_pages=0)
+    config = CrawlConfig(default_open_crawl_limit=0)
     assert config.default_open_crawl_limit == 0
-    assert config.max_pages == 0
+    assert not hasattr(config, "max_pages")
 
 
 def test_crawl_config_explicit_finite_open_limit_is_preserved():
-    config = CrawlConfig(default_open_crawl_limit=25, max_pages=25)
+    config = CrawlConfig(default_open_crawl_limit=25)
     assert config.default_open_crawl_limit == 25
-    assert config.max_pages == 25
+    assert not hasattr(config, "max_pages")
 
 
 def test_profile_flags_enable_playwright_and_default_to_headed():

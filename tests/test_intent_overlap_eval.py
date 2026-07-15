@@ -152,7 +152,7 @@ async def test_intent_overlap_eval_fixture_matches_golden(fixture_site_and_store
         respect_robots_txt=False,
         same_host_only=True,
         discover_sitemaps=False,
-        max_pages=0,
+        default_open_crawl_limit=0,
     )
     engine = CrawlEngine(cfg, store=store)
     await engine.crawl_list([f"{base}{p}" for p in _fixture_pages(base)])

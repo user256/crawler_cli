@@ -1,6 +1,6 @@
 # Ticket 112: Crawl-run isolation hygiene leftovers
 
-**Status:** in_progress (claimed by `agent/ticket-112-run-isolation-hygiene-leftovers`; 2026-07-15 MERGE+REMEDIATE from ticket 099 / PR #20)
+**Status:** done (2026-07-15, branch `agent/ticket-112-run-isolation-hygiene-leftovers`)
 **Priority:** P3 hygiene
 **Related:** Tickets 090, 091, 099
 
@@ -34,3 +34,14 @@ ticket were not folded in:
 No unused crawl-limit config field remains as a latent trap; auth guard copy
 matches the flag that failed; tests cover the wording / config-field behaviour;
 ruff + mypy + unit suite green.
+
+## Resolution
+
+- Deleted dead `CrawlConfig.max_pages`; CLI `--max-pages` maps only to
+  `default_open_crawl_limit` (engine single source of truth).
+- Auth password-context guard names the supplied source flag
+  (`--auth-password` / `--auth-password-env` / `--auth-password-file`).
+- Collapsed the single-member `--resume` mutually exclusive argparse group into
+  a plain argument (resume vs `--crawl-run-id` still validated in `_run_crawl`).
+- Tests updated/added for config-field removal and per-source auth wording.
+- Validation: ruff + mypy clean; 534 unit tests passed.
