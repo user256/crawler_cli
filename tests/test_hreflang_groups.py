@@ -42,6 +42,24 @@ def test_normalise_url_empty_and_non_string():
     assert normalise_url(None) == ""  # type: ignore[arg-type]
 
 
+def test_normalise_url_folds_index_documents():
+    # Default-document tails fold onto their directory URL (ticket 102).
+    assert normalise_url("https://example.com/index.php") == "https://example.com/"
+    assert normalise_url("https://example.com/index.html") == "https://example.com/"
+    assert normalise_url("https://example.com/index.htm") == "https://example.com/"
+    assert normalise_url("https://example.com/dir/index.php") == "https://example.com/dir"
+    assert normalise_url("https://example.com/Dir/INDEX.HTML") == "https://example.com/dir"
+    # An index tail with a real query keeps the (folded) path + the query.
+    assert normalise_url("https://example.com/index.php?id=5") == "https://example.com/?id=5"
+
+
+def test_normalise_url_does_not_strip_index_lookalikes():
+    # Only a "/index.<ext>" tail folds; substrings must not.
+    assert normalise_url("https://example.com/reindex.php") == "https://example.com/reindex.php"
+    assert normalise_url("https://example.com/myindex.html") == "https://example.com/myindex.html"
+    assert normalise_url("https://example.com/index.phpx") == "https://example.com/index.phpx"
+
+
 def test_lang_bucket():
     assert lang_bucket("en-US") == "en"
     assert lang_bucket("en") == "en"

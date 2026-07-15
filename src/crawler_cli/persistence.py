@@ -92,6 +92,7 @@ class AnalysisRow(TypedDict):
     embedding: list[float] | None
     embedding_model: str | None
     canonical_url: str | None
+    signature_hash: str | None
 
 
 DEFAULT_CRAWL_RUN_ID = "legacy"
@@ -2773,6 +2774,7 @@ class AsyncpgStore:
                        ix.overall_indexable AS overall_indexable,
                        s.signal_confidence AS signal_confidence,
                        s.extraction_method AS extraction_method,
+                       s.signature_hash AS signature_hash,
                        e.embedding_json AS embedding_json, e.model AS embedding_model,
                        canu.url AS canonical_url
                 FROM urls u
@@ -2817,6 +2819,7 @@ class AsyncpgStore:
                     "embedding": embedding,
                     "embedding_model": r["embedding_model"],
                     "canonical_url": r["canonical_url"],
+                    "signature_hash": r["signature_hash"],
                 }
             )
         return out

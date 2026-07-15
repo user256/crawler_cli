@@ -1221,6 +1221,13 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
         f"{s.get('duplicate_pages', 0)} duplicate pages "
         f"({s.get('suppressed_pairs', 0)} intra-hreflang pairs suppressed){tnote}"
     )
+    param_pages = s.get("parameterised_pages", 0)
+    if param_pages:
+        print(
+            f"parameterised URLs: {param_pages} pages "
+            f"({s.get('parameterised_duplicates', 0)} folded as duplicates of their base, "
+            f"{s.get('missing_canonical', 0)} missing a canonical)"
+        )
     print(f"Reports written to {args.out}/ ({len(run.written)} files)")
     if run.exit_code:
         print(
