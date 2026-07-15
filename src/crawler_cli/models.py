@@ -108,8 +108,9 @@ class CrawlResult:
     persist_error: str | None = None
     challenge: str | None = None
     """Bot-challenge vendor (cloudflare/datadome/...) if this response was an
-    anti-bot interstitial rather than real content (ticket 074). Set means the
-    page is blocked, not crawled."""
+    anti-bot interstitial rather than real content (ticket 074/089). When set,
+    ``skip_reason`` is ``bot_challenge``, content is not extracted/persisted,
+    and the result is counted as blocked rather than crawled."""
     detected_cms: "CMSDetectionResult | None" = None
     detected_analytics: "AnalyticsDetectionResult | None" = None
     browser_runtime: BrowserRuntime | None = None

@@ -883,3 +883,206 @@ async def test_classify_amp_variants_clears_stale_labels(store: AsyncpgStore) ->
             "https://amp.example/stale/amp",
         )
     assert kind is None
+
+
+@pytest.mark.asyncio
+async def test_challenge_persist_records_metadata_without_content(store: AsyncpgStore) -> None:
+    """Unresolved bot challenges audit to page_metadata but never write content (ticket 089)."""
+    url = "https://challenge.example/"
+    result = CrawlResult(
+        requested_url=url,
+        final_url=url,
+        status=403,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=None,
+        raw_html=None,
+        skip_reason="bot_challenge",
+        challenge="cloudflare",
+        ttfb_seconds=0.1,
+        total_duration_seconds=0.2,
+    )
+    await store.persist(result)
+
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        meta = await conn.fetchrow(
+            """
+            SELECT pm.initial_status_code, pm.challenge, pm.skip_reason, pm.ttfb_seconds
+            FROM page_metadata pm
+            JOIN urls u ON u.id = pm.url_id
+            WHERE u.url = $1
+            """,
+            url,
+        )
+        content_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM content c JOIN urls u ON u.id = c.url_id WHERE u.url = $1",
+            url,
+        )
+        pages_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM pages p JOIN urls u ON u.id = p.url_id WHERE u.url = $1",
+            url,
+        )
+        links_count = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM internal_links il
+            JOIN urls u ON u.id = il.source_url_id
+            WHERE u.url = $1
+            """,
+            url,
+        )
+
+    assert meta is not None
+    assert meta["initial_status_code"] == 403
+    assert meta["challenge"] == "cloudflare"
+    assert meta["skip_reason"] == "bot_challenge"
+    assert meta["ttfb_seconds"] == pytest.approx(0.1)
+    assert content_count == 0
+    assert pages_count == 0
+    assert links_count == 0
+
+
+@pytest.mark.asyncio
+async def test_challenge_persist_does_not_overwrite_prior_content(store: AsyncpgStore) -> None:
+    """A later challenge must not wipe a previously successful page snapshot (ticket 089)."""
+    url = "https://challenge.example/kept"
+    first = CrawlResult(
+        requested_url=url,
+        final_url=url,
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=ExtractedContent(
+            title="Keep Me",
+            meta_description=None,
+            meta_robots=RobotsDirectives(raw=["index"]),
+            x_robots_tag=RobotsDirectives(raw=[]),
+            canonical=None,
+            x_canonical=None,
+            hreflang_links=[],
+            html_lang="en",
+            headings={"h1": ["Keep Me"], "h2": []},
+            text="real body",
+            word_count=2,
+            metadata={},
+        ),
+        raw_html="<html><head><title>Keep Me</title></head><body><h1>Keep Me</h1></body></html>",
+        discovered_links=[
+            DiscoveredLink(
+                href="https://challenge.example/other",
+                anchor_text="Other",
+                xpath="/html/body/a[1]",
+                is_image=False,
+            )
+        ],
+    )
+    await store.persist(first)
+
+    blocked = CrawlResult(
+        requested_url=url,
+        final_url=url,
+        status=403,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=None,
+        raw_html=None,
+        skip_reason="bot_challenge",
+        challenge="cloudflare",
+    )
+    await store.persist(blocked)
+
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        title = await conn.fetchval(
+            "SELECT c.title FROM content c JOIN urls u ON u.id = c.url_id WHERE u.url = $1",
+            url,
+        )
+        link_count = await conn.fetchval(
+            """
+            SELECT COUNT(*) FROM internal_links il
+            JOIN urls u ON u.id = il.source_url_id
+            WHERE u.url = $1
+            """,
+            url,
+        )
+        meta = await conn.fetchrow(
+            """
+            SELECT pm.challenge, pm.skip_reason, pm.final_status_code
+            FROM page_metadata pm
+            JOIN urls u ON u.id = pm.url_id
+            WHERE u.url = $1
+            """,
+            url,
+        )
+
+    assert title == "Keep Me"
+    assert link_count == 1
+    assert meta is not None
+    assert meta["challenge"] == "cloudflare"
+    assert meta["skip_reason"] == "bot_challenge"
+    assert meta["final_status_code"] == 403
+
+
+@pytest.mark.asyncio
+async def test_engine_challenge_hard_stop_end_to_end(store: AsyncpgStore) -> None:
+    """Engine + Postgres: unresolved challenge is blocked, not crawled content (ticket 074/089)."""
+
+    class ChallengedBackend:
+        async def fetch(self, url: str) -> FetchResponse:
+            html = (
+                "<html><head><title>Just a moment...</title></head>"
+                "<body>__cf_chl_opt<a href='/next'>n</a></body></html>"
+            )
+            return FetchResponse(
+                url=url,
+                requested_url=url,
+                status=403,
+                headers={"content-type": "text/html"},
+                body=html.encode(),
+                text=html,
+            )
+
+        async def fetch_resilient(self, url: str) -> FetchResponse:
+            return await self.fetch(url)
+
+        async def close(self) -> None:
+            return None
+
+    engine = CrawlEngine(
+        CrawlConfig(
+            respect_robots_txt=False,
+            detect_challenges=True,
+            challenge_escalate_to_browser=False,
+            discover_sitemaps=False,
+            max_concurrency=1,
+        ),
+        store=store,
+    )
+    engine.backend = ChallengedBackend()
+    result = await engine.crawl("https://challenge-e2e.example/")
+
+    assert result.challenge == "cloudflare"
+    assert result.skip_reason == "bot_challenge"
+    assert result.extracted is None
+    assert result.discovered_links == []
+
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        meta = await conn.fetchrow(
+            """
+            SELECT pm.challenge, pm.skip_reason FROM page_metadata pm
+            JOIN urls u ON u.id = pm.url_id WHERE u.url = $1
+            """,
+            "https://challenge-e2e.example/",
+        )
+        content_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM content c JOIN urls u ON u.id = c.url_id WHERE u.url = $1",
+            "https://challenge-e2e.example/",
+        )
+    assert meta is not None
+    assert meta["challenge"] == "cloudflare"
+    assert meta["skip_reason"] == "bot_challenge"
+    assert content_count == 0

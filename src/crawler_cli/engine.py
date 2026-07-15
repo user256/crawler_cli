@@ -286,6 +286,8 @@ class CrawlEngine:
                         _host_sem.release()
 
                 # Bot-challenge detection + escalate-to-browser (ticket 074).
+                # Unresolved challenges hard-stop before extraction/persistence
+                # of interstitial HTML as page content (ticket 089).
                 challenge_kind = None
                 if self.config.detect_challenges:
                     response, challenge_kind = await self._handle_challenge(url, response)
@@ -300,7 +302,12 @@ class CrawlEngine:
                 detected_cms = None
                 detected_analytics = None
                 custom_data = None
-                if content_type and "html" in content_type.lower():
+                skip_reason: str | None = None
+                if challenge_kind is not None:
+                    # Blocked: keep fetch metadata + vendor, never treat the
+                    # interstitial as extractable/crawled content.
+                    skip_reason = "bot_challenge"
+                elif content_type and "html" in content_type.lower():
                     raw_html = response.text
                     # Large documents are parsed in a worker thread so a
                     # multi-MB page can't stall every in-flight fetch on the
@@ -343,6 +350,7 @@ class CrawlEngine:
                     content_hash_simhash=content_hash_simhash,
                     discovered_links=discovered_links,
                     allowed_by_robots=True if self.config.respect_robots_txt else None,
+                    skip_reason=skip_reason,
                     challenge=challenge_kind,
                     detected_cms=detected_cms,
                     detected_analytics=detected_analytics,

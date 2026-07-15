@@ -345,6 +345,12 @@ SCHEMA_STATEMENTS = [
     ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS inp_ms DOUBLE PRECISION
     """,
     """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS challenge TEXT
+    """,
+    """
+    ALTER TABLE page_metadata ADD COLUMN IF NOT EXISTS skip_reason TEXT
+    """,
+    """
     ALTER TABLE content ADD COLUMN IF NOT EXISTS custom_data JSONB
     """,
     """
@@ -1910,13 +1916,18 @@ class AsyncpgStore:
                 final_url_id = await self._get_or_create_url(conn, result.final_url)
 
                 # Always store page_metadata for the REQUESTED URL
-                # so we know the fetch was attempted and where it landed
+                # so we know the fetch was attempted and where it landed.
+                # Challenge/skip outcome columns let SQL consumers distinguish
+                # bot-challenge interstitials from real content (ticket 089)
+                # without overwriting a prior successful pages/content snapshot
+                # when extracted is None.
                 await conn.execute(
                     """
                     INSERT INTO page_metadata
                         (url_id, initial_status_code, final_status_code, final_url_id,
-                         fetched_at, ttfb_seconds, total_duration_seconds, lcp_ms, cls, inp_ms)
-                    VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::INTEGER, $5, $6, $7, $8, $9)
+                         fetched_at, ttfb_seconds, total_duration_seconds, lcp_ms, cls, inp_ms,
+                         challenge, skip_reason)
+                    VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::INTEGER, $5, $6, $7, $8, $9, $10, $11)
                     ON CONFLICT (url_id) DO UPDATE
                     SET initial_status_code = EXCLUDED.initial_status_code,
                         final_status_code = EXCLUDED.final_status_code,
@@ -1926,7 +1937,9 @@ class AsyncpgStore:
                         total_duration_seconds = EXCLUDED.total_duration_seconds,
                         lcp_ms = EXCLUDED.lcp_ms,
                         cls = EXCLUDED.cls,
-                        inp_ms = EXCLUDED.inp_ms
+                        inp_ms = EXCLUDED.inp_ms,
+                        challenge = EXCLUDED.challenge,
+                        skip_reason = EXCLUDED.skip_reason
                     """,
                     requested_url_id,
                     result.status,
@@ -1937,10 +1950,15 @@ class AsyncpgStore:
                     result.lcp_ms,
                     result.cls,
                     result.inp_ms,
+                    result.challenge,
+                    result.skip_reason,
                 )
 
                 if result.extracted is None:
-                    # Fetch succeeded/failed but no extractable content
+                    # Fetch succeeded/failed but no extractable content (including
+                    # unresolved bot challenges). page_metadata above retains the
+                    # audit trail; pages/content/links from a prior successful
+                    # crawl are left intact.
                     return
 
                 # Determine which URL should own the extracted content.
@@ -1953,18 +1971,24 @@ class AsyncpgStore:
                 if content_url_id != requested_url_id:
                     await conn.execute(
                         """
-                        INSERT INTO page_metadata (url_id, initial_status_code, final_status_code, final_url_id, fetched_at)
-                        VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::INTEGER)
+                        INSERT INTO page_metadata
+                            (url_id, initial_status_code, final_status_code, final_url_id, fetched_at,
+                             challenge, skip_reason)
+                        VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::INTEGER, $5, $6)
                         ON CONFLICT (url_id) DO UPDATE
                         SET initial_status_code = EXCLUDED.initial_status_code,
                             final_status_code = EXCLUDED.final_status_code,
                             final_url_id = EXCLUDED.final_url_id,
-                            fetched_at = EXCLUDED.fetched_at
+                            fetched_at = EXCLUDED.fetched_at,
+                            challenge = EXCLUDED.challenge,
+                            skip_reason = EXCLUDED.skip_reason
                         """,
                         content_url_id,
                         result.status,
                         result.status,
                         final_url_id,
+                        result.challenge,
+                        result.skip_reason,
                     )
 
                 # Store full content against the URL that actually served it
