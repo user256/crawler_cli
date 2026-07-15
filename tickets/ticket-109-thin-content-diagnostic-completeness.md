@@ -1,6 +1,6 @@
 # Ticket 109: Complete thin-content diagnostic evidence
 
-**Status:** proposed (2026-07-15 review remediation)
+**Status:** in progress (claimed 2026-07-15 on `agent/ticket-109-thin-diagnostics`)
 **Priority:** P2 reporting
 **Depends on:** Ticket 104
 

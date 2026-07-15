@@ -614,6 +614,7 @@ def _store_row(url, vec, **over):
         "hreflang_group": None,
         "hreflang_code": None,
         "word_count": 100,
+        "main_text": None,
         "signal_confidence": "high",
         "signature_model_input": None,
         "embedding": _unit(vec),
@@ -658,6 +659,63 @@ async def test_run_intent_overlap_excludes_noindex(tmp_path):
     # Only one eligible page -> no pairs; the noindex page is excluded.
     assert run.result.summary["overlap_pairs"] == 0
     assert run.result.summary["pages_excluded"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_intent_overlap_pages_csv_reports_thin_diagnostic_lengths(tmp_path):
+    rows = [
+        _store_row(
+            "https://a.com/videos",
+            [1.0, 0.0, 0.0],
+            word_count=900,
+            main_text="alpha beta gamma",
+            signature_model_input="title h1 alpha beta gamma",
+        ),
+        _store_row(
+            "https://a.com/videos/clip",
+            [1.0, 0.0, 0.0],
+            word_count=820,
+            main_text="clip clip",
+            signature_model_input="clip clip",
+        ),
+    ]
+    store = FakeAnalysisStore(rows)
+    await run_intent_overlap(store, out_dir=str(tmp_path), lang_split=False)
+
+    with open(tmp_path / "pages.csv") as fh:
+        by_url = {row["url"]: row for row in csv.DictReader(fh)}
+
+    page = by_url["https://a.com/videos"]
+    assert page["word_count"] == "900"
+    assert page["main_text_words"] == "3"
+    assert page["main_text_chars"] == str(len("alpha beta gamma"))
+    assert page["signature_words"] == "5"
+    assert page["signature_chars"] == str(len("title h1 alpha beta gamma"))
+
+
+@pytest.mark.asyncio
+async def test_run_intent_overlap_pages_csv_distinguishes_missing_vs_zero_length_evidence(tmp_path):
+    rows = [
+        _store_row("https://a.com/missing", [1.0, 0.0, 0.0], main_text=None, signature_model_input=None),
+        _store_row("https://a.com/empty", [0.0, 1.0, 0.0], main_text="", signature_model_input=""),
+    ]
+    store = FakeAnalysisStore(rows)
+    await run_intent_overlap(store, out_dir=str(tmp_path), lang_split=False)
+
+    with open(tmp_path / "pages.csv") as fh:
+        by_url = {row["url"]: row for row in csv.DictReader(fh)}
+
+    missing = by_url["https://a.com/missing"]
+    assert missing["main_text_words"] == ""
+    assert missing["main_text_chars"] == ""
+    assert missing["signature_words"] == ""
+    assert missing["signature_chars"] == ""
+
+    empty = by_url["https://a.com/empty"]
+    assert empty["main_text_words"] == "0"
+    assert empty["main_text_chars"] == "0"
+    assert empty["signature_words"] == "0"
+    assert empty["signature_chars"] == "0"
 
 
 @pytest.mark.asyncio
