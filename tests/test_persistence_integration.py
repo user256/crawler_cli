@@ -783,17 +783,51 @@ async def test_amphtml_edge_persisted(store: AsyncpgStore) -> None:
 
 @pytest.mark.asyncio
 async def test_classify_amp_variants_marks_variant_kind_and_hygiene(store: AsyncpgStore) -> None:
-    """classify_amp_variants classifies via every evidence path and records the
-    canonical-hygiene rows (ticket 103)."""
+    """classify_amp_variants classifies via positive evidence paths and records
+    the canonical-hygiene rows (tickets 103 / 108)."""
     # Base page declaring an amphtml edge to an otherwise unshaped target.
     await store.persist(_amp_page("https://amp.example/base", amphtml="https://amp.example/base/amp"))
     # AMP page confirmed by canonical-to-base (base also crawled).
     await store.persist(_amp_page("https://amp.example/base/amp", canonical="https://amp.example/base"))
-    # AMP page confirmed by base-exists but with NO canonical -> hygiene issue.
+    # AMP page confirmed by signature-hash match but with NO canonical -> hygiene.
     await store.persist(_amp_page("https://amp.example/blog"))
     await store.persist(_amp_page("https://amp.example/blog/amp"))
+    # Literal /amp with crawled base but no amphtml/canonical/signature evidence.
+    await store.persist(_amp_page("https://amp.example/ordinary"))
+    await store.persist(_amp_page("https://amp.example/ordinary/amp"))
     # A decoy: slug ends in "amp" but is a real page -> must NOT be classified.
     await store.persist(_amp_page("https://amp.example/revamp"))
+
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        id_rows = await conn.fetch(
+            "SELECT id, url FROM urls WHERE url = ANY($1::text[])",
+            [
+                "https://amp.example/blog",
+                "https://amp.example/blog/amp",
+            ],
+        )
+    ids = {r["url"]: int(r["id"]) for r in id_rows}
+    await store.store_intent_signatures_bulk(
+        [
+            {
+                "url_id": ids["https://amp.example/blog"],
+                "main_text": "blog body",
+                "extraction_method": "test",
+                "signal_confidence": "high",
+                "signature_hash": "blog-sig",
+                "signature_model_input": "test",
+            },
+            {
+                "url_id": ids["https://amp.example/blog/amp"],
+                "main_text": "blog body amp",
+                "extraction_method": "test",
+                "signal_confidence": "high",
+                "signature_hash": "blog-sig",
+                "signature_model_input": "test",
+            },
+        ]
+    )
 
     hygiene = await store.classify_amp_variants()
     hygiene_by_url = {row["url"]: row for row in hygiene}
@@ -807,10 +841,14 @@ async def test_classify_amp_variants_marks_variant_kind_and_hygiene(store: Async
     assert blog_amp["issue"] == "missing-canonical"
     assert blog_amp["base_url"] == "https://amp.example/blog"
     assert blog_amp["has_canonical"] is False
+    assert blog_amp["confirmed_by"] == "signature-hash"
     # AMP page that canonicals to its base is healthy (no issue).
     assert hygiene_by_url["https://amp.example/base/amp"]["issue"] == ""
+    assert hygiene_by_url["https://amp.example/base/amp"]["confirmed_by"] in {
+        "amphtml-target",
+        "canonical-to-base",
+    }
 
-    assert store.pool is not None
     async with store.pool.acquire() as conn:
         amp_kinds = await conn.fetch("SELECT url, variant_kind FROM urls WHERE variant_kind IS NOT NULL ORDER BY url")
     marked = {r["url"]: r["variant_kind"] for r in amp_kinds}
@@ -818,5 +856,30 @@ async def test_classify_amp_variants_marks_variant_kind_and_hygiene(store: Async
         "https://amp.example/base/amp": "amp",
         "https://amp.example/blog/amp": "amp",
     }
-    # The /revamp decoy was never marked.
+    # Base-exists alone and /revamp decoy were never marked.
+    assert "https://amp.example/ordinary/amp" not in marked
     assert "https://amp.example/revamp" not in marked
+
+
+@pytest.mark.asyncio
+async def test_classify_amp_variants_clears_stale_labels(store: AsyncpgStore) -> None:
+    """Recomputation clears variant_kind when a page no longer classifies (ticket 108)."""
+    await store.persist(_amp_page("https://amp.example/stale/amp", canonical="https://amp.example/stale"))
+    hygiene = await store.classify_amp_variants()
+    assert [row["url"] for row in hygiene] == ["https://amp.example/stale/amp"]
+
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM canonical_urls WHERE url_id = (SELECT id FROM urls WHERE url = $1)",
+            "https://amp.example/stale/amp",
+        )
+
+    hygiene_after = await store.classify_amp_variants()
+    assert hygiene_after == []
+    async with store.pool.acquire() as conn:
+        kind = await conn.fetchval(
+            "SELECT variant_kind FROM urls WHERE url = $1",
+            "https://amp.example/stale/amp",
+        )
+    assert kind is None
