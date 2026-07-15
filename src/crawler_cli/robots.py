@@ -11,7 +11,9 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from .backends import _proxy_url, build_proxy_pool
 from .config import CrawlConfig
+from .proxy_pool import ProxyPool
 
 
 @lru_cache(maxsize=2048)
@@ -70,6 +72,19 @@ def calculate_cache_ttl(headers: dict[str, str], default_ttl: int = 3600) -> int
         return default_ttl
 
 
+def _path_with_query(url: str) -> str:
+    """Return the path (+ query if present) used for robots rule matching.
+
+    RFC 9309 §2.2.2 matches against the URI path; query is part of the path
+    component for pattern matching (e.g. ``Disallow: /*?``).
+    """
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    if parsed.query:
+        return f"{path}?{parsed.query}"
+    return path
+
+
 @dataclass(slots=True)
 class RobotsDecision:
     allowed: bool
@@ -83,6 +98,10 @@ class _RobotsRules:
 
     Implements RFC 9309 longest-match precedence with Allow tie-break and
     case-insensitive product-token user-agent matching.
+
+    Consecutive ``User-agent`` lines (before any allow/disallow/crawl-delay)
+    form one shared group. Repeated groups that match the same crawler are
+    combined when evaluating rules (RFC 9309 §2.2.1).
     """
 
     def __init__(self, domain: str, content: str, *, scheme: str = "https") -> None:
@@ -91,7 +110,8 @@ class _RobotsRules:
         self._groups: dict[str, list[tuple[str, str]]] = {}
         self._crawl_delays: dict[str, float] = {}
         self._sitemaps: list[str] = []
-        current_ua: str | None = None
+        current_uas: list[str] = []
+        in_rules = False
         for line in content.splitlines():
             line = line.strip()
             if not line or line.startswith("#") or ":" not in line:
@@ -100,61 +120,81 @@ class _RobotsRules:
             key = key.strip().lower()
             value = value.strip()
             if key == "user-agent":
-                current_ua = value
-                self._groups.setdefault(current_ua, [])
-            elif key in {"disallow", "allow"} and current_ua is not None:
-                self._groups[current_ua].append((key, value))
-            elif key == "crawl-delay" and current_ua is not None:
+                if in_rules:
+                    current_uas = [value]
+                    in_rules = False
+                else:
+                    current_uas.append(value)
+                for ua in current_uas:
+                    self._groups.setdefault(ua, [])
+            elif key in {"disallow", "allow"} and current_uas:
+                in_rules = True
+                for ua in current_uas:
+                    self._groups.setdefault(ua, []).append((key, value))
+            elif key == "crawl-delay" and current_uas:
+                in_rules = True
                 try:
-                    self._crawl_delays[current_ua] = float(value)
+                    delay = float(value)
                 except ValueError:
-                    pass
+                    continue
+                for ua in current_uas:
+                    self._crawl_delays[ua] = delay
             elif key == "sitemap":
+                # Sitemap is not a group rule; it must not terminate a
+                # consecutive User-agent start-group (Google / common practice).
                 self._sitemaps.append(value)
         if not self._groups:
             self._groups["*"] = []
 
-    def _matching_group_key(self, user_agent: str) -> str | None:
-        """Return the most-specific group key for *user_agent*.
+    def _matching_group_keys(self, user_agent: str) -> list[str]:
+        """Return all group keys that match *user_agent* (to be combined).
 
-        Matching order (per RFC 9309):
-        1. Exact case-insensitive match on the full token.
+        Matching order (per RFC 9309 §2.2.1):
+        1. Exact case-insensitive match on the full token (all such groups).
         2. Case-insensitive prefix/product-token match (e.g. group
            ``crawler_cli`` matches UA ``crawler_cli/0.1``).
         3. The catch-all ``*`` group.
-        Returns None if no group applies.
+        Specific matches are never combined with ``*``.
         """
         ua_lower = user_agent.lower()
-        # Exact match first (case-insensitive)
-        for key in self._groups:
-            if key.lower() == ua_lower:
-                return key
-        # Product-token match: UA starts with the group token (case-insensitive)
+        exact = [key for key in self._groups if key.lower() == ua_lower]
+        if exact:
+            return exact
+        product: list[str] = []
         for key in self._groups:
             if key == "*":
                 continue
             token = key.lower()
             if ua_lower == token or ua_lower.startswith(token + "/") or ua_lower.startswith(token + " "):
-                return key
-        # Wildcard fallback
+                product.append(key)
+        if product:
+            return product
         if "*" in self._groups:
-            return "*"
-        return None
+            return ["*"]
+        return []
+
+    def _matching_group_key(self, user_agent: str) -> str | None:
+        """Return the primary matching group key (first combined key), or None."""
+        keys = self._matching_group_keys(user_agent)
+        return keys[0] if keys else None
 
     def check(self, path: str, user_agent: str) -> RobotsDecision:
         """Return the allow/disallow decision for *path* using longest-match
         precedence with Allow tie-break (RFC 9309 §2.2.2).
 
         The most specific (longest rule pattern) matching rule wins.  When two
-        rules of equal specificity conflict, Allow beats Disallow.
+        rules of equal specificity conflict, Allow beats Disallow.  Rules from
+        all matching groups for *user_agent* are combined before evaluation.
         """
-        group_key = self._matching_group_key(user_agent)
-        rules = self._groups.get(group_key, []) if group_key else []
+        group_keys = self._matching_group_keys(user_agent)
+        rules: list[tuple[str, str]] = []
+        for key in group_keys:
+            rules.extend(self._groups.get(key, []))
 
         best_len = -1
         best_type: str | None = None
         best_rule: str | None = None
-        best_ua: str | None = group_key
+        best_ua: str | None = group_keys[0] if group_keys else None
 
         for rule_type, rule_path in rules:
             if not self._match(path, rule_path):
@@ -184,10 +224,11 @@ class _RobotsRules:
         )
 
     def crawl_delay(self, user_agent: str) -> float | None:
-        group_key = self._matching_group_key(user_agent)
-        if group_key and group_key in self._crawl_delays:
-            return self._crawl_delays[group_key]
-        return None
+        delays = [self._crawl_delays[key] for key in self._matching_group_keys(user_agent) if key in self._crawl_delays]
+        if not delays:
+            return None
+        # Prefer the most conservative delay when multiple matching groups set one.
+        return max(delays)
 
     def sitemaps(self) -> list[str]:
         return list(self._sitemaps)
@@ -242,6 +283,11 @@ class RobotsCache:
         self._cache[domain] = (rules, time.time(), headers or {})
 
     def mark_failed(self, domain: str) -> None:
+        """Record that robots.txt was unreachable (5xx / network) for *domain*.
+
+        Per RFC 9309 §2.3.1.4, unreachable robots.txt means complete disallow
+        for the remainder of this crawl session.
+        """
         self._failed_domains.add(domain)
 
     def is_failed(self, domain: str) -> bool:
@@ -249,10 +295,27 @@ class RobotsCache:
 
 
 class RobotsPolicyCache:
+    """Fetch, cache, and evaluate robots.txt for crawl URLs.
+
+    Temporary-failure policy (RFC 9309 §2.3.1.4): when robots.txt is
+    unreachable due to HTTP 5xx or a network error, the host is marked failed
+    and ``check()`` returns ``allowed=False`` (complete disallow) for the rest
+    of the session. HTTP 4xx remains allow-all (§2.3.1.3).
+    """
+
     def __init__(self, config: CrawlConfig) -> None:
         self.config = config
         self.cache = RobotsCache(default_ttl=int(config.robots_cache_ttl_seconds))
         self._locks: dict[str, asyncio.Lock] = {}
+        self._proxy_pool: ProxyPool | None = build_proxy_pool(config)
+
+    def _user_agent_for(self, url: str) -> str:
+        return self.config.user_agent_for(url)
+
+    def _select_proxy(self, robots_url: str) -> str | None:
+        if self._proxy_pool is not None:
+            return self._proxy_pool.select(robots_url)
+        return _proxy_url(self.config)
 
     async def get_rules(self, url: str) -> _RobotsRules | None:
         parsed = urlparse(url)
@@ -275,25 +338,35 @@ class RobotsPolicyCache:
     async def check(self, url: str) -> RobotsDecision:
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
+        source_url = f"{parsed.scheme}://{domain}/robots.txt"
         if self.cache.is_failed(domain):
+            # RFC 9309 §2.3.1.4: unreachable → complete disallow.
             return RobotsDecision(
-                allowed=True,
-                matched_rule=None,
+                allowed=False,
+                matched_rule="robots.txt unreachable",
                 matched_user_agent=None,
-                source_url=f"{parsed.scheme}://{domain}/robots.txt",
+                source_url=source_url,
             )
 
         rules = await self.get_rules(url)
         if rules is None:
+            # Still unreachable after fetch attempt (or mark_failed mid-flight).
+            if self.cache.is_failed(domain):
+                return RobotsDecision(
+                    allowed=False,
+                    matched_rule="robots.txt unreachable",
+                    matched_user_agent=None,
+                    source_url=source_url,
+                )
             return RobotsDecision(
                 allowed=True,
                 matched_rule=None,
                 matched_user_agent=None,
-                source_url=f"{parsed.scheme}://{domain}/robots.txt",
+                source_url=source_url,
             )
 
-        path = parsed.path or "/"
-        return rules.check(path, self.config.user_agent)
+        path = _path_with_query(url)
+        return rules.check(path, self._user_agent_for(url))
 
     async def is_allowed(self, url: str) -> bool:
         decision = await self.check(url)
@@ -302,7 +375,7 @@ class RobotsPolicyCache:
     async def get_crawl_delay(self, url: str) -> Optional[float]:
         domain = urlparse(url).netloc.lower()
         await self.get_rules(url)
-        return self.cache.get_crawl_delay(domain, self.config.user_agent)
+        return self.cache.get_crawl_delay(domain, self._user_agent_for(url))
 
     async def sitemaps(self, url: str) -> list[str]:
         rules = await self.get_rules(url)
@@ -316,11 +389,16 @@ class RobotsPolicyCache:
         Returns (content_or_None, response_headers, http_status).
         Uses the same scheme/host as the crawled URL so http:// sites
         are fetched over http, not https.
+
+        Requests go through the configured proxy pool / proxy+auth. Headers
+        carry only the effective per-URL User-Agent — crawl-target cookies,
+        Authorization, and ``request_headers`` are intentionally omitted so
+        site credentials do not leak across hosts on this dedicated session.
         """
         parsed = urlparse(url)
         robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-        req_headers = {"User-Agent": self.config.user_agent, **self.config.request_headers}
-        proxy = self.config.proxy or None
+        req_headers = {"User-Agent": self._user_agent_for(robots_url)}
+        proxy = self._select_proxy(robots_url)
         try:
             timeout = aiohttp.ClientTimeout(total=min(self.config.timeout_seconds, 10.0))
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -346,11 +424,10 @@ class RobotsPolicyCache:
 
         if robots_content is None:
             if status >= 500 or status == 0:
-                # Server error / network failure: conservative — treat as fully
-                # disallowed for this session so we don't crawl an unreachable
-                # site, but don't cache so a later retry can succeed.
+                # RFC 9309 §2.3.1.4: server/network unreachable → complete
+                # disallow for this session (see RobotsPolicyCache.check).
                 self.cache.mark_failed(domain)
-            # 4xx (including 404): allow-all per RFC 9309; cache a permissive ruleset.
+            # 4xx (including 404): allow-all per RFC 9309 §2.3.1.3.
             elif 400 <= status < 500:
                 rules = _RobotsRules(domain, "")
                 self.cache.set_rules(domain, rules, headers)
