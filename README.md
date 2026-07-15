@@ -99,13 +99,19 @@ The CLI supports multiple subcommands. The default command is `crawl` if you jus
 ### 1. Crawl
 
 ```bash
-# Basic crawl
+# Basic crawl (plain open crawls default to 200 URLs)
+crawler-cli crawl https://www.example.com
+
+# Larger bounded crawl
 crawler-cli crawl https://www.example.com --max-pages 500
 
 # Multi-seed crawl across related hosts
 crawler-cli https://www.example.com \
   --seed-url https://app.example.com \
   --max-pages 1000
+
+# Explicit unlimited crawl (use with care: follows links and discovered sitemaps)
+crawler-cli https://www.example.com --max-pages 0
 
 # Crawl with Playwright (JS), 15 workers, and an archive.org audit
 crawler-cli https://www.example.com \
@@ -329,7 +335,8 @@ src/crawler_cli/
 
 - `robots.txt` is checked and honored by default
 - host `Crawl-delay` is honored when present unless you disable it
-- open crawl is intended to be bounded, with a default upper limit of `200` URLs
+- plain `crawler-cli <url>` open crawls are bounded by default at `200` URLs
+- unlimited open crawling requires an explicit `--max-pages 0`
 - open crawl is expected to use PostgreSQL-backed frontier state so it can resume
 - this package is expected to be used by other scripts for:
   - crawling a fixed list of URLs

@@ -20,6 +20,7 @@ from .config import (
     CB_ENABLED_DEFAULT,
     CB_RECOVERY_SECONDS_DEFAULT,
     CB_THRESHOLD_DEFAULT,
+    DEFAULT_OPEN_CRAWL_LIMIT,
     MAX_RESPONSE_BYTES_DEFAULT,
     BackendName,
     CrawlConfig,
@@ -431,6 +432,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         refresh_days=getattr(args, "refresh_days", 0) or 0,
         max_concurrency=_concurrency,
         max_requests_per_context=args.max_requests_per_context,
+        default_open_crawl_limit=args.max_pages,
         max_pages=args.max_pages,
         max_response_bytes=getattr(args, "max_response_bytes", MAX_RESPONSE_BYTES_DEFAULT),
         timeout_seconds=args.timeout,
@@ -553,7 +555,15 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         default=4,
         help="Max simultaneous requests to any single host (0 = unlimited, default 4).",
     )
-    parser.add_argument("--max-pages", type=int, default=0, help="Max URLs to crawl (0 = unlimited)")
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=DEFAULT_OPEN_CRAWL_LIMIT,
+        help=(
+            "Max URLs to crawl during open crawls "
+            f"(default {DEFAULT_OPEN_CRAWL_LIMIT}; 0 = unlimited and can expand aggressively via links/sitemaps)."
+        ),
+    )
     parser.add_argument(
         "--max-response-bytes",
         type=int,
@@ -1237,6 +1247,7 @@ class _SavedJob(TypedDict, total=False):
     mode: Literal["list", "open"]
     seed_urls: list[str]
     saved_to: str | None
+    max_urls: int | None
     retry_attempts: int
     interrupted: bool
     results: list[_SavedResult]
@@ -1356,6 +1367,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             seed_urls=list(summary.get("seed_urls", []) or []),
             results=results,
             saved_to=summary.get("saved_to"),
+            max_urls=summary.get("max_urls"),
             retry_attempts=int(summary.get("retry_attempts", 0) or 0),
             interrupted=bool(summary.get("interrupted", False)),
         )
@@ -1367,6 +1379,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             seed_urls=list(job.get("seed_urls", []) or []),
             results=[_load_result(item) for item in job.get("results", []) or [] if isinstance(item, dict)],
             saved_to=job.get("saved_to"),
+            max_urls=job.get("max_urls"),
             retry_attempts=int(job.get("retry_attempts", 0) or 0),
             interrupted=bool(job.get("interrupted", False)),
         )

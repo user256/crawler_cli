@@ -14,6 +14,7 @@ from crawler_cli.__main__ import (
     _postgres_config_supplied,
     _run_crawl,
 )
+from crawler_cli.config import DEFAULT_OPEN_CRAWL_LIMIT, CrawlConfig
 from crawler_cli.models import CrawlJobResult
 from crawler_cli.persistence import MemoryStore
 
@@ -153,6 +154,48 @@ def test_default_concurrency_is_15():
     args = _build_parser().parse_args(["crawl", "https://x.com"])
     config = _build_config(args)
     assert config.max_concurrency == 15
+
+
+def test_max_pages_default_is_safe_open_crawl_bound():
+    args = _build_parser().parse_args(["crawl", "https://x.com"])
+    config = _build_config(args)
+    assert args.max_pages == DEFAULT_OPEN_CRAWL_LIMIT
+    assert config.default_open_crawl_limit == DEFAULT_OPEN_CRAWL_LIMIT
+    assert config.max_pages == DEFAULT_OPEN_CRAWL_LIMIT
+
+
+def test_max_pages_explicit_finite_value_is_preserved():
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--max-pages", "25"])
+    config = _build_config(args)
+    assert args.max_pages == 25
+    assert config.default_open_crawl_limit == 25
+    assert config.max_pages == 25
+
+
+def test_max_pages_zero_preserves_explicit_unlimited_mode():
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--max-pages", "0"])
+    config = _build_config(args)
+    assert args.max_pages == 0
+    assert config.default_open_crawl_limit == 0
+    assert config.max_pages == 0
+
+
+def test_crawl_config_default_open_limit_matches_safe_bound():
+    config = CrawlConfig()
+    assert config.default_open_crawl_limit == DEFAULT_OPEN_CRAWL_LIMIT
+    assert config.max_pages == DEFAULT_OPEN_CRAWL_LIMIT
+
+
+def test_crawl_config_explicit_unlimited_mode_is_preserved():
+    config = CrawlConfig(default_open_crawl_limit=0, max_pages=0)
+    assert config.default_open_crawl_limit == 0
+    assert config.max_pages == 0
+
+
+def test_crawl_config_explicit_finite_open_limit_is_preserved():
+    config = CrawlConfig(default_open_crawl_limit=25, max_pages=25)
+    assert config.default_open_crawl_limit == 25
+    assert config.max_pages == 25
 
 
 def test_profile_flags_enable_playwright_and_default_to_headed():
