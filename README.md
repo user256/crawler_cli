@@ -62,6 +62,14 @@ For tests:
 pip install -e ".[test]"
 ```
 
+For the real browser smoke path used by CI:
+
+```bash
+pip install -e ".[test,playwright]"
+pytest -m "not playwright_smoke"
+pytest --run-playwright-smoke -m playwright_smoke tests/test_playwright_smoke.py
+```
+
 With the HTTP API:
 
 ```bash

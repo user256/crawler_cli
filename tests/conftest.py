@@ -12,6 +12,26 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-playwright-smoke",
+        action="store_true",
+        default=False,
+        help="Run real Chromium-backed Playwright smoke tests.",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("--run-playwright-smoke"):
+        return
+    skip_playwright_smoke = pytest.mark.skip(
+        reason="need --run-playwright-smoke to run real Chromium-backed Playwright smoke tests"
+    )
+    for item in items:
+        if "playwright_smoke" in item.keywords:
+            item.add_marker(skip_playwright_smoke)
+
+
 # Postgres connection env vars that _build_dsn / _postgres_config_supplied read.
 # A developer shell that exports these (e.g. CRAWLER_CLI_POSTGRES_DSN pointing at a
 # local crawler DB) otherwise leaks into tests that assert the "no Postgres

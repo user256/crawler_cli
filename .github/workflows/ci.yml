@@ -25,12 +25,8 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[test]"
 
-      - name: Install Playwright browsers
-        run: python -m playwright install chromium --with-deps
-        continue-on-error: true
-
       - name: Run tests with coverage
-        run: pytest -x -q --tb=short --cov=crawler_cli --cov-report=term-missing --cov-fail-under=60
+        run: pytest -x -q --tb=short -m "not playwright_smoke" --cov=crawler_cli --cov-report=term-missing --cov-fail-under=60
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -73,6 +69,54 @@ jobs:
         env:
           CRAWLER_CLI_TEST_DSN: "postgresql://crawler:crawler@localhost:5432/crawler_test"
         run: pytest -x -q --tb=short -m integration
+
+  playwright-smoke:
+    name: "Playwright smoke (real Chromium)"
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e ".[test,playwright]"
+
+      - name: Resolve Playwright browser cache key
+        id: playwright-meta
+        run: |
+          python - <<'PY'
+          import importlib.metadata
+          import json
+          import os
+          from pathlib import Path
+          import playwright
+
+          version = importlib.metadata.version("playwright")
+          browsers_json = Path(playwright.__file__).resolve().parent / "driver" / "package" / "browsers.json"
+          data = json.loads(browsers_json.read_text(encoding="utf-8"))
+          chromium = next(browser for browser in data["browsers"] if browser["name"] == "chromium")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"playwright_version={version}\n")
+              fh.write(f"chromium_revision={chromium['revision']}\n")
+          PY
+
+      - name: Cache supported Chromium
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: playwright-${{ runner.os }}-${{ steps.playwright-meta.outputs.playwright_version }}-${{ steps.playwright-meta.outputs.chromium_revision }}
+
+      - name: Install supported Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run Playwright smoke tests
+        run: pytest -x -q --tb=short --run-playwright-smoke -m playwright_smoke tests/test_playwright_smoke.py
 
   lint:
     name: "Lint & typecheck"
