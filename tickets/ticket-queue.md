@@ -1,6 +1,29 @@
 ## Ticket queue
 A list of tickets, their status and the md file which summarises action taken for subsequent review.
 
+**Authoritative register** for status, acceptance notes, and delivery order.
+Ticket files remain the source of truth for scope and DoD.
+
+### Current position (2026-07-15)
+
+- Tickets **101–105** are on `master` and form the intent-overlap reporting
+  baseline (relationship, parameterised-URL, AMP, thin-content, time-sequenced).
+- Review remediations **099 / 109 / 111** merged (PRs #20 / #21 / #19); leftover
+  hygiene/calibration are **112 / 113**. **108** remains open and should land
+  before interactive report work consumes AMP classifications.
+- PR / ticket **110** was explicitly excluded (rejected / unused); next free
+  number is **114**.
+
+### Ordering rules
+
+- Correctness and evidence hardening precede presentation work that consumes
+  the affected fields.
+- Ticket **107** cannot start before **106** defines and tests the JSON contract;
+  **106** should wait on **108** for stable AMP/variant evidence.
+- External/manual evidence is recorded as a blocker; it is never inferred from
+  unit tests.
+- New remediation work uses the next free number (**114**); do not reuse **110**.
+
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
 - `003` `done` [ticket-003-resumable-frontier.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-003-resumable-frontier.md)
@@ -255,21 +278,35 @@ data export. Land after 101–105 (+108 AMP evidence) so tag fields are stable.
 
 ### Open work — priority order (2026-07-15)
 
-Implement in this order unless a ticket's dependency blocks it. (110 unused.)
+Implement in this order unless a ticket's dependency blocks it.
 
-1. **P0** `087` sitemap scope/budget/politeness
-2. **P0** `088` robots RFC9309 follow-up
-3. **P0** `089` challenge hard-stop persistence
-4. **P1** `108` AMP classification evidence hardening → unblocks stable 106 schema
-5. **P1** `092` persist-failure exit policy
-6. **P2** `093` CLI/config numeric validation
-7. **P2** `095` run-aware snapshots/reporting (depends 086 ✓)
-8. **P2** `096` persistence coverage gate
-9. **P2** `106` report_data.json export (after 108; then `107`)
-10. **P2** `107` interactive HTML cluster report (blocked on 106)
-11. **P3** `098` packaging/docs/release hygiene
-12. **P3** `100` Obscura installer test hardening
-13. **P3** `112` run-isolation hygiene leftovers (from 099)
-14. **P3** `113` thin-diagnostic schema/calibration leftovers (from 109)
-15. **deferred** `035` Redis frontier
-16. **proposed** `075` Casino Guru review ingestion (separate track)
+**1. Crawl correctness and persistence safety**
+
+1. **P0** `087` [sitemap scope/budget/politeness](./ticket-087-sitemap-scope-budget-politeness.md)
+2. **P0** `088` [robots RFC9309 follow-up](./ticket-088-robots-rfc9309-follow-up.md)
+3. **P0** `089` [challenge hard-stop persistence](./ticket-089-challenge-hard-stop-persistence.md)
+4. **P1** `092` [persist-failure exit policy](./ticket-092-persist-failure-exit-policy.md)
+5. **P1** `108` [AMP classification evidence hardening](./ticket-108-amp-classification-evidence-hardening.md) — after 103 ✓; unblocks stable 106 schema
+
+**2. Run-aware reporting and verification**
+
+6. **P2** `095` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — depends 086 ✓
+7. **P2** `096` [persistence coverage gate](./ticket-096-persistence-coverage-gate.md)
+8. **P2** `093` [CLI/config numeric validation](./ticket-093-cli-config-numeric-validation.md)
+9. **P3** `112` [run-isolation hygiene leftovers](./ticket-112-run-isolation-hygiene-leftovers.md) — from 099
+10. **P3** `113` [thin-diagnostic schema/calibration](./ticket-113-thin-diagnostic-schema-calibration.md) — from 109
+
+**3. Interactive intent-overlap reporting**
+
+11. **P2** `106` [report_data.json export](./ticket-106-report-data-json-export.md) — after 108; then 107
+12. **P2** `107` [interactive HTML cluster report](./ticket-107-interactive-html-cluster-report.md) — blocked on 106
+
+**4. Lower-priority hardening**
+
+13. **P3** `098` [packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md)
+14. **P3** `100` [Obscura installer test hardening](./ticket-100-obscura-installer-test-hardening.md)
+
+**Deferred lanes**
+
+15. **deferred** `035` [Redis frontier](./ticket-035-redis-frontier-queue.md) — architectural/infra
+16. **proposed** `075` [Casino Guru review ingestion](./ticket-075-casino-guru-review-ingestion.md) — blocked on reliable authorised fetch path
