@@ -9,9 +9,9 @@ Ticket files remain the source of truth for scope and DoD.
 - Batch review of open PRs **#22–#26** complete: all five merged to `master`
   (087 / 088 / 089 / 092 / 108). Pre-merge CI blockers fixed in-branch (088
   ruff format; 089 integration fixture `h2` key).
-- Next lane claimed for parallel worktrees: **095 / 096 / 093 / 112 / 113 /
-  106→107 / 098 / 100** (see Open work). Leftovers **114 / 115 / 116** remain
-  unclaimed.
+- Next lane claimed for parallel worktrees: **095 / 096 / 112 / 113 /
+  106→107 / 098 / 100** (see Open work); **093** done in this lane. Leftovers
+  **114 / 115 / 116** remain unclaimed.
 - Tickets **101–105** + **108** form the intent-overlap reporting baseline;
   **106** / **107** are unblocked on AMP evidence.
 - Ticket **110** remains unused/rejected; next free number is **117**.
@@ -229,7 +229,7 @@ proceed independently except where their DoD references earlier behavior.
 - `090` `done` (2026-07-15, PR #12) [ticket-090-safe-default-crawl-bound.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-090-safe-default-crawl-bound.md) — **P1:** restore a finite default open-crawl bound and align config/CLI/docs. Reviewed MERGE: default open crawl now bounded at 200, `--max-pages 0` still explicitly unlimited, fixed-list/CSV uncapped; all DoD met (370 passed). Minor dead-`config.max_pages`-field note → ticket 112 (via 099)
 - `091` `done` (2026-07-15, PR #9) [ticket-091-real-digest-auth.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-091-real-digest-auth.md) — **P1:** implement real Digest authentication across supported backends or remove the misleading option. Reviewed MERGE: chose the ticket-permitted removal path — `digest` gone from CLI/type surface, legacy programmatic use fails clearly, no silent Basic downgrade; added `--auth-password-env/-file`. 30 passed
 - `092` `done` (2026-07-15, PR #25; leftovers → 115) [ticket-092-persist-failure-exit-policy.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-092-persist-failure-exit-policy.md) — **P1:** terminal persistence failures produce a non-zero automation result and durable/partial output metadata. Reviewed MERGE+REMEDIATE: DoD met; CI green
-- `093` `in_progress` [ticket-093-cli-config-numeric-validation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-093-cli-config-numeric-validation.md) — **P2:** validate numeric and cross-field config at CLI/library boundaries; no raw tracebacks — claimed by `agent/ticket-093-cli-config-numeric-validation`
+- `093` `done` [ticket-093-cli-config-numeric-validation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-093-cli-config-numeric-validation.md) — **P2:** validate numeric and cross-field config at CLI/library boundaries; no raw tracebacks
 - `094` `done` (2026-07-15, PR #11) [ticket-094-obscura-installer-verification.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-094-obscura-installer-verification.md) — **P1 security:** checksum/signature verification, safe staged archive extraction, and atomic install. Reviewed MERGE: adversarial security review found no exploitable holes — real-path containment (not string prefix), pre-extraction symlink/hardlink/device rejection, fail-closed digest verify, atomic replace with rollback; 42 passed. Test-coverage hardening + digest cross-check filed as ticket 100
 - `095` `in_progress` [ticket-095-run-aware-snapshots-reporting.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-095-run-aware-snapshots-reporting.md) — **P2, depends on 086:** retain per-run snapshots and require deterministic run selection in reports/enrichment — claimed by `agent/ticket-095-run-aware-snapshots-reporting`
 - `096` `in_progress` [ticket-096-persistence-coverage-gate.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-096-persistence-coverage-gate.md) — **P2:** combine/gate PostgreSQL integration coverage and exercise migrations/concurrency/failure paths — claimed by `agent/ticket-096-persistence-coverage-gate`
@@ -296,7 +296,7 @@ Implement in this order unless a ticket's dependency blocks it.
 
 1. **P2** `095` `in_progress` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — depends 086 ✓ — `agent/ticket-095-run-aware-snapshots-reporting`
 2. **P2** `096` `in_progress` [persistence coverage gate](./ticket-096-persistence-coverage-gate.md) — `agent/ticket-096-persistence-coverage-gate`
-3. **P2** `093` `in_progress` [CLI/config numeric validation](./ticket-093-cli-config-numeric-validation.md) — `agent/ticket-093-cli-config-numeric-validation`
+3. **P2** `093` `done` [CLI/config numeric validation](./ticket-093-cli-config-numeric-validation.md)
 4. **P2** `114` [sitemap budget dedupe / CDN docs](./ticket-114-sitemap-budget-dedupe-cdn-docs.md) — from 087
 5. **P2** `115` [persist/frontier incompleteness signaling](./ticket-115-persist-frontier-incompleteness-signaling.md) — from 092
 6. **P3** `112` `in_progress` [run-isolation hygiene leftovers](./ticket-112-run-isolation-hygiene-leftovers.md) — from 099 — `agent/ticket-112-run-isolation-hygiene-leftovers`

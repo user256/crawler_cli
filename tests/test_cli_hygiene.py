@@ -145,10 +145,16 @@ def test_concurrency_alias_sets_concurrency():
     assert config.max_concurrency == 7
 
 
-def test_max_workers_wins_when_both_passed():
-    args = _build_parser().parse_args(["crawl", "https://x.com", "--max-workers", "20", "--concurrency", "5"])
+def test_max_workers_and_concurrency_same_value_ok():
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--max-workers", "8", "--concurrency", "8"])
     config = _build_config(args)
-    assert config.max_concurrency == 20
+    assert config.max_concurrency == 8
+
+
+def test_max_workers_and_concurrency_disagree_rejected():
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--max-workers", "20", "--concurrency", "5"])
+    with pytest.raises(ValueError, match="disagree"):
+        _build_config(args)
 
 
 def test_default_concurrency_is_15():

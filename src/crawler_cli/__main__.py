@@ -41,6 +41,18 @@ from .exit_codes import EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .reports import CrawlReports
+from .validators import (
+    non_negative_float,
+    non_negative_int,
+    percentage,
+    positive_float,
+    positive_int,
+    probability,
+    require_non_negative_int,
+    require_positive_float,
+    require_positive_int,
+    require_probability,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +328,7 @@ def _resolve_circuit_breaker(args: argparse.Namespace) -> tuple[bool, int, float
     else:
         env_threshold = _env_int("CRAWLER_CLI_CB_THRESHOLD")
         threshold = env_threshold if env_threshold is not None else CB_THRESHOLD_DEFAULT
+    threshold = require_positive_int(threshold, field="circuit breaker threshold")
 
     cli_recovery = getattr(args, "circuit_breaker_recovery_seconds", None)
     if cli_recovery is not None:
@@ -323,13 +336,55 @@ def _resolve_circuit_breaker(args: argparse.Namespace) -> tuple[bool, int, float
     else:
         env_recovery = _env_float("CRAWLER_CLI_CB_RECOVERY_SECONDS")
         recovery = env_recovery if env_recovery is not None else CB_RECOVERY_SECONDS_DEFAULT
+    recovery = require_positive_float(recovery, field="circuit breaker recovery seconds")
 
     return enabled, threshold, recovery
+
+
+def _resolve_concurrency(args: argparse.Namespace) -> int:
+    """Resolve ``--max-workers`` / ``--concurrency`` aliases (ticket 093).
+
+    Both flags are equivalent; disagreeing explicit values are rejected rather
+    than silently preferring one.
+    """
+    max_workers = getattr(args, "max_workers", None)
+    concurrency = getattr(args, "concurrency", None)
+    if max_workers is not None and concurrency is not None and max_workers != concurrency:
+        raise ValueError(
+            f"--max-workers ({max_workers}) and --concurrency ({concurrency}) disagree; "
+            "pass only one alias, or the same value for both"
+        )
+    if max_workers is not None:
+        return max_workers
+    if concurrency is not None:
+        return concurrency
+    return 15
+
+
+def _validate_memory_watermarks(args: argparse.Namespace) -> None:
+    high = getattr(args, "memory_high_watermark", None)
+    recovery = getattr(args, "memory_recovery_watermark", None)
+    if high is None or recovery is None:
+        return
+    if recovery >= high:
+        raise ValueError(f"--memory-recovery-watermark ({recovery}) must be below --memory-high-watermark ({high})")
+
+
+def _validate_intent_overlap_numeric_args(args: argparse.Namespace) -> None:
+    """Reject invalid overlap/ANN numerics before store init or output mkdir."""
+    threshold = require_probability(args.threshold, field="--threshold")
+    dup_threshold = require_probability(args.dup_threshold, field="--dup-threshold")
+    if dup_threshold < threshold:
+        raise ValueError(f"--dup-threshold ({dup_threshold}) must be >= --threshold ({threshold})")
+    require_positive_int(args.ann_min_pages, field="--ann-min-pages")
+    require_positive_int(args.ann_k, field="--ann-k")
+    require_non_negative_int(args.thin_signature_words, field="--thin-signature-words")
 
 
 def _build_config(args: argparse.Namespace) -> CrawlConfig:
     _validate_obscura_args(args)
     _validate_playwright_args(args)
+    _validate_memory_watermarks(args)
     playwright_cdp_endpoint = _resolve_playwright_cdp_endpoint(args)
     wants_playwright = bool(
         args.js
@@ -430,8 +485,8 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     if _proxy_mode is None:
         _proxy_mode = "gateway" if (getattr(args, "proxy", "") and not proxies) else "list"
 
-    # --max-workers and --concurrency are aliases; explicit flag wins over default.
-    _concurrency = args.max_workers or args.concurrency or 15
+    # --max-workers and --concurrency are aliases; disagreeing values are rejected.
+    _concurrency = _resolve_concurrency(args)
 
     curl_impersonate = getattr(args, "curl_impersonate", "") or ""
     # When impersonating, the curl_cffi profile supplies the UA; only override
@@ -574,7 +629,7 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--refresh-days",
-        type=int,
+        type=non_negative_int,
         default=0,
         help="Skip URLs already fetched successfully within N days (0 = refetch all).",
     )
@@ -588,25 +643,25 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--max-workers",
-        type=int,
+        type=positive_int,
         default=None,
         help="Max concurrent workers (default 15). Alias: --concurrency.",
     )
     parser.add_argument(
         "--concurrency",
-        type=int,
+        type=positive_int,
         default=None,
         help="Alias for --max-workers.",
     )
     parser.add_argument(
         "--per-host-concurrency",
-        type=int,
+        type=non_negative_int,
         default=4,
         help="Max simultaneous requests to any single host (0 = unlimited, default 4).",
     )
     parser.add_argument(
         "--max-pages",
-        type=int,
+        type=non_negative_int,
         default=DEFAULT_OPEN_CRAWL_LIMIT,
         help=(
             "Max URLs to crawl during open crawls "
@@ -615,7 +670,7 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--max-response-bytes",
-        type=int,
+        type=positive_int,
         default=MAX_RESPONSE_BYTES_DEFAULT,
         help=(
             "Max bytes read per response before truncation (default "
@@ -623,7 +678,12 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
             "large sitemaps so they parse intact; lower it to cap downloads."
         ),
     )
-    parser.add_argument("--timeout", type=float, default=30.0, help="Per-request timeout in seconds")
+    parser.add_argument(
+        "--timeout",
+        type=positive_float,
+        default=30.0,
+        help="Per-request timeout in seconds",
+    )
     parser.add_argument("--js", action="store_true", help="Use Playwright (JS-enabled) backend")
     parser.add_argument(
         "--headed",
@@ -632,13 +692,13 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--max-requests-per-context",
-        type=int,
+        type=non_negative_int,
         default=50,
         help="Recycle Playwright browser contexts after this many page loads (0 disables recycling)",
     )
     parser.add_argument(
         "--playwright-network-idle-timeout",
-        type=float,
+        type=non_negative_float,
         default=5.0,
         help="Additional Playwright network-idle settle timeout in seconds",
     )
@@ -652,7 +712,7 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--playwright-cdp-port",
-        type=int,
+        type=positive_int,
         help="CDP port for an already-running Chrome/Edge launched with --remote-debugging-port",
     )
     parser.add_argument(
@@ -678,13 +738,13 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--wait-for-selector-timeout",
-        type=float,
+        type=positive_float,
         default=10.0,
         help="Timeout in seconds for --wait-for-selector (default 10)",
     )
     parser.add_argument(
         "--wait-for-network-idle",
-        type=float,
+        type=non_negative_float,
         metavar="SECONDS",
         help="JS backend only: override the network-idle settle timeout in seconds "
         "(alias for --playwright-network-idle-timeout; 0 disables the idle wait)",
@@ -710,13 +770,13 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--memory-high-watermark",
-        type=float,
+        type=percentage,
         default=85.0,
         help="Reduce worker concurrency when system memory usage reaches this percent",
     )
     parser.add_argument(
         "--memory-recovery-watermark",
-        type=float,
+        type=percentage,
         default=70.0,
         help="Restore worker concurrency once system memory usage drops to this percent",
     )
@@ -741,7 +801,7 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     cb = parser.add_argument_group("Circuit breaker (per-host)")
     cb.add_argument(
         "--circuit-breaker-threshold",
-        type=int,
+        type=positive_int,
         default=None,
         help=(
             "Consecutive per-host failures before the breaker opens "
@@ -750,7 +810,7 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     cb.add_argument(
         "--circuit-breaker-recovery-seconds",
-        type=float,
+        type=positive_float,
         default=None,
         help=(
             "Seconds an open breaker waits before a half-open retry "
@@ -790,9 +850,9 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     obscura.add_argument("--obscura", action="store_true", help="Use Obscura as the JS backend (implies --js)")
     obscura.add_argument("--obscura-binary", default=argparse.SUPPRESS, help="Path to the obscura binary")
     obscura.add_argument("--obscura-host", default=argparse.SUPPRESS, help="Obscura host")
-    obscura.add_argument("--obscura-port", type=int, default=argparse.SUPPRESS, help="Obscura port")
+    obscura.add_argument("--obscura-port", type=positive_int, default=argparse.SUPPRESS, help="Obscura port")
     obscura.add_argument("--obscura-proxy", default=argparse.SUPPRESS, help="Proxy URL for Obscura")
-    obscura.add_argument("--obscura-workers", type=int, default=argparse.SUPPRESS, help="Obscura worker count")
+    obscura.add_argument("--obscura-workers", type=positive_int, default=argparse.SUPPRESS, help="Obscura worker count")
     obscura.add_argument(
         "--obscura-stealth",
         action="store_true",
@@ -881,7 +941,7 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     proxy.add_argument(
         "--proxy-gateway-max-retries",
-        type=int,
+        type=non_negative_int,
         default=2,
         help="gateway mode: extra retries through the gateway on a failed fetch "
         "(each retry gets a fresh exit IP). Default 2.",
@@ -895,13 +955,13 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     proxy.add_argument(
         "--proxy-max-failures",
-        type=int,
+        type=non_negative_int,
         default=3,
         help="Consecutive failures before a pool proxy is put on cooldown (default 3).",
     )
     proxy.add_argument(
         "--proxy-cooldown",
-        type=float,
+        type=non_negative_float,
         default=60.0,
         dest="proxy_cooldown_seconds",
         help="Seconds an evicted pool proxy stays out of rotation (default 60).",
@@ -949,7 +1009,11 @@ async def _run_crawl(args: argparse.Namespace) -> int:
         print("Error: use --resume RUN_ID or --crawl-run-id for a new run, not both", file=sys.stderr)
         return EXIT_VALIDATION
 
-    config = _build_config(args)
+    try:
+        config = _build_config(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
     config.default_open_crawl_limit = args.max_pages
     config.max_pages = args.max_pages
 
@@ -1202,6 +1266,12 @@ async def _run_hreflang_groups(args: argparse.Namespace) -> int:
 async def _run_intent_overlap(args: argparse.Namespace) -> int:
     from .embeddings import MixedModelError
     from .intent_overlap import run_intent_overlap
+
+    try:
+        _validate_intent_overlap_numeric_args(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
 
     run_args = {
         "threshold": args.threshold,
@@ -1739,8 +1809,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Embed intent signatures or cleaned page text "
         "(default: signature for sentence-transformers, page-text for openai)",
     )
-    emb_parser.add_argument("--batch-size", type=int, default=None, help="Batch size (default 10 openai, 64 local)")
-    emb_parser.add_argument("--delay", type=float, default=1.0, help="Delay between batches (seconds, openai)")
+    emb_parser.add_argument(
+        "--batch-size", type=positive_int, default=None, help="Batch size (default 10 openai, 64 local)"
+    )
+    emb_parser.add_argument(
+        "--delay", type=non_negative_float, default=1.0, help="Delay between batches (seconds, openai)"
+    )
     emb_parser.add_argument("--force", action="store_true", help="Regenerate existing embeddings")
     emb_parser.add_argument("--urls", nargs="*", help="Optional URL filter list")
     _add_postgres_args(emb_parser)
@@ -1752,13 +1826,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sig_parser.add_argument("--urls", nargs="*", help="Optional URL filter list")
     sig_parser.add_argument(
         "--boilerplate-share",
-        type=float,
+        type=probability,
         default=0.30,
         help="Min title share for per-site boilerplate stripping (default 0.30)",
     )
     sig_parser.add_argument(
         "--min-words",
-        type=int,
+        type=non_negative_int,
         default=50,
         help="Pages below this word count get signal_confidence=low (default 50)",
     )
@@ -1775,9 +1849,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "intent-overlap",
         help="Analyse intent overlap / de-canonicalisation risk over a crawled + embedded site",
     )
-    io_parser.add_argument("--threshold", type=float, default=0.85, help="Overlap threshold (default 0.85)")
+    io_parser.add_argument("--threshold", type=probability, default=0.85, help="Overlap threshold (default 0.85)")
     io_parser.add_argument(
-        "--dup-threshold", type=float, default=0.92, help="Duplicate / decanonicalisation threshold (default 0.92)"
+        "--dup-threshold",
+        type=probability,
+        default=0.92,
+        help="Duplicate / decanonicalisation threshold (default 0.92)",
     )
     io_parser.add_argument(
         "--hreflang-mode",
@@ -1793,7 +1870,7 @@ def _build_parser() -> argparse.ArgumentParser:
     io_parser.add_argument("--out", default="./out", help="Output directory for CSV reports")
     io_parser.add_argument(
         "--thin-signature-words",
-        type=int,
+        type=non_negative_int,
         default=DEFAULT_THIN_SIGNATURE_WORDS,
         help=(
             "Pages whose signature text (title+h1+meta+extracted body) has fewer than this "
@@ -1814,8 +1891,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use hnswlib ANN pair search above --ann-min-pages (needs the [ann] extra)",
     )
-    io_parser.add_argument("--ann-min-pages", type=int, default=10000, help="Page count before ANN activates")
-    io_parser.add_argument("--ann-k", type=int, default=128, help="hnswlib k neighbours")
+    io_parser.add_argument("--ann-min-pages", type=positive_int, default=10000, help="Page count before ANN activates")
+    io_parser.add_argument("--ann-k", type=positive_int, default=128, help="hnswlib k neighbours")
     io_parser.add_argument(
         "--time-sequenced-section",
         action="append",
@@ -1846,7 +1923,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "compact-html",
         help="Gzip-compress legacy uncompressed HTML in pages.html_compressed",
     )
-    compact_html_parser.add_argument("--batch-size", type=int, default=500)
+    compact_html_parser.add_argument("--batch-size", type=positive_int, default=500)
     _add_confirm_args(compact_html_parser)
     _add_postgres_args(compact_html_parser)
 
@@ -1871,7 +1948,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "compact-crawl",
         help="Drop stored HTML while keeping audit metadata and content hashes",
     )
-    compact_parser.add_argument("--batch-size", type=int, default=500)
+    compact_parser.add_argument("--batch-size", type=positive_int, default=500)
     compact_parser.add_argument(
         "--require-hashes",
         action=argparse.BooleanOptionalAction,
@@ -1912,7 +1989,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sitemap_parser.add_argument(
         "--max-urls-per-file",
-        type=int,
+        type=positive_int,
         default=50_000,
         help="Split into a sitemap index above this many URLs (default 50000)",
     )
@@ -2033,6 +2110,9 @@ def main() -> None:
 
     try:
         sys.exit(asyncio.run(_dispatch(args)))
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(EXIT_VALIDATION)
     except KeyboardInterrupt:
         sys.exit(130)
 
