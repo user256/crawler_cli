@@ -156,6 +156,29 @@ class CrawlJobResult:
         return sum(1 for result in self.results if result.persist_error is not None)
 
     @property
+    def persist_failed_urls(self) -> list[str]:
+        """URLs whose fetched page failed to write to the store (ticket 092)."""
+        return [result.final_url or result.requested_url for result in self.results if result.persist_error is not None]
+
+    @property
+    def durability(self) -> Literal["durable", "partially_durable", "saved_output_only"]:
+        """How durable the crawl results are after persistence (ticket 092).
+
+        - ``durable``: every crawled page persisted successfully
+        - ``partially_durable``: some crawled pages persisted, some failed
+        - ``saved_output_only``: no crawled page persisted; data only in
+          ``saved_to`` / in-memory results
+        """
+        crawled = [result for result in self.results if result.skip_reason is None]
+        failed = [result for result in crawled if result.persist_error is not None]
+        if not failed:
+            return "durable"
+        ok = len(crawled) - len(failed)
+        if ok > 0:
+            return "partially_durable"
+        return "saved_output_only"
+
+    @property
     def challenge_blocked_count(self) -> int:
         """Pages that were anti-bot interstitials, not real content (ticket 074)."""
         return sum(1 for result in self.results if result.challenge is not None)

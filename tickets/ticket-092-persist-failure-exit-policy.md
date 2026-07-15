@@ -26,5 +26,5 @@ incomplete database crawl as successful.
   available only in the saved output.
 
 ## Status
-in_progress (Priority: **P1**) — claimed by `agent/ticket-092-persist-failure-exit-policy`; reliability/automation; found in 2026-07-15 audit.
+done (Priority: **P1**) — claimed by `agent/ticket-092-persist-failure-exit-policy`; reliability/automation; found in 2026-07-15 audit.
 

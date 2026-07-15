@@ -37,6 +37,7 @@ from .cookies import (
 from .csv_urls import load_urls_from_csv
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
+from .exit_codes import EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .reports import CrawlReports
@@ -822,6 +823,14 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--output-dir", type=Path, help="Directory for CSV/JSON output")
     parser.add_argument("--save-to", help="Path to save crawl JSON results")
+    parser.add_argument(
+        "--allow-persist-failures",
+        action="store_true",
+        help=(
+            "Best-effort durability: exit 0 even when some pages failed to persist "
+            "(ticket 092). Default is non-zero so automation notices incomplete DB writes."
+        ),
+    )
     parser.add_argument("--csv-file", help="CSV file containing URLs to crawl")
     parser.add_argument("--csv-column", default="url", help="CSV column containing URLs")
     parser.add_argument(
@@ -932,13 +941,13 @@ async def _run_crawl(args: argparse.Namespace) -> int:
     seeds = _collect_seed_urls(args)
     if not seeds and not args.csv_file:
         print("Error: provide a seed URL, one or more --seed-url values, or --csv-file", file=sys.stderr)
-        return 2
+        return EXIT_VALIDATION
     if args.csv_file and not seeds and not args.csv_seed:
         args.url = load_urls_from_csv(args.csv_file, column=args.csv_column)[0]
         seeds = _collect_seed_urls(args)
     if args.resume and args.crawl_run_id:
         print("Error: use --resume RUN_ID or --crawl-run-id for a new run, not both", file=sys.stderr)
-        return 2
+        return EXIT_VALIDATION
 
     config = _build_config(args)
     config.default_open_crawl_limit = args.max_pages
@@ -955,7 +964,7 @@ async def _run_crawl(args: argparse.Namespace) -> int:
 
     if args.archive_org_check and not _postgres_config_supplied(args):
         print("Error: --archive-org-check requires PostgreSQL configuration", file=sys.stderr)
-        return 2
+        return EXIT_VALIDATION
 
     if _postgres_config_supplied(args):
         store: AsyncpgStore | MemoryStore | None = _store_from_args(args)
@@ -997,12 +1006,22 @@ async def _run_crawl(args: argparse.Namespace) -> int:
                 )
             except CrawlRunSelectionError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
-                return 2
-        if job.interrupted:
-            _exit_code = 130
+                return EXIT_VALIDATION
+        _exit_code = resolve_crawl_exit_code(
+            job,
+            allow_persist_failures=bool(getattr(args, "allow_persist_failures", False)),
+        )
         persist_errors = job.persist_error_count
         label = "Crawl interrupted" if job.interrupted else "Crawl complete"
-        summary = f"{label}: {job.crawled_count} crawled, {job.blocked_count} blocked by robots"
+        durability_label = {
+            "durable": "durable",
+            "partially_durable": "partially durable",
+            "saved_output_only": "saved-output-only",
+        }[job.durability]
+        summary = (
+            f"{label}: {job.crawled_count} crawled, {job.blocked_count} blocked by robots, "
+            f"durability={durability_label}"
+        )
         if job.refresh_skipped_count:
             summary += f", {job.refresh_skipped_count} skipped (fresh within --refresh-days)"
         if job.retry_attempts:
@@ -1010,7 +1029,16 @@ async def _run_crawl(args: argparse.Namespace) -> int:
         if job.challenge_blocked_count:
             summary += f", {job.challenge_blocked_count} blocked by bot-challenge"
         if persist_errors:
-            summary += f", {persist_errors} persist failures (check WARNING logs)"
+            summary += f", {persist_errors} persist failures"
+            if job.persist_failed_urls:
+                preview = ", ".join(job.persist_failed_urls[:5])
+                if persist_errors > 5:
+                    preview += ", ..."
+                summary += f" [{preview}]"
+            if args.save_to:
+                summary += f" (results in {args.save_to})"
+            elif job.durability == "saved_output_only":
+                summary += " (in-memory results only)"
         if job.run_id:
             summary += f" (run {job.run_id})"
         print(summary)

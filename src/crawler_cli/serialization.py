@@ -113,16 +113,35 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
     return payload
 
 
+def serialize_job_summary_metadata(job: CrawlJobResult, *, saved_to: str | None = None) -> dict[str, object]:
+    """Aggregate fields for JSONL summary lines and crawl metadata (ticket 092)."""
+    return {
+        "crawled_count": job.crawled_count,
+        "blocked_count": job.blocked_count,
+        "persist_error_count": job.persist_error_count,
+        "persist_failed_urls": job.persist_failed_urls,
+        "durability": job.durability,
+        "retry_attempts": job.retry_attempts,
+        "interrupted": job.interrupted,
+        "saved_to": job.saved_to if saved_to is None else saved_to,
+        "refresh_skipped_count": job.refresh_skipped_count,
+        "challenge_blocked_count": job.challenge_blocked_count,
+    }
+
+
 def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> dict[str, object]:
+    resolved_saved_to = job.saved_to if saved_to is None else saved_to
     payload: dict[str, object] = {
         "mode": job.mode,
         "run_id": job.run_id,
         "seed_urls": job.seed_urls,
-        "saved_to": job.saved_to if saved_to is None else saved_to,
+        "saved_to": resolved_saved_to,
         "crawled_count": job.crawled_count,
         "blocked_count": job.blocked_count,
         "challenge_blocked_count": job.challenge_blocked_count,
         "persist_error_count": job.persist_error_count,
+        "persist_failed_urls": job.persist_failed_urls,
+        "durability": job.durability,
         "retry_attempts": job.retry_attempts,
         "interrupted": job.interrupted,
         "refresh_skipped_count": job.refresh_skipped_count,

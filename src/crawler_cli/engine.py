@@ -25,7 +25,7 @@ from .hashing import sha256_hash, simhash64
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, DiscoveredLink, ExtractedContent
 from .persistence import AsyncpgStore, MemoryStore
 from .robots import RobotsPolicyCache
-from .serialization import serialize_crawl_job, serialize_crawl_result
+from .serialization import serialize_crawl_job, serialize_crawl_result, serialize_job_summary_metadata
 from .sitemap import SitemapParser, discover_sitemap_paths
 
 logger = logging.getLogger(__name__)
@@ -403,6 +403,12 @@ class CrawlEngine:
                         result.final_url,
                         max_attempts,
                         result.persist_error,
+                        extra={
+                            "event": "persist_error",
+                            "url": result.final_url,
+                            "persist_error": result.persist_error,
+                            "attempts": max_attempts,
+                        },
                     )
                     return
                 await asyncio.sleep(0.05 * (2**attempt))
@@ -412,6 +418,11 @@ class CrawlEngine:
                     "Persist failed for %s: %s — page data retained in results",
                     result.final_url,
                     result.persist_error,
+                    extra={
+                        "event": "persist_error",
+                        "url": result.final_url,
+                        "persist_error": result.persist_error,
+                    },
                 )
                 return
 
@@ -491,6 +502,19 @@ class CrawlEngine:
             saved_to=save_to,
             interrupted=self._stop_requested,
         )
+        if job.persist_error_count:
+            logger.warning(
+                "Crawl persistence incomplete: %d failure(s), durability=%s, urls=%s",
+                job.persist_error_count,
+                job.durability,
+                job.persist_failed_urls[:20],
+                extra={
+                    "event": "persist_summary",
+                    "persist_error_count": job.persist_error_count,
+                    "persist_failed_urls": job.persist_failed_urls,
+                    "durability": job.durability,
+                },
+            )
         if save_to:
             await self._save_results(job, save_to)
         return job
@@ -867,18 +891,7 @@ class CrawlEngine:
                 "path_exclude": self.config.path_exclude,
             }
             if job is not None:
-                payload.update(
-                    {
-                        "crawled_count": job.crawled_count,
-                        "blocked_count": job.blocked_count,
-                        "persist_error_count": job.persist_error_count,
-                        "retry_attempts": job.retry_attempts,
-                        "interrupted": job.interrupted,
-                        "saved_to": save_to,
-                        "refresh_skipped_count": job.refresh_skipped_count,
-                        "challenge_blocked_count": job.challenge_blocked_count,
-                    }
-                )
+                payload.update(serialize_job_summary_metadata(job, saved_to=save_to))
             return payload
 
         if not seeds:
@@ -958,6 +971,9 @@ class CrawlEngine:
             discovered_to_enqueue: list[tuple[str, int, str | None, float]] = []
             out_of_scope_discovered: list[str] = []
             done_urls: list[str] = []
+            # Persist failures stay pending so resume can retry the write
+            # (ticket 092). Do not mark them done.
+            persist_failed_urls: list[str] = []
 
             for task in done:
                 item = in_flight.pop(task)
@@ -978,7 +994,10 @@ class CrawlEngine:
 
                 results.append(result)
                 session_crawled += 1
-                done_urls.append(url)
+                if result.persist_error is not None:
+                    persist_failed_urls.append(url)
+                else:
+                    done_urls.append(url)
                 # Stream every appended result — including skips — so the
                 # JSONL file is a complete record and its summary counts
                 # reconcile with its lines (ticket-068).  Retried attempts
@@ -1048,8 +1067,35 @@ class CrawlEngine:
                         len(discovered_to_enqueue),
                         type(exc).__name__,
                     )
+            if persist_failed_urls:
+                logger.warning(
+                    "Leaving %d URL(s) pending after persist failure for resume: %s",
+                    len(persist_failed_urls),
+                    persist_failed_urls[:10],
+                    extra={
+                        "event": "persist_frontier_pending",
+                        "count": len(persist_failed_urls),
+                        "urls": persist_failed_urls,
+                    },
+                )
             if done_urls:
-                await self.store.frontier_mark_done(done_urls)
+                # A successful persist followed by mark-done failure must stay
+                # resumable (pending → queued on --resume), not silently lost
+                # (ticket 092).
+                try:
+                    await self.store.frontier_mark_done(done_urls)
+                except Exception as exc:  # noqa: BLE001 - keep frontier resumable
+                    logger.warning(
+                        "frontier_mark_done failed for %d URL(s) after persist (%s) — leaving pending for resume",
+                        len(done_urls),
+                        type(exc).__name__,
+                        extra={
+                            "event": "frontier_mark_done_error",
+                            "count": len(done_urls),
+                            "urls": done_urls,
+                            "error": type(exc).__name__,
+                        },
+                    )
 
         interrupted = False
         try:
@@ -1109,25 +1155,31 @@ class CrawlEngine:
             )
             if interrupted:
                 logger.warning("Crawl interrupted: %d URLs crawled before stop", session_crawled)
+            if job.persist_error_count:
+                logger.warning(
+                    "Crawl persistence incomplete: %d failure(s), durability=%s, urls=%s",
+                    job.persist_error_count,
+                    job.durability,
+                    job.persist_failed_urls[:20],
+                    extra={
+                        "event": "persist_summary",
+                        "persist_error_count": job.persist_error_count,
+                        "persist_failed_urls": job.persist_failed_urls,
+                        "durability": job.durability,
+                    },
+                )
             await self._set_crawl_run_status(crawl_run_id, "interrupted" if interrupted else "complete")
             if _jsonl_fh is not None:
                 # Append a summary record as the last line so tooling can
                 # detect a complete crawl and read aggregate counts without
-                # re-scanning all result lines (ticket-059).
+                # re-scanning all result lines (ticket-059 / ticket-092).
                 summary = {
                     "__type": "summary",
                     "mode": job.mode,
                     "run_id": job.run_id,
                     "seed_urls": job.seed_urls,
                     "max_urls": job.max_urls,
-                    "crawled_count": job.crawled_count,
-                    "blocked_count": job.blocked_count,
-                    "challenge_blocked_count": job.challenge_blocked_count,
-                    "persist_error_count": job.persist_error_count,
-                    "retry_attempts": job.retry_attempts,
-                    "interrupted": job.interrupted,
-                    "refresh_skipped_count": job.refresh_skipped_count,
-                    "saved_to": save_to,
+                    **serialize_job_summary_metadata(job, saved_to=save_to),
                 }
                 _jsonl_fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
                 _jsonl_fh.close()
