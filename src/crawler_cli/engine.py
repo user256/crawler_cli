@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .amp import is_amp_url_shape
 from .archive import discover_historical_urls
 from .backends import ObscuraFetchBackend, PlaywrightBackend, RateLimiter, build_backend
 from .challenge import detect_challenge
@@ -841,6 +842,12 @@ class CrawlEngine:
                     continue
                 for link in result.discovered_links:
                     if self.config.same_host_only and not self.config.is_host_allowed(link.href, seeds):
+                        continue
+                    if self.config.skip_amp_variants and is_amp_url_shape(link.href):
+                        # --skip-amp-variants: don't spend crawl budget fetching
+                        # AMP URL shapes (ticket 103).  They're still recorded as
+                        # discovered-but-out-of-scope so provenance is preserved.
+                        out_of_scope_discovered.append(link.href)
                         continue
                     if self.config.should_crawl_url(link.href):
                         discovered_to_enqueue.append(

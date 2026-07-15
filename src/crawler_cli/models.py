@@ -72,6 +72,10 @@ class ExtractedContent:
     text: str
     word_count: int
     metadata: dict[str, Any]
+    amphtml: str | None = None
+    """Absolute URL from ``<link rel="amphtml" href=...>`` — the page's declared
+    AMP variant.  Captured so AMP variants get a first-class page<->AMP pairing
+    signal instead of being dropped at extraction time (ticket 103)."""
     schema_data: list[dict[str, Any]] = field(default_factory=list)
 
 

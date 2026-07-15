@@ -222,6 +222,42 @@ async def test_open_crawl_default_limit_is_safe_bound_and_saves_metadata(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_skip_amp_variants_does_not_enqueue_amp_shapes(tmp_path):
+    """--skip-amp-variants keeps AMP URL shapes out of the frontier (ticket 103)."""
+    pages = {
+        "https://example.com/": (
+            '<html><body>'
+            '<a href="/article">A</a>'
+            '<a href="/article/amp">AMP</a>'
+            '<a href="/article?amp=1">AMP-q</a>'
+            '<a href="/revamp">not amp</a>'
+            "</body></html>"
+        ),
+        "https://example.com/article": "<html><body>article</body></html>",
+        "https://example.com/article/amp": "<html><body>amp</body></html>",
+        "https://example.com/article?amp=1": "<html><body>amp q</body></html>",
+        "https://example.com/revamp": "<html><body>revamp</body></html>",
+    }
+    store = FakeStore()
+    engine = CrawlEngine(
+        CrawlConfig(max_concurrency=1, discover_sitemaps=False, skip_amp_variants=True),
+        store=store,
+    )
+    engine.backend = FakeBackend(pages)
+    engine._robots = FakeRobots()
+
+    job = await engine.crawl_open(["https://example.com/"], save_to=str(tmp_path / "c.jsonl"))
+    crawled = {r.requested_url for r in job.results}
+
+    # AMP shapes were never enqueued/crawled...
+    assert "https://example.com/article/amp" not in crawled
+    assert "https://example.com/article?amp=1" not in crawled
+    # ...but the non-AMP article and the "/revamp" decoy still are.
+    assert "https://example.com/article" in crawled
+    assert "https://example.com/revamp" in crawled
+
+
+@pytest.mark.asyncio
 async def test_open_crawl_explicit_finite_limit_saves_output(tmp_path):
     pages = {
         "https://example.com/": '<html><body><a href="/a">A</a><a href="/b">B</a></body></html>',

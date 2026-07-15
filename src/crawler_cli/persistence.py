@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from typing import Any, TypedDict, cast
 from urllib.parse import urlparse
 
+from .amp import VARIANT_KIND_AMP, classify_amp_variants, urls_match
 from .compression import compress_html, decompress_html, is_compressed
 from .detection.analytics import AnalyticsDetectionResult
 from .hashing import sha256_hash, simhash64, simhash_to_signed, simhash_to_unsigned
@@ -93,6 +94,22 @@ class AnalysisRow(TypedDict):
     embedding_model: str | None
     canonical_url: str | None
     signature_hash: str | None
+    variant_kind: str | None
+
+
+class AmpHygieneRow(TypedDict):
+    """One AMP variant's canonical-hygiene status (ticket 103), for
+    ``amp_issues.csv``.  ``base_url`` is the paired non-AMP page when known
+    (from ``rel="amphtml"`` or the URL shape); ``issue`` is empty for a healthy
+    AMP page that canonicals to its base."""
+
+    url: str
+    base_url: str
+    variant_kind: str
+    confirmed_by: str
+    canonical_url: str
+    has_canonical: bool
+    issue: str
 
 
 DEFAULT_CRAWL_RUN_ID = "legacy"
@@ -191,6 +208,21 @@ SCHEMA_STATEMENTS = [
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (url_id) REFERENCES urls (id),
         FOREIGN KEY (canonical_url_id) REFERENCES urls (id)
+    )
+    """,
+    # ticket 103: the page->AMP edge from <link rel="amphtml">, mirroring
+    # canonical_urls.  url_id is the base page, amphtml_url_id its declared AMP
+    # variant.  rel="amphtml" is an HTML-head-only signal, hence source fixed to
+    # 'html_head' (kept as a column for symmetry / future header sources).
+    """
+    CREATE TABLE IF NOT EXISTS amphtml_urls (
+        id SERIAL PRIMARY KEY,
+        url_id INTEGER NOT NULL,
+        amphtml_url_id INTEGER NOT NULL,
+        source TEXT CHECK (source IN ('html_head', 'http_header')) NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (url_id) REFERENCES urls (id),
+        FOREIGN KEY (amphtml_url_id) REFERENCES urls (id)
     )
     """,
     """
@@ -537,6 +569,15 @@ SCHEMA_STATEMENTS = [
     """
     ALTER TABLE urls ADD COLUMN IF NOT EXISTS variant_of_id INTEGER
     """,
+    # ticket 103: page-variant kind on the URL identity.  Extensible enum
+    # ('amp' today; print/feed variants could follow) — deliberately plain TEXT
+    # with no CHECK so new kinds need no further migration.
+    """
+    ALTER TABLE urls ADD COLUMN IF NOT EXISTS variant_kind TEXT
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_urls_variant_kind ON urls(variant_kind) WHERE variant_kind IS NOT NULL
+    """,
     """
     CREATE INDEX IF NOT EXISTS idx_urls_hreflang_group ON urls(hreflang_group)
     """,
@@ -659,6 +700,18 @@ SCHEMA_STATEMENTS = [
     """
     CREATE UNIQUE INDEX IF NOT EXISTS uq_canonical_urls_fact
     ON canonical_urls(url_id, canonical_url_id, source)
+    """,
+    """
+    DELETE FROM amphtml_urls a
+    USING amphtml_urls b
+    WHERE a.ctid < b.ctid
+      AND a.url_id = b.url_id
+      AND a.amphtml_url_id = b.amphtml_url_id
+      AND a.source = b.source
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_amphtml_urls_fact
+    ON amphtml_urls(url_id, amphtml_url_id, source)
     """,
     """
     DELETE FROM hreflang_http_header a
@@ -785,6 +838,7 @@ CRAWL_TABLES: tuple[str, ...] = (
     "crawl_comparison_urls",
     "robots_directives",
     "canonical_urls",
+    "amphtml_urls",
     "hreflang_http_header",
     "hreflang_html_head",
     "hreflang_sitemap",
@@ -1846,6 +1900,12 @@ class AsyncpgStore:
                         prelock_urls.append(result.extracted.canonical)
                     if result.extracted.x_canonical:
                         prelock_urls.append(result.extracted.x_canonical)
+                    if result.extracted.amphtml:
+                        # ticket 103: the amphtml href gets a `urls` row too, so it
+                        # MUST be folded into this same sorted bulk pre-lock rather
+                        # than locked separately in _persist_amphtml, or concurrent
+                        # persist() transactions can deadlock on the urls rows.
+                        prelock_urls.append(result.extracted.amphtml)
                     prelock_urls.extend(link.href for link in result.extracted.hreflang_links if link.href)
                 if result.discovered_links:
                     # Internal links are bulk-locked again later in
@@ -1997,6 +2057,7 @@ class AsyncpgStore:
 
                 await self._persist_directives(conn, content_url_id, result)
                 await self._persist_canonical(conn, content_url_id, result)
+                await self._persist_amphtml(conn, content_url_id, result)
                 await self._persist_hreflang(conn, content_url_id, result)
                 if result.extracted.schema_data:
                     await self._persist_schema(conn, content_url_id, result.extracted.schema_data)
@@ -2131,6 +2192,26 @@ class AsyncpgStore:
                 canonical_url_id,
                 source,
             )
+
+    async def _persist_amphtml(self, conn: asyncpg.Connection, url_id: int, result: CrawlResult) -> None:
+        """Persist the <link rel="amphtml"> edge (ticket 103), mirroring
+        :meth:`_persist_canonical`.  The amphtml href already went through the
+        sorted bulk pre-lock in _persist_once, so _get_or_create_url here just
+        re-locks a row this transaction already holds."""
+        assert result.extracted is not None
+        amphtml_url = result.extracted.amphtml
+        if not amphtml_url:
+            return
+        amphtml_url_id = await self._get_or_create_url(conn, amphtml_url)
+        await conn.execute(
+            """
+            INSERT INTO amphtml_urls (url_id, amphtml_url_id, source)
+            VALUES ($1, $2, 'html_head')
+            ON CONFLICT DO NOTHING
+            """,
+            url_id,
+            amphtml_url_id,
+        )
 
     async def _persist_hreflang(self, conn: asyncpg.Connection, url_id: int, result: CrawlResult) -> None:
         assert result.extracted is not None
@@ -2757,6 +2838,99 @@ class AsyncpgStore:
             for r in rows
         ]
 
+    async def classify_amp_variants(self) -> list[AmpHygieneRow]:
+        """Classify AMP variants structurally and record ``variant_kind='amp'``
+        on their URL identity (ticket 103).
+
+        Uses only crawler-captured evidence — the ``rel="amphtml"`` edges in
+        ``amphtml_urls``, AMP URL shape, canonical edges and content hashes —
+        via the pure :func:`crawler_cli.amp.classify_amp_variants`.  Idempotent:
+        re-running only ever (re)sets ``variant_kind`` to ``'amp'``.
+
+        Returns one :class:`AmpHygieneRow` per classified AMP page for the
+        canonical-hygiene report (``amp_issues.csv``)."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            page_rows = await conn.fetch(
+                """
+                SELECT u.id AS url_id, u.url AS url,
+                       c.content_hash_sha256 AS content_hash,
+                       canu.url AS canonical_url
+                FROM urls u
+                JOIN page_metadata pm ON pm.url_id = u.id
+                LEFT JOIN content c ON c.url_id = u.id
+                LEFT JOIN LATERAL (
+                    SELECT cu.canonical_url_id
+                    FROM canonical_urls cu
+                    WHERE cu.url_id = u.id
+                    ORDER BY cu.id
+                    LIMIT 1
+                ) can ON TRUE
+                LEFT JOIN urls canu ON canu.id = can.canonical_url_id
+                -- Only pages actually served (200) are AMP-hygiene candidates:
+                -- a non-200 AMP URL is reported as non-200, not as a missing
+                -- canonical, and compute_exclusion ranks non-200 first anyway.
+                WHERE pm.final_status_code = 200
+                """
+            )
+            amphtml_rows = await conn.fetch(
+                """
+                SELECT au.amphtml_url_id AS target_id, base.url AS base_url
+                FROM amphtml_urls au
+                JOIN urls base ON base.id = au.url_id
+                """
+            )
+
+        pages = [
+            {
+                "url_id": int(r["url_id"]),
+                "url": str(r["url"]),
+                "canonical_url": r["canonical_url"],
+                "content_hash": r["content_hash"],
+            }
+            for r in page_rows
+        ]
+        amphtml_base_by_target = {int(r["target_id"]): str(r["base_url"]) for r in amphtml_rows}
+        canonical_by_id = {int(r["url_id"]): r["canonical_url"] for r in page_rows}
+
+        classifications = classify_amp_variants(pages, amphtml_base_by_target)
+        if not classifications:
+            return []
+
+        amp_ids = [c.url_id for c in classifications]
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE urls SET variant_kind = $1 WHERE id = ANY($2::int[])",
+                    VARIANT_KIND_AMP,
+                    sorted(amp_ids),
+                )
+
+        hygiene: list[AmpHygieneRow] = []
+        for c in classifications:
+            canonical = canonical_by_id.get(c.url_id)
+            if not canonical:
+                issue = "missing-canonical"
+            elif c.base_url and urls_match(str(canonical), c.base_url):
+                issue = ""
+            else:
+                # Canonical present but not pointing at the detected base page.
+                issue = "canonical-not-base"
+            hygiene.append(
+                {
+                    "url": c.url,
+                    "base_url": c.base_url or "",
+                    "variant_kind": VARIANT_KIND_AMP,
+                    "confirmed_by": c.confirmed_by,
+                    "canonical_url": str(canonical) if canonical else "",
+                    "has_canonical": bool(canonical),
+                    "issue": issue,
+                }
+            )
+        hygiene.sort(key=lambda row: row["url"])
+        return hygiene
+
     async def fetch_analysis_rows(self) -> list[AnalysisRow]:
         """Load every fetched page with the fields the intent-overlap analysis
         needs, including its embedding vector (ticket 079)."""
@@ -2768,6 +2942,7 @@ class AsyncpgStore:
                 SELECT u.id AS url_id, u.url AS url, u.kind AS kind,
                        u.norm_url AS norm_url, u.hreflang_group AS hreflang_group,
                        u.resolved_hreflang_code AS hreflang_code,
+                       u.variant_kind AS variant_kind,
                        vu.url AS variant_of,
                        pm.final_status_code AS status,
                        c.title AS title, c.h1_tags AS h1, c.word_count AS word_count,
@@ -2820,6 +2995,7 @@ class AsyncpgStore:
                     "embedding_model": r["embedding_model"],
                     "canonical_url": r["canonical_url"],
                     "signature_hash": r["signature_hash"],
+                    "variant_kind": r["variant_kind"],
                 }
             )
         return out
