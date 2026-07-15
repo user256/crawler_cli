@@ -13,11 +13,14 @@ from crawler_cli.hreflang_groups import (
     UnionFind,
     build_and_store_identity,
     build_groups,
+    classify_relation,
     lang_bucket,
     normalise_url,
+    path_depth,
     reciprocity_issues,
     resolve_language,
     resolve_variants,
+    section_of,
 )
 
 
@@ -47,6 +50,98 @@ def test_lang_bucket():
     assert lang_bucket("en") == "en"
     assert lang_bucket(None) == "unknown"
     assert lang_bucket("") == "unknown"
+
+
+# --------------------------------------------------------------------------
+# classify_relation / section_of / path_depth (ticket 101)
+# --------------------------------------------------------------------------
+
+
+def test_classify_relation_parent_child_direct():
+    a = classify_relation(
+        "https://a.com/accidents-to-cyclists",
+        "https://a.com/accidents-to-cyclists/cycle-accident-compensation-claims",
+    )
+    b = classify_relation(
+        "https://a.com/accidents-to-cyclists/cycle-accident-compensation-claims",
+        "https://a.com/accidents-to-cyclists",
+    )
+    assert a == "parent-child"
+    assert b == "parent-child"  # either direction
+
+
+def test_classify_relation_parent_child_hub_vs_category():
+    assert classify_relation("https://a.com/videos", "https://a.com/videos/road-safety") == "parent-child"
+
+
+def test_classify_relation_does_not_false_positive_on_string_prefix():
+    # "/video" is a raw string prefix of "/videos/x" but NOT a path-segment
+    # prefix — must not be misclassified as parent-child.
+    assert classify_relation("https://a.com/video", "https://a.com/videos/x") == "cross-section"
+
+
+def test_classify_relation_homepage_is_parent_of_everything():
+    assert classify_relation("https://a.com/", "https://a.com/videos") == "parent-child"
+    assert classify_relation("https://a.com/videos", "https://a.com/") == "parent-child"
+
+
+def test_classify_relation_sibling_same_directory():
+    assert classify_relation("https://a.com/videos/road-safety", "https://a.com/videos/cycling") == "sibling"
+    assert classify_relation("https://a.com/news/archived/2020", "https://a.com/news/archived/2021") == "sibling"
+
+
+def test_classify_relation_top_level_pages_are_cross_section_not_sibling():
+    # Two unrelated top-level pages technically share the root as a "parent
+    # directory" but that's not a useful sibling signal — must not swallow
+    # every pair of top-level pages into "sibling".
+    assert classify_relation("https://a.com/accidents-to-cyclists", "https://a.com/road-traffic-accidents") == (
+        "cross-section"
+    )
+
+
+def test_classify_relation_same_section_different_subdirectory():
+    assert classify_relation("https://a.com/videos/road-safety/x", "https://a.com/videos/cycling/y") == "same-section"
+
+
+def test_classify_relation_cross_section():
+    assert classify_relation("https://a.com/videos/x", "https://a.com/news/y") == "cross-section"
+
+
+def test_classify_relation_cross_host():
+    assert classify_relation("https://a.com/p", "https://b.com/p") == "cross-section"
+
+
+def test_classify_relation_trailing_slash_normalised():
+    assert classify_relation("https://a.com/videos/", "https://a.com/videos") == "sibling"
+
+
+def test_classify_relation_query_strings_ignored():
+    assert classify_relation("https://a.com/videos?utm_source=x", "https://a.com/videos") == "sibling"
+    assert classify_relation("https://a.com/videos/road-safety?id=1", "https://a.com/videos/cycling?id=2") == "sibling"
+
+
+def test_classify_relation_nested_depth_greater_than_one():
+    # depth-3 parent, depth-4 child.
+    assert (
+        classify_relation(
+            "https://a.com/videos/road-safety/tips",
+            "https://a.com/videos/road-safety/tips/winter-driving",
+        )
+        == "parent-child"
+    )
+
+
+def test_section_of():
+    assert section_of("https://a.com/videos/road-safety") == "videos"
+    assert section_of("https://a.com/") == "/"
+    assert section_of("https://a.com") == "/"
+    assert section_of("https://a.com/videos/") == "videos"
+
+
+def test_path_depth():
+    assert path_depth("https://a.com/") == 0
+    assert path_depth("https://a.com/videos") == 1
+    assert path_depth("https://a.com/videos/road-safety") == 2
 
 
 # --------------------------------------------------------------------------

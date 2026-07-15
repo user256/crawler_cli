@@ -8,6 +8,7 @@ CSV column contracts, and --fail-on exit codes.
 from __future__ import annotations
 
 import csv
+import json
 import math
 
 import pytest
@@ -15,6 +16,8 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from crawler_cli.intent_overlap import (  # noqa: E402
+    RISK_DUPLICATE,
+    RISK_PARENT_CHILD,
     analyse_embeddings,
     compute_exclusion,
     run_intent_overlap,
@@ -175,6 +178,93 @@ def test_pick_canonical_prefers_word_count_then_shortest_url():
 
 
 # --------------------------------------------------------------------------
+# Relationship classification (ticket 101)
+# --------------------------------------------------------------------------
+
+
+def test_overlap_pairs_carry_relation_and_sections():
+    recs = [
+        _rec("https://a.com/videos", [1.0, 0.0, 0.0]),
+        _rec("https://a.com/videos/road-safety", [0.999, 0.044, 0.0]),
+    ]
+    res = analyse_embeddings(recs, lang_split=False)
+    assert len(res.overlap_pairs) == 1
+    pair = res.overlap_pairs[0]
+    assert pair["relation"] == "parent-child"
+    assert pair["section_a"] == "videos"
+    assert pair["section_b"] == "videos"
+
+
+def test_parent_child_only_duplicate_gets_distinct_risk_label():
+    recs = [
+        _rec("https://a.com/videos", [1.0, 0.0, 0.0]),
+        _rec("https://a.com/videos/road-safety", [0.999, 0.044, 0.0]),
+    ]
+    res = analyse_embeddings(recs, lang_split=False)
+    by_url = {r["url"]: r for r in res.pages_rows}
+    assert by_url["https://a.com/videos"]["risk"] == RISK_PARENT_CHILD
+    assert by_url["https://a.com/videos/road-safety"]["risk"] == RISK_PARENT_CHILD
+    # duplicate_pages (the --fail-on duplicate gating count) still counts them —
+    # ticket 101 must not silently change gating semantics, only the label.
+    assert res.summary["duplicate_pages"] == 2
+    assert res.summary["duplicate_pages_parent_child_only"] == 2
+
+
+def test_duplicate_risk_stays_ordinary_when_not_solely_parent_child():
+    # hub<->child (parent-child, dup-crossing) and hub<->unrelated
+    # (cross-section, dup-crossing), but child<->unrelated stays below
+    # dup_threshold. The hub's duplicate risk is driven by *both* a
+    # parent-child edge and a cross-section edge, so it keeps the ordinary
+    # label; the child's only dup-level edge is the parent-child one, so it
+    # gets the distinct label.
+    hub = [1.0, 0.0, 0.0, 0.0]
+    child = [0.95, (1 - 0.95**2) ** 0.5, 0.0, 0.0]
+    unrelated = [0.95, 0.0, (1 - 0.95**2) ** 0.5, 0.0]
+    recs = [
+        _rec("https://a.com/videos", hub),
+        _rec("https://a.com/videos/road-safety", child),
+        _rec("https://a.com/news/other", unrelated),
+    ]
+    res = analyse_embeddings(recs, lang_split=False)
+    by_url = {r["url"]: r for r in res.pages_rows}
+    assert by_url["https://a.com/videos"]["risk"] == RISK_DUPLICATE
+    assert by_url["https://a.com/videos/road-safety"]["risk"] == RISK_PARENT_CHILD
+    assert by_url["https://a.com/news/other"]["risk"] == RISK_DUPLICATE
+
+
+def test_relation_counts_in_summary():
+    recs = [
+        _rec("https://a.com/videos", [1.0, 0.0, 0.0]),
+        _rec("https://a.com/videos/road-safety", [0.999, 0.044, 0.0]),
+    ]
+    res = analyse_embeddings(recs, lang_split=False)
+    assert res.summary["relation_counts"] == {"parent-child": 1}
+
+
+def test_cluster_relation_field_and_parent_preferred_canonical():
+    recs = [
+        _rec("https://a.com/videos", [1.0, 0.0, 0.0], wc=50),  # thin hub
+        _rec("https://a.com/videos/road-safety", [0.999, 0.044, 0.0], wc=900),  # bigger child
+    ]
+    res = analyse_embeddings(recs, lang_split=False)
+    cluster = res.cluster_rows[0]
+    assert cluster["relation"] == "parent-child"
+    # Parent (shallower path) preferred over the higher-word-count child.
+    assert cluster["suggested_canonical"] == "https://a.com/videos"
+
+
+def test_cluster_relation_field_mixed_when_not_all_parent_child():
+    recs = [
+        _rec("https://a.com/longer-url-here", [1.0, 0.0], wc=500),
+        _rec("https://a.com/x", [1.0, 0.0], wc=900),
+    ]
+    res = analyse_embeddings(recs, lang_split=False)
+    assert res.cluster_rows[0]["relation"] == "cross-section"
+    # Non-parent-child cluster keeps the word-count-based canonical pick.
+    assert res.cluster_rows[0]["suggested_canonical"] == "https://a.com/x"
+
+
+# --------------------------------------------------------------------------
 # Exclusion reasons
 # --------------------------------------------------------------------------
 
@@ -229,7 +319,16 @@ def test_write_reports_produces_six_csvs_and_manifest(tmp_path):
     # overlap_pairs column contract.
     with open(tmp_path / "overlap_pairs.csv") as fh:
         header = next(csv.reader(fh))
-    assert header == ["url_a", "url_b", "similarity", "low_confidence", "sim_percentile"]
+    assert header == [
+        "url_a",
+        "url_b",
+        "similarity",
+        "low_confidence",
+        "sim_percentile",
+        "relation",
+        "section_a",
+        "section_b",
+    ]
     # Excluded page appears in pages.csv with its reason.
     with open(tmp_path / "pages.csv") as fh:
         rows = list(csv.DictReader(fh))
@@ -324,3 +423,31 @@ async def test_run_intent_overlap_rejects_mixed_models(tmp_path):
     store = FakeAnalysisStore(rows)
     with pytest.raises(MixedModelError):
         await run_intent_overlap(store, out_dir=str(tmp_path), lang_split=False)
+
+
+@pytest.mark.asyncio
+async def test_run_intent_overlap_fail_on_duplicate_still_counts_parent_child(tmp_path):
+    # Ticket 101 constraint: --fail-on duplicate keeps counting parent-child
+    # pairs by default — the new label split must not silently change gating.
+    rows = [
+        _store_row("https://a.com/videos", [1.0, 0.0, 0.0]),
+        _store_row("https://a.com/videos/road-safety", [0.999, 0.044, 0.0]),
+    ]
+    store = FakeAnalysisStore(rows)
+    run = await run_intent_overlap(store, out_dir=str(tmp_path), lang_split=False, fail_on="duplicate")
+    assert run.exit_code == 3
+    assert run.result.summary["duplicate_pages"] == 2
+    assert run.result.summary["duplicate_pages_parent_child_only"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_intent_overlap_manifest_has_relation_counts(tmp_path):
+    rows = [
+        _store_row("https://a.com/videos", [1.0, 0.0, 0.0]),
+        _store_row("https://a.com/videos/road-safety", [0.999, 0.044, 0.0]),
+    ]
+    store = FakeAnalysisStore(rows)
+    run = await run_intent_overlap(store, out_dir=str(tmp_path), lang_split=False, run_args={"threshold": 0.85})
+    assert run.result.summary["relation_counts"] == {"parent-child": 1}
+    manifest = json.loads((tmp_path / "run_manifest.json").read_text())
+    assert manifest["summary"]["relation_counts"] == {"parent-child": 1}

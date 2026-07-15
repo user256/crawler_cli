@@ -27,7 +27,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from .embeddings import ensure_single_model
-from .hreflang_groups import UnionFind, lang_bucket, normalise_url, reciprocity_issues
+from .hreflang_groups import (
+    UnionFind,
+    classify_relation,
+    lang_bucket,
+    normalise_url,
+    path_depth,
+    reciprocity_issues,
+    section_of,
+)
 from .persistence import AnalysisRow, UrlVariantRow
 
 if TYPE_CHECKING:
@@ -62,6 +70,14 @@ CLUSTER_SAMPLE_CAP = 50
 DEFAULT_THRESHOLD = 0.85
 DEFAULT_DUP_THRESHOLD = 0.92
 DIST_LOW = 0.80  # distribution buckets are defined on the 0.80 grid
+
+# Risk labels (ticket 101 adds RISK_PARENT_CHILD as a distinct label from
+# RISK_DUPLICATE for pages whose only dup-threshold pairing is a hub/detail
+# parent-child relationship — "pick one canonical" is often the wrong call
+# there, unlike two unrelated pages competing for the same intent).
+RISK_DUPLICATE = "duplicate — decanonicalisation likely"
+RISK_PARENT_CHILD = "parent-child overlap — differentiate or consolidate deliberately"
+RISK_HIGH_OVERLAP = "high intent overlap"
 
 
 def _np() -> Any:
@@ -280,6 +296,16 @@ def _pick_canonical(members: list[dict[str, Any]]) -> str:
     return min((m["url"] for m in ties), key=len)
 
 
+def _pick_parent_canonical(members: list[dict[str, Any]]) -> str:
+    """Canonical pick for an all-parent-child cluster (ticket 101): the
+    shallowest ("hub") page is the natural survivor when a merge IS wanted —
+    not the highest-word-count member, since a thin hub page legitimately
+    overlapping several detail children shouldn't lose to its own child.
+    Tie-break shortest URL, then lexical.
+    """
+    return min((m["url"] for m in members), key=lambda u: (path_depth(u), len(u), u))
+
+
 def analyse_embeddings(
     records: Sequence[dict[str, Any]],
     *,
@@ -357,6 +383,12 @@ def analyse_embeddings(
     suppressed = 0
     all_nn: list[float] = []
     scan_low = min(DIST_LOW, threshold)  # IO ticket 115 floor
+    # Per-page relations of the dup_threshold-crossing edges that touch it
+    # (ticket 101) — used below to tell whether a page's "duplicate" risk is
+    # driven solely by parent-child pairs (hub/detail), vs a genuine
+    # de-canonicalisation risk against an unrelated or sibling page.
+    dup_relations: dict[int, list[str]] = {}
+    relation_counts: dict[str, int] = {}
 
     for lang, idx_list in partitions:
         idxs = np.asarray(idx_list)
@@ -380,12 +412,17 @@ def analyse_embeddings(
             if s >= DIST_LOW:
                 part_pair_sims.append(s)
             if s >= threshold:
+                relation = classify_relation(urls[i], urls[j])
+                relation_counts[relation] = relation_counts.get(relation, 0) + 1
                 result.overlap_pairs.append(
                     {
                         "url_a": urls[i],
                         "url_b": urls[j],
                         "similarity": round(s, 4),
                         "low_confidence": conf[i] == "low" or conf[j] == "low",
+                        "relation": relation,
+                        "section_a": section_of(urls[i]),
+                        "section_b": section_of(urls[j]),
                     }
                 )
                 part_edges.append((i, j, s))
@@ -394,6 +431,9 @@ def analyse_embeddings(
                     max_sim[i], nearest[i] = s, urls[j]
                 if s > max_sim[j]:
                     max_sim[j], nearest[j] = s, urls[i]
+                if s >= dup_threshold:
+                    dup_relations.setdefault(i, []).append(relation)
+                    dup_relations.setdefault(j, []).append(relation)
         result.distribution_rows.append(build_similarity_distribution(lang, nn, part_pair_sims, pages=part_n))
         if linkage == "complete":
             partition_edges.append((lang, part_edges))
@@ -427,9 +467,15 @@ def analyse_embeddings(
     for i, r in enumerate(emb):
         ms = float(max_sim[i])
         if ms >= dup_threshold:
-            risk = "duplicate — decanonicalisation likely"
+            rels = dup_relations.get(i, [])
+            # "Solely" parent-child: every dup_threshold-crossing pair that
+            # touches this page is a hub/detail relationship, not just its
+            # single nearest neighbour — a page with one parent-child edge
+            # AND one genuine cross-section duplicate edge still gets the
+            # ordinary duplicate label (ticket 101).
+            risk = RISK_PARENT_CHILD if rels and all(rel == "parent-child" for rel in rels) else RISK_DUPLICATE
         elif ms >= threshold:
-            risk = "high intent overlap"
+            risk = RISK_HIGH_OVERLAP
         else:
             risk = ""
         r["_cluster_id"] = roots[i]
@@ -444,15 +490,35 @@ def analyse_embeddings(
         if cid is not None:
             by_cluster.setdefault(cid, []).append(i)
 
+    # Dominant relation of the edges within each cluster (ticket 101) — lets
+    # clusters.csv distinguish an all-parent-child hub/detail cluster from a
+    # sibling/same-section/mixed one, and drives the parent-preferring
+    # canonical pick below.
+    url_to_cluster = {r["url"]: r["_cluster_id"] for r in emb}
+    cluster_edge_relations: dict[str, list[str]] = {}
+    for pair in result.overlap_pairs:
+        ca = url_to_cluster.get(pair["url_a"])
+        cb = url_to_cluster.get(pair["url_b"])
+        if ca is not None and ca == cb:
+            cluster_edge_relations.setdefault(ca, []).append(pair["relation"])
+
     chained_n = 0
     canon_by_cluster: dict[str, str] = {}
     for cid, member_idxs in sorted(by_cluster.items()):
         members = [emb[i] for i in member_idxs]
         min_s, mean_s, cohesion, sampled = intra_cluster_stats(vecs, member_idxs)
         chained = min_s < threshold
+        edge_rels = cluster_edge_relations.get(cid, [])
+        parent_child_only = bool(edge_rels) and all(rel == "parent-child" for rel in edge_rels)
+        if edge_rels and all(rel == edge_rels[0] for rel in edge_rels):
+            relation_summary = edge_rels[0]
+        else:
+            relation_summary = "mixed" if edge_rels else ""
         if chained:
             chained_n += 1
             canon = "review — chained cluster"
+        elif parent_child_only:
+            canon = _pick_parent_canonical(members)
         else:
             canon = _pick_canonical(members)
         canon_by_cluster[cid] = canon
@@ -463,6 +529,7 @@ def analyse_embeddings(
                 "cluster_id": cid,
                 "size": len(members),
                 "suggested_canonical": canon,
+                "relation": relation_summary,
                 "languages": ",".join(cluster_langs),
                 "urls": " | ".join(m["url"] for m in members),
                 "avg_word_count": int(sum(int(m.get("word_count") or 0) for m in members) / len(members)),
@@ -498,15 +565,23 @@ def analyse_embeddings(
             }
         )
 
-    dup_n = sum(1 for r in emb if str(r.get("_risk", "")).startswith("duplicate"))
+    # Counted by max_sim crossing dup_threshold — NOT by the "_risk" label
+    # text, which ticket 101 now splits into RISK_DUPLICATE / RISK_PARENT_CHILD.
+    # --fail-on duplicate gates on this count and must keep counting
+    # parent-child-driven pages by default (ticket 101 constraint: don't
+    # silently change gating semantics); the label split is informational.
+    dup_n = int((max_sim >= dup_threshold).sum())
+    dup_parent_child_n = sum(1 for r in emb if r.get("_risk") == RISK_PARENT_CHILD)
     result.suppressed = suppressed
     result.chained_clusters = chained_n
     result.summary = {
         "embedded": n,
         "overlap_pairs": len(result.overlap_pairs),
+        "relation_counts": relation_counts,
         "clusters": len(result.cluster_rows),
         "chained_clusters": chained_n,
         "duplicate_pages": dup_n,
+        "duplicate_pages_parent_child_only": dup_parent_child_n,
         "suppressed_pairs": suppressed,
         "threshold": threshold,
         "dup_threshold": dup_threshold,
@@ -557,11 +632,21 @@ _PAGES_FIELDS = [
     "signal_confidence",
     "excluded",
 ]
-_PAIRS_FIELDS = ["url_a", "url_b", "similarity", "low_confidence", "sim_percentile"]
+_PAIRS_FIELDS = [
+    "url_a",
+    "url_b",
+    "similarity",
+    "low_confidence",
+    "sim_percentile",
+    "relation",
+    "section_a",
+    "section_b",
+]
 _CLUSTER_FIELDS = [
     "cluster_id",
     "size",
     "suggested_canonical",
+    "relation",
     "languages",
     "urls",
     "avg_word_count",
