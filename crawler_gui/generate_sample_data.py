@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 OUT = Path(__file__).with_name("sample-data.json")
@@ -206,7 +207,7 @@ def overview_from_pages(pages: list[dict]) -> dict:
     }
 
 
-def main() -> None:
+def build_fixture() -> dict:
     pages = build_pages()
     total = len(pages)
     data = {
@@ -220,7 +221,7 @@ def main() -> None:
             {"id": "dashboard", "label": "Dashboard", "enabled": False},
             {"id": "crawler", "label": "Crawler", "enabled": True},
             {"id": "lighthouse", "label": "Lighthouse", "enabled": False},
-            {"id": "schedule", "label": "Schedule", "enabled": False},
+            {"id": "schedule", "label": "Schedule", "enabled": True},
         ],
         "categoryTabs": [
             {"id": "internal", "label": "Internal"},
@@ -305,6 +306,9 @@ def main() -> None:
             "delay": 0.2,
             "respectRobots": True,
             "useJs": False,
+            "ignoreNoFollow": False,
+            "crawlImages": False,
+            "userAgent": "Mozilla/5.0 (compatible; crawler_gui/1.0; +https://example.com/bot)",
             "backend": "aiohttp",
         },
         "overview": overview_from_pages(pages),
@@ -317,8 +321,25 @@ def main() -> None:
         "pages": pages,
     }
 
-    OUT.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    print(f"Wrote {OUT} ({total} pages)")
+    return data
+
+
+def render_fixture() -> str:
+    return json.dumps(build_fixture(), indent=2) + "\n"
+
+
+def main() -> None:
+    expected = render_fixture()
+    if "--check" in sys.argv[1:]:
+        actual = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
+        if actual != expected:
+            print(f"{OUT} is out of date; run python3 {Path(__file__).name}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"{OUT} is current")
+        return
+
+    OUT.write_text(expected, encoding="utf-8")
+    print(f"Wrote {OUT} ({len(build_fixture()['pages'])} pages)")
 
 
 if __name__ == "__main__":

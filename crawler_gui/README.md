@@ -71,6 +71,12 @@ Regenerate fixture:
 python3 generate_sample_data.py
 ```
 
+Verify that the checked-in fixture is exactly what the generator emits:
+
+```bash
+python3 generate_sample_data.py --check
+```
+
 ### JSON contract (prototype → future API)
 
 Top-level keys the UI expects today:
