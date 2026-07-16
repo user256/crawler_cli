@@ -80,6 +80,7 @@ Report files contain client URLs — they belong in the run's `--out` dir
 (untracked), never in git, and must not be published anywhere by tooling.
 
 ## Status
-in_progress (claimed by `agent/ticket-107-interactive-html-cluster-report`; starts after 106 PR) — blocked on ticket 106's stable schema until that PR lands. UX reference:
-the user's prior Colab/plotly workflow (hover URLs, legend toggles, duplicate +
-off-topic overlays), reimplemented dependency-free.
+`done` (2026-07-15) — `render-report` + `intent-overlap --html-report` write a
+single self-contained offline HTML cluster report (canvas map, match-type
+filters, sortable tables, URL search). Depends on ticket 106's
+`report_data.json`. ruff/mypy/tests green.

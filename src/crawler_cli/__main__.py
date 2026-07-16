@@ -1278,6 +1278,8 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
+    html_report = bool(getattr(args, "html_report", False))
+    json_report = bool(getattr(args, "json_report", False) or html_report)
 
     run_args = {
         "threshold": args.threshold,
@@ -1293,7 +1295,8 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
         "ann_k": args.ann_k,
         "thin_signature_words": args.thin_signature_words,
         "time_sequenced_section": args.time_sequenced_section,
-        "json_report": args.json_report,
+        "json_report": json_report,
+        "html_report": html_report,
         "json_min_similarity": args.json_min_similarity,
         "projection_seed": args.projection_seed,
     }
@@ -1317,7 +1320,7 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
             thin_signature_words=args.thin_signature_words,
             time_sequenced_sections=args.time_sequenced_section or (),
             run_args=run_args,
-            json_report=args.json_report,
+            json_report=json_report,
             json_min_similarity=args.json_min_similarity,
             projection_seed=args.projection_seed,
         )
@@ -1330,6 +1333,20 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
         return 2
     finally:
         await store.close()
+
+    if html_report:
+        from pathlib import Path
+
+        from .report_html import write_report_html
+
+        json_path = Path(args.out) / "report_data.json"
+        html_path = Path(args.out) / "report.html"
+        try:
+            write_report_html(json_path, html_path)
+            run.written.append(str(html_path))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Error writing HTML report: {exc}", file=sys.stderr)
+            return 2
 
     s = run.result.summary
     tp = s.get("threshold_percentile")
@@ -1374,6 +1391,23 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     return run.exit_code
+
+
+def _run_render_report(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from .report_html import write_report_html
+
+    try:
+        out = write_report_html(args.data, args.output)
+    except FileNotFoundError:
+        print(f"Error: report data not found: {args.data}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"Error rendering report: {exc}", file=sys.stderr)
+        return 2
+    print(f"Wrote {out} ({Path(out).stat().st_size} bytes)")
+    return 0
 
 
 # --- Saved-crawl JSON schema (ticket 083) -----------------------------------
@@ -1943,7 +1977,31 @@ def _build_parser() -> argparse.ArgumentParser:
         default=42,
         help="Deterministic seed for UMAP/PCA 2D projection in report_data.json (default 42)",
     )
+    io_parser.add_argument(
+        "--html-report",
+        action="store_true",
+        help=(
+            "Write report.html as well as report_data.json (implies --json-report). "
+            "Self-contained offline cluster map + tables (ticket 107)."
+        ),
+    )
     _add_postgres_args(io_parser)
+
+    render_parser = subparsers.add_parser(
+        "render-report",
+        help="Render report_data.json as a self-contained offline HTML cluster report",
+    )
+    render_parser.add_argument(
+        "--data",
+        required=True,
+        help="Path to report_data.json from intent-overlap --json-report",
+    )
+    render_parser.add_argument(
+        "-o",
+        "--output",
+        default="report.html",
+        help="Output HTML path (default: report.html)",
+    )
 
     cmp_parser = subparsers.add_parser("compare", help="Compare two saved crawl JSON files")
     cmp_parser.add_argument("baseline_json", help="Baseline crawl JSON path")
@@ -2069,11 +2127,16 @@ def _normalize_argv(argv: list[str]) -> list[str]:
     if argv[0] in {
         "crawl",
         "generate-embeddings",
+        "backfill-signatures",
+        "hreflang-groups",
+        "intent-overlap",
+        "render-report",
         "compare",
         "compact-html",
         "delete-crawl",
         "compact-crawl",
         "generate-sitemap",
+        "install-obscura",
     }:
         return argv
     if "://" in argv[0]:
@@ -2109,6 +2172,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_hreflang_groups(args)
     if command == "intent-overlap":
         return await _run_intent_overlap(args)
+    if command == "render-report":
+        return _run_render_report(args)
     if command == "compare":
         return await _run_compare(args)
     if command == "compact-html":
