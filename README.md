@@ -409,6 +409,27 @@ Periodic re-runs: `crawl --refresh-days 30` skips URLs fetched successfully
 within the window, and `--ua "domain=User Agent"` sets a per-domain User-Agent
 (matches subdomains) for portfolio crawls.
 
+### Run snapshots and retention
+
+Each fetch is retained as an immutable page snapshot for its crawl run. The
+normalised `pages`/`content` tables remain a convenient latest-state view, but
+historical reporting and enrichment read snapshot values. When a database has
+multiple runs, these commands require `--crawl-run-id`; they refuse to guess:
+
+```bash
+crawler-cli backfill-signatures --postgres-dsn ... --crawl-run-id crawl-20260716-a
+crawler-cli generate-embeddings --postgres-dsn ... --crawl-run-id crawl-20260716-a
+crawler-cli hreflang-groups --postgres-dsn ... --crawl-run-id crawl-20260716-a
+crawler-cli intent-overlap --postgres-dsn ... --crawl-run-id crawl-20260716-a --out ./out
+```
+
+Snapshots retain HTML, metadata, extracted content/hashes, indexability,
+canonical/hreflang/robots/schema/link/analytics facts, and run-specific
+signatures, embeddings, and identity resolution. They consume more storage
+than the current-state projection; use `compact-crawl --crawl-run-id RUN_ID`
+to purge HTML for one retained run after its downstream analysis is complete.
+Deleting a crawl truncates all runs and snapshots together.
+
 ### 3. Compare Crawls
 
 Run a deep comparison between two saved crawl JSON files to identify missing URLs, title changes, schema regressions, and link drift:
@@ -429,8 +450,8 @@ crawler-cli delete-crawl --postgres-dsn ... --dry-run
 crawler-cli delete-crawl --postgres-dsn ... --confirm crawler_db_example
 crawler-cli delete-crawl --postgres-dsn ... --mode drop-database --confirm crawler_db_example
 
-# Drop stored HTML but keep URLs, metadata, analytics hits, and content hashes
-crawler-cli compact-crawl --postgres-dsn ... --backfill-hashes --confirm crawler_db_example
+# Drop one retained run's HTML while retaining its snapshot facts and hashes
+crawler-cli compact-crawl --postgres-dsn ... --crawl-run-id crawl-20260716-a --confirm crawler_db_example
 ```
 
 Run `generate-embeddings` **before** `compact-crawl` if you need vectors — compact removes HTML required for embedding generation.
@@ -440,7 +461,7 @@ Run `generate-embeddings` **before** `compact-crawl` if you need vectors — com
 Generate a clean `sitemap.xml` from a completed crawl (indexable, self-canonical, 200-OK URLs). Splits into a sitemap index above 50,000 URLs:
 
 ```bash
-crawler-cli generate-sitemap --postgres-dsn ... -o sitemap.xml --base-url https://example.com
+crawler-cli generate-sitemap --postgres-dsn ... --crawl-run-id crawl-20260716-a -o sitemap.xml --base-url https://example.com
 ```
 
 Connection to PostgreSQL can be configured via environment variables (`CRAWLER_CLI_POSTGRES_*` or `PostgreSQLCrawler_POSTGRES_*`) or CLI flags (`--postgres-dsn`, `--postgres-host`, etc.). CLI flags override env vars.

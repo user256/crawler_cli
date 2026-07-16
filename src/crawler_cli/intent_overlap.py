@@ -1131,6 +1131,7 @@ def build_report_data(
     projection_seed: int = DEFAULT_PROJECTION_SEED,
     projection_dims: int = DEFAULT_PROJECTION_DIMS,
     off_topic_percentile: float = DEFAULT_OFF_TOPIC_PERCENTILE,
+    crawl_run_id: str | None = None,
     json_min_similarity: float | None = None,
     size_floor_pages: int = JSON_PAIR_SIZE_FLOOR_PAGES,
 ) -> dict[str, Any]:
@@ -1513,6 +1514,7 @@ async def run_intent_overlap(
     json_min_similarity: float | None = None,
     projection_seed: int = DEFAULT_PROJECTION_SEED,
     off_topic_percentile: float = DEFAULT_OFF_TOPIC_PERCENTILE,
+    crawl_run_id: str | None = None,
 ) -> IntentOverlapRun:
     """Load embeddings + identity from the store, run the analysis, write the
     six CSVs + manifest, and return a run summary (ticket 079).
@@ -1526,11 +1528,18 @@ async def run_intent_overlap(
     """
     from datetime import datetime, timezone
 
-    # Classify AMP variants structurally first (ticket 103) so variant_kind is
-    # populated before the analysis rows are loaded and compute_exclusion runs.
-    amp_hygiene = await store.classify_amp_variants()
+    # Classify AMP variants in the selected run before snapshot-backed analysis.
+    if crawl_run_id is None:
+        amp_hygiene = await store.classify_amp_variants()
+        fetched = await store.fetch_analysis_rows()
+        edges = await store.fetch_hreflang_edges()
+        variant_source = await store.fetch_url_variant_rows()
+    else:
+        amp_hygiene = await store.classify_amp_variants(run_id=crawl_run_id)
+        fetched = await store.fetch_analysis_rows(run_id=crawl_run_id)
+        edges = await store.fetch_hreflang_edges(run_id=crawl_run_id)
+        variant_source = await store.fetch_url_variant_rows(run_id=crawl_run_id)
 
-    fetched = await store.fetch_analysis_rows()
     rows: list[AnalysedRow] = [{**r, "excluded": compute_exclusion(r)} for r in fetched]
     # Classify parameterised URLs and fold content-confirmed duplicates onto
     # their base URL before partitioning records (ticket 102).
@@ -1569,9 +1578,8 @@ async def run_intent_overlap(
         time_sequenced_sections=time_sequenced_sections,
     )
 
-    edges = await store.fetch_hreflang_edges()
     issues = reciprocity_issues(edges)
-    variant_rows = _variant_rows_from_store(await store.fetch_url_variant_rows())
+    variant_rows = _variant_rows_from_store(variant_source)
 
     parameterised_pages = sum(1 for r in rows if r.get("url_class") == "parameterised")
     parameterised_duplicates = sum(1 for r in rows if r.get("excluded") == "parameterised-duplicate")

@@ -315,14 +315,14 @@ class IdentityResult:
     reciprocity_issues: int = 0
 
 
-async def build_and_store_identity(store: AsyncpgStore) -> IdentityResult:
+async def build_and_store_identity(store: AsyncpgStore, *, run_id: str | None = None) -> IdentityResult:
     """Build hreflang groups, resolve languages, and fold URL variants over a
     crawl, persisting the results (ticket 078).  Reads only crawler-captured
     data; no external input.
     """
-    edges = await store.fetch_hreflang_edges()
+    edges = await store.fetch_hreflang_edges(**({"run_id": run_id} if run_id is not None else {}))
     grouping = build_groups(edges)
-    pages = await store.fetch_pages_for_identity()
+    pages = await store.fetch_pages_for_identity(**({"run_id": run_id} if run_id is not None else {}))
 
     result = IdentityResult(pages=len(pages))
     result.groups = grouping.group_count
@@ -359,7 +359,10 @@ async def build_and_store_identity(store: AsyncpgStore) -> IdentityResult:
             }
         )
 
-    await store.store_hreflang_identity(identity_rows)
+    if run_id is None:
+        await store.store_hreflang_identity(identity_rows)
+    else:
+        await store.store_hreflang_identity(identity_rows, run_id=run_id)
     result.grouped_urls = sum(1 for r in identity_rows if r["hreflang_group"])
 
     resolution = resolve_variants(variant_input)
@@ -368,7 +371,10 @@ async def build_and_store_identity(store: AsyncpgStore) -> IdentityResult:
         for variant, rep in resolution.variant_of.items()
         if variant in url_to_id and rep in url_to_id
     ]
-    await store.store_url_variants(variant_pairs)
+    if run_id is None:
+        await store.store_url_variants(variant_pairs)
+    else:
+        await store.store_url_variants(variant_pairs, run_id=run_id)
     result.variants = len(variant_pairs)
     result.representatives = len(resolution.representatives)
     return result

@@ -605,6 +605,13 @@ def _add_postgres_args(parser: argparse.ArgumentParser) -> None:
     pg.add_argument("--postgres-db", help="PostgreSQL database name")
 
 
+def _add_reporting_run_selector(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--crawl-run-id",
+        help="Crawl run whose immutable snapshots to read. Required when the database contains multiple runs.",
+    )
+
+
 def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("url", nargs="?", help="Seed URL to crawl")
     parser.add_argument(
@@ -1170,6 +1177,7 @@ async def _run_embeddings(args: argparse.Namespace) -> int:
     await store.initialize()
 
     try:
+        run_id = await store.resolve_reporting_run_id(args.crawl_run_id)
         urls = None
         if args.urls:
             urls = args.urls
@@ -1181,6 +1189,7 @@ async def _run_embeddings(args: argparse.Namespace) -> int:
             delay_seconds=args.delay,
             skip_existing=not args.force,
             urls=urls,
+            run_id=run_id,
         )
         print(f"Embeddings complete: processed={result.processed} skipped={result.skipped} failed={result.failed}")
         if result.errors:
@@ -1205,6 +1214,7 @@ async def _run_local_embeddings(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
+        run_id = await store.resolve_reporting_run_id(args.crawl_run_id)
         result = await generate_signature_embeddings_for_store(
             store,
             model=model,
@@ -1213,6 +1223,7 @@ async def _run_local_embeddings(args: argparse.Namespace) -> int:
             force=args.force,
             urls=args.urls or None,
             source=source,
+            run_id=run_id,
         )
     finally:
         await store.close()
@@ -1234,12 +1245,14 @@ async def _run_backfill_signatures(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
+        run_id = await store.resolve_reporting_run_id(args.crawl_run_id)
         result = await backfill_intent_signatures(
             store,
             urls=args.urls or None,
             boilerplate_share=args.boilerplate_share,
             min_words=args.min_words,
             dry_run=args.dry_run,
+            run_id=run_id,
         )
     finally:
         await store.close()
@@ -1262,7 +1275,8 @@ async def _run_hreflang_groups(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
-        result = await build_and_store_identity(store)
+        run_id = await store.resolve_reporting_run_id(args.crawl_run_id)
+        result = await build_and_store_identity(store, run_id=run_id)
     finally:
         await store.close()
 
@@ -1310,6 +1324,7 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
+        run_id = await store.resolve_reporting_run_id(args.crawl_run_id)
         run = await run_intent_overlap(
             store,
             out_dir=args.out,
@@ -1329,6 +1344,7 @@ async def _run_intent_overlap(args: argparse.Namespace) -> int:
             json_report=json_report,
             json_min_similarity=args.json_min_similarity,
             projection_seed=args.projection_seed,
+            crawl_run_id=run_id,
         )
     except MixedModelError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -1724,7 +1740,7 @@ async def _run_delete_crawl(args: argparse.Namespace) -> int:
     db_name = database_name_from_dsn(dsn)
     try:
         counts = await store.table_row_counts()
-        queued, pending, done = await store.frontier_stats()
+        queued, pending, done = await store.frontier_stats_all_runs()
         print(f"Database: {db_name}")
         print(f"Mode: {args.mode}")
         for table in ("pages", "urls", "frontier", "content", "page_analytics_hits"):
@@ -1756,7 +1772,8 @@ async def _run_compact_crawl(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
-        stats = await store.html_storage_stats()
+        run_id = await store.resolve_reporting_run_id(args.crawl_run_id)
+        stats = await store.run_snapshot_html_stats(run_id=run_id)
         print(json.dumps(stats, indent=2))
         missing = stats["pages_with_html_missing_hash"]
         if args.require_hashes and missing > 0 and not args.backfill_hashes:
@@ -1769,24 +1786,17 @@ async def _run_compact_crawl(args: argparse.Namespace) -> int:
         if (code := _require_confirm(args, dsn)) is not None:
             return code
         if args.backfill_hashes:
-            backfill = await store.backfill_content_hashes(
-                batch_size=args.batch_size,
-                dry_run=args.dry_run,
-            )
-            print(f"Hash backfill: {json.dumps(backfill)}")
-            stats = await store.html_storage_stats()
-            missing = stats["pages_with_html_missing_hash"]
-            if args.require_hashes and missing > 0:
-                print(f"Still missing hashes on {missing} pages.", file=sys.stderr)
-                return 2
-        result = await store.purge_stored_html(
-            drop_headers=args.drop_headers,
-            vacuum=args.vacuum,
-            dry_run=args.dry_run,
+            print("Snapshot hashes are immutable; re-crawl the selected run to add missing hashes.", file=sys.stderr)
+            return 2
+        result = await store.purge_run_snapshot_html(
+            run_id=run_id, drop_headers=args.drop_headers, dry_run=args.dry_run
         )
         print(json.dumps(result, indent=2))
         if args.dry_run:
             print("Dry run — HTML not purged.")
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     finally:
         await store.close()
     return 0
@@ -1798,7 +1808,11 @@ async def _run_generate_sitemap(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     await store.initialize()
     try:
-        urls = await fetch_indexable_urls(store)
+        run_id = await store.resolve_reporting_run_id(args.crawl_run_id)
+        urls = await fetch_indexable_urls(store, run_id=run_id)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     finally:
         await store.close()
 
@@ -1879,6 +1893,7 @@ def _build_parser() -> argparse.ArgumentParser:
     emb_parser.add_argument("--force", action="store_true", help="Regenerate existing embeddings")
     emb_parser.add_argument("--urls", nargs="*", help="Optional URL filter list")
     _add_postgres_args(emb_parser)
+    _add_reporting_run_selector(emb_parser)
 
     sig_parser = subparsers.add_parser(
         "backfill-signatures",
@@ -1899,12 +1914,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sig_parser.add_argument("--dry-run", action="store_true", help="Report counts without writing")
     _add_postgres_args(sig_parser)
+    _add_reporting_run_selector(sig_parser)
 
     hreflang_parser = subparsers.add_parser(
         "hreflang-groups",
         help="Build hreflang alternate groups + resolve URL variants from crawler-captured edges",
     )
     _add_postgres_args(hreflang_parser)
+    _add_reporting_run_selector(hreflang_parser)
 
     io_parser = subparsers.add_parser(
         "intent-overlap",
@@ -2001,6 +2018,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_postgres_args(io_parser)
+    _add_reporting_run_selector(io_parser)
 
     render_parser = subparsers.add_parser(
         "render-report",
@@ -2081,6 +2099,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_confirm_args(compact_parser)
     _add_postgres_args(compact_parser)
+    _add_reporting_run_selector(compact_parser)
 
     sitemap_parser = subparsers.add_parser(
         "generate-sitemap",
@@ -2103,6 +2122,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Split into a sitemap index above this many URLs (default 50000)",
     )
     _add_postgres_args(sitemap_parser)
+    _add_reporting_run_selector(sitemap_parser)
 
     install_parser = subparsers.add_parser(
         "install-obscura",

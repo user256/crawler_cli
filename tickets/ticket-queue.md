@@ -10,19 +10,13 @@ Ticket files remain the source of truth for scope and DoD.
   merged: 114 / 115 / 116 met their definitions of done; 117 fixed the shared
   `CrawlConfig.validate()` regression that had made their original CI checks red.
 - Tickets **118** (GUI fixture parity, PR #42) and **119** (GUI intent-overlap
-  viewer, PR #45 — its stacked PR #43 mis-merged into `agent/118`, so the same
-  verified commit was re-targeted to master) are **merged**. The `crawler_gui/`
-  prototype baseline is now tracked on master.
-- PR **#33** (095) was rejected. The rework (PR **#44**, branch
-  `agent/095-run-aware-snapshots`) fixes all three original rejection reasons
-  (snapshot-backed reads, functional `hreflang-groups` selector, green suite —
-  670 passed against a real Postgres) but is **held, not merged**: it introduces
-  a silent AMP-variant exclusion regression that re-opens Ticket 103. Blocker is
-  tracked as Ticket **120**; 095 merges only after 120 lands.
+  viewer, PR #45) are **merged**. The `crawler_gui/` prototype baseline is now
+  tracked on master.
+- PR **#33** (095) remains rejected. Its replacement, draft PR **#44**, is
+  ready for review: snapshot-backed reads, deterministic report selection, and
+  the run-scoped AMP exclusion remediation from Ticket **120** are implemented.
 - Tickets **101–108** now form the completed intent-overlap reporting baseline.
-- Ticket **110** remains unused/rejected; **120** (095 AMP regression) and
-  **121** (crawler_gui shell hygiene) are the new remediation tickets; next
-  unreserved number is **122**.
+- Ticket **110** remains unused/rejected; next unreserved number is **122**.
 
 ### Ordering rules
 
@@ -238,7 +232,7 @@ proceed independently except where their DoD references earlier behavior.
 - `092` `done` (2026-07-15, PR #25; leftovers → 115) [ticket-092-persist-failure-exit-policy.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-092-persist-failure-exit-policy.md) — **P1:** terminal persistence failures produce a non-zero automation result and durable/partial output metadata. Reviewed MERGE+REMEDIATE: DoD met; CI green
 - `093` `done` [ticket-093-cli-config-numeric-validation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-093-cli-config-numeric-validation.md) — **P2:** validate numeric and cross-field config at CLI/library boundaries; no raw tracebacks
 - `094` `done` (2026-07-15, PR #11) [ticket-094-obscura-installer-verification.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-094-obscura-installer-verification.md) — **P1 security:** checksum/signature verification, safe staged archive extraction, and atomic install. Reviewed MERGE: adversarial security review found no exploitable holes — real-path containment (not string prefix), pre-extraction symlink/hardlink/device rejection, fail-closed digest verify, atomic replace with rollback; 42 passed. Test-coverage hardening + digest cross-check filed as ticket 100
-- `095` `held (rework in PR #44; blocked on 120)` [ticket-095-run-aware-snapshots-reporting.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-095-run-aware-snapshots-reporting.md) — **P2, depends on 086:** retain snapshots and require deterministic run selection. PR #33 rejected; rework PR #44 fixes all three rejection reasons (snapshot-backed reads, working `hreflang-groups` selector, 670 passed on real Postgres) but is **not merged** — it drops AMP `variant_kind` from `fetch_analysis_rows` (silent regression re-opening 103). Merge after **120**.
+- `095` `ready for review (agent/095-run-aware-snapshots; draft PR #44; replaces rejected PR #33)` [ticket-095-run-aware-snapshots-reporting.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-095-run-aware-snapshots-reporting.md) — **P2, depends on 086:** immutable snapshots and deterministic run selection; Ticket 120 AMP regression remediation is folded into the rework
 - `096` `done` (2026-07-15) [ticket-096-persistence-coverage-gate.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-096-persistence-coverage-gate.md) — **P2:** combine/gate PostgreSQL integration coverage and exercise migrations/concurrency/failure paths
 - `097` `done` (2026-07-15, PR #10) [ticket-097-real-playwright-ci-smoke.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-097-real-playwright-ci-smoke.md) — **P2:** install and launch real Chromium in a required CI smoke job. Reviewed MERGE: dedicated `playwright-smoke` job installs `.[test,playwright]` + pinned/cached Chromium with `continue-on-error` removed (hard-fails on broken browser); real JS-rendered end-to-end crawl through `CrawlEngine`, cleanup-on-success/failure asserted; heavy tests marker-gated so local unit runs stay fast. Real browser ran in review (2 passed)
 - `098` `done` (2026-07-15) [ticket-098-packaging-docs-release-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-098-packaging-docs-release-hygiene.md) — **P3:** fix nonexistent `[api]` extra docs; add license/project metadata/install-matrix/release checks — MIT LICENSE + pyproject metadata; README install matrix; CHANGELOG/RELEASING; CI packaging + extras jobs
@@ -302,11 +296,10 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 
 ### Open work — priority order (2026-07-16, updated after PR-review batch #41–#45)
 
-1. **P1** `120` `open (blocker for 095)` [run-snapshot AMP-exclusion regression](./ticket-120-run-snapshot-amp-exclusion-regression.md) — restore run-scoped AMP `variant_kind` in `fetch_analysis_rows`; add a full-flow test; fold in the `CrawlReports._run_id` multi-run guard and stale-comment cleanup.
-2. **P2** `095` `held (rework in PR #44)` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — PR #44 is functionally complete and green but must not merge until **120** removes the AMP-exclusion regression; re-review then. PR #33 must not be resumed unchanged.
-3. **P3** `121` `proposed` [crawler_gui shell hygiene](./ticket-121-crawler-gui-shell-hygiene.md) — self-host/drop Google Fonts, drop the non-owned `CrawlZilla.html` + screenshot bloat, document the grid view's HTTP-serving requirement.
+1. **P2** `095` `ready for review (draft PR #44)` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — snapshot-backed historical semantics, deterministic report selection, and the Ticket 120 AMP fix are implemented; final review/CI remain.
+2. **P3** `121` `proposed` [crawler_gui shell hygiene](./ticket-121-crawler-gui-shell-hygiene.md) — self-host/drop Google Fonts, drop the non-owned `CrawlZilla.html` + screenshot bloat, document the grid view's HTTP-serving requirement.
 
-Tickets **118** and **119** are done (merged 2026-07-16, PRs #42 / #45).
+Tickets **118** and **119** are done (merged 2026-07-16, PRs #42 / #45). Ticket **120** is folded into PR #44.
 
 **Deferred lanes**
 

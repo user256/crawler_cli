@@ -285,6 +285,7 @@ async def backfill_intent_signatures(
     boilerplate_share: float = DEFAULT_BOILERPLATE_SHARE,
     min_words: int = DEFAULT_MIN_WORDS,
     dry_run: bool = False,
+    run_id: str | None = None,
 ) -> SignatureBackfillResult:
     """Compute and persist intent signatures over stored HTML.
 
@@ -295,7 +296,10 @@ async def backfill_intent_signatures(
     unchanged crawl rewrites zero hashes (the IO ticket-114 zero-re-embed
     proof).
     """
-    pages = await store.fetch_pages_for_signatures(urls=urls)
+    if run_id is None:
+        pages = await store.fetch_pages_for_signatures(urls=urls)
+    else:
+        pages = await store.fetch_pages_for_signatures(urls=urls, run_id=run_id)
 
     # Pass 1: extract main text and gather titles per site.
     extracted: list[dict[str, Any]] = []
@@ -323,7 +327,7 @@ async def backfill_intent_signatures(
         )
 
     boilerplate = detect_boilerplate(titles_by_site, boilerplate_share)
-    existing = await store.existing_signature_hashes()
+    existing = await store.existing_signature_hashes(**({"run_id": run_id} if run_id is not None else {}))
 
     result = SignatureBackfillResult()
     to_write: list[IntentSignatureRow] = []
@@ -353,7 +357,10 @@ async def backfill_intent_signatures(
         )
 
     if to_write and not dry_run:
-        await store.store_intent_signatures_bulk(to_write)
+        if run_id is None:
+            await store.store_intent_signatures_bulk(to_write)
+        else:
+            await store.store_intent_signatures_bulk(to_write, run_id=run_id)
     elif dry_run:
         # Nothing written; report what would have changed but leave counts.
         pass
