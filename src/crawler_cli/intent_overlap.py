@@ -1528,8 +1528,7 @@ async def run_intent_overlap(
     """
     from datetime import datetime, timezone
 
-    # Classify AMP variants structurally first (ticket 103) so variant_kind is
-    # populated before the analysis rows are loaded and compute_exclusion runs.
+    # Classify AMP variants in the selected run before snapshot-backed analysis.
     if crawl_run_id is None:
         amp_hygiene = await store.classify_amp_variants()
         fetched = await store.fetch_analysis_rows()

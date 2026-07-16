@@ -343,6 +343,7 @@ SCHEMA_STATEMENTS = [
         links_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         analytics_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         amphtml_url TEXT,
+        variant_kind TEXT,
         PRIMARY KEY (run_id, url_id)
     )
     """,
@@ -362,6 +363,7 @@ SCHEMA_STATEMENTS = [
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS schema_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS links_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS analytics_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS variant_kind TEXT""",
     """
     CREATE TABLE IF NOT EXISTS run_intent_signatures (
         run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
@@ -1273,7 +1275,7 @@ class AsyncpgStore:
                     headers_json, html_compressed, title, meta_description, h1_tags, h2_tags,
                     word_count, html_lang, content_length, content_hash_sha256, content_hash_simhash,
                     custom_data, html_meta_allows, http_header_allows, overall_indexable, challenge,
-                    skip_reason, canonical_urls_json, hreflang_json
+                    skip_reason, canonical_urls_json, hreflang_json, analytics_json, variant_kind
                 )
                 SELECT 'legacy', p.url_id, pm.final_url_id, pm.initial_status_code, pm.final_status_code,
                        COALESCE(pm.fetched_at, EXTRACT(EPOCH FROM NOW())::INTEGER),
@@ -1289,14 +1291,39 @@ class AsyncpgStore:
                                        UNION ALL SELECT url_id, href_url_id, hreflang_id, 'html_head'::text FROM hreflang_html_head
                                        UNION ALL SELECT url_id, href_url_id, hreflang_id, 'sitemap'::text FROM hreflang_sitemap) e
                                  JOIN urls hu ON hu.id = e.href_url_id JOIN hreflang_languages h ON h.id = e.hreflang_id
-                                 WHERE e.url_id = p.url_id), '[]'::jsonb)
+                                 WHERE e.url_id = p.url_id), '[]'::jsonb),
+                       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                           'vendor', av.vendor, 'category', av.category,
+                           'identifier', pah.identifier, 'evidence_type', pah.evidence_type,
+                           'evidence_snippet', pah.evidence_snippet,
+                           'confidence', pah.confidence
+                       ))
+                       FROM page_analytics_hits pah
+                       JOIN analytics_vendors av ON av.id = pah.vendor_id
+                       WHERE pah.page_id = p.id), '[]'::jsonb),
+                       u.variant_kind
                 FROM pages p
+                JOIN urls u ON u.id = p.url_id
                 LEFT JOIN page_metadata pm ON pm.url_id = p.url_id
                 LEFT JOIN content c ON c.url_id = p.url_id
                 LEFT JOIN meta_descriptions md ON md.id = c.meta_description_id
                 LEFT JOIN html_languages hl ON hl.id = c.html_lang_id
                 LEFT JOIN indexability ix ON ix.url_id = p.url_id
                 ON CONFLICT (run_id, url_id) DO NOTHING
+                """
+            )
+            # A pre-095 database may already have AMP labels on its mutable
+            # URL identity.  Carry them into the one-time legacy projection so
+            # the snapshot-backed reader keeps the existing exclusion result.
+            await conn.execute(
+                """
+                UPDATE page_run_snapshots snapshot
+                SET variant_kind = urls.variant_kind
+                FROM urls
+                WHERE snapshot.run_id = 'legacy'
+                  AND snapshot.url_id = urls.id
+                  AND snapshot.variant_kind IS NULL
+                  AND urls.variant_kind IS NOT NULL
                 """
             )
             await conn.execute(
@@ -2113,6 +2140,7 @@ class AsyncpgStore:
                         "category": hit.category,
                         "identifier": hit.identifier,
                         "evidence_type": hit.evidence_type,
+                        "evidence_snippet": hit.evidence_snippet,
                         "confidence": hit.confidence,
                     }
                     for hit in detected.hits
@@ -3322,11 +3350,25 @@ class AsyncpgStore:
         canonical_by_id = {int(p["url_id"]): p["canonical_url"] for p in pages}
 
         classifications = classify_amp_variants(pages, amphtml_base_by_target)
-        # Preserve the current-state convenience marker for existing callers;
-        # run-scoped analysis never reads it (it reads snapshots above).
+        resolved_run_id = self._resolve_run_id(run_id)
         amp_ids = [c.url_id for c in classifications]
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # Analysis reads immutable per-run values, so AMP labels must
+                # be attached to the selected snapshot rather than only to the
+                # mutable URL convenience projection.
+                await conn.execute(
+                    "UPDATE page_run_snapshots SET variant_kind = NULL WHERE run_id = $1 AND variant_kind = $2",
+                    resolved_run_id,
+                    VARIANT_KIND_AMP,
+                )
+                if amp_ids:
+                    await conn.execute(
+                        "UPDATE page_run_snapshots SET variant_kind = $1 WHERE run_id = $2 AND url_id = ANY($3::int[])",
+                        VARIANT_KIND_AMP,
+                        resolved_run_id,
+                        sorted(amp_ids),
+                    )
                 await conn.execute("UPDATE urls SET variant_kind = NULL WHERE variant_kind = $1", VARIANT_KIND_AMP)
                 if amp_ids:
                     await conn.execute(
@@ -3371,7 +3413,7 @@ class AsyncpgStore:
                 """
                 SELECT s.url_id, u.url, u.kind,
                        i.norm_url, i.hreflang_group, i.resolved_hreflang_code AS hreflang_code,
-                       NULL::text AS variant_kind,
+                       s.variant_kind,
                        vu.url AS variant_of,
                        s.final_status_code AS status, s.title, s.h1_tags AS h1, s.word_count,
                        sig.main_text_compressed, s.overall_indexable,

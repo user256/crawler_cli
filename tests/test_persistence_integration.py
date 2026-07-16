@@ -23,7 +23,9 @@ from crawler_cli.detection.analytics import AnalyticsDetectionResult, AnalyticsH
 from crawler_cli.models import DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
 from crawler_cli.models import CrawlResult, FetchResponse
 from crawler_cli import CrawlConfig, CrawlEngine
+from crawler_cli.intent_overlap import compute_exclusion
 from crawler_cli.persistence import AsyncpgStore, CRAWL_TABLES, SCHEMA_STATEMENTS
+from crawler_cli.reports import CrawlReports
 
 
 _DSN = os.environ.get("CRAWLER_CLI_TEST_DSN", "")
@@ -862,6 +864,24 @@ async def test_classify_amp_variants_marks_variant_kind_and_hygiene(store: Async
 
 
 @pytest.mark.asyncio
+async def test_snapshot_analysis_excludes_amp_variant_without_canonical(store: AsyncpgStore) -> None:
+    """AMP classification survives the snapshot analysis path (ticket 120)."""
+    base_url = "https://amp.example/snapshot-base"
+    amp_url = f"{base_url}/amp"
+    await store.persist(_amp_page(base_url, amphtml=amp_url))
+    await store.persist(_amp_page(amp_url))
+
+    hygiene = await store.classify_amp_variants()
+    assert {row["url"] for row in hygiene} == {amp_url}
+    assert hygiene[0]["issue"] == "missing-canonical"
+
+    rows = await store.fetch_analysis_rows()
+    amp_row = next(row for row in rows if row["url"] == amp_url)
+    assert amp_row["variant_kind"] == "amp"
+    assert compute_exclusion(amp_row) == "amp-variant"
+
+
+@pytest.mark.asyncio
 async def test_classify_amp_variants_clears_stale_labels(store: AsyncpgStore) -> None:
     """Recomputation clears variant_kind when a page no longer classifies (ticket 108)."""
     await store.persist(_amp_page("https://amp.example/stale/amp", canonical="https://amp.example/stale"))
@@ -990,6 +1010,45 @@ async def test_run_snapshots_keep_historical_analysis_values(store: AsyncpgStore
     with pytest.raises(ValueError, match="multiple crawl runs"):
         await store.resolve_reporting_run_id()
     assert await store.resolve_reporting_run_id("snapshot-a") == "snapshot-a"
+    with pytest.raises(ValueError, match="multiple crawl runs"):
+        await CrawlReports(store).indexability_reasons()
+    a_report_rows = await CrawlReports(store, run_id="snapshot-a").indexability_reasons()
+    assert [row["url"] for row in a_report_rows] == [url]
+
+
+@pytest.mark.asyncio
+async def test_analytics_reports_read_the_selected_run_snapshot(store: AsyncpgStore) -> None:
+    """Later analytics detection must not rewrite an earlier run's reports."""
+    url = "https://analytics-history.example/page"
+
+    def page(identifier: str) -> CrawlResult:
+        result = _amp_page(url)
+        result.detected_analytics = AnalyticsDetectionResult(
+            hits=[
+                AnalyticsHit(
+                    vendor="ga4",
+                    category="analytics",
+                    identifier=identifier,
+                    evidence_type="script_src",
+                    evidence_snippet=identifier,
+                    confidence=1.0,
+                )
+            ]
+        )
+        return result
+
+    await store.create_crawl_run("analytics-a", seed_urls=[url], config_hash="a", config={})
+    await store.persist(page("G-OLD"))
+    await store.create_crawl_run("analytics-b", seed_urls=[url], config_hash="b", config={})
+    await store.persist(page("G-NEW"))
+
+    reports_a = CrawlReports(store, run_id="analytics-a")
+    reports_b = CrawlReports(store, run_id="analytics-b")
+    assert [row["identifier"] for row in await reports_a.analytics_per_page(url)] == ["G-OLD"]
+    assert [row["evidence_snippet"] for row in await reports_a.analytics_per_page(url)] == ["G-OLD"]
+    assert [row["identifier"] for row in await reports_b.analytics_per_page(url)] == ["G-NEW"]
+    assert await reports_a.pages_missing_expected_id("G-OLD") == []
+    assert [row["url"] for row in await reports_a.pages_missing_expected_id("G-NEW")] == [url]
 
 
 @pytest.mark.asyncio
