@@ -799,7 +799,11 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--custom-ua", "--user-agent", dest="custom_ua", help="Custom User-Agent")
     parser.add_argument("--ignore-robots", action="store_true", help="Ignore robots.txt")
     parser.add_argument("--offsite", action="store_true", help="Follow off-site links")
-    parser.add_argument("--allowed-hosts", default="", help="Comma-separated additional hosts")
+    parser.add_argument(
+        "--allowed-hosts",
+        default="",
+        help="Comma-separated additional hosts, including CDN Sitemap: hosts",
+    )
     parser.add_argument("--path-restriction", help="Restrict crawl to paths containing this string")
     parser.add_argument(
         "--path-exclude",

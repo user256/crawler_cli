@@ -380,6 +380,46 @@ async def test_sitemap_enqueue_respects_small_max_pages_budget():
 
 
 @pytest.mark.asyncio
+async def test_sitemap_duplicate_locs_do_not_consume_frontier_budget():
+    """Repeated locs leave the finite sitemap budget for distinct pages."""
+    sitemap_body = b"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">
+  <url><loc>https://example.com/duplicate</loc></url>
+  <url><loc>https://example.com/duplicate</loc></url>
+  <url><loc>https://example.com/distinct-a</loc></url>
+  <url><loc>https://example.com/distinct-b</loc></url>
+</urlset>"""
+    page_urls = {
+        "https://example.com/",
+        "https://example.com/duplicate",
+        "https://example.com/distinct-a",
+        "https://example.com/distinct-b",
+    }
+    pages = {
+        "https://example.com/sitemap.xml": (sitemap_body, "application/xml"),
+        **{url: (b"<html><body>page</body></html>", "text/html; charset=utf-8") for url in page_urls},
+    }
+    store = TrackingStore()
+    backend = TrackingBackend(pages)
+    engine = CrawlEngine(
+        CrawlConfig(
+            max_concurrency=2,
+            default_open_crawl_limit=4,
+            discover_sitemaps=True,
+            respect_robots_txt=False,
+        ),
+        store=store,
+    )
+    engine.backend = backend
+    engine._robots = FakeRobots(sitemaps=["https://example.com/sitemap.xml"])
+
+    job = await engine.crawl_open(["https://example.com/"], max_urls=4)
+
+    assert len(job.results) == 4
+    assert page_urls <= set(store.frontier)
+
+
+@pytest.mark.asyncio
 async def test_sitemap_fetches_respect_per_host_concurrency():
     """Sitemap shard fetches must share per-host concurrency with page fetches."""
     children = [f"https://example.com/sitemap-{i}.xml" for i in range(6)]
