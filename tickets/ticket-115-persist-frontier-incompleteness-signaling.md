@@ -1,6 +1,6 @@
 # Ticket 115: Signal frontier mark-done / run incompleteness to automation
 
-**Status:** proposed (2026-07-15 MERGE+REMEDIATE from ticket 092 / PR #25)
+**Status:** done (2026-07-16, PR #37)
 **Priority:** P2 reliability
 **Related:** Ticket 092
 
