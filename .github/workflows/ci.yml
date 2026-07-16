@@ -168,3 +168,112 @@ jobs:
 
       - name: mypy
         run: mypy src/crawler_cli
+
+  packaging:
+    name: "Build & metadata check"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Twine metadata check
+        run: twine check dist/*
+
+      - name: Assert packaging metadata
+        run: |
+          python - <<'PY'
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          dist = Path("dist")
+          wheels = list(dist.glob("*.whl"))
+          sdists = list(dist.glob("*.tar.gz"))
+          assert len(wheels) == 1, wheels
+          assert len(sdists) == 1, sdists
+
+          with zipfile.ZipFile(wheels[0]) as zf:
+              metas = [n for n in zf.namelist() if n.endswith(".dist-info/METADATA")]
+              assert len(metas) == 1, metas
+              meta = zf.read(metas[0]).decode()
+          for needle in (
+              "Name: crawler-cli",
+              "License: MIT",
+              "Requires-Python: >=3.11",
+              "Project-URL: Homepage, https://github.com/user256/crawler_cli",
+              "Project-URL: Repository, https://github.com/user256/crawler_cli",
+              "Project-URL: Changelog, https://github.com/user256/crawler_cli/blob/master/CHANGELOG.md",
+              "Classifier: Programming Language :: Python :: 3.11",
+              "Classifier: Programming Language :: Python :: 3.12",
+              "Provides-Extra: playwright",
+              "Provides-Extra: intent",
+              "Provides-Extra: embeddings-local",
+              "Provides-Extra: ann",
+              "Provides-Extra: test",
+          ):
+              assert needle in meta, f"missing {needle!r} in wheel METADATA"
+
+          with tarfile.open(sdists[0], "r:gz") as tf:
+              names = tf.getnames()
+          assert any(n.endswith("/LICENSE") for n in names), "LICENSE missing from sdist"
+          assert any("/tests/" in n for n in names), "tests/ missing from sdist"
+          assert not any("/tickets/" in n for n in names), "tickets/ leaked into sdist"
+          assert not any("/runs/" in n for n in names), "runs/ leaked into sdist"
+          print("packaging metadata OK")
+          PY
+
+  extras:
+    name: "Extras install (${{ matrix.extra }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - extra: base
+            install: "."
+            import_check: "import crawler_cli"
+          - extra: playwright
+            install: ".[playwright]"
+            import_check: "import playwright; import crawler_cli"
+          - extra: intent
+            install: ".[intent]"
+            import_check: "import trafilatura; import crawler_cli"
+          - extra: ann
+            install: ".[ann]"
+            import_check: "import hnswlib; import crawler_cli"
+          - extra: test
+            install: ".[test]"
+            import_check: "import pytest; import numpy; import crawler_cli"
+          # sentence-transformers pulls torch — resolve deps only in CI.
+          - extra: embeddings-local
+            install: ".[embeddings-local]"
+            import_check: ""
+            resolve_only: "true"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Resolve or install extra
+        run: |
+          if [ "${{ matrix.resolve_only }}" = "true" ]; then
+            pip install --dry-run "${{ matrix.install }}"
+          else
+            pip install "${{ matrix.install }}"
+            python -c "${{ matrix.import_check }}"
+          fi

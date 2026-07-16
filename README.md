@@ -43,38 +43,49 @@
 
 ## Install
 
-Base install:
+Requires **Python 3.11+**. Supported platforms are POSIX-like (Linux/macOS);
+Windows is best-effort. License: MIT (see `LICENSE`).
+
+### Install matrix
+
+| Extra | Command | Provides |
+|---|---|---|
+| *(base)* | `pip install -e .` | Core crawl/fetch/extract/persist stack |
+| `playwright` | `pip install -e ".[playwright]"` | JS rendering via Playwright (then `playwright install chromium`) |
+| `intent` | `pip install -e ".[intent]"` | Intent-signature extraction (`trafilatura`) |
+| `embeddings-local` | `pip install -e ".[embeddings-local]"` | Local sentence-transformers embeddings (pulls torch) |
+| `ann` | `pip install -e ".[ann]"` | Approximate NN pairing for intent-overlap (`hnswlib`) |
+| `test` | `pip install -e ".[test]"` | pytest stack for the unit/integration suite |
+
+Common combinations:
 
 ```bash
+# Base (editable)
 pip install -e .
-```
 
-With Playwright support:
-
-```bash
+# Playwright support
 pip install -e ".[playwright]"
 playwright install chromium
-```
 
-For tests:
+# Intent-overlap pipeline (signatures + local embeddings; add ann for --ann)
+pip install -e ".[intent,embeddings-local]"
+pip install -e ".[intent,embeddings-local,ann]"
 
-```bash
+# Tests
 pip install -e ".[test]"
-```
 
-For the real browser smoke path used by CI:
-
-```bash
+# Real browser smoke path used by CI
 pip install -e ".[test,playwright]"
 pytest -m "not playwright_smoke"
 pytest --run-playwright-smoke -m playwright_smoke tests/test_playwright_smoke.py
 ```
 
-With the HTTP API:
+There is **no** `[api]` extra. The HTTP API lives in the separate sibling
+repository `crawler_api` (checkout alongside this repo and follow that project's
+README). See [HTTP API](#http-api).
 
-```bash
-pip install -e ".[api]"
-```
+Release metadata, versioning, and publish steps: [RELEASING.md](./RELEASING.md).
+Changelog: [CHANGELOG.md](./CHANGELOG.md).
 
 ## GuardGeese Monitoring
 
@@ -389,29 +400,30 @@ Connection to PostgreSQL can be configured via environment variables (`CRAWLER_C
 
 The HTTP API is a **separate project**, `crawler_api`, which depends on `crawler_cli` and
 wraps its engine in a Dockerized, token-authenticated FastAPI service. It lives in its own
-repository (sibling `crawler_api/`) and is **not** part of this package. See that repo's
-README and tickets for API endpoints, auth, and deployment.
+repository (sibling `crawler_api/` checkout next to this one) and is **not** part of this
+package — there is no `pip install '.[api]'` extra here. See that repo's README and tickets
+for API endpoints, auth, and deployment.
 
 ## Package Layout
 
 ```text
 src/crawler_cli/
-  __init__.py
-  __main__.py
-  archive.py
-  backends.py
-  compare_renders.py
-  config.py
-  engine.py
-  extract.py
-  hashing.py
-  monitoring.py
-  models.py
-  persistence.py
-  probes.py
-  robots.py
-  sitemap.py
-  variants.py
+  __init__.py          # public library surface
+  __main__.py          # CLI entry (crawler-cli)
+  config.py / engine.py / backends.py / models.py
+  extract.py / schema.py / custom_extract.py / hashing.py
+  robots.py / sitemap.py / sitemap_generate.py
+  persistence.py / serialization.py / compression.py
+  monitoring.py / archive.py / probes.py / variants.py
+  compare_renders.py / comparison.py / reports.py
+  embeddings.py / intent_signature.py / intent_overlap.py
+  hreflang_groups.py / amp.py / challenge.py
+  obscura_install.py / auth.py / cookies.py / csv_urls.py
+  circuit_breaker.py / proxy_pool.py / exit_codes.py
+  detection/
+    cms.py
+    analytics.py
+tests/                 # shipped in the sdist for install verification
 ```
 
 ## Default Behavior
