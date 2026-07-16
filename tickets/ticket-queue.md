@@ -16,7 +16,7 @@ Ticket files remain the source of truth for scope and DoD.
   ready for review: snapshot-backed reads, deterministic report selection, and
   the run-scoped AMP exclusion remediation from Ticket **120** are implemented.
 - Tickets **101–108** now form the completed intent-overlap reporting baseline.
-- Ticket **110** remains unused/rejected; next unreserved number is **122**.
+- Ticket **110** remains unused/rejected; **122** is now reserved (compare remap / URL-pair mapping); next unreserved number is **123**.
 
 ### Ordering rules
 
@@ -26,7 +26,7 @@ Ticket files remain the source of truth for scope and DoD.
   every scoped analysis/report path before it can be accepted.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**122**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**123**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -296,7 +296,9 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 
 ### Open work — priority order (2026-07-16, updated after PR-review batch #41–#45)
 
-No active implementation tickets. Deferred lanes remain below.
+- `122` `in-review` [ticket-122-compare-remap-and-url-pair-mapping.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-122-compare-remap-and-url-pair-mapping.md) — **P2:** site-to-site compare: `--replace` host remapping + simhash hamming tolerance on `compare`, and a new `compare-urls` CSV pair/redirect-mapping command (redirect-chain capture, store-backed page loading, `--fail-on` CI gating). Implemented on `agent/122-compare-remap-url-pairs` (single PR, A+B+C+D). Store-loader path needs store-backed evidence in review (no PostgreSQL reachable at authoring time).
+
+Deferred lanes remain below.
 
 Tickets **118** and **119** are done (merged 2026-07-16, PRs #42 / #45). Ticket **120** is folded into PR #44.
 

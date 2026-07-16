@@ -42,6 +42,12 @@ class FetchResponse:
     """Cumulative Layout Shift (unitless) — lab metric, Playwright only (ticket 046)."""
     inp_ms: float | None = None
     """Interaction to Next Paint in ms — lab metric, Playwright only (ticket 046)."""
+    redirect_chain: list[dict[str, Any]] = field(default_factory=list)
+    """Ordered redirect hops before the final response, each ``{"url", "status"}``
+    (ticket 122). Populated from aiohttp/curl_cffi ``response.history`` and the
+    Playwright request redirect chain; empty when the request was not redirected.
+    Enables redirect validation in ``compare-urls`` (301 vs 302, hop count,
+    intermediate URLs) instead of only knowing the final URL."""
 
 
 @dataclass(slots=True)
@@ -123,6 +129,8 @@ class CrawlResult:
     """Cumulative Layout Shift (unitless) — lab metric, Playwright only (ticket 046)."""
     inp_ms: float | None = None
     """Interaction to Next Paint in ms — lab metric, Playwright only (ticket 046)."""
+    redirect_chain: list[dict[str, Any]] = field(default_factory=list)
+    """Redirect hops carried through from :class:`FetchResponse` (ticket 122)."""
 
 
 @dataclass(slots=True)

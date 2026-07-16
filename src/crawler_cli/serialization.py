@@ -85,6 +85,7 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
         "lcp_ms": result.lcp_ms,
         "cls": result.cls,
         "inp_ms": result.inp_ms,
+        "redirect_chain": result.redirect_chain,
         "custom_data": result.custom_data,
         "detected_cms": None
         if result.detected_cms is None

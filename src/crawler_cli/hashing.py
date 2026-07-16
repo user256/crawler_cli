@@ -22,13 +22,25 @@ def normalize_html_for_hashing(html: str) -> str:
 
 
 def sha256_hash(html: str) -> str:
-    normalized = normalize_html_for_hashing(html)
+    return sha256_of_normalized(normalize_html_for_hashing(html))
+
+
+def sha256_of_normalized(normalized: str) -> str:
+    """sha256 of text that is already normalized (e.g. after remapping).
+
+    Split out from :func:`sha256_hash` so the compare tooling can re-hash
+    remapped text without re-running the (expensive) HTML normalization, and
+    without double-normalizing (ticket 122)."""
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def simhash64(html: str) -> int:
-    normalized = normalize_html_for_hashing(html).lower()
-    tokens = re.findall(r"\w+", normalized)
+    return simhash64_of_normalized(normalize_html_for_hashing(html))
+
+
+def simhash64_of_normalized(normalized: str) -> int:
+    """Simhash of already-normalized text; see :func:`sha256_of_normalized`."""
+    tokens = re.findall(r"\w+", normalized.lower())
     if not tokens:
         return 0
     counts = Counter(tokens)
@@ -64,3 +76,18 @@ def simhash_to_unsigned(value: int | None) -> int | None:
     if value is None:
         return None
     return value + _UINT64 if value < 0 else value
+
+
+def hamming64(a: int, b: int) -> int:
+    """Bit distance between two 64-bit simhash fingerprints (ticket 122).
+
+    Accepts values in either representation — the unsigned fingerprints that
+    :func:`simhash64` returns, or the signed BIGINTs a PostgreSQL column hands
+    back — by normalizing both through :func:`simhash_to_unsigned` first. This
+    keeps distances consistent regardless of which side a fingerprint was loaded
+    from, including the high-bit/sign-mapping edge (see the ticket-081 history).
+    """
+    ua = simhash_to_unsigned(a)
+    ub = simhash_to_unsigned(b)
+    assert ua is not None and ub is not None  # non-None ints in, non-None out
+    return (ua ^ ub).bit_count()

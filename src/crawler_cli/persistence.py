@@ -12,7 +12,7 @@ from .amp import VARIANT_KIND_AMP, classify_amp_variants, urls_match
 from .compression import compress_html, decompress_html, is_compressed
 from .detection.analytics import AnalyticsDetectionResult
 from .hashing import sha256_hash, simhash64, simhash_to_signed, simhash_to_unsigned
-from .models import CrawlResult, DiscoveredLink
+from .models import CrawlResult, DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
 from .schema import create_schema_content_hash, identify_schema_relationships
 
 
@@ -736,10 +736,15 @@ SCHEMA_STATEMENTS = [
         candidate_schema_types JSONB,
         links_added JSONB,
         links_removed JSONB,
+        content_verdict TEXT,
+        simhash_distance INTEGER,
         UNIQUE (session_id, path),
         FOREIGN KEY (session_id) REFERENCES crawl_comparison_sessions (id)
     )
     """,
+    # Added in ticket 122 — tolerate pre-122 comparison tables.
+    """ALTER TABLE crawl_comparison_urls ADD COLUMN IF NOT EXISTS content_verdict TEXT""",
+    """ALTER TABLE crawl_comparison_urls ADD COLUMN IF NOT EXISTS simhash_distance INTEGER""",
     """
     CREATE INDEX IF NOT EXISTS idx_crawl_comparison_urls_session ON crawl_comparison_urls(session_id)
     """,
@@ -3193,6 +3198,98 @@ class AsyncpgStore:
             for r in rows
         ]
 
+    async def fetch_pages_for_comparison(
+        self,
+        *,
+        urls: Sequence[str] | None = None,
+        run_id: str | None = None,
+    ) -> list[CrawlResult]:
+        """Reconstruct comparison-grade :class:`CrawlResult` rows from a stored
+        crawl run (ticket 122).
+
+        Rebuilds the subset of fields the compare tooling diffs — final_url,
+        status, title, h1, meta description, word_count, canonical, hreflang,
+        and both content hashes — from ``page_run_snapshots`` so an existing
+        Postgres crawl can serve as either side of a ``compare`` /
+        ``compare-urls`` without re-exporting to a JSON artifact.
+
+        With ``urls`` given, only those requested URLs are returned (any that
+        the run never fetched are simply absent). Simhash fingerprints are
+        mapped back to their unsigned form so :func:`hamming64` stays consistent
+        with fetch-time values.
+        """
+        await self.connect()
+        assert self.pool is not None
+        resolved = self._resolve_run_id(run_id)
+        query = """
+            SELECT u.url AS requested_url,
+                   COALESCE(fu.url, u.url) AS final_url,
+                   s.final_status_code AS status,
+                   s.title, s.meta_description, s.h1_tags, s.h2_tags,
+                   s.word_count, s.html_lang,
+                   s.content_hash_sha256, s.content_hash_simhash,
+                   s.canonical_urls_json ->> 0 AS canonical,
+                   s.hreflang_json AS hreflang_json,
+                   s.skip_reason, s.challenge
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            LEFT JOIN urls fu ON fu.id = s.final_url_id
+            WHERE s.run_id = $1
+        """
+        params: list[Any] = [resolved]
+        if urls is not None:
+            query += " AND u.url = ANY($2::text[])"
+            params.append(list(urls))
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+
+        results: list[CrawlResult] = []
+        for r in rows:
+            raw_hreflang = r["hreflang_json"]
+            hreflang_payload = json.loads(raw_hreflang) if isinstance(raw_hreflang, str) else (raw_hreflang or [])
+            hreflang_links = [
+                HreflangLink(
+                    hreflang=str(item.get("hreflang", "")),
+                    href=str(item.get("href", "")),
+                    source=item.get("source", "html_head"),
+                )
+                for item in hreflang_payload
+                if isinstance(item, dict)
+            ]
+            h1_tags = str(r["h1_tags"]).split("\n") if r["h1_tags"] else []
+            h2_tags = str(r["h2_tags"]).split("\n") if r["h2_tags"] else []
+            extracted = ExtractedContent(
+                title=r["title"],
+                meta_description=r["meta_description"],
+                meta_robots=RobotsDirectives(),
+                x_robots_tag=RobotsDirectives(),
+                canonical=r["canonical"],
+                x_canonical=None,
+                hreflang_links=hreflang_links,
+                html_lang=r["html_lang"],
+                headings={"h1": h1_tags, "h2": h2_tags},
+                text="",
+                word_count=int(r["word_count"]) if r["word_count"] is not None else 0,
+                metadata={},
+            )
+            results.append(
+                CrawlResult(
+                    requested_url=str(r["requested_url"]),
+                    final_url=str(r["final_url"]),
+                    status=int(r["status"]) if r["status"] is not None else 0,
+                    headers={},
+                    content_type="text/html",
+                    fetch_backend="store",
+                    extracted=extracted,
+                    raw_html=None,
+                    content_hash_sha256=r["content_hash_sha256"],
+                    content_hash_simhash=simhash_to_unsigned(r["content_hash_simhash"]),
+                    skip_reason=r["skip_reason"],
+                    challenge=r["challenge"],
+                )
+            )
+        return results
+
     async def store_hreflang_identity(self, rows: list[HreflangIdentityRow], *, run_id: str | None = None) -> None:
         """Bulk-update urls with norm_url / hreflang_group / resolved code /
         lang_bucket (ticket 078)."""
@@ -3525,6 +3622,8 @@ class AsyncpgStore:
                         json.dumps(row.get("candidate_schema_types", [])),
                         json.dumps(row.get("links_added", [])),
                         json.dumps(row.get("links_removed", [])),
+                        row.get("content_verdict"),
+                        row.get("simhash_distance"),
                     )
                     for row in rows
                 ]
@@ -3540,11 +3639,13 @@ class AsyncpgStore:
                             baseline_word_count, candidate_word_count,
                             is_moved_content, moved_from_path, moved_to_path, redirect_chain,
                             baseline_schema_types, candidate_schema_types,
-                            links_added, links_removed
+                            links_added, links_removed,
+                            content_verdict, simhash_distance
                         )
                         VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                            $15, $16, $17, $18, $19::jsonb, $20::jsonb, $21::jsonb, $22::jsonb
+                            $15, $16, $17, $18, $19::jsonb, $20::jsonb, $21::jsonb, $22::jsonb,
+                            $23, $24
                         )
                         ON CONFLICT (session_id, path) DO UPDATE
                         SET baseline_url = EXCLUDED.baseline_url,
@@ -3566,7 +3667,9 @@ class AsyncpgStore:
                             baseline_schema_types = EXCLUDED.baseline_schema_types,
                             candidate_schema_types = EXCLUDED.candidate_schema_types,
                             links_added = EXCLUDED.links_added,
-                            links_removed = EXCLUDED.links_removed
+                            links_removed = EXCLUDED.links_removed,
+                            content_verdict = EXCLUDED.content_verdict,
+                            simhash_distance = EXCLUDED.simhash_distance
                         """,
                         batch,
                     )

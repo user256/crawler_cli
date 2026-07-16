@@ -361,6 +361,7 @@ class CrawlEngine:
                     lcp_ms=response.lcp_ms,
                     cls=response.cls,
                     inp_ms=response.inp_ms,
+                    redirect_chain=response.redirect_chain,
                 )
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)
