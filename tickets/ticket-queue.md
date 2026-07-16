@@ -10,7 +10,7 @@ Ticket files remain the source of truth for scope and DoD.
   093 / 096 / 098 / 100 / 112 / 113 / 106 / 107. PR **#33** (095) was
   rejected: it did not preserve historical run semantics and its CI suite was
   red. Ticket 095 is open for a complete rework.
-- The open implementation queue is **117 → 095 → 114 / 115 → 116**.
+- The open implementation queue is **117 → 095 → 114 / 115**.
 - Tickets **101–108** now form the completed intent-overlap reporting baseline.
 - Ticket **110** remains unused/rejected; next free number is **118**.
 
@@ -283,14 +283,13 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 
 - `114` `done` (2026-07-16, PR #36) [ticket-114-sitemap-budget-dedupe-cdn-docs.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-114-sitemap-budget-dedupe-cdn-docs.md) — **P2:** 087 leftovers — dedupe sitemap locs against frontier budget + document cross-host `Sitemap:` allowlisting
 - `115` `done` (2026-07-16, PR #37) [ticket-115-persist-frontier-incompleteness-signaling.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-115-persist-frontier-incompleteness-signaling.md) — **P2:** 092 leftovers — signal mark-done failure to automation; align crawl-run status with persist incompleteness
-- `116` `proposed` [ticket-116-amp-evidence-production-recount.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-116-amp-evidence-production-recount.md) — **P3:** 108 follow-up — fresh thompsons-scotland evidence-backed AMP / missing-canonical counts
+- `116` `done` (2026-07-16, production-store reclassification) [ticket-116-amp-evidence-production-recount.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-116-amp-evidence-production-recount.md) — **P3:** 108 follow-up — 479 evidence-backed AMP variants (477 canonical, 2 signature-hash, 0 amphtml edges); 0 missing canonical
 - `117` `in progress` (feature/117-config-validation-merge-regression) [ticket-117-config-validation-merge-regression.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-117-config-validation-merge-regression.md) — **P1:** merged 093/112 regression: `CrawlConfig.validate()` references the removed `max_pages` field, leaving mypy red
 
 ### Open work — priority order (2026-07-16)
 
 1. **P1** `117` `in progress` [config-validation merge regression](./ticket-117-config-validation-merge-regression.md) — restore the green typecheck after 093/112 integration.
 2. **P2** `095` `open (rework required)` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — complete snapshot-backed run semantics; rejected PR #33 must not be resumed unchanged.
-3. **P3** `116` `proposed` [AMP evidence production recount](./ticket-116-amp-evidence-production-recount.md).
 
 **Deferred lanes**
 
