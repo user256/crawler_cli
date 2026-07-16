@@ -1,0 +1,1464 @@
+{
+  "meta": {
+    "brand": "crawler_cli",
+    "uiName": "crawler_gui",
+    "prototype": true,
+    "note": "Static fixture for crawler_gui layout exploration. Not live API output."
+  },
+  "nav": [
+    {
+      "id": "dashboard",
+      "label": "Dashboard",
+      "enabled": false
+    },
+    {
+      "id": "crawler",
+      "label": "Crawler",
+      "enabled": true
+    },
+    {
+      "id": "lighthouse",
+      "label": "Lighthouse",
+      "enabled": false
+    },
+    {
+      "id": "schedule",
+      "label": "Schedule",
+      "enabled": true
+    }
+  ],
+  "categoryTabs": [
+    {
+      "id": "internal",
+      "label": "Internal"
+    },
+    {
+      "id": "external",
+      "label": "External"
+    },
+    {
+      "id": "security",
+      "label": "Security"
+    },
+    {
+      "id": "response-codes",
+      "label": "Response Codes"
+    },
+    {
+      "id": "url",
+      "label": "URL"
+    },
+    {
+      "id": "page-titles",
+      "label": "Page Titles"
+    },
+    {
+      "id": "meta-description",
+      "label": "Meta Description"
+    },
+    {
+      "id": "h1",
+      "label": "H1"
+    },
+    {
+      "id": "h2",
+      "label": "H2"
+    },
+    {
+      "id": "content",
+      "label": "Content"
+    },
+    {
+      "id": "images",
+      "label": "Images"
+    },
+    {
+      "id": "canonicals",
+      "label": "Canonicals"
+    },
+    {
+      "id": "directives",
+      "label": "Directives"
+    },
+    {
+      "id": "links",
+      "label": "Links"
+    },
+    {
+      "id": "structured-data",
+      "label": "Structured Data"
+    },
+    {
+      "id": "javascript",
+      "label": "JavaScript"
+    },
+    {
+      "id": "hreflang",
+      "label": "Hreflang"
+    },
+    {
+      "id": "sitemaps",
+      "label": "Sitemaps"
+    }
+  ],
+  "sidebarTabs": [
+    {
+      "id": "overview",
+      "label": "Overview"
+    },
+    {
+      "id": "issues",
+      "label": "Issues"
+    },
+    {
+      "id": "structure",
+      "label": "Site Structure"
+    },
+    {
+      "id": "live",
+      "label": "Live"
+    }
+  ],
+  "detailTabs": [
+    {
+      "id": "url-details",
+      "label": "URL Details"
+    },
+    {
+      "id": "inlinks",
+      "label": "Inlinks"
+    },
+    {
+      "id": "outlinks",
+      "label": "Outlinks"
+    },
+    {
+      "id": "serp",
+      "label": "SERP Snippet"
+    },
+    {
+      "id": "headers",
+      "label": "HTTP Headers"
+    },
+    {
+      "id": "structured-data",
+      "label": "Structured Data"
+    }
+  ],
+  "crawl": {
+    "id": "crawl_whiskipedia_demo",
+    "url": "https://whiskipedia.com/",
+    "mode": "Spider",
+    "status": "complete",
+    "statusLabel": "Spider Mode: Complete",
+    "progress": {
+      "completed": 20,
+      "total": 20,
+      "pct": 100.0,
+      "remaining": 0
+    },
+    "speed": {
+      "average": 2.3,
+      "current": 0.0
+    },
+    "startedAt": "2026-07-15T14:02:11Z",
+    "finishedAt": "2026-07-15T14:08:04Z"
+  },
+  "history": [
+    {
+      "id": "crawl_whiskipedia_demo",
+      "domain": "whiskipedia.com",
+      "url": "https://whiskipedia.com/",
+      "status": "complete",
+      "viewing": true,
+      "urls": 20,
+      "htmlStored": 17,
+      "date": "2026-07-15"
+    },
+    {
+      "id": "crawl_ibiza_20260706",
+      "domain": "ibizasummervillas.com",
+      "url": "https://www.ibizasummervillas.com/",
+      "status": "complete",
+      "viewing": false,
+      "urls": 412,
+      "htmlStored": 390,
+      "date": "2026-07-06"
+    },
+    {
+      "id": "crawl_thompsons_20260715",
+      "domain": "thompsons-scotland.co.uk",
+      "url": "https://www.thompsons-scotland.co.uk/",
+      "status": "complete",
+      "viewing": false,
+      "urls": 3942,
+      "htmlStored": 0,
+      "date": "2026-07-15"
+    }
+  ],
+  "configDefaults": {
+    "maxPages": 200,
+    "concurrency": 5,
+    "delay": 0.2,
+    "respectRobots": true,
+    "useJs": false,
+    "ignoreNoFollow": false,
+    "crawlImages": false,
+    "userAgent": "Mozilla/5.0 (compatible; crawler_gui/1.0; +https://example.com/bot)",
+    "backend": "aiohttp"
+  },
+  "overview": {
+    "summary": [
+      {
+        "label": "Total URLs Crawled",
+        "count": 20,
+        "pct": 100.0
+      },
+      {
+        "label": "Indexable",
+        "count": 12,
+        "pct": 60.0
+      },
+      {
+        "label": "Non-Indexable",
+        "count": 8,
+        "pct": 40.0
+      },
+      {
+        "label": "HTTPS",
+        "count": 20,
+        "pct": 100.0
+      },
+      {
+        "label": "HTTP",
+        "count": 0,
+        "pct": 0.0
+      }
+    ],
+    "responseCodes": [
+      {
+        "label": "2xx OK",
+        "count": 17,
+        "pct": 85.0,
+        "tone": "ok"
+      },
+      {
+        "label": "3xx Redirect",
+        "count": 1,
+        "pct": 5.0,
+        "tone": "warn"
+      },
+      {
+        "label": "4xx Client Error",
+        "count": 1,
+        "pct": 5.0,
+        "tone": "bad"
+      },
+      {
+        "label": "5xx Server Error",
+        "count": 1,
+        "pct": 5.0,
+        "tone": "bad"
+      }
+    ],
+    "content": [
+      {
+        "label": "HTML",
+        "count": 16,
+        "pct": 80.0
+      },
+      {
+        "label": "Missing Title",
+        "count": 0,
+        "pct": 0.0,
+        "tone": "ok"
+      },
+      {
+        "label": "Missing Meta Description",
+        "count": 2,
+        "pct": 10.0,
+        "tone": "warn"
+      },
+      {
+        "label": "Missing H1",
+        "count": 1,
+        "pct": 5.0,
+        "tone": "warn"
+      }
+    ]
+  },
+  "issues": [
+    {
+      "severity": "high",
+      "label": "5xx responses",
+      "count": 1
+    },
+    {
+      "severity": "medium",
+      "label": "Missing H1",
+      "count": 1
+    },
+    {
+      "severity": "medium",
+      "label": "Missing meta description",
+      "count": 2
+    },
+    {
+      "severity": "low",
+      "label": "Title length warnings",
+      "count": 7
+    }
+  ],
+  "pages": [
+    {
+      "id": 1,
+      "address": "https://whiskipedia.com/",
+      "path": "/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "Whiskipedia \u2014 The Whisky Encyclopedia",
+      "titleLength": 38,
+      "metaDescription": "Explore distilleries, regions, and tasting notes.",
+      "metaDescriptionLength": 48,
+      "h1": "Whiskipedia",
+      "h1Count": 1,
+      "responseTimeMs": 412,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 600,
+      "canonical": "https://whiskipedia.com/",
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [
+        {
+          "type": "Organization",
+          "name": "Whiskipedia"
+        },
+        {
+          "type": "WebSite",
+          "name": "Whiskipedia"
+        }
+      ],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Whiskipedia \u2014 The Whisky Encyclopedia",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Whiskipedia \u2014 The Whisky Encyclopedia",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/speyside/",
+          "anchorText": "Whiskipedia \u2014 The Whisky Encyclopedia",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [
+        {
+          "targetUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Scotland",
+          "follow": true,
+          "external": false
+        },
+        {
+          "targetUrl": "https://whiskipedia.com/japan/",
+          "anchorText": "Japan",
+          "follow": true,
+          "external": false
+        },
+        {
+          "targetUrl": "https://example.com/partner",
+          "anchorText": "Partner",
+          "follow": true,
+          "external": true
+        }
+      ],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 2,
+      "address": "https://whiskipedia.com/scotland/",
+      "path": "/scotland/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "Scotch Whisky Regions",
+      "titleLength": 22,
+      "metaDescription": "Highland, Speyside, Islay, Lowland, and Campbeltown.",
+      "metaDescriptionLength": 52,
+      "h1": "Scotch Regions",
+      "h1Count": 1,
+      "responseTimeMs": 388,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 420,
+      "canonical": "https://whiskipedia.com/scotland/",
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Scotch Whisky Regions",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Scotch Whisky Regions",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/speyside/",
+          "anchorText": "Scotch Whisky Regions",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [
+        {
+          "targetUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Islay",
+          "follow": true,
+          "external": false
+        },
+        {
+          "targetUrl": "https://whiskipedia.com/distilleries/ardbeg/",
+          "anchorText": "Ardbeg",
+          "follow": true,
+          "external": false
+        }
+      ],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 3,
+      "address": "https://whiskipedia.com/scotland/islay/",
+      "path": "/scotland/islay/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "Islay Whisky",
+      "titleLength": 12,
+      "metaDescription": "Peated malts from the Queen of the Hebrides.",
+      "metaDescriptionLength": 45,
+      "h1": "Islay",
+      "h1Count": 1,
+      "responseTimeMs": 501,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 279,
+      "canonical": "https://whiskipedia.com/scotland/islay/",
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Islay Whisky",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Islay Whisky",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/speyside/",
+          "anchorText": "Islay Whisky",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [
+        {
+          "targetUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Islay",
+          "follow": true,
+          "external": false
+        },
+        {
+          "targetUrl": "https://whiskipedia.com/distilleries/ardbeg/",
+          "anchorText": "Ardbeg",
+          "follow": true,
+          "external": false
+        }
+      ],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 4,
+      "address": "https://whiskipedia.com/scotland/speyside/",
+      "path": "/scotland/speyside/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "Speyside Distilleries Guide | Whiskipedia Long Title That Warns",
+      "titleLength": 62,
+      "metaDescription": "A short meta.",
+      "metaDescriptionLength": 13,
+      "h1": "Speyside",
+      "h1Count": 1,
+      "responseTimeMs": 467,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 783,
+      "canonical": "https://whiskipedia.com/scotland/speyside/",
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Speyside Distilleries Guide | Whiskipedia Long Title That Warns",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Speyside Distilleries Guide | Whiskipedia Long Title That Warns",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Speyside Distilleries Guide | Whiskipedia Long Title That Warns",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [
+        {
+          "targetUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Islay",
+          "follow": true,
+          "external": false
+        },
+        {
+          "targetUrl": "https://whiskipedia.com/distilleries/ardbeg/",
+          "anchorText": "Ardbeg",
+          "follow": true,
+          "external": false
+        }
+      ],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 5,
+      "address": "https://whiskipedia.com/distilleries/ardbeg/",
+      "path": "/distilleries/ardbeg/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "Ardbeg Distillery",
+      "titleLength": 17,
+      "metaDescription": "History, expressions, and visitor info for Ardbeg.",
+      "metaDescriptionLength": 50,
+      "h1": null,
+      "h1Count": 0,
+      "responseTimeMs": 572,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 354,
+      "canonical": "https://whiskipedia.com/distilleries/ardbeg/",
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Ardbeg Distillery",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Ardbeg Distillery",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Ardbeg Distillery",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 6,
+      "address": "https://whiskipedia.com/distilleries/lagavulin/",
+      "path": "/distilleries/lagavulin/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "Lagavulin Distillery",
+      "titleLength": 20,
+      "metaDescription": "16 Year Old and beyond \u2014 Islay classic.",
+      "metaDescriptionLength": 40,
+      "h1": "Lagavulin",
+      "h1Count": 1,
+      "responseTimeMs": 445,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 360,
+      "canonical": "https://whiskipedia.com/distilleries/lagavulin/",
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Lagavulin Distillery",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Lagavulin Distillery",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Lagavulin Distillery",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 7,
+      "address": "https://whiskipedia.com/blog/",
+      "path": "/blog/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "Whisky Blog",
+      "titleLength": 11,
+      "metaDescription": null,
+      "metaDescriptionLength": 0,
+      "h1": "Blog",
+      "h1Count": 1,
+      "responseTimeMs": 390,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 132,
+      "canonical": "https://whiskipedia.com/blog/",
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [
+        {
+          "type": "Article",
+          "headline": "Whisky Blog"
+        }
+      ],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Whisky Blog",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Whisky Blog",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Whisky Blog",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 8,
+      "address": "https://whiskipedia.com/blog/peat-levels/",
+      "path": "/blog/peat-levels/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "Understanding Peat Levels in Malt Whisky",
+      "titleLength": 41,
+      "metaDescription": "PPM, phenolics, and how peat shapes flavour.",
+      "metaDescriptionLength": 45,
+      "h1": "Peat Levels",
+      "h1Count": 1,
+      "responseTimeMs": 610,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 627,
+      "canonical": "https://whiskipedia.com/blog/peat-levels/",
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [
+        {
+          "type": "Article",
+          "headline": "Understanding Peat Levels in Malt Whisky"
+        }
+      ],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Understanding Peat Levels in Malt Whisky",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Understanding Peat Levels in Malt Whisky",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Understanding Peat Levels in Malt Whisky",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 9,
+      "address": "https://whiskipedia.com/search?q=islay",
+      "path": "/search?q=islay",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Non-Indexable",
+      "indexabilityStatus": "noindex",
+      "title": "Search: islay",
+      "titleLength": 13,
+      "metaDescription": "Search results for islay.",
+      "metaDescriptionLength": 25,
+      "h1": "Search",
+      "h1Count": 1,
+      "responseTimeMs": 320,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 231,
+      "canonical": "https://whiskipedia.com/search?q=islay",
+      "robots": "noindex, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": "noindex",
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Search: islay",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Search: islay",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Search: islay",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "directives",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 10,
+      "address": "https://whiskipedia.com/old-page/",
+      "path": "/old-page/",
+      "contentType": "text/html",
+      "statusCode": 301,
+      "status": "Moved Permanently",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "",
+      "titleLength": 0,
+      "metaDescription": null,
+      "metaDescriptionLength": 0,
+      "h1": null,
+      "h1Count": 0,
+      "responseTimeMs": 180,
+      "redirectUrl": "https://whiskipedia.com/scotland/islay/",
+      "internalInlinks": 0,
+      "externalInlinks": 0,
+      "wordCount": 0,
+      "canonical": null,
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [],
+      "outlinks": [],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles",
+        "response-codes"
+      ]
+    },
+    {
+      "id": 11,
+      "address": "https://whiskipedia.com/gone/",
+      "path": "/gone/",
+      "contentType": "text/html",
+      "statusCode": 404,
+      "status": "Not Found",
+      "indexability": "Non-Indexable",
+      "indexabilityStatus": "HTTP 404",
+      "title": "Page not found",
+      "titleLength": 14,
+      "metaDescription": null,
+      "metaDescriptionLength": 0,
+      "h1": "Not found",
+      "h1Count": 1,
+      "responseTimeMs": 95,
+      "redirectUrl": null,
+      "internalInlinks": 0,
+      "externalInlinks": 0,
+      "wordCount": 168,
+      "canonical": null,
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [],
+      "outlinks": [],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "directives",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles",
+        "response-codes"
+      ]
+    },
+    {
+      "id": 12,
+      "address": "https://whiskipedia.com/assets/logo.png",
+      "path": "/assets/logo.png",
+      "contentType": "image/png",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Non-Indexable",
+      "indexabilityStatus": "Non-HTML",
+      "title": "",
+      "titleLength": 0,
+      "metaDescription": null,
+      "metaDescriptionLength": 0,
+      "h1": null,
+      "h1Count": 0,
+      "responseTimeMs": 55,
+      "redirectUrl": null,
+      "internalInlinks": 0,
+      "externalInlinks": 0,
+      "wordCount": 0,
+      "canonical": null,
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "image/png",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [],
+      "outlinks": [],
+      "categoryHints": [
+        "directives",
+        "images",
+        "internal",
+        "url"
+      ]
+    },
+    {
+      "id": 13,
+      "address": "https://whiskipedia.com/robots.txt",
+      "path": "/robots.txt",
+      "contentType": "text/plain",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Non-Indexable",
+      "indexabilityStatus": "Non-HTML",
+      "title": "",
+      "titleLength": 0,
+      "metaDescription": null,
+      "metaDescriptionLength": 0,
+      "h1": null,
+      "h1Count": 0,
+      "responseTimeMs": 40,
+      "redirectUrl": null,
+      "internalInlinks": 0,
+      "externalInlinks": 0,
+      "wordCount": 0,
+      "canonical": null,
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/plain",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [],
+      "outlinks": [],
+      "categoryHints": [
+        "directives",
+        "internal",
+        "url"
+      ]
+    },
+    {
+      "id": 14,
+      "address": "https://whiskipedia.com/sitemap.xml",
+      "path": "/sitemap.xml",
+      "contentType": "application/xml",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Non-Indexable",
+      "indexabilityStatus": "Non-HTML",
+      "title": "",
+      "titleLength": 0,
+      "metaDescription": null,
+      "metaDescriptionLength": 0,
+      "h1": null,
+      "h1Count": 0,
+      "responseTimeMs": 120,
+      "redirectUrl": null,
+      "internalInlinks": 0,
+      "externalInlinks": 0,
+      "wordCount": 0,
+      "canonical": null,
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "application/xml",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [],
+      "outlinks": [],
+      "categoryHints": [
+        "directives",
+        "internal",
+        "sitemaps",
+        "url"
+      ]
+    },
+    {
+      "id": 15,
+      "address": "https://whiskipedia.com/japan/",
+      "path": "/japan/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "Japanese Whisky",
+      "titleLength": 15,
+      "metaDescription": "From Yamazaki to Chichibu \u2014 Japanese whisky overview.",
+      "metaDescriptionLength": 54,
+      "h1": "Japanese Whisky",
+      "h1Count": 2,
+      "responseTimeMs": 489,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 342,
+      "canonical": "https://whiskipedia.com/japan/",
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Japanese Whisky",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Japanese Whisky",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Japanese Whisky",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 16,
+      "address": "https://whiskipedia.com/usa/bourbon/",
+      "path": "/usa/bourbon/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "Bourbon Guide",
+      "titleLength": 13,
+      "metaDescription": "Straight bourbon, rye, and American whiskey primers.",
+      "metaDescriptionLength": 53,
+      "h1": "Bourbon",
+      "h1Count": 1,
+      "responseTimeMs": 433,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 315,
+      "canonical": "https://whiskipedia.com/usa/bourbon/",
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Bourbon Guide",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Bourbon Guide",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Bourbon Guide",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 17,
+      "address": "https://whiskipedia.com/account/login/",
+      "path": "/account/login/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Non-Indexable",
+      "indexabilityStatus": "noindex",
+      "title": "Login",
+      "titleLength": 5,
+      "metaDescription": null,
+      "metaDescriptionLength": 0,
+      "h1": "Sign in",
+      "h1Count": 1,
+      "responseTimeMs": 210,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 60,
+      "canonical": "https://whiskipedia.com/account/login/",
+      "robots": "noindex, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": "noindex",
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Login",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Login",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Login",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "directives",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    },
+    {
+      "id": 18,
+      "address": "https://whiskipedia.com/api/health",
+      "path": "/api/health",
+      "contentType": "application/json",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Non-Indexable",
+      "indexabilityStatus": "Non-HTML",
+      "title": "",
+      "titleLength": 0,
+      "metaDescription": null,
+      "metaDescriptionLength": 0,
+      "h1": null,
+      "h1Count": 0,
+      "responseTimeMs": 28,
+      "redirectUrl": null,
+      "internalInlinks": 0,
+      "externalInlinks": 0,
+      "wordCount": 0,
+      "canonical": null,
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "application/json",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [],
+      "outlinks": [],
+      "categoryHints": [
+        "directives",
+        "internal",
+        "url"
+      ]
+    },
+    {
+      "id": 19,
+      "address": "https://whiskipedia.com/ireland/",
+      "path": "/ireland/",
+      "contentType": "text/html",
+      "statusCode": 503,
+      "status": "Service Unavailable",
+      "indexability": "Non-Indexable",
+      "indexabilityStatus": "HTTP 503",
+      "title": "Temporarily unavailable",
+      "titleLength": 23,
+      "metaDescription": null,
+      "metaDescriptionLength": 0,
+      "h1": "Unavailable",
+      "h1Count": 1,
+      "responseTimeMs": 8000,
+      "redirectUrl": null,
+      "internalInlinks": 0,
+      "externalInlinks": 0,
+      "wordCount": 276,
+      "canonical": null,
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [],
+      "outlinks": [],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "directives",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles",
+        "response-codes"
+      ]
+    },
+    {
+      "id": 20,
+      "address": "https://whiskipedia.com/scotland/highland/",
+      "path": "/scotland/highland/",
+      "contentType": "text/html",
+      "statusCode": 200,
+      "status": "OK",
+      "indexability": "Indexable",
+      "indexabilityStatus": "",
+      "title": "Highland Whisky",
+      "titleLength": 15,
+      "metaDescription": "Vast region covering coastal and inland malts.",
+      "metaDescriptionLength": 47,
+      "h1": "Highlands",
+      "h1Count": 1,
+      "responseTimeMs": 455,
+      "redirectUrl": null,
+      "internalInlinks": 3,
+      "externalInlinks": 0,
+      "wordCount": 321,
+      "canonical": "https://whiskipedia.com/scotland/highland/",
+      "robots": "index, follow",
+      "headers": {
+        "content-type": "text/html",
+        "server": "nginx",
+        "x-robots-tag": null,
+        "cache-control": "public, max-age=600"
+      },
+      "structuredData": [],
+      "inlinks": [
+        {
+          "sourceUrl": "https://whiskipedia.com/",
+          "anchorText": "Highland Whisky",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/",
+          "anchorText": "Highland Whisky",
+          "follow": true,
+          "hashlink": false
+        },
+        {
+          "sourceUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Highland Whisky",
+          "follow": true,
+          "hashlink": false
+        }
+      ],
+      "outlinks": [
+        {
+          "targetUrl": "https://whiskipedia.com/scotland/islay/",
+          "anchorText": "Islay",
+          "follow": true,
+          "external": false
+        },
+        {
+          "targetUrl": "https://whiskipedia.com/distilleries/ardbeg/",
+          "anchorText": "Ardbeg",
+          "follow": true,
+          "external": false
+        }
+      ],
+      "categoryHints": [
+        "canonicals",
+        "content",
+        "h1",
+        "internal",
+        "links",
+        "meta-description",
+        "page-titles"
+      ]
+    }
+  ]
+}
