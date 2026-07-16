@@ -114,13 +114,16 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
 
 
 def serialize_job_summary_metadata(job: CrawlJobResult, *, saved_to: str | None = None) -> dict[str, object]:
-    """Aggregate fields for JSONL summary lines and crawl metadata (ticket 092)."""
+    """Aggregate fields for JSONL summary lines and crawl metadata (tickets 092, 115)."""
     return {
         "crawled_count": job.crawled_count,
         "blocked_count": job.blocked_count,
         "persist_error_count": job.persist_error_count,
         "persist_failed_urls": job.persist_failed_urls,
         "durability": job.durability,
+        "frontier_mark_done_error_count": job.frontier_mark_done_error_count,
+        "frontier_mark_done_failed_urls": job.frontier_mark_done_failed_urls,
+        "crawl_run_status": job.crawl_run_status,
         "retry_attempts": job.retry_attempts,
         "interrupted": job.interrupted,
         "saved_to": job.saved_to if saved_to is None else saved_to,
@@ -142,6 +145,9 @@ def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> 
         "persist_error_count": job.persist_error_count,
         "persist_failed_urls": job.persist_failed_urls,
         "durability": job.durability,
+        "frontier_mark_done_error_count": job.frontier_mark_done_error_count,
+        "frontier_mark_done_failed_urls": job.frontier_mark_done_failed_urls,
+        "crawl_run_status": job.crawl_run_status,
         "retry_attempts": job.retry_attempts,
         "interrupted": job.interrupted,
         "refresh_skipped_count": job.refresh_skipped_count,

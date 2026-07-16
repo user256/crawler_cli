@@ -221,6 +221,15 @@ def test_resolve_crawl_exit_code_precedence():
     assert resolve_crawl_exit_code(failed) == EXIT_FAILURE
     assert resolve_crawl_exit_code(failed, allow_persist_failures=True) == EXIT_SUCCESS
 
+    frontier_incomplete = CrawlJobResult(
+        mode="open",
+        seed_urls=[],
+        results=[_result(url="https://a/")],
+        frontier_mark_done_failed_urls=["https://a/"],
+    )
+    assert resolve_crawl_exit_code(frontier_incomplete) == EXIT_FAILURE
+    assert resolve_crawl_exit_code(frontier_incomplete, allow_persist_failures=True) == EXIT_FAILURE
+
     interrupted = CrawlJobResult(
         mode="list",
         seed_urls=[],
@@ -282,15 +291,25 @@ async def test_mixed_persist_success_and_failure(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_mark_done_failure_after_persist_leaves_pending():
+async def test_mark_done_failure_after_persist_is_signaled_and_leaves_pending(tmp_path: Path):
     url = "https://example.com/"
     store = ControllableStore(mark_done_fail=True)
-    job = await _engine(store, _page(url)).crawl_open([url])
+    out = tmp_path / "out.jsonl"
+    job = await _engine(store, _page(url)).crawl_open([url], save_to=str(out))
     assert job.persist_error_count == 0
     assert job.durability == "durable"
+    assert job.frontier_mark_done_error_count == 1
+    assert job.frontier_mark_done_failed_urls == [url]
+    assert job.crawl_run_status == "complete_with_errors"
     assert url in store.persisted
     assert store.frontier[url]["status"] == "pending"
     assert len(store.mark_done_calls) == 1
+
+    lines = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    summary = next(ln for ln in lines if ln.get("__type") == "summary")
+    assert summary["frontier_mark_done_error_count"] == 1
+    assert summary["frontier_mark_done_failed_urls"] == [url]
+    assert summary["crawl_run_status"] == "complete_with_errors"
 
 
 @pytest.mark.asyncio
@@ -342,6 +361,32 @@ async def test_run_crawl_allow_persist_failures_keeps_exit_zero(monkeypatch):
     args = _build_parser().parse_args(["crawl", "https://x.com", "--max-pages", "1", "--allow-persist-failures"])
     rc = await _run_crawl(args)
     assert rc == EXIT_SUCCESS
+
+
+@pytest.mark.asyncio
+async def test_run_crawl_exits_nonzero_on_frontier_mark_done_failure(monkeypatch):
+    class StubEngine:
+        def __init__(self, config, store=None) -> None:
+            return None
+
+        def request_stop(self) -> None:
+            return None
+
+        async def crawl_open(self, *args, **kwargs):
+            return CrawlJobResult(
+                mode="open",
+                seed_urls=["https://x.com"],
+                results=[_result(url="https://x.com/")],
+                frontier_mark_done_failed_urls=["https://x.com/"],
+            )
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("crawler_cli.__main__.CrawlEngine", StubEngine)
+    args = _build_parser().parse_args(["crawl", "https://x.com", "--max-pages", "1", "--allow-persist-failures"])
+    rc = await _run_crawl(args)
+    assert rc == EXIT_FAILURE
 
 
 @pytest.mark.asyncio

@@ -142,6 +142,14 @@ class CrawlJobResult:
     refresh_skipped_count: int = 0
     """URLs skipped at enqueue time because they were fetched within the
     --refresh-days window (ticket 080). Surfaced in the CLI summary."""
+    frontier_mark_done_failed_urls: list[str] = field(default_factory=list)
+    """Persisted URLs left pending because frontier mark-done failed (ticket 115).
+
+    These URLs are safe to retry with ``--resume``: their page data was
+    persisted, but their frontier bookkeeping was not completed.
+    """
+    crawl_run_status: str | None = None
+    """Final status recorded for the open crawl run, when applicable."""
 
     @property
     def crawled_count(self) -> int:
@@ -159,6 +167,11 @@ class CrawlJobResult:
     def persist_failed_urls(self) -> list[str]:
         """URLs whose fetched page failed to write to the store (ticket 092)."""
         return [result.final_url or result.requested_url for result in self.results if result.persist_error is not None]
+
+    @property
+    def frontier_mark_done_error_count(self) -> int:
+        """Number of persisted URLs whose frontier completion is resumable."""
+        return len(self.frontier_mark_done_failed_urls)
 
     @property
     def durability(self) -> Literal["durable", "partially_durable", "saved_output_only"]:

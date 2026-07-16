@@ -967,6 +967,7 @@ class CrawlEngine:
 
         session_crawled = 0
         session_retry_attempts = 0
+        frontier_mark_done_failed_urls: list[str] = []
         # in_flight maps task → (url, depth, parent_url, retry_count)
         in_flight: dict[asyncio.Task, tuple[str, int, str | None, int]] = {}
 
@@ -976,6 +977,7 @@ class CrawlEngine:
             nonlocal session_crawled
             nonlocal session_retry_attempts
             nonlocal _jsonl_fh
+            nonlocal frontier_mark_done_failed_urls
             discovered_to_enqueue: list[tuple[str, int, str | None, float]] = []
             out_of_scope_discovered: list[str] = []
             done_urls: list[str] = []
@@ -1093,6 +1095,7 @@ class CrawlEngine:
                 try:
                     await self.store.frontier_mark_done(done_urls)
                 except Exception as exc:  # noqa: BLE001 - keep frontier resumable
+                    frontier_mark_done_failed_urls.extend(done_urls)
                     logger.warning(
                         "frontier_mark_done failed for %d URL(s) after persist (%s) — leaving pending for resume",
                         len(done_urls),
@@ -1160,6 +1163,7 @@ class CrawlEngine:
                 retry_attempts=session_retry_attempts,
                 interrupted=interrupted,
                 refresh_skipped_count=self._refresh_skipped,
+                frontier_mark_done_failed_urls=frontier_mark_done_failed_urls,
             )
             if interrupted:
                 logger.warning("Crawl interrupted: %d URLs crawled before stop", session_crawled)
@@ -1176,7 +1180,26 @@ class CrawlEngine:
                         "durability": job.durability,
                     },
                 )
-            await self._set_crawl_run_status(crawl_run_id, "interrupted" if interrupted else "complete")
+            if job.frontier_mark_done_error_count:
+                logger.warning(
+                    "Crawl frontier bookkeeping incomplete: %d URL(s) pending for --resume: %s",
+                    job.frontier_mark_done_error_count,
+                    job.frontier_mark_done_failed_urls[:20],
+                    extra={
+                        "event": "frontier_mark_done_summary",
+                        "frontier_mark_done_error_count": job.frontier_mark_done_error_count,
+                        "frontier_mark_done_failed_urls": job.frontier_mark_done_failed_urls,
+                    },
+                )
+            crawl_run_status = (
+                "interrupted"
+                if interrupted
+                else "complete_with_errors"
+                if job.persist_error_count or job.frontier_mark_done_error_count
+                else "complete"
+            )
+            job.crawl_run_status = crawl_run_status
+            await self._set_crawl_run_status(crawl_run_id, crawl_run_status)
             if _jsonl_fh is not None:
                 # Append a summary record as the last line so tooling can
                 # detect a complete crawl and read aggregate counts without
