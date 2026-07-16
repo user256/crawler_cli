@@ -1,6 +1,6 @@
 # Ticket 121: crawler_gui prototype shell hygiene
 
-**Status:** proposed
+**Status:** done (2026-07-16)
 **Priority:** P3
 **Product:** crawler_gui prototype
 **Related:** Tickets 118, 119 (crawler_gui baseline, merged 2026-07-16)
@@ -38,3 +38,10 @@ neither blocking but worth cleaning up:
 crawler_gui renders with no external network requests, the tracked tree no
 longer carries the ~1 MB non-owned reference asset and unoptimised screenshots,
 and the HTTP-serving requirement for the grid view is documented.
+
+## Completion
+
+- Dropped remote Google Fonts in favour of system font stacks.
+- The direct intent-overlap route now bypasses the grid fixture fetch entirely.
+- Removed the competitor capture and unoptimised screenshots.
+- Added an automated shell-hygiene check and documented the HTTP/offline split.

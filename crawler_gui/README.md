@@ -1,7 +1,8 @@
 # crawler_gui — architecture & prototype
 
 Static UI prototype and decision notes for an operator interface over crawl data.
-Reference layout comes from competitor screenshots in this folder (not pixel parity).
+See [PORTAL_MODULE.md](./PORTAL_MODULE.md) for the proposed self-hosted product
+boundary, deployment shape, and API contract.
 
 ## Decision (2026-07-15)
 
@@ -54,8 +55,6 @@ can be iterated without PHP or Postgres.
 | `generate_sample_data.py` | Regenerates the JSON fixture |
 | `intent-report-fixture.mjs` | Generated static fixture with the Ticket 106 `report_data.json` envelope |
 | `intent-overlap.mjs` | The single adapter and dependency-free map/filter/table viewer for that envelope |
-| `CrawlZilla.html` | Competitor capture (reference only; not our app) |
-| `Screenshot from …png` | Layout reference shots |
 
 ### Run the prototype
 
@@ -66,6 +65,10 @@ cd /home/user256/GitRepos/crawler_cli/crawler_gui
 python3 -m http.server 8765
 # open http://127.0.0.1:8765/
 ```
+
+The grid shell loads `sample-data.json`, so it needs HTTP as above. The intent
+overlap route (`index.html?view=intent-overlap`) does not fetch that JSON or any
+third-party resource; it uses its imported static fixture instead.
 
 Regenerate fixture:
 

@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "crawler_gui" / "generate_sample_data.py"
 FIXTURE = ROOT / "crawler_gui" / "sample-data.json"
+SHELL = ROOT / "crawler_gui" / "index.html"
 
 
 def test_crawler_gui_fixture_matches_generator_and_schedule_contract() -> None:
@@ -38,3 +39,12 @@ def test_crawler_gui_fixture_matches_generator_and_schedule_contract() -> None:
         "userAgent": "Mozilla/5.0 (compatible; crawler_gui/1.0; +https://example.com/bot)",
         "backend": "aiohttp",
     }
+
+
+def test_crawler_gui_shell_has_no_external_assets_or_reference_captures() -> None:
+    """The self-contained prototype must not fetch fonts or ship competitor captures."""
+    shell = SHELL.read_text(encoding="utf-8")
+    assert "fonts.googleapis.com" not in shell
+    assert "fonts.gstatic.com" not in shell
+    assert not (ROOT / "crawler_gui" / "CrawlZilla.html").exists()
+    assert not list((ROOT / "crawler_gui").glob("Screenshot from *.png"))

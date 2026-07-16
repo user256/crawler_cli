@@ -292,11 +292,11 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 - `118` `done` (2026-07-16, PR #42) [ticket-118-crawler-gui-fixture-regeneration.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-118-crawler-gui-fixture-regeneration.md) — **P3:** keep the generated crawler_gui fixture aligned with scheduled-crawl UI fields. Reviewed MERGE: byte-exact generator↔fixture parity, `generate_sample_data.py --check` + `tests/test_crawler_gui_fixture.py` guard drift; schedule nav enabled + all 9 config fields. Landed the `crawler_gui/` baseline on master
 - `119` `done` (2026-07-16, PR #45) [ticket-119-crawler-gui-intent-overlap-viewer.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-119-crawler-gui-intent-overlap-viewer.md) — **P2:** replicate Ticket 107's intent-overlap viewer in crawler_gui while retaining the standalone offline export. Reviewed MERGE: reuses 106 `report_data` via one adapter (no browser recomputation), dependency-free, 107 `render-report` export unchanged, light/dark themes, map↔table selection sync; node 3/3 + python parity green. #42 generator conflict resolved and both fixtures regenerated. (Stacked PR #43 mis-merged into `agent/118`; same commit re-targeted to master as PR #45.) Shell hygiene → 121
 - `120` `done` (2026-07-16, PR #44) [ticket-120-run-snapshot-amp-exclusion-regression.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-120-run-snapshot-amp-exclusion-regression.md) — **P1:** restored run-scoped AMP `variant_kind`, full-flow coverage, and deterministic multi-run report selection
-- `121` `proposed` [ticket-121-crawler-gui-shell-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-121-crawler-gui-shell-hygiene.md) — **P3:** 118/119 follow-up — self-host/drop Google Fonts in `index.html` (true offline viewer), drop the ~1 MB non-owned `CrawlZilla.html` + screenshot PNGs, document the grid view's HTTP-serving requirement
+- `121` `done` (2026-07-16) [ticket-121-crawler-gui-shell-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-121-crawler-gui-shell-hygiene.md) — **P3:** offline shell, no competitor capture/screenshots, and documented grid HTTP requirement
 
 ### Open work — priority order (2026-07-16, updated after PR-review batch #41–#45)
 
-1. **P3** `121` `proposed` [crawler_gui shell hygiene](./ticket-121-crawler-gui-shell-hygiene.md) — self-host/drop Google Fonts, drop the non-owned `CrawlZilla.html` + screenshot bloat, document the grid view's HTTP-serving requirement.
+No active implementation tickets. Deferred lanes remain below.
 
 Tickets **118** and **119** are done (merged 2026-07-16, PRs #42 / #45). Ticket **120** is folded into PR #44.
 

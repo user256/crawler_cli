@@ -17,6 +17,11 @@ const state = {
   intentViewer: null,
 };
 
+const INTENT_ONLY_DATA = {
+  meta: { uiName: "crawler_gui" },
+  nav: [{ id: "intent-overlap", label: "Intent Overlap", enabled: true }],
+};
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
@@ -713,17 +718,26 @@ function renderAll() {
 }
 
 async function main() {
+  const intentOnly = new URLSearchParams(window.location.search).get("view") === "intent-overlap";
+  initialiseTheme();
+  if (intentOnly) {
+    // The report fixture is imported by this module, so this route does not
+    // fetch sample-data.json and remains suitable for an offline report view.
+    state.data = INTENT_ONLY_DATA;
+    bindEvents();
+    $(".crawl-bar").hidden = true;
+    $(".statusbar").hidden = true;
+    showIntentOverlap();
+    return;
+  }
+
   try {
     const res = await fetch("./sample-data.json", { cache: "no-store" });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     state.data = await res.json();
-    initialiseTheme();
     state.selectedId = state.data.pages[0]?.id ?? null;
     bindEvents();
     renderAll();
-    if (new URLSearchParams(window.location.search).get("view") === "intent-overlap") {
-      showIntentOverlap();
-    }
   } catch (err) {
     document.body.innerHTML = `<pre style="padding:2rem;color:#f87171">Failed to load sample-data.json.
 Serve this folder over HTTP, e.g.:
