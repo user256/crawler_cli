@@ -135,6 +135,7 @@ async def generate_signature_embeddings_for_store(
     force: bool = False,
     urls: list[str] | None = None,
     source: str = "signature",
+    run_id: str | None = None,
 ) -> EmbeddingJobResult:
     """Embed ticket-076 intent signatures with a local model, skipping pages
     whose ``signature_hash`` and ``model`` already match a stored embedding
@@ -147,9 +148,15 @@ async def generate_signature_embeddings_for_store(
 
     rows: list[SignatureEmbeddingRow]
     if source == "signature":
-        rows = await store.fetch_signature_rows_for_embeddings(urls=urls)
+        if run_id is None:
+            rows = await store.fetch_signature_rows_for_embeddings(urls=urls)
+        else:
+            rows = await store.fetch_signature_rows_for_embeddings(urls=urls, run_id=run_id)
     else:
-        pages = await store.fetch_pages_for_embeddings(urls=urls)
+        if run_id is None:
+            pages = await store.fetch_pages_for_embeddings(urls=urls)
+        else:
+            pages = await store.fetch_pages_for_embeddings(urls=urls, run_id=run_id)
         rows = [
             {
                 "url_id": uid,
@@ -195,13 +202,14 @@ async def generate_signature_embeddings_for_store(
 
     for row, vector in zip(to_embed, vectors):
         try:
-            await store.store_embedding(
-                int(row["url_id"]),
-                vector,
-                model=model,
-                text_length=len(str(row["text"])),
-                signature_hash=row.get("signature_hash"),
-            )
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "text_length": len(str(row["text"])),
+                "signature_hash": row.get("signature_hash"),
+            }
+            if run_id is not None:
+                kwargs["run_id"] = run_id
+            await store.store_embedding(int(row["url_id"]), vector, **kwargs)
             result.processed += 1
         except Exception as exc:  # noqa: BLE001
             result.failed += 1
@@ -218,11 +226,15 @@ async def generate_embeddings_for_store(
     delay_seconds: float = 1.0,
     skip_existing: bool = True,
     urls: list[str] | None = None,
+    run_id: str | None = None,
 ) -> EmbeddingJobResult:
-    pages = await store.fetch_pages_for_embeddings(urls=urls)
+    if run_id is None:
+        pages = await store.fetch_pages_for_embeddings(urls=urls)
+    else:
+        pages = await store.fetch_pages_for_embeddings(urls=urls, run_id=run_id)
     existing_ids: set[int] = set()
     if skip_existing:
-        existing_ids = await store.embedding_url_ids(model=model)
+        existing_ids = await store.embedding_url_ids(model=model, **({"run_id": run_id} if run_id is not None else {}))
 
     result = EmbeddingJobResult()
     async with aiohttp.ClientSession() as session:
@@ -245,6 +257,7 @@ async def generate_embeddings_for_store(
                 model=model,
                 session=session,
                 result=result,
+                run_id=run_id,
             )
             batch = []
             if delay_seconds > 0:
@@ -257,6 +270,7 @@ async def generate_embeddings_for_store(
                 model=model,
                 session=session,
                 result=result,
+                run_id=run_id,
             )
     return result
 
@@ -269,6 +283,7 @@ async def _process_embedding_batch(
     model: str,
     session: aiohttp.ClientSession,
     result: EmbeddingJobResult,
+    run_id: str | None = None,
 ) -> None:
     for url_id, _url, text in batch:
         try:
@@ -282,7 +297,10 @@ async def _process_embedding_batch(
                 result.failed += 1
                 result.errors.append(f"no embedding returned for url_id={url_id}")
                 continue
-            await store.store_embedding(url_id, embedding, model=model, text_length=len(text))
+            kwargs: dict[str, Any] = {"model": model, "text_length": len(text)}
+            if run_id is not None:
+                kwargs["run_id"] = run_id
+            await store.store_embedding(url_id, embedding, **kwargs)
             result.processed += 1
         except Exception as exc:
             result.failed += 1

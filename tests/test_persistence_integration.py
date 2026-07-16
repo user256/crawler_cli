@@ -944,6 +944,55 @@ async def test_challenge_persist_records_metadata_without_content(store: Asyncpg
 
 
 @pytest.mark.asyncio
+async def test_run_snapshots_keep_historical_analysis_values(store: AsyncpgStore) -> None:
+    """A selected run reads its own values, never mutable current-state rows."""
+    url = "https://history.example/page"
+
+    def page(title: str, canonical: str, alternate: str) -> CrawlResult:
+        return CrawlResult(
+            requested_url=url,
+            final_url=url,
+            status=200,
+            headers={"content-type": "text/html"},
+            content_type="text/html",
+            fetch_backend="aiohttp",
+            extracted=ExtractedContent(
+                title=title,
+                meta_description=f"{title} description",
+                meta_robots=RobotsDirectives(),
+                x_robots_tag=RobotsDirectives(),
+                canonical=canonical,
+                x_canonical=None,
+                hreflang_links=[HreflangLink(hreflang="fr", href=alternate, source="html_head")],
+                html_lang="en",
+                headings={"h1": [title], "h2": []},
+                text=title,
+                word_count=10,
+                metadata={},
+            ),
+            raw_html=f"<html><title>{title}</title><body>{title}</body></html>",
+        )
+
+    await store.create_crawl_run("snapshot-a", seed_urls=[url], config_hash="a", config={})
+    await store.persist(page("before", "https://history.example/old", "https://history.example/fr-old"))
+    await store.create_crawl_run("snapshot-b", seed_urls=[url], config_hash="b", config={})
+    await store.persist(page("after", "https://history.example/new", "https://history.example/fr-new"))
+
+    a_rows = await store.fetch_analysis_rows(run_id="snapshot-a")
+    b_rows = await store.fetch_analysis_rows(run_id="snapshot-b")
+    assert a_rows[0]["title"] == "before"
+    assert a_rows[0]["canonical_url"] == "https://history.example/old"
+    assert b_rows[0]["title"] == "after"
+    assert b_rows[0]["canonical_url"] == "https://history.example/new"
+    assert await store.fetch_hreflang_edges(run_id="snapshot-a") == [(url, "https://history.example/fr-old", "fr")]
+    assert await store.fetch_hreflang_edges(run_id="snapshot-b") == [(url, "https://history.example/fr-new", "fr")]
+
+    with pytest.raises(ValueError, match="multiple crawl runs"):
+        await store.resolve_reporting_run_id()
+    assert await store.resolve_reporting_run_id("snapshot-a") == "snapshot-a"
+
+
+@pytest.mark.asyncio
 async def test_challenge_persist_does_not_overwrite_prior_content(store: AsyncpgStore) -> None:
     """A later challenge must not wipe a previously successful page snapshot (ticket 089)."""
     url = "https://challenge.example/kept"

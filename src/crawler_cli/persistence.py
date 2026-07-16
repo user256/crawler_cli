@@ -301,6 +301,109 @@ SCHEMA_STATEMENTS = [
         updated_at INTEGER NOT NULL
     )
     """,
+    # Ticket 095: immutable fetch values.  The original tables remain the
+    # latest-write-wins convenience projection; reporting/enrichment reads this
+    # table (and its run-keyed derivatives) so a later crawl cannot rewrite a
+    # historical run.  JSONB retains multi-valued extraction facts without
+    # turning every lookup/deduplication table into a temporal table.
+    """
+    CREATE TABLE IF NOT EXISTS page_run_snapshots (
+        run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+        url_id INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+        final_url_id INTEGER REFERENCES urls(id),
+        initial_status_code INTEGER,
+        final_status_code INTEGER,
+        fetched_at INTEGER NOT NULL,
+        headers_json JSONB,
+        html_compressed BYTEA,
+        title TEXT,
+        meta_description TEXT,
+        h1_tags TEXT,
+        h2_tags TEXT,
+        word_count INTEGER,
+        html_lang TEXT,
+        content_length INTEGER,
+        content_hash_sha256 TEXT,
+        content_hash_simhash BIGINT,
+        custom_data JSONB,
+        html_meta_allows BOOLEAN,
+        http_header_allows BOOLEAN,
+        overall_indexable BOOLEAN,
+        challenge TEXT,
+        skip_reason TEXT,
+        ttfb_seconds DOUBLE PRECISION,
+        total_duration_seconds DOUBLE PRECISION,
+        lcp_ms DOUBLE PRECISION,
+        cls DOUBLE PRECISION,
+        inp_ms DOUBLE PRECISION,
+        canonical_urls_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        hreflang_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        robots_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        schema_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        links_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        analytics_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        amphtml_url TEXT,
+        PRIMARY KEY (run_id, url_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_page_run_snapshots_run_status
+    ON page_run_snapshots(run_id, final_status_code)
+    """,
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS amphtml_url TEXT""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS ttfb_seconds DOUBLE PRECISION""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS total_duration_seconds DOUBLE PRECISION""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS lcp_ms DOUBLE PRECISION""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS cls DOUBLE PRECISION""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS inp_ms DOUBLE PRECISION""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS canonical_urls_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS hreflang_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS robots_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS schema_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS links_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS analytics_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """
+    CREATE TABLE IF NOT EXISTS run_intent_signatures (
+        run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+        url_id INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+        main_text_compressed BYTEA,
+        extraction_method TEXT,
+        signal_confidence TEXT,
+        signature_hash TEXT,
+        signature_model_input TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (run_id, url_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_page_embeddings (
+        run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+        url_id INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+        embedding_json JSONB NOT NULL,
+        model TEXT NOT NULL,
+        text_length INTEGER,
+        signature_hash TEXT,
+        dim INTEGER,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (run_id, url_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_url_identity (
+        run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+        url_id INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+        norm_url TEXT,
+        hreflang_group TEXT,
+        resolved_hreflang_code TEXT,
+        lang_bucket TEXT,
+        variant_of_url_id INTEGER REFERENCES urls(id),
+        PRIMARY KEY (run_id, url_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_url_identity_group
+    ON run_url_identity(run_id, hreflang_group)
+    """,
     """
     CREATE TABLE IF NOT EXISTS frontier (
         id SERIAL PRIMARY KEY,
@@ -823,6 +926,10 @@ COMPARISON_VIEW_STATEMENTS = [
 
 # Tables owned by crawler_cli (used for truncate / row-count summaries).
 CRAWL_TABLES: tuple[str, ...] = (
+    "run_page_embeddings",
+    "run_intent_signatures",
+    "run_url_identity",
+    "page_run_snapshots",
     "page_analytics_hits",
     "page_schema_references",
     "internal_links",
@@ -1156,6 +1263,57 @@ class AsyncpgStore:
         async with self.pool.acquire() as conn:
             for statement in SCHEMA_STATEMENTS:
                 await conn.execute(statement)
+            # Existing installations had only current-state rows.  Preserve a
+            # one-time ``legacy`` snapshot rather than silently making those
+            # rows disappear from the newly run-scoped readers.
+            await conn.execute(
+                """
+                INSERT INTO page_run_snapshots (
+                    run_id, url_id, final_url_id, initial_status_code, final_status_code, fetched_at,
+                    headers_json, html_compressed, title, meta_description, h1_tags, h2_tags,
+                    word_count, html_lang, content_length, content_hash_sha256, content_hash_simhash,
+                    custom_data, html_meta_allows, http_header_allows, overall_indexable, challenge,
+                    skip_reason, canonical_urls_json, hreflang_json
+                )
+                SELECT 'legacy', p.url_id, pm.final_url_id, pm.initial_status_code, pm.final_status_code,
+                       COALESCE(pm.fetched_at, EXTRACT(EPOCH FROM NOW())::INTEGER),
+                       COALESCE(p.headers_json, '{}')::jsonb, p.html_compressed, c.title, md.description,
+                       c.h1_tags, c.h2_tags, c.word_count, hl.language_code, c.content_length,
+                       c.content_hash_sha256, c.content_hash_simhash, c.custom_data,
+                       ix.html_meta_allows, ix.http_header_allows, ix.overall_indexable, pm.challenge,
+                       pm.skip_reason,
+                       COALESCE((SELECT jsonb_agg(cu.url ORDER BY cu.id) FROM canonical_urls ca
+                                 JOIN urls cu ON cu.id = ca.canonical_url_id WHERE ca.url_id = p.url_id), '[]'::jsonb),
+                       COALESCE((SELECT jsonb_agg(jsonb_build_object('href', hu.url, 'hreflang', h.language_code, 'source', e.source))
+                                 FROM (SELECT url_id, href_url_id, hreflang_id, 'http_header'::text AS source FROM hreflang_http_header
+                                       UNION ALL SELECT url_id, href_url_id, hreflang_id, 'html_head'::text FROM hreflang_html_head
+                                       UNION ALL SELECT url_id, href_url_id, hreflang_id, 'sitemap'::text FROM hreflang_sitemap) e
+                                 JOIN urls hu ON hu.id = e.href_url_id JOIN hreflang_languages h ON h.id = e.hreflang_id
+                                 WHERE e.url_id = p.url_id), '[]'::jsonb)
+                FROM pages p
+                LEFT JOIN page_metadata pm ON pm.url_id = p.url_id
+                LEFT JOIN content c ON c.url_id = p.url_id
+                LEFT JOIN meta_descriptions md ON md.id = c.meta_description_id
+                LEFT JOIN html_languages hl ON hl.id = c.html_lang_id
+                LEFT JOIN indexability ix ON ix.url_id = p.url_id
+                ON CONFLICT (run_id, url_id) DO NOTHING
+                """
+            )
+            await conn.execute(
+                """
+                INSERT INTO run_intent_signatures
+                    (run_id, url_id, main_text_compressed, extraction_method, signal_confidence, signature_hash, signature_model_input)
+                SELECT 'legacy', url_id, main_text_compressed, extraction_method, signal_confidence, signature_hash, signature_model_input
+                FROM intent_signatures ON CONFLICT (run_id, url_id) DO NOTHING
+                """
+            )
+            await conn.execute(
+                """
+                INSERT INTO run_page_embeddings (run_id, url_id, embedding_json, model, text_length, signature_hash, dim)
+                SELECT 'legacy', url_id, embedding_json, model, text_length, signature_hash, dim
+                FROM page_embeddings ON CONFLICT (run_id, url_id) DO NOTHING
+                """
+            )
 
     async def initialize_comparison_views(self) -> None:
         await self.connect()
@@ -1228,6 +1386,29 @@ class AsyncpgStore:
             "created_at": int(row["created_at"]),
             "updated_at": int(row["updated_at"]),
         }
+
+    async def resolve_reporting_run_id(self, requested: str | None = None) -> str:
+        """Choose a report/enrichment run without guessing across histories.
+
+        An explicit id always wins.  With exactly one run (including a migrated
+        legacy database) it is ergonomic to omit the flag; multiple runs are
+        intentionally an error so no command quietly reports a mixed or
+        newest-only state.
+        """
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            if requested:
+                exists = await conn.fetchval("SELECT 1 FROM crawl_runs WHERE run_id = $1", requested)
+                if not exists:
+                    raise ValueError(f"crawl run not found: {requested}")
+                return requested
+            rows = await conn.fetch("SELECT run_id FROM crawl_runs ORDER BY created_at, run_id")
+        if len(rows) == 1:
+            return str(rows[0]["run_id"])
+        if not rows:
+            raise ValueError("no crawl runs found")
+        raise ValueError("multiple crawl runs exist; pass --crawl-run-id to select one")
 
     async def update_crawl_run_status(self, run_id: str, status: str) -> None:
         await self.connect()
@@ -1842,6 +2023,15 @@ class AsyncpgStore:
             )
         return int(queued or 0), int(pending or 0), int(done or 0)
 
+    async def frontier_stats_all_runs(self) -> tuple[int, int, int]:
+        """Explicit aggregate used by destructive-database reporting."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT status, COUNT(*) AS count FROM frontier GROUP BY status")
+        counts = {str(r["status"]): int(r["count"]) for r in rows}
+        return counts.get("queued", 0), counts.get("pending", 0), counts.get("done", 0)
+
     async def persist(self, result: CrawlResult) -> None:
         """Persist crawl result to database.
 
@@ -1876,6 +2066,158 @@ class AsyncpgStore:
         await conn.execute("DELETE FROM internal_links WHERE source_url_id = $1", url_id)
         if page_id is not None:
             await conn.execute("DELETE FROM page_analytics_hits WHERE page_id = $1", page_id)
+
+    async def _write_run_snapshot(
+        self,
+        conn: asyncpg.Connection,
+        *,
+        url_id: int,
+        final_url_id: int,
+        result: CrawlResult,
+        html_blob: bytes | None = None,
+        content_url: bool = False,
+    ) -> None:
+        """Store the immutable values observed for this URL in the active run.
+
+        ``pages`` and friends deliberately stay latest-write-wins for existing
+        callers.  This row is the historical source of truth: no reporting
+        code is allowed to join mutable page/content/edge tables for a selected
+        run (ticket 095).
+        """
+        extracted = result.extracted if content_url else None
+        hreflang = []
+        canonicals: list[str] = []
+        robots: list[object] = []
+        schema: list[object] = []
+        links: list[dict[str, object]] = []
+        analytics: list[dict[str, object]] = []
+        if extracted is not None:
+            canonicals = [u for u in (extracted.canonical, extracted.x_canonical) if u]
+            hreflang = [
+                {"href": link.href, "hreflang": link.hreflang, "source": link.source}
+                for link in extracted.hreflang_links
+                if link.href
+            ]
+            robots = [*extracted.meta_robots.raw, *extracted.x_robots_tag.raw]
+            schema = list(extracted.schema_data or [])
+            links = [
+                {"href": link.href, "anchor_text": link.anchor_text, "xpath": link.xpath}
+                for link in (result.discovered_links or [])
+                if link.href
+            ]
+            detected = result.detected_analytics
+            if detected is not None:
+                analytics = [
+                    {
+                        "vendor": hit.vendor,
+                        "category": hit.category,
+                        "identifier": hit.identifier,
+                        "evidence_type": hit.evidence_type,
+                        "confidence": hit.confidence,
+                    }
+                    for hit in detected.hits
+                ]
+        overall_indexable = (
+            result.status == 200
+            and extracted is not None
+            and not extracted.meta_robots.noindex
+            and not extracted.x_robots_tag.noindex
+        )
+        # ``truncate_crawl_tables`` intentionally clears crawl_runs too.  A
+        # library caller may then persist without going through CrawlEngine,
+        # so recreate the compatibility legacy run before its FK-backed
+        # snapshot is written.
+        await conn.execute(
+            """INSERT INTO crawl_runs (run_id, mode, status, seed_urls_json, config_hash, config_json, created_at, updated_at)
+            VALUES ($1, 'open', 'legacy', '[]', '', '{}', EXTRACT(EPOCH FROM NOW())::INTEGER, EXTRACT(EPOCH FROM NOW())::INTEGER)
+            ON CONFLICT (run_id) DO NOTHING""",
+            self.active_run_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO page_run_snapshots (
+                run_id, url_id, final_url_id, initial_status_code, final_status_code, fetched_at,
+                headers_json, html_compressed, title, meta_description, h1_tags, h2_tags,
+                word_count, html_lang, content_length, content_hash_sha256, content_hash_simhash,
+                custom_data, html_meta_allows, http_header_allows, overall_indexable, challenge,
+                skip_reason, ttfb_seconds, total_duration_seconds, lcp_ms, cls, inp_ms, canonical_urls_json, hreflang_json, robots_json, schema_json,
+                links_json, analytics_json, amphtml_url
+            ) VALUES (
+                $1, $2, $3, $4, $5, EXTRACT(EPOCH FROM NOW())::INTEGER,
+                $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                $17::jsonb, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb, $29::jsonb,
+                $30::jsonb, $31::jsonb, $32::jsonb, $33::jsonb, $34
+            )
+            ON CONFLICT (run_id, url_id) DO UPDATE SET
+                final_url_id = EXCLUDED.final_url_id,
+                initial_status_code = EXCLUDED.initial_status_code,
+                final_status_code = EXCLUDED.final_status_code,
+                fetched_at = EXCLUDED.fetched_at,
+                headers_json = EXCLUDED.headers_json,
+                html_compressed = EXCLUDED.html_compressed,
+                title = EXCLUDED.title,
+                meta_description = EXCLUDED.meta_description,
+                h1_tags = EXCLUDED.h1_tags,
+                h2_tags = EXCLUDED.h2_tags,
+                word_count = EXCLUDED.word_count,
+                html_lang = EXCLUDED.html_lang,
+                content_length = EXCLUDED.content_length,
+                content_hash_sha256 = EXCLUDED.content_hash_sha256,
+                content_hash_simhash = EXCLUDED.content_hash_simhash,
+                custom_data = EXCLUDED.custom_data,
+                html_meta_allows = EXCLUDED.html_meta_allows,
+                http_header_allows = EXCLUDED.http_header_allows,
+                overall_indexable = EXCLUDED.overall_indexable,
+                challenge = EXCLUDED.challenge,
+                skip_reason = EXCLUDED.skip_reason,
+                ttfb_seconds = EXCLUDED.ttfb_seconds,
+                total_duration_seconds = EXCLUDED.total_duration_seconds,
+                lcp_ms = EXCLUDED.lcp_ms,
+                cls = EXCLUDED.cls,
+                inp_ms = EXCLUDED.inp_ms,
+                canonical_urls_json = EXCLUDED.canonical_urls_json,
+                hreflang_json = EXCLUDED.hreflang_json,
+                robots_json = EXCLUDED.robots_json,
+                schema_json = EXCLUDED.schema_json,
+                links_json = EXCLUDED.links_json,
+                analytics_json = EXCLUDED.analytics_json
+                , amphtml_url = EXCLUDED.amphtml_url
+            """,
+            self.active_run_id,
+            url_id,
+            final_url_id,
+            result.status,
+            result.status,
+            json.dumps(result.headers, sort_keys=True),
+            html_blob,
+            extracted.title if extracted else None,
+            extracted.meta_description if extracted else None,
+            "\n".join(extracted.headings["h1"]) if extracted else None,
+            "\n".join(extracted.headings["h2"]) if extracted else None,
+            extracted.word_count if extracted else None,
+            extracted.html_lang if extracted else None,
+            len(result.raw_html or "") if extracted else None,
+            result.content_hash_sha256 if extracted else None,
+            simhash_to_signed(result.content_hash_simhash) if extracted else None,
+            json.dumps(result.custom_data) if extracted and result.custom_data else None,
+            (not extracted.meta_robots.noindex) if extracted else None,
+            (not extracted.x_robots_tag.noindex) if extracted else None,
+            overall_indexable if extracted else None,
+            result.challenge,
+            result.skip_reason,
+            result.ttfb_seconds,
+            result.total_duration_seconds,
+            result.lcp_ms,
+            result.cls,
+            result.inp_ms,
+            json.dumps(canonicals),
+            json.dumps(hreflang),
+            json.dumps(robots),
+            json.dumps(schema),
+            json.dumps(links),
+            json.dumps(analytics),
+            extracted.amphtml if extracted else None,
+        )
 
     async def _persist_once(self, result: CrawlResult) -> None:
         assert self.pool is not None
@@ -1959,6 +2301,12 @@ class AsyncpgStore:
                     # unresolved bot challenges). page_metadata above retains the
                     # audit trail; pages/content/links from a prior successful
                     # crawl are left intact.
+                    await self._write_run_snapshot(
+                        conn,
+                        url_id=requested_url_id,
+                        final_url_id=final_url_id,
+                        result=result,
+                    )
                     return
 
                 # Determine which URL should own the extracted content.
@@ -2100,6 +2448,21 @@ class AsyncpgStore:
                     not result.extracted.x_robots_tag.noindex,
                     overall_indexable,
                 )
+                await self._write_run_snapshot(
+                    conn,
+                    url_id=content_url_id,
+                    final_url_id=final_url_id,
+                    result=result,
+                    html_blob=html_blob,
+                    content_url=True,
+                )
+                if content_url_id != requested_url_id:
+                    await self._write_run_snapshot(
+                        conn,
+                        url_id=requested_url_id,
+                        final_url_id=final_url_id,
+                        result=result,
+                    )
 
     async def _persist_analytics(
         self,
@@ -2520,6 +2883,7 @@ class AsyncpgStore:
         self,
         *,
         urls: list[str] | None = None,
+        run_id: str | None = None,
     ) -> list[tuple[int, str, str]]:
         await self.connect()
         assert self.pool is not None
@@ -2527,30 +2891,31 @@ class AsyncpgStore:
             if urls:
                 rows = await conn.fetch(
                     """
-                    SELECT p.url_id, u.url, p.html_compressed
-                    FROM pages p
-                    JOIN urls u ON u.id = p.url_id
-                    WHERE u.url = ANY($1::text[]) AND p.html_compressed IS NOT NULL
+                    SELECT s.url_id, u.url, s.html_compressed
+                    FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+                    WHERE s.run_id = $1 AND u.url = ANY($2::text[]) AND s.html_compressed IS NOT NULL
                     """,
+                    self._resolve_run_id(run_id),
                     urls,
                 )
             else:
                 rows = await conn.fetch(
                     """
-                    SELECT p.url_id, u.url, p.html_compressed
-                    FROM pages p
-                    JOIN urls u ON u.id = p.url_id
-                    WHERE p.html_compressed IS NOT NULL
-                    """
+                    SELECT s.url_id, u.url, s.html_compressed
+                    FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+                    WHERE s.run_id = $1 AND s.html_compressed IS NOT NULL
+                    """,
+                    self._resolve_run_id(run_id),
                 )
         return [(int(row["url_id"]), str(row["url"]), decompress_html(bytes(row["html_compressed"]))) for row in rows]
 
-    async def embedding_url_ids(self, *, model: str) -> set[int]:
+    async def embedding_url_ids(self, *, model: str, run_id: str | None = None) -> set[int]:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT url_id FROM page_embeddings WHERE model = $1",
+                "SELECT url_id FROM run_page_embeddings WHERE run_id = $1 AND model = $2",
+                self._resolve_run_id(run_id),
                 model,
             )
         return {int(row["url_id"]) for row in rows}
@@ -2563,10 +2928,29 @@ class AsyncpgStore:
         model: str,
         text_length: int,
         signature_hash: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO run_page_embeddings
+                    (run_id, url_id, embedding_json, model, text_length, signature_hash, dim)
+                VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7)
+                ON CONFLICT (run_id, url_id) DO UPDATE SET
+                    embedding_json = EXCLUDED.embedding_json, model = EXCLUDED.model,
+                    text_length = EXCLUDED.text_length, signature_hash = EXCLUDED.signature_hash,
+                    dim = EXCLUDED.dim, created_at = CURRENT_TIMESTAMP
+                """,
+                self._resolve_run_id(run_id),
+                url_id,
+                json.dumps(embedding),
+                model,
+                text_length,
+                signature_hash,
+                len(embedding),
+            )
             await conn.execute(
                 """
                 INSERT INTO page_embeddings
@@ -2592,6 +2976,7 @@ class AsyncpgStore:
         self,
         *,
         urls: list[str] | None = None,
+        run_id: str | None = None,
     ) -> list[SignatureEmbeddingRow]:
         """Return intent-signature rows joined with any existing embedding, for
         hash-gated signature embedding (ticket 077).
@@ -2606,16 +2991,16 @@ class AsyncpgStore:
             SELECT s.url_id, u.url, s.signature_model_input AS text,
                    s.signature_hash,
                    e.signature_hash AS embedded_hash, e.model AS embedded_model
-            FROM intent_signatures s
+            FROM run_intent_signatures s
             JOIN urls u ON u.id = s.url_id
-            LEFT JOIN page_embeddings e ON e.url_id = s.url_id
-            WHERE s.signature_model_input IS NOT NULL
+            LEFT JOIN run_page_embeddings e ON e.run_id = s.run_id AND e.url_id = s.url_id
+            WHERE s.run_id = $1 AND s.signature_model_input IS NOT NULL
         """
         async with self.pool.acquire() as conn:
             if urls:
-                rows = await conn.fetch(base_query + " AND u.url = ANY($1::text[])", urls)
+                rows = await conn.fetch(base_query + " AND u.url = ANY($2::text[])", self._resolve_run_id(run_id), urls)
             else:
-                rows = await conn.fetch(base_query)
+                rows = await conn.fetch(base_query, self._resolve_run_id(run_id))
         return [
             {
                 "url_id": int(row["url_id"]),
@@ -2628,38 +3013,38 @@ class AsyncpgStore:
             for row in rows
         ]
 
-    async def embedding_models(self) -> list[str]:
+    async def embedding_models(self, *, run_id: str | None = None) -> list[str]:
         """Distinct embedding models present in page_embeddings (mixed-model
         guard support, ticket 077 / enforced in 079)."""
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT DISTINCT model FROM page_embeddings ORDER BY model")
+            rows = await conn.fetch(
+                "SELECT DISTINCT model FROM run_page_embeddings WHERE run_id = $1 ORDER BY model",
+                self._resolve_run_id(run_id),
+            )
         return [str(row["model"]) for row in rows]
 
     async def fetch_pages_for_signatures(
         self,
         *,
         urls: list[str] | None = None,
+        run_id: str | None = None,
     ) -> list[SignaturePageRow]:
         """Return stored HTML pages joined with title/h1/meta for signature
         computation (ticket 076)."""
         await self.connect()
         assert self.pool is not None
         base_query = """
-            SELECT p.url_id, u.url, p.html_compressed,
-                   c.title, c.h1_tags AS h1, md.description AS meta_description
-            FROM pages p
-            JOIN urls u ON u.id = p.url_id
-            LEFT JOIN content c ON c.url_id = p.url_id
-            LEFT JOIN meta_descriptions md ON md.id = c.meta_description_id
-            WHERE p.html_compressed IS NOT NULL
+            SELECT s.url_id, u.url, s.html_compressed, s.title, s.h1_tags AS h1, s.meta_description
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1 AND s.html_compressed IS NOT NULL
         """
         async with self.pool.acquire() as conn:
             if urls:
-                rows = await conn.fetch(base_query + " AND u.url = ANY($1::text[])", urls)
+                rows = await conn.fetch(base_query + " AND u.url = ANY($2::text[])", self._resolve_run_id(run_id), urls)
             else:
-                rows = await conn.fetch(base_query)
+                rows = await conn.fetch(base_query, self._resolve_run_id(run_id))
         return [
             {
                 "url_id": int(row["url_id"]),
@@ -2672,17 +3057,18 @@ class AsyncpgStore:
             for row in rows
         ]
 
-    async def existing_signature_hashes(self) -> dict[int, str]:
+    async def existing_signature_hashes(self, *, run_id: str | None = None) -> dict[int, str]:
         """Map url_id -> stored signature_hash (ticket 076 gating)."""
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT url_id, signature_hash FROM intent_signatures WHERE signature_hash IS NOT NULL"
+                "SELECT url_id, signature_hash FROM run_intent_signatures WHERE run_id = $1 AND signature_hash IS NOT NULL",
+                self._resolve_run_id(run_id),
             )
         return {int(row["url_id"]): str(row["signature_hash"]) for row in rows}
 
-    async def store_intent_signatures_bulk(self, rows: list[IntentSignatureRow]) -> None:
+    async def store_intent_signatures_bulk(self, rows: list[IntentSignatureRow], *, run_id: str | None = None) -> None:
         """Upsert intent-signature rows (ticket 076).
 
         Each row carries ``url_id``, ``main_text`` (compressed on write),
@@ -2707,6 +3093,16 @@ class AsyncpgStore:
         async with self.pool.acquire() as conn:
             await conn.executemany(
                 """
+                INSERT INTO run_intent_signatures (run_id, url_id, main_text_compressed, extraction_method, signal_confidence, signature_hash, signature_model_input)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (run_id, url_id) DO UPDATE SET main_text_compressed = EXCLUDED.main_text_compressed,
+                    extraction_method = EXCLUDED.extraction_method, signal_confidence = EXCLUDED.signal_confidence,
+                    signature_hash = EXCLUDED.signature_hash, signature_model_input = EXCLUDED.signature_model_input, updated_at = NOW()
+                """,
+                [(self._resolve_run_id(run_id), *row) for row in batch],
+            )
+            await conn.executemany(
+                """
                 INSERT INTO intent_signatures
                     (url_id, main_text_compressed, extraction_method, signal_confidence,
                      signature_hash, signature_model_input, updated_at)
@@ -2722,7 +3118,7 @@ class AsyncpgStore:
                 batch,
             )
 
-    async def fetch_hreflang_edges(self) -> list[tuple[str, str, str | None]]:
+    async def fetch_hreflang_edges(self, *, run_id: str | None = None) -> list[tuple[str, str, str | None]]:
         """All crawler-captured hreflang edges (url, alt_url, code) unioned from
         the three edge tables (ticket 078). 100% crawler-derived."""
         await self.connect()
@@ -2730,22 +3126,17 @@ class AsyncpgStore:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT su.url AS url, tu.url AS alt_url, hl.language_code AS code
-                FROM (
-                    SELECT url_id, href_url_id, hreflang_id FROM hreflang_http_header
-                    UNION ALL
-                    SELECT url_id, href_url_id, hreflang_id FROM hreflang_html_head
-                    UNION ALL
-                    SELECT url_id, href_url_id, hreflang_id FROM hreflang_sitemap
-                ) e
-                JOIN urls su ON su.id = e.url_id
-                JOIN urls tu ON tu.id = e.href_url_id
-                JOIN hreflang_languages hl ON hl.id = e.hreflang_id
-                """
+                SELECT su.url AS url, edge->>'href' AS alt_url, edge->>'hreflang' AS code
+                FROM page_run_snapshots s
+                JOIN urls su ON su.id = s.url_id
+                CROSS JOIN LATERAL jsonb_array_elements(s.hreflang_json) edge
+                WHERE s.run_id = $1
+                """,
+                self._resolve_run_id(run_id),
             )
         return [(str(r["url"]), str(r["alt_url"]), r["code"]) for r in rows]
 
-    async def fetch_pages_for_identity(self) -> list[IdentityPageRow]:
+    async def fetch_pages_for_identity(self, *, run_id: str | None = None) -> list[IdentityPageRow]:
         """Fetched pages with the fields needed for language + variant
         resolution (ticket 078)."""
         await self.connect()
@@ -2753,17 +3144,14 @@ class AsyncpgStore:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT u.id AS url_id, u.url AS url,
-                       hl.language_code AS html_lang,
-                       pm.final_status_code AS status,
-                       c.word_count AS word_count,
+                SELECT s.url_id, u.url, s.html_lang,
+                       s.final_status_code AS status, s.word_count,
                        fu.url AS final_url
-                FROM urls u
-                JOIN page_metadata pm ON pm.url_id = u.id
-                LEFT JOIN content c ON c.url_id = u.id
-                LEFT JOIN html_languages hl ON hl.id = c.html_lang_id
-                LEFT JOIN urls fu ON fu.id = pm.final_url_id
-                """
+                FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+                LEFT JOIN urls fu ON fu.id = s.final_url_id
+                WHERE s.run_id = $1
+                """,
+                self._resolve_run_id(run_id),
             )
         return [
             {
@@ -2777,7 +3165,7 @@ class AsyncpgStore:
             for r in rows
         ]
 
-    async def store_hreflang_identity(self, rows: list[HreflangIdentityRow]) -> None:
+    async def store_hreflang_identity(self, rows: list[HreflangIdentityRow], *, run_id: str | None = None) -> None:
         """Bulk-update urls with norm_url / hreflang_group / resolved code /
         lang_bucket (ticket 078)."""
         if not rows:
@@ -2797,6 +3185,16 @@ class AsyncpgStore:
         async with self.pool.acquire() as conn:
             await conn.executemany(
                 """
+                INSERT INTO run_url_identity (run_id, url_id, norm_url, hreflang_group, resolved_hreflang_code, lang_bucket)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (run_id, url_id) DO UPDATE SET norm_url = EXCLUDED.norm_url,
+                    hreflang_group = EXCLUDED.hreflang_group, resolved_hreflang_code = EXCLUDED.resolved_hreflang_code,
+                    lang_bucket = EXCLUDED.lang_bucket
+                """,
+                [(self._resolve_run_id(run_id), *row) for row in batch],
+            )
+            await conn.executemany(
+                """
                 UPDATE urls
                 SET norm_url = $2,
                     hreflang_group = $3,
@@ -2807,13 +3205,22 @@ class AsyncpgStore:
                 batch,
             )
 
-    async def store_url_variants(self, variant_pairs: list[tuple[int, int]]) -> None:
+    async def store_url_variants(self, variant_pairs: list[tuple[int, int]], *, run_id: str | None = None) -> None:
         """Set urls.variant_of_id for folded variants (ticket 078).  Reps and
         non-variants are reset to NULL first so a rebuild is idempotent."""
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                await conn.execute(
+                    "UPDATE run_url_identity SET variant_of_url_id = NULL WHERE run_id = $1",
+                    self._resolve_run_id(run_id),
+                )
+                if variant_pairs:
+                    await conn.executemany(
+                        "UPDATE run_url_identity SET variant_of_url_id = $3 WHERE run_id = $1 AND url_id = $2",
+                        [(self._resolve_run_id(run_id), *pair) for pair in variant_pairs],
+                    )
                 await conn.execute("UPDATE urls SET variant_of_id = NULL WHERE variant_of_id IS NOT NULL")
                 if variant_pairs:
                     await conn.executemany(
@@ -2821,7 +3228,7 @@ class AsyncpgStore:
                         variant_pairs,
                     )
 
-    async def fetch_url_variant_rows(self) -> list[UrlVariantRow]:
+    async def fetch_url_variant_rows(self, *, run_id: str | None = None) -> list[UrlVariantRow]:
         """Variant groups (norm_url, representative, variants) for reporting
         (ticket 078; CSV written by ticket 079)."""
         await self.connect()
@@ -2829,16 +3236,17 @@ class AsyncpgStore:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT u.url AS url, u.norm_url AS norm_url, r.url AS representative
-                FROM urls u
-                LEFT JOIN urls r ON r.id = u.variant_of_id
-                WHERE u.norm_url IS NOT NULL
+                SELECT u.url AS url, i.norm_url, r.url AS representative
+                FROM run_url_identity i JOIN urls u ON u.id = i.url_id
+                LEFT JOIN urls r ON r.id = i.variant_of_url_id
+                WHERE i.run_id = $1 AND i.norm_url IS NOT NULL
                   AND EXISTS (
-                    SELECT 1 FROM urls u2
-                    WHERE u2.norm_url = u.norm_url AND u2.id <> u.id
+                    SELECT 1 FROM run_url_identity i2
+                    WHERE i2.run_id = i.run_id AND i2.norm_url = i.norm_url AND i2.url_id <> i.url_id
                   )
                 ORDER BY u.norm_url, u.url
-                """
+                """,
+                self._resolve_run_id(run_id),
             )
         return [
             {
@@ -2849,7 +3257,7 @@ class AsyncpgStore:
             for r in rows
         ]
 
-    async def classify_amp_variants(self) -> list[AmpHygieneRow]:
+    async def classify_amp_variants(self, *, run_id: str | None = None) -> list[AmpHygieneRow]:
         """Classify AMP variants structurally and record ``variant_kind='amp'``
         on their URL identity (tickets 103 / 108).
 
@@ -2867,63 +3275,65 @@ class AsyncpgStore:
         async with self.pool.acquire() as conn:
             page_rows = await conn.fetch(
                 """
-                SELECT u.id AS url_id, u.url AS url,
-                       s.signature_hash AS signature_hash,
-                       canu.url AS canonical_url
-                FROM urls u
-                JOIN page_metadata pm ON pm.url_id = u.id
-                LEFT JOIN intent_signatures s ON s.url_id = u.id
-                LEFT JOIN LATERAL (
-                    SELECT cu.canonical_url_id
-                    FROM canonical_urls cu
-                    WHERE cu.url_id = u.id
-                    ORDER BY cu.id
-                    LIMIT 1
-                ) can ON TRUE
-                LEFT JOIN urls canu ON canu.id = can.canonical_url_id
+                SELECT snap.url_id, u.url, sig.signature_hash,
+                       snap.canonical_urls_json ->> 0 AS canonical_url
+                FROM page_run_snapshots snap JOIN urls u ON u.id = snap.url_id
+                LEFT JOIN run_intent_signatures sig ON sig.run_id = snap.run_id AND sig.url_id = snap.url_id
                 -- Only pages actually served (200) are AMP-hygiene candidates:
                 -- a non-200 AMP URL is reported as non-200, not as a missing
                 -- canonical, and compute_exclusion ranks non-200 first anyway.
-                WHERE pm.final_status_code = 200
-                """
+                WHERE snap.run_id = $1 AND snap.final_status_code = 200
+                """,
+                self._resolve_run_id(run_id),
             )
             amphtml_rows = await conn.fetch(
                 """
-                SELECT au.amphtml_url_id AS target_id, base.url AS base_url
-                FROM amphtml_urls au
-                JOIN urls base ON base.id = au.url_id
-                """
+                SELECT target.id AS target_id, base.url AS base_url
+                FROM page_run_snapshots snap
+                JOIN urls base ON base.id = snap.url_id
+                JOIN urls target ON target.url = snap.amphtml_url
+                WHERE snap.run_id = $1 AND snap.amphtml_url IS NOT NULL
+                """,
+                self._resolve_run_id(run_id),
             )
+            current_canonicals: dict[int, str | None] = {}
+            if run_id is None:
+                # Compatibility projection: callers that deliberately ask for
+                # the current state retain the historical AMP recomputation
+                # behaviour.  Explicit run-scoped analysis never enters this
+                # branch and therefore reads snapshot values only.
+                current_canonicals = {int(r["url_id"]): None for r in page_rows}
+                canonical_rows = await conn.fetch(
+                    """SELECT url_id, cu.url AS canonical_url FROM canonical_urls ca
+                    JOIN urls cu ON cu.id = ca.canonical_url_id"""
+                )
+                current_canonicals.update({int(r["url_id"]): r["canonical_url"] for r in canonical_rows})
 
         pages = [
             {
                 "url_id": int(r["url_id"]),
                 "url": str(r["url"]),
-                "canonical_url": r["canonical_url"],
+                "canonical_url": current_canonicals.get(int(r["url_id"]), r["canonical_url"]),
                 "signature_hash": r["signature_hash"],
             }
             for r in page_rows
         ]
         amphtml_base_by_target = {int(r["target_id"]): str(r["base_url"]) for r in amphtml_rows}
-        canonical_by_id = {int(r["url_id"]): r["canonical_url"] for r in page_rows}
+        canonical_by_id = {int(p["url_id"]): p["canonical_url"] for p in pages}
 
         classifications = classify_amp_variants(pages, amphtml_base_by_target)
+        # Preserve the current-state convenience marker for existing callers;
+        # run-scoped analysis never reads it (it reads snapshots above).
         amp_ids = [c.url_id for c in classifications]
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                # Clear every prior amp label, then write the current set so a
-                # page that lost its evidence no longer carries variant_kind.
-                await conn.execute(
-                    "UPDATE urls SET variant_kind = NULL WHERE variant_kind = $1",
-                    VARIANT_KIND_AMP,
-                )
+                await conn.execute("UPDATE urls SET variant_kind = NULL WHERE variant_kind = $1", VARIANT_KIND_AMP)
                 if amp_ids:
                     await conn.execute(
                         "UPDATE urls SET variant_kind = $1 WHERE id = ANY($2::int[])",
                         VARIANT_KIND_AMP,
                         sorted(amp_ids),
                     )
-
         if not classifications:
             return []
 
@@ -2951,7 +3361,7 @@ class AsyncpgStore:
         hygiene.sort(key=lambda row: row["url"])
         return hygiene
 
-    async def fetch_analysis_rows(self) -> list[AnalysisRow]:
+    async def fetch_analysis_rows(self, *, run_id: str | None = None) -> list[AnalysisRow]:
         """Load every fetched page with the fields the intent-overlap analysis
         needs, including its embedding vector (ticket 079)."""
         await self.connect()
@@ -2959,37 +3369,23 @@ class AsyncpgStore:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT u.id AS url_id, u.url AS url, u.kind AS kind,
-                       u.norm_url AS norm_url, u.hreflang_group AS hreflang_group,
-                       u.resolved_hreflang_code AS hreflang_code,
-                       u.variant_kind AS variant_kind,
+                SELECT s.url_id, u.url, u.kind,
+                       i.norm_url, i.hreflang_group, i.resolved_hreflang_code AS hreflang_code,
+                       NULL::text AS variant_kind,
                        vu.url AS variant_of,
-                       pm.final_status_code AS status,
-                       c.title AS title, c.h1_tags AS h1, c.word_count AS word_count,
-                       s.main_text_compressed AS main_text_compressed,
-                       ix.overall_indexable AS overall_indexable,
-                       s.signal_confidence AS signal_confidence,
-                       s.extraction_method AS extraction_method,
-                       s.signature_hash AS signature_hash,
-                       s.signature_model_input AS signature_model_input,
-                       e.embedding_json AS embedding_json, e.model AS embedding_model,
-                       canu.url AS canonical_url
-                FROM urls u
-                JOIN page_metadata pm ON pm.url_id = u.id
-                LEFT JOIN urls vu ON vu.id = u.variant_of_id
-                LEFT JOIN content c ON c.url_id = u.id
-                LEFT JOIN indexability ix ON ix.url_id = u.id
-                LEFT JOIN intent_signatures s ON s.url_id = u.id
-                LEFT JOIN page_embeddings e ON e.url_id = u.id
-                LEFT JOIN LATERAL (
-                    SELECT cu.canonical_url_id
-                    FROM canonical_urls cu
-                    WHERE cu.url_id = u.id
-                    ORDER BY cu.id
-                    LIMIT 1
-                ) can ON TRUE
-                LEFT JOIN urls canu ON canu.id = can.canonical_url_id
-                """
+                       s.final_status_code AS status, s.title, s.h1_tags AS h1, s.word_count,
+                       sig.main_text_compressed, s.overall_indexable,
+                       sig.signal_confidence, sig.extraction_method, sig.signature_hash,
+                       sig.signature_model_input, e.embedding_json, e.model AS embedding_model,
+                       s.canonical_urls_json ->> 0 AS canonical_url
+                FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+                LEFT JOIN run_url_identity i ON i.run_id = s.run_id AND i.url_id = s.url_id
+                LEFT JOIN urls vu ON vu.id = i.variant_of_url_id
+                LEFT JOIN run_intent_signatures sig ON sig.run_id = s.run_id AND sig.url_id = s.url_id
+                LEFT JOIN run_page_embeddings e ON e.run_id = s.run_id AND e.url_id = s.url_id
+                WHERE s.run_id = $1
+                """,
+                self._resolve_run_id(run_id),
             )
         out: list[AnalysisRow] = []
         for r in rows:
@@ -3028,15 +3424,19 @@ class AsyncpgStore:
             )
         return out
 
-    async def hreflang_group_summary(self) -> dict[str, int]:
+    async def hreflang_group_summary(self, *, run_id: str | None = None) -> dict[str, int]:
         """Counts of groups and grouped URLs (ticket 078)."""
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
             groups = await conn.fetchval(
-                "SELECT COUNT(DISTINCT hreflang_group) FROM urls WHERE hreflang_group IS NOT NULL"
+                "SELECT COUNT(DISTINCT hreflang_group) FROM run_url_identity WHERE run_id = $1 AND hreflang_group IS NOT NULL",
+                self._resolve_run_id(run_id),
             )
-            grouped_urls = await conn.fetchval("SELECT COUNT(*) FROM urls WHERE hreflang_group IS NOT NULL")
+            grouped_urls = await conn.fetchval(
+                "SELECT COUNT(*) FROM run_url_identity WHERE run_id = $1 AND hreflang_group IS NOT NULL",
+                self._resolve_run_id(run_id),
+            )
         return {"groups": int(groups or 0), "grouped_urls": int(grouped_urls or 0)}
 
     async def persist_comparison_session(
@@ -3182,6 +3582,41 @@ class AsyncpgStore:
             "pages_with_metadata_and_html": int(with_html or 0),
             "pages_with_html_missing_hash": int(missing_hash or 0),
         }
+
+    async def run_snapshot_html_stats(self, *, run_id: str) -> dict[str, int]:
+        """Storage guard values for one immutable run, used by compaction."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM page_run_snapshots WHERE run_id = $1 AND html_compressed IS NOT NULL", run_id
+            )
+            missing = await conn.fetchval(
+                """SELECT COUNT(*) FROM page_run_snapshots
+                WHERE run_id = $1 AND html_compressed IS NOT NULL AND content_hash_sha256 IS NULL""",
+                run_id,
+            )
+        return {"pages_with_html": int(total or 0), "pages_with_html_missing_hash": int(missing or 0)}
+
+    async def purge_run_snapshot_html(
+        self, *, run_id: str, drop_headers: bool = False, dry_run: bool = False
+    ) -> dict[str, int]:
+        """Purge only a selected run's retained HTML; never another run's."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM page_run_snapshots WHERE run_id = $1 AND html_compressed IS NOT NULL", run_id
+            )
+            if not dry_run:
+                if drop_headers:
+                    await conn.execute(
+                        "UPDATE page_run_snapshots SET html_compressed = NULL, headers_json = NULL WHERE run_id = $1",
+                        run_id,
+                    )
+                else:
+                    await conn.execute("UPDATE page_run_snapshots SET html_compressed = NULL WHERE run_id = $1", run_id)
+        return {"rows_updated": int(count or 0)}
 
     async def truncate_crawl_tables(self) -> None:
         await self.connect()

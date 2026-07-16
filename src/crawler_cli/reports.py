@@ -6,40 +6,47 @@ from .persistence import AsyncpgStore
 
 
 class CrawlReports:
-    def __init__(self, store: AsyncpgStore) -> None:
+    def __init__(self, store: AsyncpgStore, *, run_id: str | None = None) -> None:
         self.store = store
+        self.run_id = run_id
+
+    def _run_id(self) -> str:
+        return self.store._resolve_run_id(self.run_id)
 
     async def orphan_pages(self) -> list[dict[str, object]]:
         return await self._fetch(
             """
             SELECT u.url
-            FROM urls u
-            LEFT JOIN frontier f ON f.url_id = u.id
-            WHERE u.kind = 'html' AND f.parent_id IS NULL
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            LEFT JOIN frontier f ON f.run_id = s.run_id AND f.url_id = u.id
+            WHERE s.run_id = $1 AND u.kind = 'html' AND f.parent_id IS NULL
             ORDER BY u.url
-            """
+            """,
+            self._run_id(),
         )
 
     async def indexability_reasons(self) -> list[dict[str, object]]:
         return await self._fetch(
             """
-            SELECT u.url, i.html_meta_allows, i.http_header_allows, i.overall_indexable
-            FROM indexability i
-            JOIN urls u ON u.id = i.url_id
+            SELECT u.url, s.html_meta_allows, s.http_header_allows, s.overall_indexable
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1
             ORDER BY u.url
-            """
+            """,
+            self._run_id(),
         )
 
     async def redirect_chains(self) -> list[dict[str, object]]:
         return await self._fetch(
             """
             SELECT src.url AS requested_url, dst.url AS final_url, pm.initial_status_code, pm.final_status_code
-            FROM page_metadata pm
+            FROM page_run_snapshots pm
             JOIN urls src ON src.id = pm.url_id
             JOIN urls dst ON dst.id = pm.final_url_id
-            WHERE pm.url_id <> pm.final_url_id
+            WHERE pm.run_id = $1 AND pm.url_id <> pm.final_url_id
             ORDER BY src.url
-            """
+            """,
+            self._run_id(),
         )
 
     async def site_hub_pages(self, min_outlinks: int = 5) -> list[dict[str, object]]:
@@ -48,11 +55,12 @@ class CrawlReports:
             SELECT p.url AS parent_url, COUNT(*)::INT AS outlinks
             FROM frontier f
             JOIN urls p ON p.id = f.parent_id
-            WHERE f.parent_id IS NOT NULL
+            WHERE f.run_id = $1 AND f.parent_id IS NOT NULL
             GROUP BY p.url
-            HAVING COUNT(*) >= $1
+            HAVING COUNT(*) >= $2
             ORDER BY outlinks DESC, p.url
             """,
+            self._run_id(),
             min_outlinks,
         )
 
@@ -61,12 +69,13 @@ class CrawlReports:
         return await self._fetch(
             """
             SELECT u.url, pm.ttfb_seconds, pm.total_duration_seconds, pm.final_status_code
-            FROM page_metadata pm
+            FROM page_run_snapshots pm
             JOIN urls u ON u.id = pm.url_id
-            WHERE pm.total_duration_seconds IS NOT NULL
+            WHERE pm.run_id = $1 AND pm.total_duration_seconds IS NOT NULL
             ORDER BY pm.total_duration_seconds DESC
-            LIMIT $1
+            LIMIT $2
             """,
+            self._run_id(),
             limit,
         )
 
@@ -80,12 +89,13 @@ class CrawlReports:
         return await self._fetch(
             """
             SELECT u.url, pm.lcp_ms, pm.cls, pm.inp_ms, pm.final_status_code
-            FROM page_metadata pm
+            FROM page_run_snapshots pm
             JOIN urls u ON u.id = pm.url_id
-            WHERE pm.lcp_ms IS NOT NULL OR pm.cls IS NOT NULL OR pm.inp_ms IS NOT NULL
+            WHERE pm.run_id = $1 AND (pm.lcp_ms IS NOT NULL OR pm.cls IS NOT NULL OR pm.inp_ms IS NOT NULL)
             ORDER BY pm.lcp_ms DESC NULLS LAST, pm.cls DESC NULLS LAST
-            LIMIT $1
+            LIMIT $2
             """,
+            self._run_id(),
             limit,
         )
 

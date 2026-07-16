@@ -18,25 +18,22 @@ MAX_URLS_PER_FILE = 50_000
 # A URL is excluded when it canonicalises to a *different* URL.
 INDEXABLE_URLS_QUERY = """
     SELECT u.url
-    FROM urls u
-    JOIN page_metadata pm ON pm.url_id = u.id
-    LEFT JOIN indexability i ON i.url_id = u.id
+    FROM page_run_snapshots pm
+    JOIN urls u ON u.id = pm.url_id
     WHERE u.kind = 'html'
+      AND pm.run_id = $1
       AND pm.final_status_code = 200
-      AND (i.overall_indexable IS NULL OR i.overall_indexable = TRUE)
-      AND NOT EXISTS (
-          SELECT 1 FROM canonical_urls c
-          WHERE c.url_id = u.id AND c.canonical_url_id <> u.id
-      )
+      AND (pm.overall_indexable IS NULL OR pm.overall_indexable = TRUE)
+      AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(pm.canonical_urls_json) canonical WHERE canonical <> u.url)
     ORDER BY u.url
 """
 
 
-async def fetch_indexable_urls(store) -> list[str]:
+async def fetch_indexable_urls(store, *, run_id: str | None = None) -> list[str]:
     """Return the sorted list of sitemap-eligible URLs from the store."""
     assert store.pool is not None
     async with store.pool.acquire() as conn:
-        rows = await conn.fetch(INDEXABLE_URLS_QUERY)
+        rows = await conn.fetch(INDEXABLE_URLS_QUERY, store._resolve_run_id(run_id))
     return [row["url"] for row in rows]
 
 
