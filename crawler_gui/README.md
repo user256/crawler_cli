@@ -52,6 +52,8 @@ can be iterated without PHP or Postgres.
 | `styles.css` | Light-first operator-tool chrome with an optional dark theme |
 | `sample-data.json` | Fixture crawl (pages, overview, history, detail payloads) |
 | `generate_sample_data.py` | Regenerates the JSON fixture |
+| `intent-report-fixture.mjs` | Generated static fixture with the Ticket 106 `report_data.json` envelope |
+| `intent-overlap.mjs` | The single adapter and dependency-free map/filter/table viewer for that envelope |
 | `CrawlZilla.html` | Competitor capture (reference only; not our app) |
 | `Screenshot from …png` | Layout reference shots |
 
@@ -90,6 +92,45 @@ Top-level keys the UI expects today:
 
 When `crawler_api` grows report endpoints, keep this shape (or map 1:1) so the
 prototype can swap `sample-data.json` for `GET /crawls/{id}/ui-snapshot`.
+
+### Intent Overlap / Cluster Report (Ticket 119)
+
+The **Intent Overlap** primary-nav view is an additional, operator-facing
+surface for Ticket 106 data. It is not an alternative implementation of the
+analysis and it does not parse the CSV outputs: `intent-overlap.mjs` accepts
+one `report_data.json`-shaped envelope containing the exported `pages`,
+`pairs`, `clusters`, summary, thresholds, and projection coordinates.
+
+The current prototype imports the generated `intent-report-fixture.mjs` rather
+than making an API request. It includes a deliberately explicit completed-run
+identity and points **Export HTML** at `./report.html`, the retained Ticket 107
+portable/offline artifact. The static viewer makes no browser fetch/XHR calls
+and has no third-party dependencies.
+
+When Ticket 095 has established the run selector in the real control plane,
+replace only the adapter input with a deterministic, run-scoped endpoint:
+
+```
+GET /crawls/{crawl_id}/runs/{run_id}/intent-report
+```
+
+The response must be the snapshot-backed Ticket 106 export for that exact
+`run_id`, not current-state analysis rows. Continue to expose the corresponding
+offline `report.html` artifact. The viewer already presents the selected run,
+so it must not silently fall back to a latest/current run.
+
+The view supports map hover/pin, wheel zoom and drag pan, URL search,
+relation/page-type/risk filters, cluster selection, and synchronised
+pages/pairs/clusters tables and detail. It uses the shell theme variables, so
+the existing light/dark toggle applies to it too.
+
+Validate its generated fixture and interaction model without installing any
+browser packages:
+
+```bash
+python3 crawler_gui/generate_sample_data.py
+node --test crawler_gui/test_intent_overlap.mjs
+```
 
 ## Out of scope for this folder
 

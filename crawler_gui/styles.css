@@ -263,6 +263,39 @@ button.ghost {
   border-bottom-color: var(--accent);
 }
 
+/* —— Intent-overlap report (Ticket 119) —— */
+#intent-overlap-root {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.intent-view { min-height: 100%; padding: 0.9rem; background: var(--bg); }
+.intent-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin-bottom: 0.75rem; }
+.intent-header h2 { margin: 0; font-size: 17px; }
+.intent-header p { margin: 0.2rem 0 0; color: var(--text-dim); }
+.intent-header a { text-decoration: none; display: inline-flex; align-items: center; }
+.intent-summary { display: flex; flex-wrap: wrap; gap: 0.45rem 1rem; padding: 0.65rem; background: var(--bg-panel); border: 1px solid var(--border); margin-bottom: 0.75rem; color: var(--text-dim); }
+.intent-summary strong { color: var(--text); }
+.intent-layout { display: grid; grid-template-columns: minmax(185px, 240px) minmax(0, 1fr); gap: 0.75rem; min-height: 660px; }
+.intent-filters { padding: 0.75rem; background: var(--bg-panel); border: 1px solid var(--border); overflow: auto; }
+.intent-filters > label, .intent-filters #intent-types label, .intent-filters #intent-clusters label { display: block; margin-bottom: 0.45rem; color: var(--text-dim); }
+.intent-filters input[type="search"], .intent-filters select { width: 100%; margin-top: 0.2rem; padding: 0.35rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+.intent-filters h3 { margin: 0.95rem 0 0.35rem; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-mute); }
+.intent-filters b { float: right; color: var(--text-mute); }
+.intent-main { display: grid; grid-template-rows: minmax(300px, 1fr) minmax(260px, .8fr); min-width: 0; gap: 0.75rem; }
+.intent-map-wrap { position: relative; min-height: 300px; border: 1px solid var(--border); background: var(--bg-panel); overflow: hidden; }
+#intent-map { display: block; width: 100%; height: 100%; cursor: crosshair; }
+.intent-map-wrap > small { position: absolute; left: .65rem; bottom: .5rem; color: var(--text-mute); pointer-events: none; }
+.intent-tooltip { position: absolute; display: block; max-width: 300px; padding: .45rem; background: var(--topbar); border: 1px solid var(--border); color: var(--text); pointer-events: none; z-index: 2; box-shadow: 0 4px 15px rgba(0,0,0,.25); }
+.intent-tooltip[hidden] { display: none; }
+.intent-tables { display: grid; grid-template-rows: auto minmax(120px, 1fr) auto; min-height: 0; border: 1px solid var(--border); background: var(--bg-panel); }
+.intent-tables .detail-tabs { padding-left: .3rem; }
+.overlap-table td { max-width: 24rem; }
+.intent-detail { padding: .55rem .7rem; border-top: 1px solid var(--border); color: var(--text-dim); }
+.intent-detail strong { display: block; color: var(--text); font-family: var(--mono); overflow-wrap: anywhere; }
+@media (max-width: 760px) { .intent-layout { grid-template-columns: 1fr; } .intent-filters { max-height: 220px; } .intent-main { min-height: 620px; } .intent-header { flex-direction: column; } }
+
 /* —— Main stage —— */
 .stage {
   flex: 1;

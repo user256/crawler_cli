@@ -289,7 +289,7 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 - `116` `done` (2026-07-16, production-store reclassification) [ticket-116-amp-evidence-production-recount.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-116-amp-evidence-production-recount.md) — **P3:** 108 follow-up — 479 evidence-backed AMP variants (477 canonical, 2 signature-hash, 0 amphtml edges); 0 missing canonical
 - `117` `done` (2026-07-16, PR #39) [ticket-117-config-validation-merge-regression.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-117-config-validation-merge-regression.md) — **P1:** removed stale `max_pages` validation; `default_open_crawl_limit=0` remains the direct-library unlimited sentinel
 - `118` `in progress` (agent `ticket_118`, branch `agent/118-gui-fixture-parity`) [ticket-118-crawler-gui-fixture-regeneration.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-118-crawler-gui-fixture-regeneration.md) — **P3:** keep the generated crawler_gui fixture aligned with scheduled-crawl UI fields.
-- `119` `proposed` [ticket-119-crawler-gui-intent-overlap-viewer.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-119-crawler-gui-intent-overlap-viewer.md) — **P2:** replicate Ticket 107's intent-overlap viewer in crawler_gui while retaining the standalone offline export
+- `119` `in progress` (agent `ticket_119`, branch `agent/119-gui-intent-overlap`) [ticket-119-crawler-gui-intent-overlap-viewer.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-119-crawler-gui-intent-overlap-viewer.md) — **P2:** replicate Ticket 107's intent-overlap viewer in crawler_gui while retaining the standalone offline export
 
 ### Open work — priority order (2026-07-16)
 
