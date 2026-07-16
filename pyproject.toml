@@ -100,9 +100,11 @@ crawler-cli = "crawler_cli.__main__:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Coverage flags live in the CI test job command, NOT here: putting them in
-# addopts would apply the 60% floor to single-file local runs and to the
-# integration-only CI job, failing both (ticket-067).
+# Coverage flags live in the CI job commands, NOT here: putting them in
+# addopts would apply the floor to single-file local runs and to the
+# integration-only CI job, failing both (ticket-067). Ticket 096 collects
+# Postgres integration coverage separately and gates persistence.py there /
+# in the combined coverage job.
 markers = [
     "integration: requires a real PostgreSQL database (set CRAWLER_CLI_TEST_DSN)",
     "playwright_smoke: real Chromium-backed Playwright smoke tests (run with --run-playwright-smoke)",

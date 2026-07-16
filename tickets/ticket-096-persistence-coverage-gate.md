@@ -30,5 +30,8 @@ closes the remaining measurement and branch gaps.
 - A regression in run isolation or write durability fails CI.
 
 ## Status
-in_progress (Priority: **P2**) — claimed by `agent/ticket-096-persistence-coverage-gate`; test-risk follow-up to ticket 066; found in 2026-07-15 audit.
-
+done (Priority: **P2**) — 2026-07-15: integration job collects HTML/XML coverage
+and gates `persistence.py` at 65%; combine job merges unit+Postgres coverage
+(persistence ≥70%, package ≥60% unchanged). Added migration, redirect, retry,
+concurrent claim, rollback, compact/purge, reports, and deadlock-retry tests;
+fixed dry-run infinite loops in `compact_html_storage` / `backfill_content_hashes`.

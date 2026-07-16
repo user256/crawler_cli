@@ -25,3 +25,5 @@ AGENTS.md
 # test / build artifacts
 .coverage
 *.whl
+coverage/
+htmlcov/

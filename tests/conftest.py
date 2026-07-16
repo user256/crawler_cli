@@ -60,3 +60,33 @@ def _clear_postgres_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for var in _POSTGRES_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _disable_asyncpg_ssl_for_test_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force ssl=False when running against CRAWLER_CLI_TEST_DSN.
+
+    Local Docker Postgres can segfault in asyncpg's SSL probe under coverage
+    tracing; CI's service container is fine either way. Only activates when the
+    integration DSN is set so unit tests are untouched.
+    """
+    import os
+
+    if not os.environ.get("CRAWLER_CLI_TEST_DSN"):
+        return
+
+    import asyncpg
+
+    orig_pool = asyncpg.create_pool
+    orig_connect = asyncpg.connect
+
+    async def create_pool(*args, **kwargs):  # type: ignore[no-untyped-def]
+        kwargs.setdefault("ssl", False)
+        return await orig_pool(*args, **kwargs)
+
+    async def connect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        kwargs.setdefault("ssl", False)
+        return await orig_connect(*args, **kwargs)
+
+    monkeypatch.setattr(asyncpg, "create_pool", create_pool)
+    monkeypatch.setattr(asyncpg, "connect", connect)

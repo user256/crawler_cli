@@ -3257,6 +3257,10 @@ class AsyncpgStore:
                         compressed,
                     )
                     updated += 1
+                if dry_run:
+                    # dry-run does not mutate rows; a second SELECT would return the
+                    # same set forever. Count this pass and stop.
+                    break
         bytes_after = bytes_before if dry_run else await self.pages_relation_bytes()
         return {
             "rows_updated": updated,
@@ -3314,6 +3318,9 @@ class AsyncpgStore:
                         len(html),
                     )
                     updated += 1
+                if dry_run:
+                    # dry-run does not write hashes; stop after one pass.
+                    break
         return {"rows_updated": updated}
 
     async def purge_stored_html(
