@@ -1,6 +1,6 @@
 # Ticket 117: Restore CrawlConfig validation after ticket-093/112 integration
 
-**Status:** proposed
+**Status:** done (2026-07-16, PR #39)
 **Priority:** P1 regression
 **Related:** Tickets 093 and 112
 
@@ -26,3 +26,10 @@ but ticket 112 correctly removed that dead field in favour of
 
 The combined ticket-093/112 behaviour type-checks, validates the active crawl
 limit field only, and has a green unit suite.
+
+## Acceptance notes
+
+- Removed validation of the deleted `max_pages` field.
+- Direct-library coverage keeps `default_open_crawl_limit=0` as the explicit
+  unlimited sentinel.
+- Ruff and mypy passed; the non-integration suite was run before merge.
