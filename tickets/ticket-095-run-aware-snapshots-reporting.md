@@ -39,8 +39,22 @@ ticket builds durable snapshot semantics on top of that identity.
 - Current-state convenience and historical retention are both documented.
 
 ## Status
-open — rework required after PR #33 was rejected on 2026-07-16. The attempted
-implementation filtered snapshot membership but still read analysis fields from
-current-state tables, which cannot support historical reporting; its
-`hreflang-groups` run selector was also nonfunctional. Reopen only with
-snapshot-backed data paths, functional scope enforcement, and a green suite.
+held (rework in PR #44; blocked on ticket 120) — 2026-07-16.
+
+PR #33 was rejected because it filtered snapshot membership but still read
+analysis fields from current-state tables and shipped a nonfunctional
+`hreflang-groups` run selector with a red suite. The rework on branch
+`agent/095-run-aware-snapshots` (PR #44) fixes all three: analysis/report reads
+are snapshot-backed (`fetch_analysis_rows` reads `page_run_snapshots` +
+`run_url_identity`/`run_intent_signatures`/`run_page_embeddings`), the
+`hreflang-groups` selector threads `run_id` end-to-end, and the full suite is
+green (670 passed against a real Postgres, including the new two-run historical
+proof). The two named concrete instances are addressed (`reports.py`
+`site_hub_pages` is `WHERE f.run_id = $1`; `_run_delete_crawl` aggregates via
+`frontier_stats_all_runs()`).
+
+**Not merged.** The rework regressed AMP-variant exclusion: `fetch_analysis_rows`
+hardcodes `NULL::text AS variant_kind`, so `compute_exclusion` no longer returns
+`"amp-variant"` and AMP variants leak back into intent-overlap pairing — the
+defect ticket 103 fixed, uncaught by tests. Tracked as **ticket 120**. Re-review
+PR #44 for merge only once 120 restores run-scoped `variant_kind`.
