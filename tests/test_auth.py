@@ -90,7 +90,24 @@ def test_auth_password_sources_are_mutually_exclusive(monkeypatch: pytest.Monkey
 def test_auth_password_without_basic_context_fails() -> None:
     args = _build_parser().parse_args(["crawl", "https://example.com", "--auth-password", "secret"])
 
-    with pytest.raises(ValueError, match="requires --auth-username"):
+    with pytest.raises(ValueError, match=r"^--auth-password requires --auth-username or --auth-type basic$"):
+        _build_auth(args)
+
+
+def test_auth_password_env_without_basic_context_names_env_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CRAWLER_TEST_PASSWORD", "env-secret")
+    args = _build_parser().parse_args(["crawl", "https://example.com", "--auth-password-env", "CRAWLER_TEST_PASSWORD"])
+
+    with pytest.raises(ValueError, match=r"^--auth-password-env requires --auth-username or --auth-type basic$"):
+        _build_auth(args)
+
+
+def test_auth_password_file_without_basic_context_names_file_flag(tmp_path) -> None:
+    secret_file = tmp_path / "auth-password"
+    secret_file.write_text("file-secret\n", encoding="utf-8")
+    args = _build_parser().parse_args(["crawl", "https://example.com", "--auth-password-file", str(secret_file)])
+
+    with pytest.raises(ValueError, match=r"^--auth-password-file requires --auth-username or --auth-type basic$"):
         _build_auth(args)
 
 

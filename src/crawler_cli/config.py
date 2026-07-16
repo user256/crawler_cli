@@ -98,7 +98,6 @@ class CrawlConfig:
     robots_cache_ttl_seconds: float = 3600.0
     honor_robots_crawl_delay: bool = True
     default_open_crawl_limit: int = DEFAULT_OPEN_CRAWL_LIMIT
-    max_pages: int = DEFAULT_OPEN_CRAWL_LIMIT
     same_host_only: bool = True
     enable_content_hashing: bool = False
     compress_html: bool = True
