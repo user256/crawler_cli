@@ -29,5 +29,5 @@ can disable limits accidentally or produce nonsensical runtime behavior.
 - CLI and direct-library validation rules are consistent and comprehensively tested.
 
 ## Status
-in_progress (Priority: **P2**) — claimed by `agent/ticket-093-cli-config-numeric-validation`; UX/defensive correctness; found in 2026-07-15 audit.
+done (Priority: **P2**) — `agent/ticket-093-cli-config-numeric-validation`; argparse type validators + `CrawlConfig.validate()`/`__post_init__`; cross-field memory watermark + alias checks; intent-overlap thresholds validated before store/output; exit code 2 without traceback.
 

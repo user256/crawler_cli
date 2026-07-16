@@ -5,6 +5,13 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from .auth import AuthConfig
+from .validators import (
+    require_non_negative_float,
+    require_non_negative_int,
+    require_percentage,
+    require_positive_float,
+    require_positive_int,
+)
 
 
 BackendName = Literal["aiohttp", "curl_cffi", "playwright"]
@@ -199,6 +206,72 @@ class CrawlConfig:
     """Retain raw_html/extracted/discovered_links on results after persist
     during open crawls.  Off by default so long crawls stay memory-bounded
     (ticket-059); library callers that read job.results directly can opt in."""
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        """Raise :class:`ValueError` when numeric configuration is invalid.
+
+        Same rules as the CLI argparse types (ticket 093): reject negatives,
+        NaN/infinity, and cross-field contradictions before the engine opens
+        sockets or creates ``asyncio.Semaphore`` values.
+        """
+        require_positive_int(self.max_concurrency, field="max_concurrency")
+        require_non_negative_int(self.max_requests_per_context, field="max_requests_per_context")
+        require_non_negative_int(self.refresh_days, field="refresh_days")
+        require_non_negative_int(self.max_pages, field="max_pages")
+        require_non_negative_int(self.default_open_crawl_limit, field="default_open_crawl_limit")
+        require_non_negative_int(self.per_host_concurrency, field="per_host_concurrency")
+        require_positive_int(self.max_response_bytes, field="max_response_bytes")
+        require_positive_float(self.timeout_seconds, field="timeout_seconds")
+        require_non_negative_float(
+            self.playwright_network_idle_timeout_seconds,
+            field="playwright_network_idle_timeout_seconds",
+        )
+        require_positive_float(
+            self.playwright_wait_for_selector_timeout_seconds,
+            field="playwright_wait_for_selector_timeout_seconds",
+        )
+        require_non_negative_float(self.rate_limit_per_second, field="rate_limit_per_second")
+        require_percentage(self.memory_high_watermark_percent, field="memory_high_watermark_percent")
+        require_percentage(
+            self.memory_recovery_watermark_percent,
+            field="memory_recovery_watermark_percent",
+        )
+        if self.memory_recovery_watermark_percent >= self.memory_high_watermark_percent:
+            raise ValueError(
+                "memory_recovery_watermark_percent must be below "
+                f"memory_high_watermark_percent "
+                f"({self.memory_recovery_watermark_percent} >= "
+                f"{self.memory_high_watermark_percent})"
+            )
+        require_non_negative_float(self.robots_cache_ttl_seconds, field="robots_cache_ttl_seconds")
+        require_positive_int(
+            self.circuit_breaker_failure_threshold,
+            field="circuit_breaker_failure_threshold",
+        )
+        require_positive_float(
+            self.circuit_breaker_recovery_seconds,
+            field="circuit_breaker_recovery_seconds",
+        )
+        require_positive_float(self.archive_timeout_seconds, field="archive_timeout_seconds")
+        require_positive_int(self.archive_max_urls, field="archive_max_urls")
+        require_non_negative_int(self.frontier_max_retries, field="frontier_max_retries")
+        require_non_negative_float(
+            self.frontier_retry_base_delay_seconds,
+            field="frontier_retry_base_delay_seconds",
+        )
+        require_non_negative_int(self.proxy_max_failures, field="proxy_max_failures")
+        require_non_negative_float(self.proxy_cooldown_seconds, field="proxy_cooldown_seconds")
+        require_non_negative_int(self.proxy_gateway_max_retries, field="proxy_gateway_max_retries")
+        require_non_negative_int(self.challenge_max_escalations, field="challenge_max_escalations")
+        require_positive_int(self.sitemap_max_urls, field="sitemap_max_urls")
+        require_positive_int(self.sitemap_max_depth, field="sitemap_max_depth")
+        require_positive_int(self.obscura_workers, field="obscura_workers")
+        require_positive_int(self.obscura_port, field="obscura_port")
+        if self.obscura_port > 65535:
+            raise ValueError(f"obscura_port must be <= 65535, got {self.obscura_port}")
 
     @staticmethod
     def _url_path(url: str) -> str:
