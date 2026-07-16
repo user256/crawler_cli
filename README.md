@@ -328,18 +328,22 @@ is downgraded from `duplicate — decanonicalisation likely` (which prescribes
 canonical/merge) to `thin content — add distinguishing content`; a pair where
 only one side is thin keeps the normal duplicate risk on both pages but is
 flagged `thin: asymmetric` in `overlap_pairs.csv` so the asymmetry isn't
-hidden. `pages.csv` gains `signature_words` next to `word_count` for the
-contrast, `clusters.csv` gains a `thin` column, and `--fail-on duplicate`
-excludes thin-only pairs from the duplicate count by default (the run summary
-reports thin page/pair counts separately, so nothing is hidden). The `88`
-default came from calibrating against a real run
-(thompsons-scotland.co.uk): its `/videos` hub + category pages all share an
-*identical* 77-word signature — title, h1, a generic meta description, and a
+hidden. `pages.csv` exposes the thin-content diagnostic surface next to
+`word_count`: `main_text_words`, `main_text_chars`, `signature_words`,
+`signature_chars`, and `signal_confidence` (same fields the ticket-106
+`report_data.json` `pages[]` schema must carry). `clusters.csv` gains a
+`thin` column, and `--fail-on duplicate` excludes thin-only pairs from the
+duplicate count by default (the run summary reports thin page/pair counts
+separately, so nothing is hidden). The `88` default came from calibrating
+against a real run (thompsons-scotland.co.uk): its `/videos` hub + category
+pages all share an *identical* signature (`signature_words=77`,
+`signature_chars=545`) and extracted main text (`main_text_words=52`,
+`main_text_chars=360`) — title, h1, a generic meta description, and a
 site-wide footer disclaimer, no real body text — and pair at cosine 1.0
-purely on that boilerplate, despite 820-1040 raw words each. A naive 40-60
-word guess would miss that entirely. Recalibrate per site by comparing
-`pages.csv`'s `word_count` against `signature_words`: a persistent gap
-between the two (high `word_count`, low `signature_words`) is the tell.
+purely on that boilerplate, despite 820–1042 raw `word_count` each. A naive
+40–60 word guess would miss that entirely. Recalibrate per site by comparing
+`word_count` against `signature_*` / `main_text_*`: a persistent gap (high
+raw count, low diagnostic lengths) is the tell.
 
 Periodic re-runs: `crawl --refresh-days 30` skips URLs fetched successfully
 within the window, and `--ua "domain=User Agent"` sets a per-domain User-Agent

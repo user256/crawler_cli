@@ -269,7 +269,7 @@ Webpage rendering of the intent-overlap results: hoverable cluster map with
 match-type toggles + the core report data as filterable tables, from a JSON
 data export. Land after 101–105 (+108 AMP evidence) so tag fields are stable.
 
-- `106` `in_progress` [ticket-106-report-data-json-export.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-106-report-data-json-export.md) — **P2:** `--json-report` → `report_data.json` (pages/pairs/clusters + 2D UMAP/PCA coords via `[viz]` extra, crawler-native cluster labels, centroid-similarity metric); the data layer for 107. Unblocked by 108 ✓; schema polish notes in 113 — claimed by `agent/ticket-106-report-data-json-export`
+- `106` `in_progress` [ticket-106-report-data-json-export.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-106-report-data-json-export.md) — **P2:** `--json-report` → `report_data.json` (pages/pairs/clusters + 2D UMAP/PCA coords via `[viz]` extra, crawler-native cluster labels, centroid-similarity metric); the data layer for 107. Unblocked by 108 ✓; `pages[]` diagnostic length contract + `/videos` calibration documented in 113 ✓ — claimed by `agent/ticket-106-report-data-json-export`
 - `107` `in_progress` (blocked on 106 PR) [ticket-107-interactive-html-cluster-report.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-107-interactive-html-cluster-report.md) — **P2, depends on 106:** `render-report` subcommand → single self-contained offline HTML — canvas cluster map (hover/zoom/pin), match-type filter toggles (parent-child, time-sequenced, thin, parameterised, amp...), sortable pages/pairs/clusters tables, URL search — claimed by `agent/ticket-107-interactive-html-cluster-report` (same agent as 106; starts after 106 PR)
 
 ### 2026-07-15 review remediations for tickets 103–104 + CI
@@ -277,7 +277,7 @@ data export. Land after 101–105 (+108 AMP evidence) so tag fields are stable.
 - `108` `done` (2026-07-15, PR #23; production recount → 116) [ticket-108-amp-classification-evidence-hardening.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-108-amp-classification-evidence-hardening.md) — **P1, depends on 103:** remove base-exists-only AMP confirmation, use intent-signature evidence, and recompute stale variant labels. Reviewed MERGE: DoD met; CI green
 - `109` `done` (2026-07-15, PR #21; leftovers → 113) [ticket-109-thin-content-diagnostic-completeness.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-109-thin-content-diagnostic-completeness.md) — **P2:** `main_text_*` / `signature_chars` diagnostics in `pages.csv`; missing-vs-zero evidence; thin policy unchanged
 - `111` `done` (2026-07-15, PR #19) [ticket-111-ci-artifact-action-runtime-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-111-ci-artifact-action-runtime-hygiene.md) — **P3:** non-empty coverage artifacts + GitHub actions off deprecated Node 20 runtimes
-- `113` `in_progress` [ticket-113-thin-diagnostic-schema-calibration.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-113-thin-diagnostic-schema-calibration.md) — **P3:** 109 leftovers — 106 schema field list polish + `/videos` calibration documentation — claimed by `agent/ticket-113-thin-diagnostic-schema-calibration`
+- `113` `done` (2026-07-15) [ticket-113-thin-diagnostic-schema-calibration.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-113-thin-diagnostic-schema-calibration.md) — **P3:** 109 leftovers — 106 `pages[]` diagnostic length contract + `/videos` calibration (`word_count` 820–1042 vs `main_text_words=52` / `signature_words=77`)
 
 ### 2026-07-15 batch review remediations (PRs #22–#26)
 
@@ -300,20 +300,19 @@ Implement in this order unless a ticket's dependency blocks it.
 4. **P2** `114` [sitemap budget dedupe / CDN docs](./ticket-114-sitemap-budget-dedupe-cdn-docs.md) — from 087
 5. **P2** `115` [persist/frontier incompleteness signaling](./ticket-115-persist-frontier-incompleteness-signaling.md) — from 092
 6. **P3** `112` `in_progress` [run-isolation hygiene leftovers](./ticket-112-run-isolation-hygiene-leftovers.md) — from 099 — `agent/ticket-112-run-isolation-hygiene-leftovers`
-7. **P3** `113` `in_progress` [thin-diagnostic schema/calibration](./ticket-113-thin-diagnostic-schema-calibration.md) — from 109 — `agent/ticket-113-thin-diagnostic-schema-calibration`
-8. **P3** `116` [AMP evidence production recount](./ticket-116-amp-evidence-production-recount.md) — from 108
+7. **P3** `116` [AMP evidence production recount](./ticket-116-amp-evidence-production-recount.md) — from 108
 
 **2. Interactive intent-overlap reporting**
 
-9. **P2** `106` `in_progress` [report_data.json export](./ticket-106-report-data-json-export.md) — after 108 ✓ — `agent/ticket-106-report-data-json-export`
-10. **P2** `107` `in_progress` [interactive HTML cluster report](./ticket-107-interactive-html-cluster-report.md) — after 106 PR (same agent) — `agent/ticket-107-interactive-html-cluster-report`
+8. **P2** `106` `in_progress` [report_data.json export](./ticket-106-report-data-json-export.md) — after 108 ✓ — `agent/ticket-106-report-data-json-export`
+9. **P2** `107` `in_progress` [interactive HTML cluster report](./ticket-107-interactive-html-cluster-report.md) — after 106 PR (same agent) — `agent/ticket-107-interactive-html-cluster-report`
 
 **3. Lower-priority hardening**
 
-11. **P3** `098` `in_progress` [packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md) — `agent/ticket-098-packaging-docs-release-hygiene`
-12. **P3** `100` `in_progress` [Obscura installer test hardening](./ticket-100-obscura-installer-test-hardening.md) — `agent/ticket-100-obscura-installer-test-hardening`
+10. **P3** `098` `in_progress` [packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md) — `agent/ticket-098-packaging-docs-release-hygiene`
+11. **P3** `100` `in_progress` [Obscura installer test hardening](./ticket-100-obscura-installer-test-hardening.md) — `agent/ticket-100-obscura-installer-test-hardening`
 
 **Deferred lanes**
 
-13. **deferred** `035` [Redis frontier](./ticket-035-redis-frontier-queue.md) — architectural/infra
-14. **proposed** `075` [Casino Guru review ingestion](./ticket-075-casino-guru-review-ingestion.md) — blocked on reliable authorised fetch path
+12. **deferred** `035` [Redis frontier](./ticket-035-redis-frontier-queue.md) — architectural/infra
+13. **proposed** `075` [Casino Guru review ingestion](./ticket-075-casino-guru-review-ingestion.md) — blocked on reliable authorised fetch path
