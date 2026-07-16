@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>crawler_gui — interface prototype</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="topbar-nav">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true"></span>
+            <span id="brand-name">crawler_gui</span>
+          </div>
+          <nav id="nav-links" aria-label="Primary"></nav>
+          <div class="topbar-spacer"></div>
+          <button type="button" class="theme-toggle" id="btn-theme" aria-pressed="false" title="Switch to light mode">
+            <span aria-hidden="true">☀</span><span id="theme-label">Light</span>
+          </button>
+          <span class="user-chip">prototype · sample-data.json</span>
+        </div>
+        <div class="crawl-bar">
+          <button type="button" id="btn-history">History</button>
+          <input id="crawl-url" type="url" spellcheck="false" />
+          <select id="crawl-mode" aria-label="Crawl mode">
+            <option>Spider</option>
+            <option>List</option>
+          </select>
+          <button type="button" class="primary" id="btn-new-crawl">New crawl</button>
+          <button type="button" id="btn-new-schedule">Schedule crawl</button>
+          <button type="button" id="btn-options">Configuration</button>
+          <button type="button" class="danger" id="btn-delete">Delete</button>
+          <div class="mini-progress" title="Crawl progress">
+            <span id="mini-progress-fill"></span>
+            <em id="mini-progress-label">0%</em>
+          </div>
+        </div>
+      </header>
+
+      <div class="category-tabs" id="category-tabs" role="tablist" aria-label="Report categories"></div>
+
+      <main class="stage">
+        <section class="grid-panel" aria-label="URL results">
+          <div class="grid-toolbar">
+            <button type="button" class="ghost" disabled>All</button>
+            <button type="button" class="ghost" disabled>Export</button>
+            <input id="grid-filter" type="search" placeholder="Filter URLs…" />
+            <span class="filter-total" id="filter-total">Filter Total: 0</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data">
+              <thead id="grid-head"></thead>
+              <tbody id="grid-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <aside class="sidebar" aria-label="Crawl overview">
+          <div class="sidebar-tabs" id="sidebar-tabs"></div>
+          <div class="sidebar-body" id="sidebar-body"></div>
+        </aside>
+
+        <section class="detail" aria-label="URL details">
+          <div class="detail-tabs" id="detail-tabs"></div>
+          <div class="detail-body" id="detail-body"></div>
+        </section>
+      </main>
+
+      <footer class="statusbar">
+        <span id="status-label">—</span>
+        <span id="status-avg">Average: —</span>
+        <span id="status-cur">Current: —</span>
+        <div class="bar">
+          <span id="status-fill"></span>
+          <em id="status-fill-label"></em>
+        </div>
+      </footer>
+    </div>
+
+    <!-- History -->
+    <div class="modal-backdrop" id="modal-history" role="dialog" aria-modal="true" aria-labelledby="history-title">
+      <div class="modal">
+        <header>
+          <h2 id="history-title">Crawl History</h2>
+          <button type="button" class="ghost" data-close aria-label="Close">✕</button>
+        </header>
+        <div class="filters" id="history-filters">
+          <button type="button" class="active" data-hfilter="all">All</button>
+          <button type="button" data-hfilter="running">Running</button>
+          <button type="button" data-hfilter="paused">Paused</button>
+          <button type="button" data-hfilter="complete">Complete</button>
+          <button type="button" data-hfilter="failed">Failed</button>
+        </div>
+        <div class="list" id="history-list"></div>
+        <footer>
+          <button type="button" data-close>Close</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- New crawl -->
+    <div class="modal-backdrop" id="modal-new-crawl" role="dialog" aria-modal="true" aria-labelledby="new-crawl-title">
+      <div class="modal setup-modal">
+        <header>
+          <div>
+            <h2 id="new-crawl-title">Start a new crawl</h2>
+            <p class="modal-subtitle">Set the crawl target, then tune behaviour in Configuration.</p>
+          </div>
+          <button type="button" class="ghost" data-close aria-label="Close">✕</button>
+        </header>
+        <div class="setup-form">
+          <label>
+            Crawl name <span class="optional">(optional)</span>
+            <input id="new-crawl-name" type="text" placeholder="July technical audit" />
+          </label>
+          <div class="segmented" role="group" aria-label="Crawl type">
+            <button type="button" class="active" data-crawl-type="Spider">Spider a site</button>
+            <button type="button" data-crawl-type="List">Crawl a URL list</button>
+          </div>
+          <label>
+            <span id="new-crawl-target-label">Seed URL</span>
+            <input id="new-crawl-url" type="url" spellcheck="false" placeholder="https://example.com" />
+          </label>
+          <p class="field-hint" id="new-crawl-hint">Discovers pages by following internal links from this URL.</p>
+          <button type="button" class="advanced-link" id="btn-new-crawl-options">⚙ Configure crawl behaviour</button>
+        </div>
+        <footer>
+          <button type="button" data-close>Cancel</button>
+          <button type="button" class="primary" id="btn-start-crawl">Start crawl</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- New scheduled crawl -->
+    <div class="modal-backdrop" id="modal-new-schedule" role="dialog" aria-modal="true" aria-labelledby="new-schedule-title">
+      <div class="modal schedule-modal">
+        <header>
+          <div>
+            <h2 id="new-schedule-title">New scheduled crawl</h2>
+            <p class="modal-subtitle">Run a crawl automatically at a time that suits your team.</p>
+          </div>
+          <button type="button" class="ghost" data-close aria-label="Close">✕</button>
+        </header>
+        <div class="schedule-form">
+          <label>
+            Name <span class="optional">(optional)</span>
+            <input id="schedule-name" type="text" placeholder="Weekly homepage audit" />
+          </label>
+          <div class="segmented schedule-type" role="group" aria-label="Scheduled crawl type">
+            <button type="button" class="active" data-schedule-type="Single URL">Single URL</button>
+            <button type="button" data-schedule-type="List of URLs">List of URLs</button>
+          </div>
+          <label>
+            <span id="schedule-target-label">Seed URL</span>
+            <input id="schedule-url" type="url" spellcheck="false" placeholder="https://example.com" />
+          </label>
+          <div>
+            <span class="form-label">Frequency</span>
+            <div class="frequency-choice" role="group" aria-label="Schedule frequency">
+              <button type="button" disabled title="Not available on this prototype plan">Daily</button>
+              <button type="button" disabled title="Not available on this prototype plan">Weekly</button>
+              <button type="button" class="active" data-frequency="Monthly">Monthly</button>
+            </div>
+          </div>
+          <div class="schedule-timing" id="schedule-monthly-fields">
+            <label class="day-field">Day of month <span class="optional">(1–28)</span>
+              <input id="schedule-day" type="number" min="1" max="28" value="1" />
+            </label>
+            <div class="timing-row">
+              <label>Time of day
+                <input id="schedule-time" type="time" value="09:00" />
+              </label>
+              <label>Timezone
+                <input id="schedule-timezone" type="text" list="schedule-tz-list" value="Europe/London" placeholder="Europe/London" />
+              </label>
+            </div>
+          </div>
+          <button type="button" class="advanced-schedule" id="btn-schedule-options">
+            <span><span aria-hidden="true">☷</span> Advanced crawl options</span>
+            <small id="schedule-options-summary">5 req/s · default requests</small>
+          </button>
+        </div>
+        <footer>
+          <button type="button" data-close>Cancel</button>
+          <button type="button" class="primary" id="btn-create-schedule">Create schedule</button>
+        </footer>
+      </div>
+    </div>
+
+    <!-- Configuration -->
+    <div class="modal-backdrop" id="modal-options" role="dialog" aria-modal="true" aria-labelledby="options-title">
+      <div class="modal config-modal">
+        <header>
+          <div class="config-title">
+            <h2 id="options-title">Crawl configuration</h2>
+            <span class="modal-tag" id="options-context">CURRENT CRAWL</span>
+          </div>
+          <button type="button" class="ghost" data-close aria-label="Close">✕</button>
+        </header>
+        <p class="config-notice" id="config-notice">⚡ Changes apply to the next crawl. Keep requests within the site’s published crawl policy.</p>
+        <div class="options-form">
+          <section class="config-section full">
+            <h3>Speed</h3>
+            <label class="range-label" for="opt-concurrency"><span>URLs per second</span><strong id="opt-concurrency-value">5</strong></label>
+            <input id="opt-concurrency" type="range" min="1" max="10" step="1" />
+            <div class="range-scale"><span>1</span><span>10 max</span></div>
+          </section>
+          <section class="config-section full">
+            <h3>Limits</h3>
+            <div class="config-pair">
+              <label>Max pages<input id="opt-max-pages" type="number" min="0" /></label>
+              <label>Delay between requests (s)<input id="opt-delay" type="number" step="0.05" min="0" /></label>
+            </div>
+          </section>
+          <section class="config-section full">
+            <h3>User-agent & rendering</h3>
+            <label>Browser / bot identity
+              <select id="opt-backend">
+                <option value="aiohttp">crawler_gui (default)</option>
+                <option value="curl_cffi">Chrome-compatible</option>
+                <option value="playwright">Playwright Chromium</option>
+                <option value="obscura">Obscura</option>
+              </select>
+            </label>
+            <label>User-agent string
+              <input id="opt-user-agent" type="text" readonly />
+            </label>
+            <label class="check-option"><input id="opt-js" type="checkbox" /><span><strong>Render JavaScript</strong><small>Use a browser renderer for client-side content.</small></span></label>
+          </section>
+          <section class="config-section full">
+            <h3>Behaviour</h3>
+            <label class="check-option"><input id="opt-nofollow" type="checkbox" /><span><strong>Ignore nofollow links</strong><small>Follow links even when they carry <code>rel="nofollow"</code>.</small></span></label>
+            <label class="check-option"><input id="opt-robots" type="checkbox" /><span><strong>Respect robots.txt</strong><small>Skip URLs disallowed for the selected user-agent.</small></span></label>
+            <label class="check-option"><input id="opt-images" type="checkbox" /><span><strong>Crawl image URLs</strong><small>Fetch image resources found on crawled pages.</small></span></label>
+          </section>
+        </div>
+        <footer>
+          <button type="button" data-close>Cancel</button>
+          <button type="button" class="primary" id="btn-save-options">Done</button>
+        </footer>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status"></div>
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>
