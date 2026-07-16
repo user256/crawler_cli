@@ -1113,6 +1113,8 @@ async def _run_crawl(args: argparse.Namespace) -> int:
                 summary += f" (results in {args.save_to})"
             elif job.durability == "saved_output_only":
                 summary += " (in-memory results only)"
+        if job.frontier_mark_done_error_count:
+            summary += f", {job.frontier_mark_done_error_count} frontier mark-done failures pending for --resume"
         if job.run_id:
             summary += f" (run {job.run_id})"
         print(summary)
@@ -1501,6 +1503,9 @@ class _SavedJob(TypedDict, total=False):
     max_urls: int | None
     retry_attempts: int
     interrupted: bool
+    run_id: str | None
+    frontier_mark_done_failed_urls: list[str]
+    crawl_run_status: str | None
     results: list[_SavedResult]
 
 
@@ -1619,8 +1624,11 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             results=results,
             saved_to=summary.get("saved_to"),
             max_urls=summary.get("max_urls"),
+            run_id=summary.get("run_id"),
             retry_attempts=int(summary.get("retry_attempts", 0) or 0),
             interrupted=bool(summary.get("interrupted", False)),
+            frontier_mark_done_failed_urls=list(summary.get("frontier_mark_done_failed_urls", []) or []),
+            crawl_run_status=summary.get("crawl_run_status"),
         )
 
     if isinstance(payload, dict) and "results" in payload:
@@ -1631,8 +1639,11 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             results=[_load_result(item) for item in job.get("results", []) or [] if isinstance(item, dict)],
             saved_to=job.get("saved_to"),
             max_urls=job.get("max_urls"),
+            run_id=job.get("run_id"),
             retry_attempts=int(job.get("retry_attempts", 0) or 0),
             interrupted=bool(job.get("interrupted", False)),
+            frontier_mark_done_failed_urls=list(job.get("frontier_mark_done_failed_urls", []) or []),
+            crawl_run_status=job.get("crawl_run_status"),
         )
 
     raise ValueError(f"Unsupported crawl artifact format: {path}")

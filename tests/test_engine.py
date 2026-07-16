@@ -338,6 +338,30 @@ async def test_memory_open_crawl_new_seed_ignores_unrelated_completed_run():
 
 
 @pytest.mark.asyncio
+async def test_open_crawl_marks_run_complete_with_errors_when_mark_done_fails():
+    class MarkDoneFailStore(MemoryStore):
+        async def frontier_mark_done(self, urls, *, run_id=None) -> None:
+            raise RuntimeError("simulated mark-done failure")
+
+    url = "https://example.com/"
+    store = MarkDoneFailStore()
+    engine = CrawlEngine(
+        CrawlConfig(max_concurrency=1, default_open_crawl_limit=1, discover_sitemaps=False, respect_robots_txt=False),
+        store=store,
+    )
+    engine.backend = FakeBackend({url: "<html><body>content</body></html>"})
+
+    job = await engine.crawl_open([url], max_urls=1, run_id="mark-done-failed-run")
+
+    assert job.crawl_run_status == "complete_with_errors"
+    assert job.frontier_mark_done_failed_urls == [url]
+    run = await store.get_crawl_run("mark-done-failed-run")
+    assert run is not None
+    assert run["status"] == "complete_with_errors"
+    assert await store.frontier_stats(run_id="mark-done-failed-run") == (0, 1, 0)
+
+
+@pytest.mark.asyncio
 async def test_memory_open_crawl_valid_resume_uses_selected_run_only():
     store = MemoryStore()
     pages = {

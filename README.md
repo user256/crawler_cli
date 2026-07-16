@@ -487,6 +487,17 @@ tests/                 # shipped in the sdist for install verification
   - resumable bounded open crawl from a seed set
   - saving crawl output and returning structured results
 
+### Incomplete persistence and resume
+
+Open-crawl JSON/JSONL summaries expose `persist_error_count` and
+`frontier_mark_done_error_count`. Either condition records the crawl run as
+`complete_with_errors` rather than `complete`; URLs in
+`frontier_mark_done_failed_urls` were persisted but remain pending because
+frontier bookkeeping failed. Re-run that explicit run with `--resume RUN_ID`
+to reset pending URLs and finish the frontier. Mark-done failures return exit
+code 1 even with `--allow-persist-failures`, so automation cannot mistake an
+incomplete frontier for a completed crawl.
+
 To bypass robots explicitly:
 
 ```python
