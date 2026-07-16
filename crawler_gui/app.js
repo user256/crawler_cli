@@ -1,4 +1,6 @@
 /* crawler_gui — bind sample-data.json into the layout shell */
+import { adaptReportData, mountIntentOverlapViewer } from "./intent-overlap.mjs";
+import { REPORT_DATA } from "./intent-report-fixture.mjs";
 
 const state = {
   data: null,
@@ -11,6 +13,8 @@ const state = {
   newCrawlType: "Spider",
   scheduleType: "Single URL",
   configContext: "crawl",
+  view: "crawler",
+  intentViewer: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -178,7 +182,7 @@ function renderNav() {
   nav.innerHTML = data.nav
     .map(
       (n) =>
-        `<button class="nav-link${n.id === "crawler" ? " active" : ""}" data-nav="${escapeHtml(n.id)}" ${
+        `<button class="nav-link${n.id === state.view ? " active" : ""}" data-nav="${escapeHtml(n.id)}" ${
           n.enabled ? "" : "disabled"
         }>${escapeHtml(n.label)}</button>`
     )
@@ -495,10 +499,16 @@ function closeModals() {
 
 function bindEvents() {
   $("#nav-links").addEventListener("click", (e) => {
-    const btn = e.target.closest('[data-nav="schedule"]');
+    const btn = e.target.closest("[data-nav]");
     if (!btn || btn.disabled) return;
-    renderScheduleModal();
-    openModal("#modal-new-schedule");
+    if (btn.dataset.nav === "schedule") {
+      renderScheduleModal();
+      openModal("#modal-new-schedule");
+    } else if (btn.dataset.nav === "intent-overlap") {
+      showIntentOverlap();
+    } else if (btn.dataset.nav === "crawler") {
+      showCrawler();
+    }
   });
 
   $("#category-tabs").addEventListener("click", (e) => {
@@ -664,6 +674,34 @@ function bindEvents() {
   });
 }
 
+function showCrawler() {
+  state.view = "crawler";
+  $(".stage").hidden = false;
+  $("#category-tabs").hidden = false;
+  $("#intent-overlap-root").hidden = true;
+  renderNav();
+}
+
+function showIntentOverlap() {
+  state.view = "intent-overlap";
+  $(".stage").hidden = true;
+  $("#category-tabs").hidden = true;
+  const root = $("#intent-overlap-root");
+  root.hidden = false;
+  if (!state.intentViewer) {
+    // Static fixture today; replace only this adapter input with the future
+    // deterministic GET /crawls/{crawl_id}/runs/{run_id}/intent-report endpoint.
+    state.intentViewer = mountIntentOverlapViewer(root, adaptReportData(REPORT_DATA, {
+      id: "crawl_whiskipedia_demo/run_2026-07-15T14:08:04Z",
+      label: "Whiskipedia completed crawl snapshot",
+      completedAt: "2026-07-15T14:08:04Z",
+      artifact: "./report.html",
+      source: "static Ticket 106 fixture (no API request)",
+    }));
+  }
+  renderNav();
+}
+
 function renderAll() {
   renderNav();
   renderCrawlBar();
@@ -683,6 +721,9 @@ async function main() {
     state.selectedId = state.data.pages[0]?.id ?? null;
     bindEvents();
     renderAll();
+    if (new URLSearchParams(window.location.search).get("view") === "intent-overlap") {
+      showIntentOverlap();
+    }
   } catch (err) {
     document.body.innerHTML = `<pre style="padding:2rem;color:#f87171">Failed to load sample-data.json.
 Serve this folder over HTTP, e.g.:

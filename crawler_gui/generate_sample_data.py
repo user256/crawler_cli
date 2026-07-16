@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 OUT = Path(__file__).with_name("sample-data.json")
+INTENT_OUT = Path(__file__).with_name("intent-report-fixture.mjs")
 
 SEED_URL = "https://whiskipedia.com/"
 
@@ -207,6 +208,56 @@ def overview_from_pages(pages: list[dict]) -> dict:
     }
 
 
+def build_intent_report(pages: list[dict]) -> dict:
+    """Return a small, precomputed Ticket 106-shaped report fixture.
+
+    The browser receives this envelope through one adapter.  It must never
+    infer clusters/pairs from the normal crawler grid or calculate analysis
+    values itself.
+    """
+    candidates = [page for page in pages if page["contentType"] == "text/html" and page["statusCode"] == 200][:10]
+    clusters = [
+        {"id": "c-scotland", "label": "/scotland · whisky regions", "size": 4,
+         "urls": [candidates[i]["address"] for i in (1, 2, 3, 9)], "relation": "parent-child", "thin": False,
+         "time_sequenced": False, "suggested_canonical": candidates[1]["address"]},
+        {"id": "c-distilleries", "label": "/distilleries · profile pages", "size": 2,
+         "urls": [candidates[i]["address"] for i in (4, 5)], "relation": "sibling", "thin": False,
+         "time_sequenced": False, "suggested_canonical": candidates[4]["address"]},
+        {"id": "c-content", "label": "/blog · explanatory content", "size": 2,
+         "urls": [candidates[i]["address"] for i in (6, 7)], "relation": "same-section", "thin": True,
+         "time_sequenced": True, "suggested_canonical": candidates[7]["address"]},
+    ]
+    cluster_ids = ["c-scotland", "c-scotland", "c-scotland", "c-distilleries", "c-distilleries", "c-content", "c-content", None, None, "c-scotland"]
+    coords = [(-0.8, 0.3), (-0.35, 0.75), (-0.12, 0.56), (0.55, 0.38), (0.76, 0.22), (0.2, -0.42), (0.48, -0.62), (-0.72, -0.68), (0.85, -0.55), (-0.48, 0.5)]
+    report_pages = []
+    for index, page in enumerate(candidates):
+        is_param = "?" in page["address"]
+        report_pages.append({
+            "url": page["address"], "cluster_id": cluster_ids[index], "coords": list(coords[index]),
+            "risk": "duplicate" if index in (1, 4) else "thin content" if index == 6 else "overlap",
+            "url_class": "parameterised" if is_param else "normal", "variant_kind": None,
+            "word_count": page["wordCount"], "main_text_words": max(0, page["wordCount"] - 20),
+            "main_text_chars": max(0, page["wordCount"] - 20) * 5, "signature_words": max(0, page["wordCount"] - 30),
+            "signature_chars": max(0, page["wordCount"] - 30) * 5, "max_similarity": round(0.97 - index * 0.018, 3),
+            "centroid_similarity": round(0.91 - index * 0.028, 3), "off_topic": index == 8,
+            "excluded": None,
+        })
+    pair_specs = [(1, 2, "parent-child", None, False), (2, 3, "parent-child", None, False),
+                  (4, 5, "sibling", None, False), (6, 7, "same-section", "time-sequenced", True),
+                  (1, 9, "parent-child", None, False)]
+    report_pairs = [{"url_a": candidates[a]["address"], "url_b": candidates[b]["address"], "similarity": round(0.96 - i * .03, 3),
+                     "relation": relation, "pair_class": pair_class, "thin": thin, "sim_percentile": 99 - i}
+                    for i, (a, b, relation, pair_class, thin) in enumerate(pair_specs)]
+    return {
+        "version": 1, "generated_at": "2026-07-15T14:10:00Z", "run_id": "crawl_whiskipedia_demo",
+        "run_label": "Whiskipedia · completed snapshot", "embedding_model": "fixture-embedding-model",
+        "projection": {"method": "PCA fixture", "dims": 2, "seed": 42}, "thresholds": {"similarity": 0.85},
+        "summary": {"embedded": len(report_pages), "overlap_pairs": len(report_pairs), "clusters": len(clusters),
+                    "duplicate_pages": 2, "thin_content_pages": 1, "threshold": 0.85},
+        "pages": report_pages, "pairs": report_pairs, "clusters": clusters,
+    }
+
+
 def build_fixture() -> dict:
     pages = build_pages()
     total = len(pages)
@@ -220,6 +271,7 @@ def build_fixture() -> dict:
         "nav": [
             {"id": "dashboard", "label": "Dashboard", "enabled": False},
             {"id": "crawler", "label": "Crawler", "enabled": True},
+            {"id": "intent-overlap", "label": "Intent Overlap", "enabled": True},
             {"id": "lighthouse", "label": "Lighthouse", "enabled": False},
             {"id": "schedule", "label": "Schedule", "enabled": True},
         ],
@@ -328,18 +380,30 @@ def render_fixture() -> str:
     return json.dumps(build_fixture(), indent=2) + "\n"
 
 
+def render_intent_fixture() -> str:
+    report = build_intent_report(build_fixture()["pages"])
+    return (
+        "// Generated fixture. Shape matches Ticket 106 report_data.json; no browser calculations.\n"
+        f"export const REPORT_DATA = {json.dumps(report, indent=2)};\n"
+    )
+
+
 def main() -> None:
     expected = render_fixture()
+    expected_intent = render_intent_fixture()
     if "--check" in sys.argv[1:]:
         actual = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
-        if actual != expected:
-            print(f"{OUT} is out of date; run python3 {Path(__file__).name}", file=sys.stderr)
+        actual_intent = INTENT_OUT.read_text(encoding="utf-8") if INTENT_OUT.exists() else ""
+        if actual != expected or actual_intent != expected_intent:
+            stale = OUT if actual != expected else INTENT_OUT
+            print(f"{stale} is out of date; run python3 {Path(__file__).name}", file=sys.stderr)
             raise SystemExit(1)
-        print(f"{OUT} is current")
+        print(f"{OUT} and {INTENT_OUT} are current")
         return
 
     OUT.write_text(expected, encoding="utf-8")
-    print(f"Wrote {OUT} ({len(build_fixture()['pages'])} pages)")
+    INTENT_OUT.write_text(expected_intent, encoding="utf-8")
+    print(f"Wrote {OUT} ({len(build_fixture()['pages'])} pages) and {INTENT_OUT}")
 
 
 if __name__ == "__main__":
