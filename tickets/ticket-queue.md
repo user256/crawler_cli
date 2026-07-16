@@ -11,11 +11,11 @@ Ticket files remain the source of truth for scope and DoD.
   `CrawlConfig.validate()` regression that had made their original CI checks red.
 - PR **#33** (095) remains rejected: it did not preserve historical run
   semantics and its CI suite was red. Ticket 095 is open for a complete rework.
-- The open implementation queue is **095 → 119**. Ticket 118 is locally
-  reserved for independent crawler_gui fixture parity work and is deliberately
-  not claimed here.
+- The open implementation queue is **095 → 119 → 118**. Ticket 118 (crawler_gui
+  fixture regeneration parity) is registered as proposed/not-started; its
+  `crawler_gui/` prototype remains untracked local WIP.
 - Tickets **101–108** now form the completed intent-overlap reporting baseline.
-- Ticket **110** remains unused/rejected; next unreserved number is **119**.
+- Ticket **110** remains unused/rejected; next unreserved number is **120**.
 
 ### Ordering rules
 
@@ -25,7 +25,7 @@ Ticket files remain the source of truth for scope and DoD.
   every scoped analysis/report path before it can be accepted.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**119**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**120**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -288,12 +288,14 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 - `115` `done` (2026-07-16, PR #37) [ticket-115-persist-frontier-incompleteness-signaling.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-115-persist-frontier-incompleteness-signaling.md) — **P2:** 092 leftovers — signal mark-done failure to automation; align crawl-run status with persist incompleteness
 - `116` `done` (2026-07-16, production-store reclassification) [ticket-116-amp-evidence-production-recount.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-116-amp-evidence-production-recount.md) — **P3:** 108 follow-up — 479 evidence-backed AMP variants (477 canonical, 2 signature-hash, 0 amphtml edges); 0 missing canonical
 - `117` `done` (2026-07-16, PR #39) [ticket-117-config-validation-merge-regression.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-117-config-validation-merge-regression.md) — **P1:** removed stale `max_pages` validation; `default_open_crawl_limit=0` remains the direct-library unlimited sentinel
+- `118` `proposed (not started)` [ticket-118-crawler-gui-fixture-regeneration.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-118-crawler-gui-fixture-regeneration.md) — **P3:** keep the generated crawler_gui fixture aligned with scheduled-crawl UI fields. **No committed work exists yet** — the `crawler_gui/` prototype remains untracked in the working tree; ticket stays open.
 - `119` `proposed` [ticket-119-crawler-gui-intent-overlap-viewer.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-119-crawler-gui-intent-overlap-viewer.md) — **P2:** replicate Ticket 107's intent-overlap viewer in crawler_gui while retaining the standalone offline export
 
 ### Open work — priority order (2026-07-16)
 
 1. **P2** `095` `open (rework required)` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — complete snapshot-backed run semantics; rejected PR #33 must not be resumed unchanged.
 2. **P2** `119` `proposed` [crawler_gui intent-overlap viewer](./ticket-119-crawler-gui-intent-overlap-viewer.md) — use Ticket 106's report-data schema to provide the Ticket 107 viewer inside the GUI without replacing the export.
+3. **P3** `118` `proposed (not started)` [crawler_gui fixture regeneration parity](./ticket-118-crawler-gui-fixture-regeneration.md) — regenerate `sample-data.json` with the Schedule nav entry + a generator/fixture parity check.
 
 **Deferred lanes**
 
