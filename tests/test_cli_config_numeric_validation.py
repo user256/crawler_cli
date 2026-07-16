@@ -206,9 +206,9 @@ def test_crawl_config_rejects_inf_timeout():
         CrawlConfig(timeout_seconds=math.inf)
 
 
-def test_crawl_config_allows_zero_sentinels():
+def test_crawl_config_allows_zero_sentinels_including_unlimited_crawl_limit():
     cfg = CrawlConfig(
-        max_pages=0,
+        default_open_crawl_limit=0,
         refresh_days=0,
         per_host_concurrency=0,
         max_requests_per_context=0,
@@ -217,7 +217,7 @@ def test_crawl_config_allows_zero_sentinels():
         frontier_max_retries=0,
         frontier_retry_base_delay_seconds=0.0,
     )
-    assert cfg.max_pages == 0
+    assert cfg.default_open_crawl_limit == 0
     assert cfg.per_host_concurrency == 0
 
 

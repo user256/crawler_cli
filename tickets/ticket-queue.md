@@ -284,11 +284,11 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 - `114` `proposed` [ticket-114-sitemap-budget-dedupe-cdn-docs.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-114-sitemap-budget-dedupe-cdn-docs.md) — **P2:** 087 leftovers — dedupe sitemap locs against frontier budget + document cross-host `Sitemap:` allowlisting
 - `115` `proposed` [ticket-115-persist-frontier-incompleteness-signaling.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-115-persist-frontier-incompleteness-signaling.md) — **P2:** 092 leftovers — signal mark-done failure to automation; align crawl-run status with persist incompleteness
 - `116` `proposed` [ticket-116-amp-evidence-production-recount.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-116-amp-evidence-production-recount.md) — **P3:** 108 follow-up — fresh thompsons-scotland evidence-backed AMP / missing-canonical counts
-- `117` `proposed` [ticket-117-config-validation-merge-regression.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-117-config-validation-merge-regression.md) — **P1:** merged 093/112 regression: `CrawlConfig.validate()` references the removed `max_pages` field, leaving mypy red
+- `117` `in progress` (feature/117-config-validation-merge-regression) [ticket-117-config-validation-merge-regression.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-117-config-validation-merge-regression.md) — **P1:** merged 093/112 regression: `CrawlConfig.validate()` references the removed `max_pages` field, leaving mypy red
 
 ### Open work — priority order (2026-07-16)
 
-1. **P1** `117` `proposed` [config-validation merge regression](./ticket-117-config-validation-merge-regression.md) — restore the green typecheck after 093/112 integration.
+1. **P1** `117` `in progress` [config-validation merge regression](./ticket-117-config-validation-merge-regression.md) — restore the green typecheck after 093/112 integration.
 2. **P2** `095` `open (rework required)` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — complete snapshot-backed run semantics; rejected PR #33 must not be resumed unchanged.
 3. **P2** `114` `proposed` [sitemap budget dedupe / CDN docs](./ticket-114-sitemap-budget-dedupe-cdn-docs.md).
 4. **P2** `115` `proposed` [persist/frontier incompleteness signaling](./ticket-115-persist-frontier-incompleteness-signaling.md).
