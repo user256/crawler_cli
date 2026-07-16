@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
+import re
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +46,8 @@ from .persistence import AnalysisRow, UrlVariantRow
 
 if TYPE_CHECKING:
     from .persistence import AsyncpgStore
+
+logger = logging.getLogger(__name__)
 
 
 class AnalysedRow(AnalysisRow, total=False):
@@ -78,6 +83,104 @@ CLUSTER_SAMPLE_CAP = 50
 DEFAULT_THRESHOLD = 0.85
 DEFAULT_DUP_THRESHOLD = 0.92
 DIST_LOW = 0.80  # distribution buckets are defined on the 0.80 grid
+
+# Ticket 106: JSON report projection + size guard.
+DEFAULT_PROJECTION_SEED = 42
+DEFAULT_PROJECTION_DIMS = 2
+DEFAULT_OFF_TOPIC_PERCENTILE = 5.0
+JSON_PAIR_SIZE_FLOOR_PAGES = 50_000
+_REPORT_COORD_DECIMALS = 6
+_LABEL_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "our",
+        "the",
+        "to",
+        "with",
+        "your",
+        "you",
+        "this",
+        "that",
+        "we",
+        "us",
+        "their",
+        "them",
+        "they",
+        "will",
+        "can",
+        "how",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+        "not",
+        "no",
+        "yes",
+        "all",
+        "any",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "than",
+        "then",
+        "there",
+        "these",
+        "those",
+        "into",
+        "over",
+        "under",
+        "about",
+        "after",
+        "before",
+        "between",
+        "through",
+        "during",
+        "has",
+        "have",
+        "had",
+        "was",
+        "were",
+        "been",
+        "being",
+        "do",
+        "does",
+        "did",
+        "but",
+        "if",
+        "so",
+        "also",
+        "just",
+        "only",
+        "very",
+        "page",
+        "home",
+        "https",
+        "http",
+        "www",
+        "com",
+        "html",
+    }
+)
+_LABEL_TOKEN_RE = re.compile(r"[a-z0-9]{3,}", re.IGNORECASE)
 
 # Risk labels (ticket 101 adds RISK_PARENT_CHILD as a distinct label from
 # RISK_DUPLICATE for pages whose only dup-threshold pairing is a hub/detail
@@ -368,6 +471,11 @@ class AnalysisResult:
     summary: dict[str, Any] = field(default_factory=dict)
     suppressed: int = 0
     chained_clusters: int = 0
+    # Ticket 106: L2-normalised float32 matrix aligned with ``pages_rows``
+    # (embedded pages only; excluded pages are not present).
+    vectors: Any | None = None
+    # Signature texts aligned with ``pages_rows`` for crawler-native cluster labels.
+    signatures: list[str | None] = field(default_factory=list)
 
 
 def _pick_canonical(members: list[dict[str, Any]]) -> str:
@@ -731,6 +839,8 @@ def analyse_embeddings(
                 "signal_confidence": r.get("signal_confidence") or "",
             }
         )
+    result.vectors = vecs
+    result.signatures = [r.get("signature_model_input") for r in emb]
 
     # Thin-only pages are intentionally excluded from duplicate gating; rich
     # parent-child pages remain counted even though their label is distinct.
@@ -881,6 +991,293 @@ def _text_words(text: str | None) -> int | None:
 
 
 # --------------------------------------------------------------------------
+# JSON report export (ticket 106)
+# --------------------------------------------------------------------------
+
+
+def project_embeddings(
+    vecs: Any,
+    *,
+    dims: int = DEFAULT_PROJECTION_DIMS,
+    seed: int = DEFAULT_PROJECTION_SEED,
+) -> tuple[list[list[float] | None], dict[str, Any]]:
+    """Project embedding rows to ``dims`` coordinates (UMAP when available, else PCA).
+
+    Returns ``(coords, meta)`` where ``coords[i]`` is a length-``dims`` list for
+    each row, or ``None`` when projection is impossible for that row. ``meta``
+    records ``method`` / ``dims`` / ``seed`` for the report envelope.
+    """
+    np = _np()
+    arr = np.asarray(vecs, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return [], {"method": "none", "dims": dims, "seed": seed}
+    n, _feat = arr.shape
+    if n == 1:
+        return [[0.0] * dims], {"method": "trivial", "dims": dims, "seed": seed}
+
+    method = "pca"
+    coords_arr: Any
+    try:
+        import umap  # type: ignore[import-untyped]
+
+        n_neighbors = max(2, min(15, n - 1))
+        reducer = umap.UMAP(
+            n_components=dims,
+            random_state=seed,
+            n_neighbors=n_neighbors,
+            min_dist=0.1,
+            metric="cosine",
+        )
+        coords_arr = reducer.fit_transform(arr)
+        method = "umap"
+    except ImportError:
+        # PCA via SVD — deterministic, no extra deps beyond numpy.
+        centered = arr - arr.mean(axis=0, keepdims=True)
+        # Full SVD on small feature dims is fine for MiniLM (~384).
+        _u, _s, vt = np.linalg.svd(centered, full_matrices=False)
+        k = min(dims, vt.shape[0])
+        projected = centered @ vt[:k].T
+        if k < dims:
+            pad = np.zeros((n, dims - k), dtype=np.float32)
+            projected = np.hstack([projected, pad])
+        coords_arr = projected
+        method = "pca"
+
+    out: list[list[float] | None] = []
+    for row in coords_arr:
+        out.append([round(float(x), _REPORT_COORD_DECIMALS) for x in row[:dims]])
+    return out, {"method": method, "dims": dims, "seed": seed}
+
+
+def longest_common_path_prefix(urls: Sequence[str]) -> str:
+    """Longest shared path-prefix across *urls* (leading slash, no trailing slash)."""
+    if not urls:
+        return ""
+    parts_list = [urlparse(u).path.strip("/").split("/") for u in urls]
+    parts_list = [[p for p in parts if p] for parts in parts_list]
+    if not parts_list or any(not parts for parts in parts_list):
+        return ""
+    common: list[str] = []
+    for tokens in zip(*parts_list):
+        if len(set(tokens)) != 1:
+            break
+        common.append(tokens[0])
+    return "/" + "/".join(common) if common else ""
+
+
+def distinguishing_signature_terms(
+    signatures: Sequence[str | None],
+    *,
+    top_k: int = 3,
+) -> list[str]:
+    """Top terms that distinguish cluster members' signatures (no LLM)."""
+    docs: list[set[str]] = []
+    for sig in signatures:
+        if not sig:
+            continue
+        tokens = {t.lower() for t in _LABEL_TOKEN_RE.findall(sig) if t.lower() not in _LABEL_STOPWORDS}
+        if tokens:
+            docs.append(tokens)
+    if not docs:
+        return []
+    df: Counter[str] = Counter()
+    for doc in docs:
+        df.update(doc)
+    n_docs = len(docs)
+    # Prefer terms in at least one doc but not universal boilerplate across all.
+    scored = [(term, count) for term, count in df.items() if count < n_docs or n_docs == 1]
+    scored.sort(key=lambda tc: (-tc[1], tc[0]))
+    return [term for term, _ in scored[:top_k]]
+
+
+def derive_cluster_label(urls: Sequence[str], signatures: Sequence[str | None]) -> str:
+    """Crawler-native cluster label from shared path prefix + signature terms."""
+    prefix = longest_common_path_prefix(urls)
+    terms = distinguishing_signature_terms(signatures)
+    if prefix and terms:
+        return f"{prefix}: {', '.join(terms)}"
+    if prefix:
+        return prefix
+    if terms:
+        return ", ".join(terms)
+    if urls:
+        # Fall back to the shallowest path segment set.
+        sample = urlparse(min(urls, key=lambda u: (path_depth(u), len(u), u))).path.strip("/")
+        return f"/{sample.split('/')[0]}" if sample else "(unlabelled)"
+    return "(unlabelled)"
+
+
+def _centroid_similarities(vecs: Any) -> Any:
+    np = _np()
+    arr = np.asarray(vecs, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        return np.array([], dtype=np.float32)
+    centroid = arr.mean(axis=0)
+    norm = float(np.linalg.norm(centroid))
+    if norm == 0.0:
+        return np.zeros(arr.shape[0], dtype=np.float32)
+    centroid = centroid / norm
+    return (arr @ centroid).astype(np.float32)
+
+
+def build_report_data(
+    result: AnalysisResult,
+    *,
+    excluded_rows: Sequence[AnalysedRow],
+    embedding_model: str | None,
+    thresholds: Mapping[str, Any],
+    page_meta: Mapping[str, Mapping[str, Any]] | None = None,
+    generated_at: str | None = None,
+    projection_seed: int = DEFAULT_PROJECTION_SEED,
+    projection_dims: int = DEFAULT_PROJECTION_DIMS,
+    off_topic_percentile: float = DEFAULT_OFF_TOPIC_PERCENTILE,
+    json_min_similarity: float | None = None,
+    size_floor_pages: int = JSON_PAIR_SIZE_FLOOR_PAGES,
+) -> dict[str, Any]:
+    """Build the ticket-106 ``report_data.json`` envelope (deterministic given seed)."""
+    from datetime import datetime, timezone
+
+    np = _np()
+    meta = page_meta or {}
+    min_sim = float(
+        json_min_similarity if json_min_similarity is not None else thresholds.get("threshold", DEFAULT_THRESHOLD)
+    )
+
+    coords: list[list[float] | None] = []
+    projection_meta: dict[str, Any] = {
+        "method": "none",
+        "dims": projection_dims,
+        "seed": projection_seed,
+    }
+    centroid_sims: Any = np.array([], dtype=np.float32)
+    if result.vectors is not None and len(result.pages_rows):
+        coords, projection_meta = project_embeddings(result.vectors, dims=projection_dims, seed=projection_seed)
+        centroid_sims = _centroid_similarities(result.vectors)
+
+    off_topic_threshold: float | None = None
+    off_topic_flags = [False] * len(result.pages_rows)
+    if len(centroid_sims):
+        off_topic_threshold = float(np.percentile(centroid_sims, off_topic_percentile))
+        off_topic_flags = [bool(float(s) <= off_topic_threshold) for s in centroid_sims]
+
+    sig_by_url = {
+        row["url"]: (result.signatures[i] if i < len(result.signatures) else None)
+        for i, row in enumerate(result.pages_rows)
+    }
+
+    pages_out: list[dict[str, Any]] = []
+    for i, row in enumerate(result.pages_rows):
+        url = row["url"]
+        extra = meta.get(url, {})
+        pages_out.append(
+            {
+                "url": url,
+                "cluster_id": row.get("cluster_id") or None,
+                "coords": coords[i] if i < len(coords) else None,
+                "risk": row.get("risk") or "",
+                "excluded": None,
+                "url_class": row.get("url_class") or extra.get("url_class") or None,
+                "variant_kind": extra.get("variant_kind") or None,
+                "word_count": row.get("word_count"),
+                "main_text_words": row.get("main_text_words"),
+                "main_text_chars": row.get("main_text_chars"),
+                "signature_words": row.get("signature_words"),
+                "signature_chars": row.get("signature_chars"),
+                "section": section_of(url),
+                "signal_confidence": row.get("signal_confidence") or None,
+                "max_similarity": row.get("max_similarity"),
+                "nearest_url": row.get("nearest_url") or None,
+                "suggested_canonical": row.get("suggested_canonical") or None,
+                "centroid_similarity": (round(float(centroid_sims[i]), 6) if i < len(centroid_sims) else None),
+                "off_topic": off_topic_flags[i] if i < len(off_topic_flags) else False,
+            }
+        )
+
+    for r in excluded_rows:
+        url = str(r["url"])
+        pages_out.append(
+            {
+                "url": url,
+                "cluster_id": None,
+                "coords": None,
+                "risk": "",
+                "excluded": r.get("excluded"),
+                "url_class": r.get("url_class") or None,
+                "variant_kind": r.get("variant_kind") or None,
+                "word_count": r.get("word_count") or 0,
+                "main_text_words": _text_words(r.get("main_text")),
+                "main_text_chars": _text_chars(r.get("main_text")),
+                "signature_words": _text_words(r.get("signature_model_input")),
+                "signature_chars": _text_chars(r.get("signature_model_input")),
+                "section": section_of(url),
+                "signal_confidence": r.get("signal_confidence") or None,
+                "max_similarity": None,
+                "nearest_url": None,
+                "suggested_canonical": r.get("suggested_canonical") or None,
+                "centroid_similarity": None,
+                "off_topic": False,
+            }
+        )
+
+    pairs_src = list(result.overlap_pairs)
+    pairs_truncated = False
+    embedded_n = len(result.pages_rows)
+    if embedded_n >= size_floor_pages:
+        pairs_src = [p for p in pairs_src if float(p.get("similarity", 0)) >= min_sim]
+        pairs_truncated = True
+
+    pairs_out = [
+        {
+            "url_a": p["url_a"],
+            "url_b": p["url_b"],
+            "similarity": p["similarity"],
+            "relation": p.get("relation") or None,
+            "pair_class": p.get("pair_class") or None,
+            "thin": p.get("thin") or None,
+            "sim_percentile": p.get("sim_percentile"),
+        }
+        for p in pairs_src
+    ]
+
+    clusters_out: list[dict[str, Any]] = []
+    for crow in result.cluster_rows:
+        member_urls = [u for u in str(crow.get("urls") or "").split(" | ") if u]
+        member_sigs = [sig_by_url.get(u) for u in member_urls]
+        clusters_out.append(
+            {
+                "id": crow["cluster_id"],
+                "size": crow["size"],
+                "urls": member_urls,
+                "suggested_canonical": crow.get("suggested_canonical") or None,
+                "suggested_action": crow.get("suggested_canonical") or None,
+                "relation": crow.get("relation") or None,
+                "thin": bool(crow.get("thin")),
+                "time_sequenced": bool(crow.get("time_sequenced")),
+                "label": derive_cluster_label(member_urls, member_sigs),
+            }
+        )
+
+    stamp = generated_at or datetime.now(timezone.utc).isoformat()
+    return {
+        "version": VERSION,
+        "generated_at": stamp,
+        "embedding_model": embedding_model,
+        "thresholds": dict(thresholds),
+        "projection": projection_meta,
+        "off_topic": {
+            "percentile": off_topic_percentile,
+            "threshold": round(off_topic_threshold, 6) if off_topic_threshold is not None else None,
+        },
+        "pairs_truncated": pairs_truncated,
+        "json_min_similarity": min_sim if pairs_truncated else None,
+        "summary": dict(result.summary),
+        "pages": pages_out,
+        "pairs": pairs_out,
+        "clusters": clusters_out,
+    }
+
+
+# --------------------------------------------------------------------------
 # CSV writing
 # --------------------------------------------------------------------------
 
@@ -969,6 +1366,12 @@ def write_reports(
     variant_rows: list[VariantReportRow],
     amp_issues: Sequence[Mapping[str, Any]] | None = None,
     manifest: dict[str, Any] | None = None,
+    json_report: bool = False,
+    json_min_similarity: float | None = None,
+    projection_seed: int = DEFAULT_PROJECTION_SEED,
+    off_topic_percentile: float = DEFAULT_OFF_TOPIC_PERCENTILE,
+    embedding_model: str | None = None,
+    page_meta: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[str]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -1020,6 +1423,39 @@ def write_reports(
     if manifest is not None:
         (out / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         written.append("run_manifest.json")
+
+    if json_report:
+        thresholds = {
+            "threshold": result.summary.get("threshold", DEFAULT_THRESHOLD),
+            "dup_threshold": result.summary.get("dup_threshold", DEFAULT_DUP_THRESHOLD),
+            "thin_signature_words": result.summary.get("thin_signature_words", DEFAULT_THIN_SIGNATURE_WORDS),
+        }
+        model = embedding_model or (manifest or {}).get("embedding_model") or result.summary.get("model")
+        stamp = (manifest or {}).get("timestamp")
+        report = build_report_data(
+            result,
+            excluded_rows=excluded_rows,
+            embedding_model=model,
+            thresholds=thresholds,
+            page_meta=page_meta,
+            generated_at=stamp,
+            projection_seed=projection_seed,
+            off_topic_percentile=off_topic_percentile,
+            json_min_similarity=json_min_similarity,
+        )
+        report_path = out / "report_data.json"
+        payload = json.dumps(report, indent=2, sort_keys=True)
+        report_path.write_text(payload, encoding="utf-8")
+        size_bytes = report_path.stat().st_size
+        logger.info(
+            "report_data.json written (%s bytes, %s pages, %s pairs, projection=%s)",
+            size_bytes,
+            len(report["pages"]),
+            len(report["pairs"]),
+            report["projection"].get("method"),
+        )
+        written.append("report_data.json")
+
     return [str(out / name) for name in written]
 
 
@@ -1073,6 +1509,10 @@ async def run_intent_overlap(
     thin_signature_words: int = DEFAULT_THIN_SIGNATURE_WORDS,
     time_sequenced_sections: Sequence[str] = (),
     run_args: dict[str, Any] | None = None,
+    json_report: bool = False,
+    json_min_similarity: float | None = None,
+    projection_seed: int = DEFAULT_PROJECTION_SEED,
+    off_topic_percentile: float = DEFAULT_OFF_TOPIC_PERCENTILE,
 ) -> IntentOverlapRun:
     """Load embeddings + identity from the store, run the analysis, write the
     six CSVs + manifest, and return a run summary (ticket 079).
@@ -1080,6 +1520,9 @@ async def run_intent_overlap(
     ``time_sequenced_sections`` (ticket 105): repeatable ``--time-sequenced-
     section`` path prefixes for news/blog archives — see
     :func:`analyse_embeddings` and :data:`TIME_SEQUENCED_RISK`.
+
+    ``json_report`` (ticket 106): also write ``report_data.json`` with pages,
+    pairs, clusters, and 2D projection coords (UMAP via ``[viz]``, else PCA).
     """
     from datetime import datetime, timezone
 
@@ -1152,6 +1595,14 @@ async def run_intent_overlap(
     )
     result.summary = summary
 
+    page_meta = {
+        str(r["url"]): {
+            "variant_kind": r.get("variant_kind"),
+            "url_class": r.get("url_class"),
+        }
+        for r in rows
+    }
+
     manifest = None
     if run_args is not None:
         manifest = {
@@ -1171,6 +1622,12 @@ async def run_intent_overlap(
         variant_rows=variant_rows,
         amp_issues=list(amp_hygiene),
         manifest=manifest,
+        json_report=json_report,
+        json_min_similarity=json_min_similarity if json_min_similarity is not None else threshold,
+        projection_seed=projection_seed,
+        off_topic_percentile=off_topic_percentile,
+        embedding_model=model,
+        page_meta=page_meta,
     )
 
     exit_code = 0

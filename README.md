@@ -269,6 +269,27 @@ crawler-cli intent-overlap --postgres-dsn ... --out ./out
 `pages.csv`, `overlap_pairs.csv`, `clusters.csv`, `hreflang_issues.csv`,
 `url_variants.csv`, `amp_issues.csv`, `similarity_distribution.csv`.
 
+**Machine-readable JSON (`--json-report`).** Pass `--json-report` to also write
+`report_data.json` — a single envelope for interactive viewers (ticket 107) or
+any other consumer. Projection uses UMAP when the optional `[viz]` extra is
+installed (`pip install "crawler-cli[viz]"` → `umap-learn`); otherwise PCA via
+numpy (already required for analysis). Both paths are deterministic given
+`--projection-seed` (default `42`). Excluded pages appear without coords.
+Above ~50k embedded pages, pairs below `--json-min-similarity` (default:
+`--threshold`) are omitted from the JSON to keep file size manageable.
+
+| Top-level key | Contents |
+|---|---|
+| `version` / `generated_at` | Schema version + UTC timestamp |
+| `embedding_model` | Model id used for the vectors |
+| `thresholds` | `threshold`, `dup_threshold`, `thin_signature_words` |
+| `projection` | `{method, dims, seed}` — `umap`, `pca`, or `trivial`/`none` |
+| `off_topic` | Bottom-percentile centroid-similarity cut (`percentile`, `threshold`) |
+| `summary` | Same summary block as `run_manifest.json` |
+| `pages[]` | url, cluster_id, coords, risk, excluded, url_class, variant_kind, word/signature length diagnostics (`word_count`, `main_text_words`, `main_text_chars`, `signature_words`, `signature_chars`), section, signal_confidence, max_similarity, nearest_url, suggested_canonical, centroid_similarity, off_topic |
+| `pairs[]` | url_a/b, similarity, relation, pair_class, thin, sim_percentile |
+| `clusters[]` | id, urls, size, suggested_canonical/action, relation/thin/time_sequenced flags, crawler-native `label` (shared path prefix + signature terms — no LLM) |
+
 **AMP / page-variant awareness.** AMP variants are classified structurally from
 crawler-captured evidence and recorded as `variant_kind='amp'` on the URL
 identity. A page is AMP when it is the target of a `<link rel="amphtml">` edge
