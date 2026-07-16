@@ -171,7 +171,8 @@ class CrawlConfig:
     allowed_hosts: list[str] = field(default_factory=list)
     """Additional hosts to crawl beyond the seed host(s).
     When empty and same_host_only=True, only the seed host is crawled.
-    When populated, these hosts are also allowed (in addition to seeds).
+    When populated, these hosts are also allowed (in addition to seeds),
+    including cross-host robots.txt ``Sitemap:`` targets and their page locs.
     """
     path_restriction: str = ""
     """If set, only URLs whose path contains this substring are fetched."""

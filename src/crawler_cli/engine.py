@@ -662,6 +662,11 @@ class CrawlEngine:
             unique_sitemaps.append((sm_url, source_kind))
 
         all_page_urls: list[tuple[str, str]] = []  # (url, detail=sitemap_url)
+        # Count page locs once across all sitemap documents before applying the
+        # frontier budget. A sitemap index can repeat a shard and individual
+        # urlsets commonly repeat locs; letting those duplicates into
+        # ``all_page_urls`` would spend slots that the frontier later rejects.
+        seen_page_urls: set[str] = set()
         hreflang_data: list[tuple[str, list]] = []  # (page_url, hreflang_links)
         page_budget = await self._remaining_frontier_budget(limit)
 
@@ -723,12 +728,15 @@ class CrawlEngine:
                             next_level.append((child, source_kind, depth + 1))
                     else:
                         for su in doc.urls[: self.config.sitemap_max_urls]:
-                            if page_budget is not None and len(all_page_urls) >= page_budget:
-                                break
                             reason = self._sitemap_url_reject_reason(su.loc, seeds, check_path=True)
                             if reason is not None:
                                 rejects.append((su.loc, reason))
                                 continue
+                            if su.loc in seen_page_urls:
+                                continue
+                            seen_page_urls.add(su.loc)
+                            if page_budget is not None and len(all_page_urls) >= page_budget:
+                                break
                             all_page_urls.append((su.loc, sm_url))
                             if su.hreflang_links:
                                 kept_hreflang = []

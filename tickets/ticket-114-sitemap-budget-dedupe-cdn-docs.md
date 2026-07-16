@@ -1,6 +1,6 @@
 # Ticket 114: Sitemap budget dedupe and cross-host Sitemap docs
 
-**Status:** proposed (2026-07-15 MERGE+REMEDIATE from ticket 087 / PR #26)
+**Status:** done (2026-07-16, PR #36)
 **Priority:** P2 correctness / docs
 **Related:** Ticket 087
 
@@ -24,15 +24,24 @@ bounded politeness to sitemap ingestion. Two non-blocking follow-ups remain:
 
 ## Tasks
 
-- Dedupe sitemap page locs (and/or count unique locs) before applying the
+- [x] Dedupe sitemap page locs (and/or count unique locs) before applying the
   remaining frontier budget cap; keep provenance for rejected duplicates if
   useful.
-- Add a regression where repeated locs under a small `--max-pages` still leave
+- [x] Add a regression where repeated locs under a small `--max-pages` still leave
   room for distinct URLs.
-- Document that CDN/`Sitemap:` hosts need `--allowed-hosts` (or equivalent
+- [x] Document that CDN/`Sitemap:` hosts need `--allowed-hosts` (or equivalent
   offsite allow) after ticket 087; include a short example.
 
 ## Definition of Done
 
 Duplicate locs do not waste frontier budget; docs state how to allow
 cross-host sitemap hosts; unit coverage green; ruff + mypy clean.
+
+## Delivery
+
+PR #36 deduplicates sitemap page locs before finite frontier-budget accounting,
+adds the repeated-loc regression, and documents CDN/cross-host `Sitemap:`
+allowlisting. Ruff is clean. The normal unit suite and mypy remain blocked by
+the pre-existing Ticket 117 `CrawlConfig.validate()` reference to removed
+`max_pages`; the sitemap suite passes with that unrelated validation call
+bypassed in memory.

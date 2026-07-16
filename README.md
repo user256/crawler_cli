@@ -201,6 +201,15 @@ crawler-cli https://example.com --cookies-file cookies.json
 # and would otherwise be truncated mid-XML and skipped.
 crawler-cli https://example.com --max-response-bytes 50000000
 
+# A robots.txt `Sitemap:` may point to a CDN or another host. Cross-host
+# sitemap documents and their page locs are rejected by default, so allow the
+# known host explicitly (hostnames only; comma-separate more than one).
+crawler-cli https://www.example.com --allowed-hosts sitemap-cdn.example.net
+
+# Use --offsite only when intentionally allowing sitemap and page URLs from
+# any host rather than maintaining an explicit allowlist.
+crawler-cli https://www.example.com --offsite
+
 # JS (Playwright) wait conditions for SPAs that hydrate asynchronously.
 crawler-cli https://example.com --js --wait-for-selector "div.app-ready"
 crawler-cli https://example.com --js --wait-for-network-idle 8
