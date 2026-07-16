@@ -30,5 +30,27 @@ GitHub assets.
 - Pinned digests are confirmed against the real published assets.
 
 ## Status
-in_progress (Priority: **P3 security**) — claimed by `agent/ticket-100-obscura-installer-test-hardening`; test hardening for ticket 094; found in
-2026-07-15 PR review.
+`done` (2026-07-15, PR #32) — Priority: **P3 security**. Claimed and delivered on
+`agent/ticket-100-obscura-installer-test-hardening`.
+
+## Delivery notes
+- Added direct rejection tests in `tests/test_obscura.py` for:
+  - tar symlink (`SYMTYPE`)
+  - tar absolute-path member
+  - tar character-device member
+  - tar FIFO member
+  - zip entry with Unix symlink mode bit (`S_IFLNK` in `external_attr`)
+- One-time digest cross-check (2026-07-15): downloaded all five published
+  `v0.1.8` assets from `https://github.com/h4ckf0r0day/obscura/releases/download/v0.1.8/`
+  and compared SHA-256 to `_ASSET_SHA256`. **5/5 matched**; fail-closed verify
+  left unchanged.
+
+  | Asset | Pinned digest (verified) |
+  | --- | --- |
+  | `obscura-aarch64-linux.tar.gz` | `58602b8293a93caa6fdac98a2868292c9a91ecab86d835f9bd20361ac7e48ea0` |
+  | `obscura-aarch64-macos.tar.gz` | `dfa84fa20e0e33c7b1af9ded190cdbf928c5a52a3edb308600595e11455ee7bb` |
+  | `obscura-x86_64-linux.tar.gz` | `e54d07054047d4180247f03bea08d1bd724ef1859829331a433da972f973988b` |
+  | `obscura-x86_64-macos.tar.gz` | `34cbeb9706f0af95de7fd6693346a3f1d601b35ddc3c623f060a363e9adac206` |
+  | `obscura-x86_64-windows.zip` | `5bcbf6789897f7e6d67a160f45510cf06e6d44a966357aa5f8b238961bac0b53` |
+
+- Optional double `_validate_version` cleanup left untouched (non-blocking).

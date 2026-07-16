@@ -6,6 +6,7 @@ import hashlib
 import io
 import os
 import shutil
+import stat
 import sys
 import tarfile
 import zipfile
@@ -908,6 +909,135 @@ def test_install_obscura_rejects_malicious_tar_link(tmp_path, monkeypatch):
     _configure_linux_install(monkeypatch, oi, install_dir, archive)
 
     with pytest.raises(RuntimeError, match="unsafe Obscura tar member type"):
+        oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
+
+    assert not install_dir.exists()
+
+
+def _write_tar_with_extra_member(
+    path: Path,
+    *,
+    extra_name: str,
+    extra_type: bytes,
+    linkname: str = "",
+    extra_mode: int = 0o644,
+) -> None:
+    with tarfile.open(path, "w:gz") as tf:
+        for name in ("obscura", "obscura-worker"):
+            data = b"new"
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o755
+            tf.addfile(info, io.BytesIO(data))
+        extra = tarfile.TarInfo(extra_name)
+        extra.type = extra_type
+        extra.linkname = linkname
+        extra.mode = extra_mode
+        if extra_type in {tarfile.CHRTYPE, tarfile.BLKTYPE}:
+            extra.devmajor = 1
+            extra.devminor = 3
+        tf.addfile(extra)
+
+
+def test_install_obscura_rejects_malicious_tar_symlink(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-linux.tar.gz"
+    _write_tar_with_extra_member(
+        archive,
+        extra_name="evil-link",
+        extra_type=tarfile.SYMTYPE,
+        linkname="/etc/passwd",
+    )
+    install_dir = tmp_path / "install"
+    _configure_linux_install(monkeypatch, oi, install_dir, archive)
+
+    with pytest.raises(RuntimeError, match="unsafe Obscura tar member type"):
+        oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
+
+    assert not install_dir.exists()
+
+
+def test_install_obscura_rejects_tar_absolute_path_member(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-linux.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        for name in ("obscura", "obscura-worker"):
+            data = b"new"
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o755
+            tf.addfile(info, io.BytesIO(data))
+        abs_member = tarfile.TarInfo("/tmp/escaped-obscura")
+        abs_member.size = 4
+        abs_member.mode = 0o755
+        tf.addfile(abs_member, io.BytesIO(b"pwn!"))
+    install_dir = tmp_path / "install"
+    _configure_linux_install(monkeypatch, oi, install_dir, archive)
+
+    with pytest.raises(RuntimeError, match="Unsafe absolute Obscura archive member path"):
+        oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
+
+    assert not install_dir.exists()
+    assert not Path("/tmp/escaped-obscura").exists()
+
+
+def test_install_obscura_rejects_tar_device_member(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-linux.tar.gz"
+    _write_tar_with_extra_member(
+        archive,
+        extra_name="evil-device",
+        extra_type=tarfile.CHRTYPE,
+    )
+    install_dir = tmp_path / "install"
+    _configure_linux_install(monkeypatch, oi, install_dir, archive)
+
+    with pytest.raises(RuntimeError, match="unsafe Obscura tar member type"):
+        oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
+
+    assert not install_dir.exists()
+
+
+def test_install_obscura_rejects_tar_fifo_member(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-linux.tar.gz"
+    _write_tar_with_extra_member(
+        archive,
+        extra_name="evil-fifo",
+        extra_type=tarfile.FIFOTYPE,
+    )
+    install_dir = tmp_path / "install"
+    _configure_linux_install(monkeypatch, oi, install_dir, archive)
+
+    with pytest.raises(RuntimeError, match="unsafe Obscura tar member type"):
+        oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
+
+    assert not install_dir.exists()
+
+
+def test_install_obscura_rejects_zip_symlink_mode(tmp_path, monkeypatch):
+    import crawler_cli.obscura_install as oi
+
+    archive = tmp_path / "obscura-x86_64-windows.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("obscura.exe", b"new")
+        zf.writestr("obscura-worker.exe", b"worker")
+        link_info = zipfile.ZipInfo("evil-link")
+        link_info.create_system = 3  # Unix
+        link_info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        zf.writestr(link_info, b"/tmp/target")
+    install_dir = tmp_path / "install"
+    monkeypatch.setattr(oi, "install_dir", lambda: install_dir)
+    monkeypatch.setattr(oi.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(oi.platform, "machine", lambda: "AMD64")
+    monkeypatch.setitem(oi._ASSET_SHA256, ("v0.1.8", archive.name), _sha256(archive))
+    monkeypatch.setattr(oi, "_download", lambda _url, dest: shutil.copyfile(archive, dest))
+
+    with pytest.raises(RuntimeError, match="Refusing unsafe Obscura zip member type"):
         oi.install_obscura("v0.1.8", force=True, log=lambda _msg: None)
 
     assert not install_dir.exists()
