@@ -4,28 +4,25 @@ A list of tickets, their status and the md file which summarises action taken fo
 **Authoritative register** for status, acceptance notes, and delivery order.
 Ticket files remain the source of truth for scope and DoD.
 
-### Current position (2026-07-15)
+### Current position (2026-07-16)
 
-- Batch review of open PRs **#22–#26** complete: all five merged to `master`
-  (087 / 088 / 089 / 092 / 108). Pre-merge CI blockers fixed in-branch (088
-  ruff format; 089 integration fixture `h2` key).
-- Next lane claimed for parallel worktrees: **095 / 106→107** (see Open work).
-  **093**, **096**, **098**, **100**, **112**, and **113** are done. Leftovers
-  **114 / 115 / 116** remain unclaimed.
-- Tickets **101–105** + **108** form the intent-overlap reporting baseline;
-  **106** / **107** are unblocked on AMP evidence.
-- Ticket **110** remains unused/rejected; next free number is **117**.
+- Review of PRs **#27–#35** is complete. Eight PRs merged to `master`:
+  093 / 096 / 098 / 100 / 112 / 113 / 106 / 107. PR **#33** (095) was
+  rejected: it did not preserve historical run semantics and its CI suite was
+  red. Ticket 095 is open for a complete rework.
+- The open implementation queue is **117 → 095 → 114 / 115 → 116**.
+- Tickets **101–108** now form the completed intent-overlap reporting baseline.
+- Ticket **110** remains unused/rejected; next free number is **118**.
 
 ### Ordering rules
 
 - Correctness and evidence hardening precede presentation work that consumes
   the affected fields.
-- Ticket **107** cannot start before **106** defines and tests the JSON contract;
-  **106** may proceed now that **108** is on master (production AMP recount is
-  **116**, not a 106 blocker).
+- Ticket **095** must use snapshot values—not merely snapshot membership—for
+  every scoped analysis/report path before it can be accepted.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next free number (**117**); do not reuse **110**.
+- New remediation work uses the next free number (**118**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -231,7 +228,7 @@ proceed independently except where their DoD references earlier behavior.
 - `092` `done` (2026-07-15, PR #25; leftovers → 115) [ticket-092-persist-failure-exit-policy.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-092-persist-failure-exit-policy.md) — **P1:** terminal persistence failures produce a non-zero automation result and durable/partial output metadata. Reviewed MERGE+REMEDIATE: DoD met; CI green
 - `093` `done` [ticket-093-cli-config-numeric-validation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-093-cli-config-numeric-validation.md) — **P2:** validate numeric and cross-field config at CLI/library boundaries; no raw tracebacks
 - `094` `done` (2026-07-15, PR #11) [ticket-094-obscura-installer-verification.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-094-obscura-installer-verification.md) — **P1 security:** checksum/signature verification, safe staged archive extraction, and atomic install. Reviewed MERGE: adversarial security review found no exploitable holes — real-path containment (not string prefix), pre-extraction symlink/hardlink/device rejection, fail-closed digest verify, atomic replace with rollback; 42 passed. Test-coverage hardening + digest cross-check filed as ticket 100
-- `095` `in_progress` [ticket-095-run-aware-snapshots-reporting.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-095-run-aware-snapshots-reporting.md) — **P2, depends on 086:** retain per-run snapshots and require deterministic run selection in reports/enrichment — claimed by `agent/ticket-095-run-aware-snapshots-reporting`
+- `095` `open (rework required; PR #33 rejected)` [ticket-095-run-aware-snapshots-reporting.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-095-run-aware-snapshots-reporting.md) — **P2, depends on 086:** retain snapshots and require deterministic run selection; rejected attempt read current-state analysis values and left CI red
 - `096` `done` (2026-07-15) [ticket-096-persistence-coverage-gate.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-096-persistence-coverage-gate.md) — **P2:** combine/gate PostgreSQL integration coverage and exercise migrations/concurrency/failure paths
 - `097` `done` (2026-07-15, PR #10) [ticket-097-real-playwright-ci-smoke.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-097-real-playwright-ci-smoke.md) — **P2:** install and launch real Chromium in a required CI smoke job. Reviewed MERGE: dedicated `playwright-smoke` job installs `.[test,playwright]` + pinned/cached Chromium with `continue-on-error` removed (hard-fails on broken browser); real JS-rendered end-to-end crawl through `CrawlEngine`, cleanup-on-success/failure asserted; heavy tests marker-gated so local unit runs stay fast. Real browser ran in review (2 passed)
 - `098` `done` (2026-07-15) [ticket-098-packaging-docs-release-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-098-packaging-docs-release-hygiene.md) — **P3:** fix nonexistent `[api]` extra docs; add license/project metadata/install-matrix/release checks — MIT LICENSE + pyproject metadata; README install matrix; CHANGELOG/RELEASING; CI packaging + extras jobs
@@ -287,31 +284,15 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 - `114` `proposed` [ticket-114-sitemap-budget-dedupe-cdn-docs.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-114-sitemap-budget-dedupe-cdn-docs.md) — **P2:** 087 leftovers — dedupe sitemap locs against frontier budget + document cross-host `Sitemap:` allowlisting
 - `115` `proposed` [ticket-115-persist-frontier-incompleteness-signaling.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-115-persist-frontier-incompleteness-signaling.md) — **P2:** 092 leftovers — signal mark-done failure to automation; align crawl-run status with persist incompleteness
 - `116` `proposed` [ticket-116-amp-evidence-production-recount.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-116-amp-evidence-production-recount.md) — **P3:** 108 follow-up — fresh thompsons-scotland evidence-backed AMP / missing-canonical counts
+- `117` `proposed` [ticket-117-config-validation-merge-regression.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-117-config-validation-merge-regression.md) — **P1:** merged 093/112 regression: `CrawlConfig.validate()` references the removed `max_pages` field, leaving mypy red
 
-### Open work — priority order (2026-07-15)
+### Open work — priority order (2026-07-16)
 
-Implement in this order unless a ticket's dependency blocks it.
-
-**1. Run-aware reporting and verification**
-
-1. **P2** `095` `in_progress` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — depends 086 ✓ — `agent/ticket-095-run-aware-snapshots-reporting`
-2. **P2** `096` `done` [persistence coverage gate](./ticket-096-persistence-coverage-gate.md)
-3. **P2** `093` `done` [CLI/config numeric validation](./ticket-093-cli-config-numeric-validation.md)
-4. **P2** `114` [sitemap budget dedupe / CDN docs](./ticket-114-sitemap-budget-dedupe-cdn-docs.md) — from 087
-5. **P2** `115` [persist/frontier incompleteness signaling](./ticket-115-persist-frontier-incompleteness-signaling.md) — from 092
-6. **P3** `112` `done` [run-isolation hygiene leftovers](./ticket-112-run-isolation-hygiene-leftovers.md) — from 099
-7. **P3** `113` `done` [thin-diagnostic schema/calibration](./ticket-113-thin-diagnostic-schema-calibration.md) — from 109
-7. **P3** `116` [AMP evidence production recount](./ticket-116-amp-evidence-production-recount.md) — from 108
-
-**2. Interactive intent-overlap reporting**
-
-9. **P2** `106` `done` [report_data.json export](./ticket-106-report-data-json-export.md) — after 108 ✓ — PR #28
-10. **P2** `107` `done` [interactive HTML cluster report](./ticket-107-interactive-html-cluster-report.md) — after 106 PR (same agent)
-
-**3. Lower-priority hardening**
-
-11. **P3** `098` `done` [packaging/docs/release hygiene](./ticket-098-packaging-docs-release-hygiene.md)
-12. **P3** `100` `done` [Obscura installer test hardening](./ticket-100-obscura-installer-test-hardening.md)
+1. **P1** `117` `proposed` [config-validation merge regression](./ticket-117-config-validation-merge-regression.md) — restore the green typecheck after 093/112 integration.
+2. **P2** `095` `open (rework required)` [run-aware snapshots/reporting](./ticket-095-run-aware-snapshots-reporting.md) — complete snapshot-backed run semantics; rejected PR #33 must not be resumed unchanged.
+3. **P2** `114` `proposed` [sitemap budget dedupe / CDN docs](./ticket-114-sitemap-budget-dedupe-cdn-docs.md).
+4. **P2** `115` `proposed` [persist/frontier incompleteness signaling](./ticket-115-persist-frontier-incompleteness-signaling.md).
+5. **P3** `116` `proposed` [AMP evidence production recount](./ticket-116-amp-evidence-production-recount.md).
 
 **Deferred lanes**
 

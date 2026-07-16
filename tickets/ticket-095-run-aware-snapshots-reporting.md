@@ -39,5 +39,8 @@ ticket builds durable snapshot semantics on top of that identity.
 - Current-state convenience and historical retention are both documented.
 
 ## Status
-in_progress (Priority: **P2**, depends on ticket 086) — claimed by `agent/ticket-095-run-aware-snapshots-reporting`; architecture/product gap; found in 2026-07-15 audit.
-
+open — rework required after PR #33 was rejected on 2026-07-16. The attempted
+implementation filtered snapshot membership but still read analysis fields from
+current-state tables, which cannot support historical reporting; its
+`hreflang-groups` run selector was also nonfunctional. Reopen only with
+snapshot-backed data paths, functional scope enforcement, and a green suite.
