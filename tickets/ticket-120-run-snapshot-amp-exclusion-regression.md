@@ -1,6 +1,6 @@
 # Ticket 120: Restore AMP-variant exclusion under run-aware snapshot reads (095 blocker)
 
-**Status:** ready for review — folded into draft PR #44
+**Status:** done — folded into and merged with PR #44 on 2026-07-16
 **Priority:** P1 — silent analysis regression
 **Depends on:** Ticket 095 rework branch (`agent/095-run-aware-snapshots`, PR #44)
 **Re-opened:** Ticket 103 (AMP-variant awareness / exclusion)

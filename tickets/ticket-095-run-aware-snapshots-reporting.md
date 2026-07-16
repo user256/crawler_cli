@@ -39,9 +39,9 @@ ticket builds durable snapshot semantics on top of that identity.
 - Current-state convenience and historical retention are both documented.
 
 ## Status
-ready for review — PR #44 replaces the rejected PR #33 implementation with
+done — merged in PR #44 on 2026-07-16. It replaces the rejected PR #33 implementation with
 snapshot-backed analysis, enrichment, sitemap, compaction, and report paths;
 reports now reject ambiguous multi-run selection. Ticket 120's AMP exclusion
 regression was folded into this rework: `variant_kind` is run-scoped and a
 full-flow integration test proves that snapshot analysis excludes AMP variants.
-The branch remains draft until final review and CI complete.
+The full CI matrix passed before merge.
