@@ -219,7 +219,6 @@ class CrawlConfig:
         require_positive_int(self.max_concurrency, field="max_concurrency")
         require_non_negative_int(self.max_requests_per_context, field="max_requests_per_context")
         require_non_negative_int(self.refresh_days, field="refresh_days")
-        require_non_negative_int(self.max_pages, field="max_pages")
         require_non_negative_int(self.default_open_crawl_limit, field="default_open_crawl_limit")
         require_non_negative_int(self.per_host_concurrency, field="per_host_concurrency")
         require_positive_int(self.max_response_bytes, field="max_response_bytes")
