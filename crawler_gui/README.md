@@ -55,6 +55,7 @@ can be iterated without PHP or Postgres.
 | `generate_sample_data.py` | Regenerates the JSON fixture |
 | `intent-report-fixture.mjs` | Generated static fixture with the Ticket 106 `report_data.json` envelope |
 | `intent-overlap.mjs` | The single adapter and dependency-free map/filter/table viewer for that envelope |
+| `server.py` | Local read-only bridge serving the GUI against a live Postgres crawl database |
 
 ### Run the prototype
 
@@ -80,6 +81,63 @@ Verify that the checked-in fixture is exactly what the generator emits:
 
 ```bash
 python3 generate_sample_data.py --check
+```
+
+## Live mode — `server.py` (ticket 125)
+
+A local **read-only** bridge that serves this GUI against a real crawler_cli
+PostgreSQL database instead of the fixture. One DSN per process; the local
+convention is one database per site, so "all crawls" means every run of that
+site.
+
+```bash
+python3 crawler_gui/server.py --postgres-dsn postgresql://user:pass@localhost:5432/sitedb
+# or: export CRAWLER_CLI_POSTGRES_DSN=... ; python3 crawler_gui/server.py
+# open http://127.0.0.1:8766/?live=1
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/live/runs` | Every crawl run in the database with per-run URL/HTML counts |
+| `GET /api/live/snapshot?run=&limit=&offset=` | One page window of a run, plus whole-run overview/issues |
+
+URL params: `?live=1` enables live mode, `?run=<run_id>` selects a run (the URL
+stays shareable), `?limit=<n>` sets the page-window size.
+
+**Security posture:** binds `127.0.0.1` only, no auth, read-only. It is a
+development bridge, not the `crawler_api` control plane — do not expose it.
+
+### Behaviours worth knowing
+
+- **Pagination, not truncation.** A window is `limit` pages (default 5000, max
+  10 000) at `offset`. The toolbar always states `Showing X of Y URLs` and
+  offers **Load more** until the run is fully loaded, so no page is
+  unreachable and a partial view never reads as the whole run.
+- **Whole-run overview.** The sidebar overview and issue counts come from a
+  run-scoped SQL aggregate, not the loaded window, so they stay correct while
+  paging.
+- **Two schemas.** With `page_run_snapshots` (ticket 095) every run is listed
+  and snapshots are genuinely run-scoped. On a legacy pre-095 database the page
+  tables are global current state and cannot be attributed to a run, so the
+  bridge collapses to a single `current-state` entry labelled
+  *current state — not run-scoped* rather than listing N runs that each claim
+  the whole database. The `legacy` compatibility placeholder run is hidden when
+  it holds no pages.
+- **Link graph.** Internal inlinks/outlinks (with anchor text) come from the
+  current-state `internal_links` table on both schemas — it is not part of the
+  immutable snapshot, so it reflects the most recent crawl. External outlinks
+  come from a snapshot's `links_json` and only exist when the crawl ran with
+  `same_host_only=False`; the default crawl drops cross-host links at
+  extraction time, so they are genuinely absent rather than hidden.
+- **No fabrication.** Fields the database does not hold stay empty — e.g.
+  `responseTimeMs` is `null` when no fetch duration was recorded, rather than 0.
+
+### Tests
+
+```bash
+pytest tests/test_crawler_gui_server.py            # pure mapping/aggregation, no DB
+CRAWLER_CLI_TEST_DSN=postgresql://... pytest tests/test_persistence_integration.py \
+  -k crawler_gui_bridge                            # run scoping, pagination, link graph
 ```
 
 ### JSON contract (prototype → future API)

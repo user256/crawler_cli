@@ -331,6 +331,12 @@ button.ghost {
   font-variant-numeric: tabular-nums;
 }
 
+.grid-toolbar .live-note {
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .grid-toolbar input[type="search"] {
   width: 11rem;
   background: var(--bg);

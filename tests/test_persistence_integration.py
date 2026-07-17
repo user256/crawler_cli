@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import os
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -1231,3 +1232,95 @@ async def test_fetch_pages_for_comparison_reconstructs_rows(store: AsyncpgStore)
     # URL filtering returns only requested URLs.
     filtered = await store.fetch_pages_for_comparison(urls=["https://cmp.example/absent"], run_id=run_id)
     assert filtered == []
+
+
+def _load_gui_server():
+    """Load crawler_gui/server.py (not an importable package) by path."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "crawler_gui" / "server.py"
+    spec = importlib.util.spec_from_file_location("crawler_gui_server", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.asyncio
+async def test_crawler_gui_bridge_serves_run_scoped_paginated_snapshots(store: AsyncpgStore, dsn: str) -> None:
+    """Ticket 125: the GUI bridge lists runs, scopes snapshots to the selected
+    run, paginates every page of a run, and resolves the internal link graph."""
+    gui_server = _load_gui_server()
+    base = "https://gui.example/"
+    other = "https://gui.example/other"
+    pages = {
+        base: "<html><head><title>Home</title></head><body><h1>Home</h1>"
+        f"<a href='{other}'>Other page</a></body></html>",
+        other: "<html><head><title>Other</title></head><body><h1>Other</h1></body></html>",
+    }
+    config = CrawlConfig(
+        max_concurrency=1,
+        default_open_crawl_limit=2,
+        discover_sitemaps=False,
+        respect_robots_txt=False,
+    )
+    engine = CrawlEngine(config, store=store)
+    engine.backend = FakeBackend(pages)
+    await engine.crawl_open([base], max_urls=2, run_id="gui-run")
+
+    live = gui_server.LiveStore(dsn)
+    await live.connect()
+    try:
+        assert live.has_run_snapshots is True
+
+        runs = await live.runs()
+        run = next(r for r in runs if r["id"] == "gui-run")
+        assert run["urls"] == 2  # per-run count, not a global table count
+        assert run["runScoped"] is True
+
+        # An unknown run is a 404 rather than a silent fallback to another run.
+        with pytest.raises(gui_server.web.HTTPNotFound):
+            await live.snapshot("no-such-run", 10)
+
+        # Page one of two: the window is partial and says so.
+        first = await live.snapshot("gui-run", 1, 0)
+        assert len(first["pages"]) == 1
+        assert first["live"]["totalPages"] == 2
+        assert first["live"]["hasMore"] is True
+        assert first["live"]["offset"] == 0
+        assert first["crawl"]["progress"]["total"] == 2
+        # The overview describes the whole run, not just the 1-page window, so
+        # it stays correct while the grid pages through a large run.
+        summary = {row["label"]: row["count"] for row in first["overview"]["summary"]}
+        assert summary["Total URLs Crawled"] == 2
+        assert first["issues"][0]["count"] == 0  # both pages indexable
+
+        # Page two completes the run: no page is unreachable.
+        second = await live.snapshot("gui-run", 1, 1)
+        assert len(second["pages"]) == 1
+        assert second["live"]["hasMore"] is False
+        assert second["pages"][0]["address"] != first["pages"][0]["address"]
+
+        full = await live.snapshot("gui-run", 100, 0)
+        assert {page["address"] for page in full["pages"]} == {base, other}
+        assert full["live"]["hasMore"] is False
+
+        # Link graph: the seed links to /other, so /other has a real inlink.
+        by_url = {page["address"]: page for page in full["pages"]}
+        assert by_url[other]["internalInlinks"] == 1
+        assert by_url[other]["inlinks"][0]["sourceUrl"] == base
+        assert any(link["targetUrl"] == other for link in by_url[base]["outlinks"])
+        # The fake backend records no timing, so the field stays absent rather
+        # than being fabricated as 0.
+        assert by_url[base]["responseTimeMs"] is None
+
+        # With a duration actually stored, it surfaces as milliseconds.
+        conn = await asyncpg.connect(dsn)
+        try:
+            await conn.execute("UPDATE page_run_snapshots SET total_duration_seconds = 0.5 WHERE run_id = 'gui-run'")
+        finally:
+            await conn.close()
+        timed = await live.snapshot("gui-run", 100, 0)
+        assert all(page["responseTimeMs"] == 500 for page in timed["pages"])
+    finally:
+        await live.close()

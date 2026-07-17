@@ -15,6 +15,8 @@ const state = {
   configContext: "crawl",
   view: "crawler",
   intentViewer: null,
+  live: false,
+  pageLimit: null,
 };
 
 const INTENT_ONLY_DATA = {
@@ -415,6 +417,26 @@ function linkTable(headers, rows) {
     .join("")}</tbody></table></div>`;
 }
 
+function renderLiveNote() {
+  const note = $("#live-note");
+  const more = $("#btn-load-more");
+  const live = state.data.live;
+  if (!state.live || !live) {
+    note.hidden = true;
+    more.hidden = true;
+    return;
+  }
+  const loaded = state.data.pages.length;
+  const parts = [];
+  // A partial view must say so — never let a capped window read as the whole run.
+  if (live.hasMore) parts.push(`Showing ${loaded} of ${live.totalPages} URLs`);
+  else if (live.totalPages) parts.push(`All ${live.totalPages} URLs loaded`);
+  if (live.runScoped === false) parts.push("current state — not run-scoped");
+  note.textContent = parts.join(" · ");
+  note.hidden = parts.length === 0;
+  more.hidden = !live.hasMore;
+}
+
 function renderStatusbar() {
   const c = state.data.crawl;
   $("#status-label").textContent = c.statusLabel;
@@ -556,6 +578,8 @@ function bindEvents() {
     openModal("#modal-history");
   });
 
+  $("#btn-load-more").addEventListener("click", loadMore);
+
   $("#btn-options").addEventListener("click", () => {
     state.configContext = "crawl";
     renderOptionsModal();
@@ -611,6 +635,10 @@ function bindEvents() {
       $("#new-crawl-url").focus();
       return;
     }
+    if (state.live) {
+      toast("Live GUI is read-only for now; crawl submission will go through crawler_api.");
+      return;
+    }
     state.data.crawl.url = url;
     state.data.crawl.mode = state.newCrawlType;
     state.data.crawl.statusLabel = `${state.newCrawlType} Mode: Ready`;
@@ -641,7 +669,7 @@ function bindEvents() {
   });
 
   $("#btn-delete").addEventListener("click", () => {
-    toast("Prototype: would call delete-crawl / API drop");
+    toast(state.live ? "Live GUI is read-only; delete remains a crawler_api action." : "Prototype: would call delete-crawl / API drop");
   });
 
   $$("[data-close]").forEach((el) => el.addEventListener("click", closeModals));
@@ -707,6 +735,39 @@ function showIntentOverlap() {
   renderNav();
 }
 
+async function fetchSnapshot({ run, offset = 0, limit = state.pageLimit } = {}) {
+  const endpoint = new URL("./api/live/snapshot", window.location.href);
+  if (run) endpoint.searchParams.set("run", run);
+  if (offset) endpoint.searchParams.set("offset", String(offset));
+  if (limit) endpoint.searchParams.set("limit", String(limit));
+  const res = await fetch(endpoint, { cache: "no-store" });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function loadMore() {
+  const live = state.data.live;
+  if (!live?.hasMore) return;
+  const btn = $("#btn-load-more");
+  btn.disabled = true;
+  btn.textContent = "Loading…";
+  try {
+    const next = await fetchSnapshot({ run: live.runId, offset: live.windowEnd, limit: live.limit });
+    // Append the next window; overview/issues are whole-run aggregates from the
+    // server, so they need no client-side recomputation.
+    state.data.pages = state.data.pages.concat(next.pages);
+    state.data.live = next.live;
+    renderTable();
+    renderLiveNote();
+    renderStatusbar();
+  } catch (err) {
+    toast(`Could not load more URLs: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Load more";
+  }
+}
+
 function renderAll() {
   renderNav();
   renderCrawlBar();
@@ -715,10 +776,15 @@ function renderAll() {
   renderSidebar();
   renderDetail();
   renderStatusbar();
+  renderLiveNote();
 }
 
 async function main() {
-  const intentOnly = new URLSearchParams(window.location.search).get("view") === "intent-overlap";
+  const params = new URLSearchParams(window.location.search);
+  const intentOnly = params.get("view") === "intent-overlap";
+  state.live = params.get("live") === "1";
+  // Optional ?limit= sets the page-window size; the server clamps it.
+  state.pageLimit = params.get("limit") || null;
   initialiseTheme();
   if (intentOnly) {
     // The report fixture is imported by this module, so this route does not
@@ -732,16 +798,24 @@ async function main() {
   }
 
   try {
-    const res = await fetch("./sample-data.json", { cache: "no-store" });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    state.data = await res.json();
+    if (state.live) {
+      state.data = await fetchSnapshot({ run: params.get("run") });
+    } else {
+      const res = await fetch("./sample-data.json", { cache: "no-store" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      state.data = await res.json();
+    }
     state.selectedId = state.data.pages[0]?.id ?? null;
     bindEvents();
     renderAll();
+    if (state.live) $(".user-chip").textContent = `live Postgres · ${state.data.crawl.id}`;
   } catch (err) {
-    document.body.innerHTML = `<pre style="padding:2rem;color:#f87171">Failed to load sample-data.json.
-Serve this folder over HTTP, e.g.:
-  python3 -m http.server 8765
+    const source = state.live ? "the live crawler snapshot" : "sample-data.json";
+    const remedy = state.live
+      ? "Start crawler_gui/server.py with a valid --postgres-dsn, then refresh this page."
+      : "Serve this folder over HTTP, e.g.:\n  python3 -m http.server 8765";
+    document.body.innerHTML = `<pre style="padding:2rem;color:#f87171">Failed to load ${source}.
+${remedy}
 ${escapeHtml(err.message)}</pre>`;
   }
 }
