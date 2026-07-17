@@ -17,7 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     remap-aware so host-derived differences stop drowning real changes.
   - Either `compare` side can be loaded from a stored PostgreSQL crawl via
     `--baseline-store`/`--candidate-store` (+ run selector), backed by a new
-    `AsyncpgStore.fetch_pages_for_comparison()` loader.
+    `AsyncpgStore.fetch_pages_for_comparison()` loader. Per-side DSNs resolve
+    from the environment (`CRAWLER_CLI_<SIDE>_POSTGRES_DSN`, or
+    `--<side>-store-env VAR` to name any variable) so credentials stay out of
+    shell history and the process list; the inline `--<side>-store DSN` flag
+    remains as an override.
   - New `compare-urls` subcommand: validate a `source_url,target_url` mapping
     CSV — redirect verdict + captured hop chain per pair, content diff, field
     deltas — resolving each side artifact → store → live (`--fetch-missing`),

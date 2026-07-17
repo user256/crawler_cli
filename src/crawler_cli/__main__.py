@@ -85,6 +85,47 @@ def _build_dsn(args: argparse.Namespace) -> str:
     return f"postgresql://{safe_user}:{safe_password}@{host}:{port}/{dbname}"
 
 
+_STORE_ENV_PREFIXES = ("CRAWLER_CLI", "PostgreSQLCrawler")
+
+
+def store_dsn_env_vars(side: str) -> tuple[str, ...]:
+    """Well-known env vars holding the store DSN for one compare side (ticket 122).
+
+    Mirrors the prefixes :func:`_build_dsn` already accepts, e.g.
+    ``CRAWLER_CLI_BASELINE_POSTGRES_DSN`` / ``PostgreSQLCrawler_BASELINE_POSTGRES_DSN``.
+    """
+    return tuple(f"{prefix}_{side.upper()}_POSTGRES_DSN" for prefix in _STORE_ENV_PREFIXES)
+
+
+def _resolve_store_dsn(args: argparse.Namespace, side: str) -> str | None:
+    """Resolve the PostgreSQL DSN for one compare side (ticket 122).
+
+    Precedence: ``--<side>-store DSN`` > ``--<side>-store-env VAR`` > the
+    well-known :func:`store_dsn_env_vars` variables. Sourcing the DSN from the
+    environment keeps credentials out of shell history and the process list;
+    the inline flag stays available as an override for local one-offs.
+
+    Returns ``None`` when no DSN is configured for this side (the side then
+    falls back to a JSON artifact).
+    """
+    inline = getattr(args, f"{side}_store", None)
+    if inline:
+        return str(inline)
+    env_var = getattr(args, f"{side}_store_env", None)
+    if env_var:
+        value = os.environ.get(env_var)
+        if not value:
+            raise ValueError(
+                f"Environment variable {env_var!r} for --{side}-store-env is not set or is empty"
+            )
+        return value
+    for name in store_dsn_env_vars(side):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
 def _resolve_secret_sources(*, value: str, env_var: str, file_path: str, label: str) -> str:
     sources = [bool(value), bool(env_var), bool(file_path)]
     if sum(sources) > 1:
@@ -1702,13 +1743,13 @@ async def _run_compare(args: argparse.Namespace) -> int:
     try:
         baseline_job = await _load_compare_side(
             json_path=args.baseline_json,
-            store_dsn=getattr(args, "baseline_store", None),
+            store_dsn=_resolve_store_dsn(args, "baseline"),
             run_id=getattr(args, "baseline_run", None),
             side="baseline",
         )
         candidate_job = await _load_compare_side(
             json_path=args.candidate_json,
-            store_dsn=getattr(args, "candidate_store", None),
+            store_dsn=_resolve_store_dsn(args, "candidate"),
             run_id=getattr(args, "candidate_run", None),
             side="candidate",
         )
@@ -1891,10 +1932,17 @@ async def _run_compare_urls(args: argparse.Namespace) -> int:
         for reason in parsed.skipped_reasons:
             print(f"  - {reason}", file=sys.stderr)
 
+    try:
+        source_dsn = _resolve_store_dsn(args, "source")
+        target_dsn = _resolve_store_dsn(args, "target")
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+
     source_by_url = await _resolve_compare_urls_side(
         [pair.source_url for pair in parsed.pairs],
         artifact=args.source_artifact,
-        store_dsn=args.source_store,
+        store_dsn=source_dsn,
         run_id=args.source_run,
         fetch_missing=args.fetch_missing,
         match_final_url=False,
@@ -1903,7 +1951,7 @@ async def _run_compare_urls(args: argparse.Namespace) -> int:
     target_by_url = await _resolve_compare_urls_side(
         [pair.target_url for pair in parsed.pairs],
         artifact=args.target_artifact,
-        store_dsn=args.target_store,
+        store_dsn=target_dsn,
         run_id=args.target_run,
         fetch_missing=args.fetch_missing,
         args=args,
@@ -2321,12 +2369,28 @@ def _build_parser() -> argparse.ArgumentParser:
     cmp_parser.add_argument(
         "--baseline-store",
         metavar="DSN",
-        help="Load the baseline side from a PostgreSQL crawl (DSN) instead of a JSON artifact",
+        help=(
+            "Load the baseline side from a PostgreSQL crawl (DSN) instead of a JSON artifact. "
+            f"Prefer the environment: {store_dsn_env_vars('baseline')[0]} or --baseline-store-env"
+        ),
+    )
+    cmp_parser.add_argument(
+        "--baseline-store-env",
+        metavar="VAR",
+        help="Name of an environment variable holding the baseline store DSN",
     )
     cmp_parser.add_argument(
         "--candidate-store",
         metavar="DSN",
-        help="Load the candidate side from a PostgreSQL crawl (DSN) instead of a JSON artifact",
+        help=(
+            "Load the candidate side from a PostgreSQL crawl (DSN) instead of a JSON artifact. "
+            f"Prefer the environment: {store_dsn_env_vars('candidate')[0]} or --candidate-store-env"
+        ),
+    )
+    cmp_parser.add_argument(
+        "--candidate-store-env",
+        metavar="VAR",
+        help="Name of an environment variable holding the candidate store DSN",
     )
     cmp_parser.add_argument("--baseline-run", metavar="RUN_ID", help="Crawl run id for --baseline-store")
     cmp_parser.add_argument("--candidate-run", metavar="RUN_ID", help="Crawl run id for --candidate-store")
@@ -2360,8 +2424,32 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     urls_parser.add_argument("--source-artifact", metavar="JSON", help="Source-side crawl JSON to resolve pages from")
     urls_parser.add_argument("--target-artifact", metavar="JSON", help="Target-side crawl JSON to resolve pages from")
-    urls_parser.add_argument("--source-store", metavar="DSN", help="Source-side PostgreSQL crawl (DSN)")
-    urls_parser.add_argument("--target-store", metavar="DSN", help="Target-side PostgreSQL crawl (DSN)")
+    urls_parser.add_argument(
+        "--source-store",
+        metavar="DSN",
+        help=(
+            "Source-side PostgreSQL crawl (DSN). Prefer the environment: "
+            f"{store_dsn_env_vars('source')[0]} or --source-store-env"
+        ),
+    )
+    urls_parser.add_argument(
+        "--source-store-env",
+        metavar="VAR",
+        help="Name of an environment variable holding the source store DSN",
+    )
+    urls_parser.add_argument(
+        "--target-store",
+        metavar="DSN",
+        help=(
+            "Target-side PostgreSQL crawl (DSN). Prefer the environment: "
+            f"{store_dsn_env_vars('target')[0]} or --target-store-env"
+        ),
+    )
+    urls_parser.add_argument(
+        "--target-store-env",
+        metavar="VAR",
+        help="Name of an environment variable holding the target store DSN",
+    )
     urls_parser.add_argument("--source-run", metavar="RUN_ID", help="Crawl run id for --source-store")
     urls_parser.add_argument("--target-run", metavar="RUN_ID", help="Crawl run id for --target-store")
     urls_parser.add_argument(

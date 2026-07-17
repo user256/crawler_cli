@@ -438,12 +438,25 @@ Run a deep comparison between two saved crawl JSON files to identify missing URL
 crawler-cli compare baseline.json candidate.json --compare-links --persist
 ```
 
-Either side may instead be pulled from a stored PostgreSQL crawl (one DB per site) rather than a JSON artifact:
+Either side may instead be pulled from a stored PostgreSQL crawl (one DB per site) rather than a JSON artifact. Keep DSNs in the environment — a DSN passed on the command line lands in shell history and the process list:
 
 ```bash
-crawler-cli compare --baseline-store "$DEV_DSN" --baseline-run crawl-a \
-                    --candidate-store "$PROD_DSN" --candidate-run crawl-b
+export CRAWLER_CLI_BASELINE_POSTGRES_DSN=postgresql://…/dev_site
+export CRAWLER_CLI_CANDIDATE_POSTGRES_DSN=postgresql://…/prod_site
+
+crawler-cli compare --baseline-run crawl-a --candidate-run crawl-b
 ```
+
+Each side resolves its DSN in precedence order — `--<side>-store DSN` > `--<side>-store-env VAR` > the well-known variable:
+
+| Side | Env var (also accepts the `PostgreSQLCrawler_` prefix) | Point at any var | Inline override |
+| --- | --- | --- | --- |
+| baseline | `CRAWLER_CLI_BASELINE_POSTGRES_DSN` | `--baseline-store-env VAR` | `--baseline-store DSN` |
+| candidate | `CRAWLER_CLI_CANDIDATE_POSTGRES_DSN` | `--candidate-store-env VAR` | `--candidate-store DSN` |
+| source (`compare-urls`) | `CRAWLER_CLI_SOURCE_POSTGRES_DSN` | `--source-store-env VAR` | `--source-store DSN` |
+| target (`compare-urls`) | `CRAWLER_CLI_TARGET_POSTGRES_DSN` | `--target-store-env VAR` | `--target-store DSN` |
+
+`--<side>-store-env` errors if the named variable is unset or empty, so a typo fails fast instead of silently falling back to a JSON artifact.
 
 #### Near-site compare (dev vs prod)
 
@@ -468,8 +481,10 @@ Validate a site migration from a `source_url,target_url` mapping CSV: for each p
 
 ```bash
 # mapping.csv:  source_url,target_url,note
+export CRAWLER_CLI_TARGET_POSTGRES_DSN=postgresql://…/prod_site
+
 crawler-cli compare-urls --pairs mapping.csv \
-    --target-store "$PROD_DSN" --target-run crawl-b \
+    --target-run crawl-b \
     --fetch-missing \
     --output migration-report.csv \
     --fail-on redirect_mismatch

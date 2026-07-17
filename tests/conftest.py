@@ -47,6 +47,13 @@ _POSTGRES_ENV_VARS = tuple(
         "POSTGRES_PASSWORD",
         "POSTGRES_DB",
         "POSTGRES_DSN",
+        # Per-side compare store DSNs (ticket 122) — an exported
+        # <SIDE>_POSTGRES_DSN would otherwise silently turn an artifact-only
+        # compare into a store-backed one.
+        "BASELINE_POSTGRES_DSN",
+        "CANDIDATE_POSTGRES_DSN",
+        "SOURCE_POSTGRES_DSN",
+        "TARGET_POSTGRES_DSN",
     )
 )
 

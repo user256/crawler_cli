@@ -21,7 +21,7 @@ Ticket files remain the source of truth for scope and DoD.
   truth on legacy schemas, and can start crawls locally. A GUI Chrome-profile
   picker remains the planned follow-up recorded in 124 — the engine side already
   ships (`--playwright-user-data-dir` / `--playwright-channel chrome`).
-- Ticket **110** remains unused/rejected; next unreserved number is **127**.
+- Ticket **110** remains unused/rejected; **127** is now reserved (compare store-DSN env resolution); next unreserved number is **128**.
 - Leftover review worktrees (`/tmp/crawler_cli_pr33`, `/tmp/crawler_cli_pr44`)
   removed 2026-07-17.
 
@@ -31,7 +31,7 @@ Ticket files remain the source of truth for scope and DoD.
   the affected fields.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**127**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**128**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -308,6 +308,7 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 ### Open work — priority order (2026-07-17)
 
 - `123` `open` [ticket-123-compare-urls-review-remediations.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-123-compare-urls-review-remediations.md) — **P2:** ticket-122 review remediations — flag-less `compare` hash-recompute behaviour change (+ double recompute per row), `--replace` silently no-op for store-loaded sides (falls back to un-remapped stored hashes), persisted-session/`--persist` test gap, CSV redirect-hops output, distinct `--fail-on` exit code, identity-mapping verdicts, artifact-path error handling, hreflang-diff scope correction
+- `127` `in-review` [ticket-127-compare-store-dsn-env.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-127-compare-store-dsn-env.md) — **P2:** the ticket-122 per-side compare store flags take a literal DSN, putting credentials in shell history and the process list. Resolve each side from the environment instead — `CRAWLER_CLI_<SIDE>_POSTGRES_DSN` (also `PostgreSQLCrawler_` prefix) plus `--<side>-store-env VAR`, with inline `--<side>-store` kept as an override; named-but-unset variable fails fast. Implemented on `agent/127-compare-store-dsn-env`
 - `126` `open` [ticket-126-legacy-snapshot-backfill-duplication.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-126-legacy-snapshot-backfill-duplication.md) — **P3:** `AsyncpgStore.initialize()` re-runs the pre-095 `legacy` snapshot backfill on every init, so on a never-legacy database the next crawl mirrors the previous crawl's pages (including `html_compressed`) into a phantom `legacy` run — roughly doubling snapshot storage for those pages. Gate it on the database actually being legacy. Found while building 124
 
 Deferred lanes remain below.
