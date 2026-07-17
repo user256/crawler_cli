@@ -1237,11 +1237,14 @@ async def test_fetch_pages_for_comparison_reconstructs_rows(store: AsyncpgStore)
 def _load_gui_server():
     """Load crawler_gui/server.py (not an importable package) by path."""
     import importlib.util
+    import sys
 
     path = Path(__file__).resolve().parents[1] / "crawler_gui" / "server.py"
     spec = importlib.util.spec_from_file_location("crawler_gui_server", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
+    # Register before exec: dataclasses resolve field types via sys.modules.
+    sys.modules["crawler_gui_server"] = module
     spec.loader.exec_module(module)
     return module
 
