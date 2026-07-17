@@ -157,8 +157,28 @@ already computes and persists for every page.
   (`probes.py:26-28` shows the existing anti-pattern to avoid).
 
 ## Status
-in-review (2026-07-16) — implemented on `agent/122-compare-remap-url-pairs`
-(single PR covering A+B+C+D).
+done (2026-07-17) — PR #47 reviewed and merged to master (MERGE+REMEDIATE).
+
+### Review outcome (2026-07-17)
+- Two review bugs fixed on the branch pre-merge (commit 67d8ebf), with 4
+  regression tests:
+  - `normalize_url_for_match` treated a bare host and its `/` root as
+    different paths, so a correct root mapping (`https://host` target vs
+    `https://host/` final URL) verdicted `redirect_wrong_target`, and a
+    chainless client-normalized root fetch read as a redirect.
+  - `_resolve_compare_urls_side` indexed results by `final_url` too, so in a
+    chained mapping (A→B, B→C) pair B→C could resolve to the A result that
+    merely redirected to B. Source side now matches `requested_url` only;
+    target side keeps the `final_url` fallback.
+- Store-loader blocker cleared: the DSN-gated
+  `test_fetch_pages_for_comparison_reconstructs_rows` ran in CI's Postgres job
+  and was re-run locally against a real PostgreSQL scratch database (passed).
+- Remaining findings (flag-less `compare` hash-recompute behaviour change,
+  `--replace` no-op on store-loaded sides, persisted-session test gap, CSV
+  hops output, `--fail-on` exit code, identity mappings, artifact-path error
+  handling, hreflang-diff scope correction) → ticket 123.
+- Final state: suite 680 passed / 41 skipped; ruff + mypy clean; CI fully
+  green on merge.
 
 ### Delivery notes
 - **A:** `hashing.hamming64()` (+ `sha256_of_normalized`/`simhash64_of_normalized`

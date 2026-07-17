@@ -4,29 +4,28 @@ A list of tickets, their status and the md file which summarises action taken fo
 **Authoritative register** for status, acceptance notes, and delivery order.
 Ticket files remain the source of truth for scope and DoD.
 
-### Current position (2026-07-16)
+### Current position (2026-07-17)
 
-- Review of PRs **#27–#39** is complete. Tickets 114–117 were reviewed and
-  merged: 114 / 115 / 116 met their definitions of done; 117 fixed the shared
-  `CrawlConfig.validate()` regression that had made their original CI checks red.
-- Tickets **118** (GUI fixture parity, PR #42) and **119** (GUI intent-overlap
-  viewer, PR #45) are **merged**. The `crawler_gui/` prototype baseline is now
-  tracked on master.
-- PR **#33** (095) remains rejected. Its replacement, draft PR **#44**, is
-  ready for review: snapshot-backed reads, deterministic report selection, and
-  the run-scoped AMP exclusion remediation from Ticket **120** are implemented.
-- Tickets **101–108** now form the completed intent-overlap reporting baseline.
-- Ticket **110** remains unused/rejected; **122** is now reserved (compare remap / URL-pair mapping); next unreserved number is **123**.
+- Ticket **122** (PR **#47**) is reviewed and **merged**: compare `--replace`
+  host remapping, simhash tolerance, and the `compare-urls` redirect-mapping
+  command. Two review bugs (root-URL redirect matching; source-side pair
+  resolution by `final_url`) were fixed on the branch pre-merge; the
+  store-loader blocker was cleared with a real-Postgres run of the DSN-gated
+  integration test. Remaining review findings are ticket **123**.
+- The 2026-07-16 batch is fully landed: 114–117 (PRs #36/#37/#38/#39),
+  118/119 (GUI, PRs #42/#45), and 095+120 (run-aware snapshots, PR #44).
+- Tickets **101–108** form the completed intent-overlap reporting baseline.
+- Ticket **110** remains unused/rejected; next unreserved number is **124**.
+- Leftover review worktrees (`/tmp/crawler_cli_pr33`, `/tmp/crawler_cli_pr44`)
+  removed 2026-07-17.
 
 ### Ordering rules
 
 - Correctness and evidence hardening precede presentation work that consumes
   the affected fields.
-- Ticket **095** must use snapshot values—not merely snapshot membership—for
-  every scoped analysis/report path before it can be accepted.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**123**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**124**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -293,14 +292,13 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 - `119` `done` (2026-07-16, PR #45) [ticket-119-crawler-gui-intent-overlap-viewer.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-119-crawler-gui-intent-overlap-viewer.md) — **P2:** replicate Ticket 107's intent-overlap viewer in crawler_gui while retaining the standalone offline export. Reviewed MERGE: reuses 106 `report_data` via one adapter (no browser recomputation), dependency-free, 107 `render-report` export unchanged, light/dark themes, map↔table selection sync; node 3/3 + python parity green. #42 generator conflict resolved and both fixtures regenerated. (Stacked PR #43 mis-merged into `agent/118`; same commit re-targeted to master as PR #45.) Shell hygiene → 121
 - `120` `done` (2026-07-16, PR #44) [ticket-120-run-snapshot-amp-exclusion-regression.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-120-run-snapshot-amp-exclusion-regression.md) — **P1:** restored run-scoped AMP `variant_kind`, full-flow coverage, and deterministic multi-run report selection
 - `121` `done` (2026-07-16) [ticket-121-crawler-gui-shell-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-121-crawler-gui-shell-hygiene.md) — **P3:** offline shell, no competitor capture/screenshots, and documented grid HTTP requirement
+- `122` `done` (2026-07-17, PR #47; remediations → 123) [ticket-122-compare-remap-and-url-pair-mapping.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-122-compare-remap-and-url-pair-mapping.md) — **P2:** site-to-site compare: `--replace` host remapping + simhash hamming tolerance on `compare`, and the `compare-urls` CSV pair/redirect-mapping command (redirect-chain capture, store-backed page loading, `--fail-on` CI gating). Reviewed MERGE+REMEDIATE: two review bugs fixed pre-merge (root-URL trailing-slash matching in `normalize_url_for_match`; source-side resolution now matches `requested_url` only) + 4 regression tests; store-loader evidence recorded against real Postgres; suite 680 passed / 41 skipped, ruff+mypy clean
 
-### Open work — priority order (2026-07-16, updated after PR-review batch #41–#45)
+### Open work — priority order (2026-07-17, updated after PR #47 review)
 
-- `122` `in-review` [ticket-122-compare-remap-and-url-pair-mapping.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-122-compare-remap-and-url-pair-mapping.md) — **P2:** site-to-site compare: `--replace` host remapping + simhash hamming tolerance on `compare`, and a new `compare-urls` CSV pair/redirect-mapping command (redirect-chain capture, store-backed page loading, `--fail-on` CI gating). Implemented on `agent/122-compare-remap-url-pairs` (single PR, A+B+C+D). Store-loader path needs store-backed evidence in review (no PostgreSQL reachable at authoring time).
+- `123` `open` [ticket-123-compare-urls-review-remediations.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-123-compare-urls-review-remediations.md) — **P2:** ticket-122 review remediations — flag-less `compare` hash-recompute behaviour change (+ double recompute per row), `--replace` silently no-op for store-loaded sides (falls back to un-remapped stored hashes), persisted-session/`--persist` test gap, CSV redirect-hops output, distinct `--fail-on` exit code, identity-mapping verdicts, artifact-path error handling, hreflang-diff scope correction
 
 Deferred lanes remain below.
-
-Tickets **118** and **119** are done (merged 2026-07-16, PRs #42 / #45). Ticket **120** is folded into PR #44.
 
 **Deferred lanes**
 
