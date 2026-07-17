@@ -157,6 +157,32 @@ def _decode_body(body: bytes, content_type: str | None) -> str:
         return body.decode("utf-8", errors="replace")
 
 
+async def _playwright_redirect_chain(response: object) -> list[dict[str, object]]:
+    """Reconstruct the redirect chain for a Playwright navigation (ticket 122).
+
+    Playwright has no ``history`` list; it links each request to the one it was
+    ``redirected_from``. Walk that backwards, reading each hop's response status
+    where available, and return the hops in request order. Best-effort — a hop
+    whose response isn't retrievable is recorded with ``status=None``."""
+    if response is None:
+        return []
+    chain: list[dict[str, object]] = []
+    request = getattr(response, "request", None)
+    request = getattr(request, "redirected_from", None) if request is not None else None
+    while request is not None:
+        status: int | None = None
+        try:
+            hop_response = await request.response()
+            if hop_response is not None:
+                status = hop_response.status
+        except Exception:
+            status = None
+        chain.append({"url": request.url, "status": status})
+        request = getattr(request, "redirected_from", None)
+    chain.reverse()
+    return chain
+
+
 def build_proxy_pool(config: CrawlConfig) -> "ProxyPool | None":
     """Build a ProxyPool from config, honouring gateway vs list mode.
 
@@ -304,6 +330,8 @@ class AiohttpBackend(FetchBackend):
                 body = b"".join(chunks)
 
             elapsed = time.monotonic() - started
+            # aiohttp keeps each redirect response in ``history`` (ticket 122).
+            redirect_chain = [{"url": str(hop.url), "status": hop.status} for hop in response.history]
             result = FetchResponse(
                 url=str(response.url),
                 requested_url=url,
@@ -314,6 +342,7 @@ class AiohttpBackend(FetchBackend):
                 ttfb_seconds=ttfb,
                 elapsed_seconds=elapsed,
                 body_truncated=truncated,
+                redirect_chain=redirect_chain,
             )
         except Exception:
             await response_cm.__aexit__(*sys.exc_info())
@@ -419,6 +448,10 @@ class CurlCffiBackend(FetchBackend):
                 await response.aclose()
         self._report_proxy(request_proxy, ok=True)
         elapsed = time.monotonic() - started
+        # curl_cffi exposes prior redirect responses via ``history`` (ticket 122).
+        redirect_chain = [
+            {"url": str(hop.url), "status": hop.status_code} for hop in getattr(response, "history", []) or []
+        ]
         return FetchResponse(
             url=str(response.url),
             requested_url=url,
@@ -429,6 +462,7 @@ class CurlCffiBackend(FetchBackend):
             ttfb_seconds=ttfb,
             elapsed_seconds=elapsed,
             body_truncated=truncated,
+            redirect_chain=redirect_chain,
         )
 
     async def close(self) -> None:
@@ -887,6 +921,7 @@ class PlaywrightBackend(FetchBackend):
             elapsed = time.monotonic() - started
             header_map = dict(response.headers) if response else {}
             body = html.encode("utf-8")[: self.config.max_response_bytes]
+            redirect_chain = await _playwright_redirect_chain(response)
             return FetchResponse(
                 url=page.url,
                 requested_url=url,
@@ -899,6 +934,7 @@ class PlaywrightBackend(FetchBackend):
                 lcp_ms=lcp_ms,
                 cls=cls,
                 inp_ms=inp_ms,
+                redirect_chain=redirect_chain,
             )
         finally:
             if page is not None:

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Site-to-site compare tooling (ticket 122):
+  - `compare --replace FROM=TO` (ordered literal host/path remapping) and
+    `--simhash-threshold N` for near-site (dev-vs-prod) diffs. Every comparison
+    row now carries a `content_verdict` (`identical|near|changed|missing`) and
+    `simhash_distance`; canonical/link/path diffs and content re-hashing are
+    remap-aware so host-derived differences stop drowning real changes.
+  - Either `compare` side can be loaded from a stored PostgreSQL crawl via
+    `--baseline-store`/`--candidate-store` (+ run selector), backed by a new
+    `AsyncpgStore.fetch_pages_for_comparison()` loader.
+  - New `compare-urls` subcommand: validate a `source_url,target_url` mapping
+    CSV — redirect verdict + captured hop chain per pair, content diff, field
+    deltas — resolving each side artifact → store → live (`--fetch-missing`),
+    with `--output` (CSV/JSON), `--persist`, and `--fail-on` CI gating.
+  - `hashing.hamming64()` (consistent with the signed/unsigned BIGINT mapping)
+    and redirect-chain capture on `FetchResponse`/`CrawlResult`
+    (aiohttp/curl_cffi `history`, Playwright request chain), persisted to
+    artifact JSON.
+
 ### Changed
 
 - Packaging metadata, install matrix, license, and release documentation

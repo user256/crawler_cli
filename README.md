@@ -438,6 +438,45 @@ Run a deep comparison between two saved crawl JSON files to identify missing URL
 crawler-cli compare baseline.json candidate.json --compare-links --persist
 ```
 
+Either side may instead be pulled from a stored PostgreSQL crawl (one DB per site) rather than a JSON artifact:
+
+```bash
+crawler-cli compare --baseline-store "$DEV_DSN" --baseline-run crawl-a \
+                    --candidate-store "$PROD_DSN" --candidate-run crawl-b
+```
+
+#### Near-site compare (dev vs prod)
+
+Comparing two crawls of *the same site on different hosts* — `dev.domain.com` vs `domain.com`, or a local build vs production — otherwise drowns real content changes in host-derived noise (canonical points at the dev host, every internal link differs, a staging banner breaks every content hash). Supply ordered literal `--replace FROM=TO` substitutions (applied to page text before re-hashing, and to canonical/link/path URLs before diffing) so only material changes survive. `--simhash-threshold N` (default 4) classifies each page via Hamming distance on its simhash fingerprint as `identical` / `near` / `changed`:
+
+```bash
+crawler-cli crawl https://dev.domain.com --content-hashing --save-to dev.json
+crawler-cli crawl https://domain.com     --content-hashing --save-to prod.json
+
+crawler-cli compare dev.json prod.json --compare-links \
+    --replace 'dev.domain.com=domain.com' \
+    --replace 'https://dev.=https://' \
+    --simhash-threshold 4 \
+    --output near-site-diff.json
+```
+
+Every comparison row carries a `content_verdict` (`identical|near|changed|missing`) and `simhash_distance`; with the right `--replace` list the host-only pages report `identical`, banner-only pages report `near`, and canonical/link noise disappears.
+
+#### Mapped compare / redirect validation (`compare-urls`)
+
+Validate a site migration from a `source_url,target_url` mapping CSV: for each pair, `compare-urls` verdicts whether the source actually redirects to its mapped target and diffs the two pages' content. Page data for each side is resolved in order — saved JSON artifact → PostgreSQL store → live fetch (`--fetch-missing`, a single batched crawl per side through the real engine, so robots/throttle/backend all apply). `--fail-on` returns a non-zero exit code for CI gating.
+
+```bash
+# mapping.csv:  source_url,target_url,note
+crawler-cli compare-urls --pairs mapping.csv \
+    --target-store "$PROD_DSN" --target-run crawl-b \
+    --fetch-missing \
+    --output migration-report.csv \
+    --fail-on redirect_mismatch
+```
+
+Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any`. Replacements are literal strings applied in order (no regex in v1).
+
 ### 4. Storage lifecycle
 
 ```bash

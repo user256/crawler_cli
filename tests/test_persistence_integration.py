@@ -1194,3 +1194,40 @@ async def test_engine_challenge_hard_stop_end_to_end(store: AsyncpgStore) -> Non
     assert meta["challenge"] == "cloudflare"
     assert meta["skip_reason"] == "bot_challenge"
     assert content_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_pages_for_comparison_reconstructs_rows(store: AsyncpgStore) -> None:
+    """Ticket 122: a stored crawl run can be pulled back as comparison-grade
+    CrawlResult rows (final_url, status, title, h1, hashes)."""
+    url = "https://cmp.example/page"
+    html = "<html><head><title>Page Title</title><link rel='canonical' href='https://cmp.example/page'></head>"
+    html += "<body><h1>Main Heading</h1><p>Some body content for hashing here.</p></body></html>"
+    config = CrawlConfig(
+        max_concurrency=1,
+        default_open_crawl_limit=1,
+        discover_sitemaps=False,
+        respect_robots_txt=False,
+        enable_content_hashing=True,
+    )
+    engine = CrawlEngine(config, store=store)
+    engine.backend = FakeBackend({url: html})
+    await engine.crawl_open([url], max_urls=1, run_id="cmp-run")
+
+    run_id = await store.resolve_reporting_run_id("cmp-run")
+    rows = await store.fetch_pages_for_comparison(run_id=run_id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.final_url == url
+    assert row.status == 200
+    assert row.extracted is not None
+    assert row.extracted.title == "Page Title"
+    assert row.extracted.headings["h1"] == ["Main Heading"]
+    assert row.extracted.canonical == "https://cmp.example/page"
+    assert row.content_hash_sha256 is not None
+    # Simhash comes back in unsigned form, consistent with fetch-time values.
+    assert row.content_hash_simhash is not None and row.content_hash_simhash >= 0
+
+    # URL filtering returns only requested URLs.
+    filtered = await store.fetch_pages_for_comparison(urls=["https://cmp.example/absent"], run_id=run_id)
+    assert filtered == []

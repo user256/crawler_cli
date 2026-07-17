@@ -11,11 +11,12 @@ from typing import TYPE_CHECKING, Any, Literal, Required, TypedDict, cast
 from urllib.parse import quote as _urlquote
 
 if TYPE_CHECKING:
-    from .models import CrawlJobResult
+    from .models import CrawlJobResult, CrawlResult
 
 from .archive import audit_archive_urls
 from .auth import AuthConfig, AuthType
-from .comparison import compare_deep, comparison_rows
+from .compare_urls import build_pair_rows, load_url_pairs, rows_failing
+from .comparison import DEFAULT_SIMHASH_THRESHOLD, compare_deep, comparison_rows
 from .config import (
     CB_ENABLED_DEFAULT,
     CB_RECOVERY_SECONDS_DEFAULT,
@@ -40,6 +41,7 @@ from .engine import CrawlEngine, CrawlRunSelectionError
 from .exit_codes import EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
+from .remap import Remap
 from .reports import CrawlReports
 from .validators import (
     non_negative_float,
@@ -1510,6 +1512,7 @@ class _SavedResult(TypedDict, total=False):
     lcp_ms: float | None
     cls: float | None
     inp_ms: float | None
+    redirect_chain: list[dict[str, Any]]
 
 
 class _SavedJob(TypedDict, total=False):
@@ -1622,6 +1625,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             lcp_ms=item.get("lcp_ms"),
             cls=item.get("cls"),
             inp_ms=item.get("inp_ms"),
+            redirect_chain=list(item.get("redirect_chain", []) or []),
         )
 
     raw_text = path.read_text(encoding="utf-8")
@@ -1665,16 +1669,59 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
     raise ValueError(f"Unsupported crawl artifact format: {path}")
 
 
+async def _load_compare_side(
+    *,
+    json_path: str | None,
+    store_dsn: str | None,
+    run_id: str | None,
+    side: str,
+) -> "list[CrawlResult] | CrawlJobResult":
+    """Resolve one side of a ``compare`` from either a JSON artifact or a stored
+    PostgreSQL crawl run (ticket 122)."""
+    if store_dsn:
+        store = AsyncpgStore(store_dsn)
+        await store.initialize()
+        try:
+            resolved = await store.resolve_reporting_run_id(run_id)
+            return await store.fetch_pages_for_comparison(run_id=resolved)
+        finally:
+            await store.close()
+    if not json_path:
+        raise ValueError(f"provide a {side} JSON path or --{side}-store DSN")
+    return _load_saved_crawl(Path(json_path))
+
+
 async def _run_compare(args: argparse.Namespace) -> int:
-    baseline_path = Path(args.baseline_json)
-    candidate_path = Path(args.candidate_json)
-    baseline_job = _load_saved_crawl(baseline_path)
-    candidate_job = _load_saved_crawl(candidate_path)
+    # New ticket-122 flags are read via getattr so programmatic callers that
+    # build a minimal Namespace keep working (existing behaviour unchanged).
+    try:
+        remap = Remap.from_specs(getattr(args, "replace", None))
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    try:
+        baseline_job = await _load_compare_side(
+            json_path=args.baseline_json,
+            store_dsn=getattr(args, "baseline_store", None),
+            run_id=getattr(args, "baseline_run", None),
+            side="baseline",
+        )
+        candidate_job = await _load_compare_side(
+            json_path=args.candidate_json,
+            store_dsn=getattr(args, "candidate_store", None),
+            run_id=getattr(args, "candidate_run", None),
+            side="candidate",
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
 
     diff = compare_deep(
         baseline_job,
         candidate_job,
         compare_links=args.compare_links,
+        remap=remap if remap else None,
+        simhash_threshold=getattr(args, "simhash_threshold", DEFAULT_SIMHASH_THRESHOLD),
     )
 
     if args.output:
@@ -1697,6 +1744,9 @@ async def _run_compare(args: argparse.Namespace) -> int:
         finally:
             await store.close()
     else:
+        verdict_counts: dict[str, int] = {}
+        for verdict in diff.content_verdicts.values():
+            verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
         print(
             json.dumps(
                 {
@@ -1706,11 +1756,230 @@ async def _run_compare(args: argparse.Namespace) -> int:
                     "url_moves": len(diff.url_moves),
                     "schema_changes": len(diff.schema_changes),
                     "link_changes": len(diff.link_changes),
+                    "content_verdicts": verdict_counts,
                 },
                 indent=2,
             )
         )
     return 0
+
+
+async def _resolve_compare_urls_side(
+    urls: list[str],
+    *,
+    artifact: str | None,
+    store_dsn: str | None,
+    run_id: str | None,
+    fetch_missing: bool,
+    match_final_url: bool = True,
+    args: argparse.Namespace,
+) -> dict[str, "CrawlResult"]:
+    """Resolve page data for one side of ``compare-urls`` in precedence order:
+    saved JSON artifact → PostgreSQL store → live fetch (ticket 122).
+
+    A single batched ``crawl_list`` runs for whatever remains unresolved when
+    ``--fetch-missing`` is set — never one fetch per row.
+
+    ``match_final_url=False`` (the source side) matches results by
+    ``requested_url`` only: a result that merely *redirected to* a source URL
+    must not stand in for a crawl of that URL, or its redirect verdict would be
+    attributed to the wrong pair. The target side keeps ``final_url`` as a
+    fallback, where content — not redirect behaviour — is what's compared.
+    """
+    wanted = list(dict.fromkeys(urls))
+    wanted_set = set(wanted)
+    resolved: dict[str, CrawlResult] = {}
+
+    def _index(results: "list[CrawlResult]") -> None:
+        for result in results:
+            key = result.requested_url
+            if key in wanted_set and key not in resolved:
+                resolved[key] = result
+        if not match_final_url:
+            return
+        for result in results:
+            key = result.final_url
+            if key in wanted_set and key not in resolved:
+                resolved[key] = result
+
+    if artifact:
+        _index(_load_saved_crawl(Path(artifact)).results)
+    remaining = [url for url in wanted if url not in resolved]
+    if remaining and store_dsn:
+        store = AsyncpgStore(store_dsn)
+        await store.initialize()
+        try:
+            resolved_run = await store.resolve_reporting_run_id(run_id)
+            _index(await store.fetch_pages_for_comparison(urls=remaining, run_id=resolved_run))
+        finally:
+            await store.close()
+    remaining = [url for url in wanted if url not in resolved]
+    if remaining and fetch_missing:
+        # One batched crawl through the real engine — robots, throttle, backend
+        # selection all apply; redirects are followed (config default) so the
+        # source chain is observed rather than toggled in place (ticket 122).
+        config = CrawlConfig(
+            backend=args.backend,
+            enable_content_hashing=True,
+            same_host_only=False,
+            respect_robots_txt=not args.ignore_robots,
+        )
+        engine = CrawlEngine(config, store=MemoryStore())
+        try:
+            job = await engine.crawl_list(remaining)
+        finally:
+            await engine.close()
+        _index(job.results)
+    return resolved
+
+
+def _compare_urls_to_session_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Map ``compare-urls`` rows onto the comparison-session row shape so they
+    can persist through the existing ``crawl_comparison_urls`` table (ticket 122;
+    dedicated redirect columns are a deferred follow-up)."""
+    session_rows: list[dict[str, object]] = []
+    for row in rows:
+        deltas = cast("dict[str, dict[str, object]]", row.get("field_deltas", {}))
+        chain = cast("list[dict[str, object]]", row.get("redirect_chain", []))
+        chain_text = " -> ".join(str(hop.get("url")) for hop in chain)
+        verdict = str(row.get("redirect_verdict"))
+        session_rows.append(
+            {
+                "path": row.get("source_url"),
+                "baseline_url": row.get("source_final_url") or row.get("source_url"),
+                "candidate_url": row.get("target_url"),
+                "exists_on_baseline": row.get("source_status") is not None,
+                "exists_on_candidate": row.get("target_status") is not None,
+                "baseline_title": deltas.get("title", {}).get("source"),
+                "candidate_title": deltas.get("title", {}).get("target"),
+                "baseline_h1": deltas.get("h1", {}).get("source"),
+                "candidate_h1": deltas.get("h1", {}).get("target"),
+                "baseline_meta_description": deltas.get("meta_description", {}).get("source"),
+                "candidate_meta_description": deltas.get("meta_description", {}).get("target"),
+                "baseline_word_count": deltas.get("word_count", {}).get("source"),
+                "candidate_word_count": deltas.get("word_count", {}).get("target"),
+                "is_moved_content": bool(chain),
+                "redirect_chain": f"{verdict}: {chain_text}" if chain_text else verdict,
+                "content_verdict": row.get("content_verdict"),
+                "simhash_distance": row.get("simhash_distance"),
+            }
+        )
+    return session_rows
+
+
+async def _run_compare_urls(args: argparse.Namespace) -> int:
+    try:
+        remap = Remap.from_specs(args.replace)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    try:
+        parsed = load_url_pairs(
+            args.pairs,
+            source_column=args.source_column,
+            target_column=args.target_column,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+
+    if not parsed.pairs:
+        print("Error: no usable source/target pairs in mapping CSV", file=sys.stderr)
+        return EXIT_VALIDATION
+    if parsed.skipped:
+        print(f"Skipped {parsed.skipped} pair(s):", file=sys.stderr)
+        for reason in parsed.skipped_reasons:
+            print(f"  - {reason}", file=sys.stderr)
+
+    source_by_url = await _resolve_compare_urls_side(
+        [pair.source_url for pair in parsed.pairs],
+        artifact=args.source_artifact,
+        store_dsn=args.source_store,
+        run_id=args.source_run,
+        fetch_missing=args.fetch_missing,
+        match_final_url=False,
+        args=args,
+    )
+    target_by_url = await _resolve_compare_urls_side(
+        [pair.target_url for pair in parsed.pairs],
+        artifact=args.target_artifact,
+        store_dsn=args.target_store,
+        run_id=args.target_run,
+        fetch_missing=args.fetch_missing,
+        args=args,
+    )
+
+    rows = build_pair_rows(
+        parsed.pairs,
+        lambda url: source_by_url.get(url),
+        lambda url: target_by_url.get(url),
+        remap=remap if remap else None,
+        simhash_threshold=args.simhash_threshold,
+    )
+
+    if args.output:
+        _write_compare_urls_output(rows, args.output)
+        print(f"Wrote {len(rows)} compare-urls rows to {args.output}")
+
+    if args.persist:
+        store = _store_from_args(args)
+        await store.initialize()
+        try:
+            session_id = await store.persist_comparison_session(
+                baseline_label=args.source_label,
+                candidate_label=args.target_label,
+                rows=_compare_urls_to_session_rows(rows),
+            )
+            print(f"Persisted compare-urls session {session_id}")
+        finally:
+            await store.close()
+
+    verdict_counts: dict[str, int] = {}
+    for row in rows:
+        key = str(row["redirect_verdict"])
+        verdict_counts[key] = verdict_counts.get(key, 0) + 1
+    print(json.dumps({"pairs": len(rows), "redirect_verdicts": verdict_counts}, indent=2))
+
+    if args.fail_on:
+        failures = rows_failing(rows, args.fail_on)
+        if failures:
+            print(
+                f"FAIL: {len(failures)} pair(s) tripped --fail-on {args.fail_on}",
+                file=sys.stderr,
+            )
+            return EXIT_VALIDATION
+    return 0
+
+
+def _write_compare_urls_output(rows: list[dict[str, object]], output: str) -> None:
+    path = Path(output)
+    if path.suffix.lower() == ".csv":
+        import csv as _csv
+
+        fieldnames = [
+            "source_url",
+            "target_url",
+            "source_status",
+            "target_status",
+            "source_final_url",
+            "redirect_verdict",
+            "sha256_equal",
+            "simhash_distance",
+            "content_verdict",
+            "note",
+        ]
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = _csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                flat = {key: row.get(key) for key in fieldnames}
+                chain = cast("list[dict[str, object]]", row.get("redirect_chain", []))
+                flat["source_final_url"] = row.get("source_final_url")
+                if chain:
+                    flat["source_final_url"] = f"{row.get('source_final_url')} ({len(chain)} hop)"
+                writer.writerow(flat)
+    else:
+        path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
 
 
 async def _run_compact_html(args: argparse.Namespace) -> int:
@@ -2036,15 +2305,95 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output HTML path (default: report.html)",
     )
 
-    cmp_parser = subparsers.add_parser("compare", help="Compare two saved crawl JSON files")
-    cmp_parser.add_argument("baseline_json", help="Baseline crawl JSON path")
-    cmp_parser.add_argument("candidate_json", help="Candidate crawl JSON path")
+    cmp_parser = subparsers.add_parser(
+        "compare",
+        help="Compare two crawls (saved JSON artifacts or stored runs), with optional host remapping",
+    )
+    cmp_parser.add_argument(
+        "baseline_json", nargs="?", help="Baseline crawl JSON path (omit when using --baseline-store)"
+    )
+    cmp_parser.add_argument(
+        "candidate_json", nargs="?", help="Candidate crawl JSON path (omit when using --candidate-store)"
+    )
     cmp_parser.add_argument("--baseline-label", default="baseline")
     cmp_parser.add_argument("--candidate-label", default="candidate")
     cmp_parser.add_argument("--compare-links", action="store_true")
+    cmp_parser.add_argument(
+        "--baseline-store",
+        metavar="DSN",
+        help="Load the baseline side from a PostgreSQL crawl (DSN) instead of a JSON artifact",
+    )
+    cmp_parser.add_argument(
+        "--candidate-store",
+        metavar="DSN",
+        help="Load the candidate side from a PostgreSQL crawl (DSN) instead of a JSON artifact",
+    )
+    cmp_parser.add_argument("--baseline-run", metavar="RUN_ID", help="Crawl run id for --baseline-store")
+    cmp_parser.add_argument("--candidate-run", metavar="RUN_ID", help="Crawl run id for --candidate-store")
+    cmp_parser.add_argument(
+        "--replace",
+        action="append",
+        default=[],
+        metavar="FROM=TO",
+        help="Literal FROM=TO replacement applied to text/URLs before diffing (repeatable, ordered)",
+    )
+    cmp_parser.add_argument(
+        "--simhash-threshold",
+        type=non_negative_int,
+        default=DEFAULT_SIMHASH_THRESHOLD,
+        help=f"Hamming distance at/under which a page is 'near' rather than 'changed' (default {DEFAULT_SIMHASH_THRESHOLD})",
+    )
     cmp_parser.add_argument("--output", help="Write comparison rows JSON to this path")
     cmp_parser.add_argument("--persist", action="store_true", help="Persist comparison to PostgreSQL")
     _add_postgres_args(cmp_parser)
+
+    urls_parser = subparsers.add_parser(
+        "compare-urls",
+        help="Compare mapped source->target URL pairs from a CSV and validate redirects",
+    )
+    urls_parser.add_argument("--pairs", required=True, metavar="CSV", help="Mapping CSV with source/target columns")
+    urls_parser.add_argument(
+        "--source-column", default="source_url", help="CSV source URL column (default: source_url)"
+    )
+    urls_parser.add_argument(
+        "--target-column", default="target_url", help="CSV target URL column (default: target_url)"
+    )
+    urls_parser.add_argument("--source-artifact", metavar="JSON", help="Source-side crawl JSON to resolve pages from")
+    urls_parser.add_argument("--target-artifact", metavar="JSON", help="Target-side crawl JSON to resolve pages from")
+    urls_parser.add_argument("--source-store", metavar="DSN", help="Source-side PostgreSQL crawl (DSN)")
+    urls_parser.add_argument("--target-store", metavar="DSN", help="Target-side PostgreSQL crawl (DSN)")
+    urls_parser.add_argument("--source-run", metavar="RUN_ID", help="Crawl run id for --source-store")
+    urls_parser.add_argument("--target-run", metavar="RUN_ID", help="Crawl run id for --target-store")
+    urls_parser.add_argument(
+        "--fetch-missing",
+        action="store_true",
+        help="Live-fetch any pair URL not found in an artifact/store (one batched crawl per side)",
+    )
+    urls_parser.add_argument(
+        "--backend",
+        choices=["aiohttp", "curl_cffi", "playwright"],
+        default="aiohttp",
+        help="Backend for --fetch-missing live fetches (default: aiohttp)",
+    )
+    urls_parser.add_argument("--ignore-robots", action="store_true", help="Ignore robots.txt on live fetches")
+    urls_parser.add_argument(
+        "--replace",
+        action="append",
+        default=[],
+        metavar="FROM=TO",
+        help="Literal FROM=TO replacement applied before content hashing (repeatable, ordered)",
+    )
+    urls_parser.add_argument("--simhash-threshold", type=non_negative_int, default=DEFAULT_SIMHASH_THRESHOLD)
+    urls_parser.add_argument("--source-label", default="source")
+    urls_parser.add_argument("--target-label", default="target")
+    urls_parser.add_argument("--output", help="Write rows to this path (.csv for CSV, else JSON)")
+    urls_parser.add_argument("--persist", action="store_true", help="Persist rows as a comparison session")
+    urls_parser.add_argument(
+        "--fail-on",
+        choices=["redirect_mismatch", "content_changed", "any"],
+        help="Return a non-zero exit code when any pair trips this condition (CI gate)",
+    )
+    _add_postgres_args(urls_parser)
 
     compact_html_parser = subparsers.add_parser(
         "compact-html",
@@ -2211,6 +2560,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return _run_render_report(args)
     if command == "compare":
         return await _run_compare(args)
+    if command == "compare-urls":
+        return await _run_compare_urls(args)
     if command == "compact-html":
         return await _run_compact_html(args)
     if command == "delete-crawl":
