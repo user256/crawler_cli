@@ -15,7 +15,12 @@ Ticket files remain the source of truth for scope and DoD.
 - The 2026-07-16 batch is fully landed: 114–117 (PRs #36/#37/#38/#39),
   118/119 (GUI, PRs #42/#45), and 095+120 (run-aware snapshots, PR #44).
 - Tickets **101–108** form the completed intent-overlap reporting baseline.
-- Ticket **110** remains unused/rejected; next unreserved number is **124**.
+- Tickets **124** (GUI crawl management) and **125** (GUI all-crawls DB
+  access) are filed 2026-07-17; **125 lands first** (it commits the untracked
+  `crawler_gui/server.py` bridge that 124 builds on). A GUI Chrome-profile
+  picker is a planned follow-up recorded in 124 — the engine side already
+  ships (`--playwright-user-data-dir` / `--playwright-channel chrome`).
+- Ticket **110** remains unused/rejected; next unreserved number is **126**.
 - Leftover review worktrees (`/tmp/crawler_cli_pr33`, `/tmp/crawler_cli_pr44`)
   removed 2026-07-17.
 
@@ -25,7 +30,7 @@ Ticket files remain the source of truth for scope and DoD.
   the affected fields.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**124**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**126**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -297,6 +302,8 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 ### Open work — priority order (2026-07-17, updated after PR #47 review)
 
 - `123` `open` [ticket-123-compare-urls-review-remediations.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-123-compare-urls-review-remediations.md) — **P2:** ticket-122 review remediations — flag-less `compare` hash-recompute behaviour change (+ double recompute per row), `--replace` silently no-op for store-loaded sides (falls back to un-remapped stored hashes), persisted-session/`--persist` test gap, CSV redirect-hops output, distinct `--fail-on` exit code, identity-mapping verdicts, artifact-path error handling, hreflang-diff scope correction
+- `125` `open` [ticket-125-crawler-gui-all-crawls-access.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-125-crawler-gui-all-crawls-access.md) — **P2:** GUI live mode gets complete access to every crawl run in the connected DB — land the untracked `server.py` bridge with tests, kill the 5k-page silent truncation (pagination/load-more), fix the legacy-schema run-scoping lie (global counts claimed by every run), fill stubbed inlinks/response-time fields from the DB. Prerequisite for 124
+- `124` `open` [ticket-124-crawler-gui-crawl-management.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-124-crawler-gui-crawl-management.md) — **P2, depends on 125:** manage crawls from the GUI — in-UX run-selector dropdown (+ clickable history cards) replacing hand-edited `?run=` params, and a working "+ New Crawl" (`POST /api/live/crawls` bridge endpoint spawning the `crawler_cli` CLI, single-job guard, progress + failure surfacing). Consciously extends the read-only-bridge boundary for local submission; delete stays CLI/API-only. Chrome-profile picker recorded as the follow-up
 
 Deferred lanes remain below.
 
