@@ -109,6 +109,11 @@ def test_normalize_trailing_slash_and_case():
     assert normalize_url_for_match(None) == ""
 
 
+def test_normalize_bare_host_matches_root():
+    # Mapping CSVs commonly write the site root without a trailing slash.
+    assert normalize_url_for_match("https://github.com") == normalize_url_for_match("https://github.com/")
+
+
 # --- redirect verdict matrix ------------------------------------------------
 
 
@@ -161,6 +166,20 @@ def test_verdict_ok_ignores_trailing_slash():
     pair = UrlPair("https://old/a", "https://new/a/")
     src = _src("https://old/a", "https://new/a", chain=[{"url": "https://old/a", "status": 308}])
     assert classify_redirect(pair, src) == REDIRECT_OK
+
+
+def test_verdict_ok_bare_host_target():
+    pair = UrlPair("http://github.com", "https://github.com")
+    src = _src("http://github.com", "https://github.com/", chain=[{"url": "http://github.com", "status": 301}])
+    assert classify_redirect(pair, src) == REDIRECT_OK
+
+
+def test_verdict_no_redirect_for_client_normalized_root():
+    # A chainless bare-host fetch whose final URL only gained the root slash
+    # has not redirected.
+    pair = UrlPair("http://example.com", "http://example.com")
+    src = _src("http://example.com", "http://example.com/", chain=[])
+    assert classify_redirect(pair, src) == NO_REDIRECT
 
 
 # --- row building + fail-on -------------------------------------------------

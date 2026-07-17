@@ -53,17 +53,16 @@ class PairParseResult:
 def normalize_url_for_match(url: str | None) -> str:
     """Light normalization for redirect-target equality (ticket 122).
 
-    Lowercases scheme+host and drops a single trailing slash so ``…/path`` and
-    ``…/path/`` match, and ``HTTP://Host`` matches ``http://host``. Deliberately
-    conservative — query and fragment are preserved."""
+    Lowercases scheme+host and drops trailing slashes so ``…/path`` and
+    ``…/path/`` match, a bare host matches its ``/`` root, and ``HTTP://Host``
+    matches ``http://host``. Deliberately conservative — query and fragment
+    are preserved."""
     if not url:
         return ""
     parts = urlsplit(url.strip())
     scheme = parts.scheme.lower()
     netloc = parts.netloc.lower()
-    path = parts.path
-    if len(path) > 1 and path.endswith("/"):
-        path = path.rstrip("/")
+    path = parts.path.rstrip("/")
     return urlunsplit((scheme, netloc, path, parts.query, parts.fragment))
 
 
@@ -131,7 +130,9 @@ def classify_redirect(pair: UrlPair, source: CrawlResult | None) -> str:
         return ERROR_STATUS
 
     chain = source.redirect_chain or []
-    redirected = bool(chain) or normalize_url_for_match(source.final_url) != normalize_url_for_match(source.requested_url)
+    redirected = bool(chain) or normalize_url_for_match(source.final_url) != normalize_url_for_match(
+        source.requested_url
+    )
     if not redirected:
         return NO_REDIRECT
 
@@ -238,6 +239,7 @@ def rows_failing(rows: list[dict[str, object]], mode: str) -> list[dict[str, obj
     - ``content_changed``: content verdict is ``changed`` (near/identical pass).
     - ``any``: either of the above.
     """
+
     def is_redirect_mismatch(row: dict[str, object]) -> bool:
         return row.get("redirect_verdict") in _MISMATCH_VERDICTS
 
@@ -249,6 +251,7 @@ def rows_failing(rows: list[dict[str, object]], mode: str) -> list[dict[str, obj
     elif mode == "content_changed":
         predicate = is_content_changed
     elif mode == "any":
+
         def predicate(row: dict[str, object]) -> bool:
             return is_redirect_mismatch(row) or is_content_changed(row)
     else:

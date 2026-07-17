@@ -331,9 +331,7 @@ class AiohttpBackend(FetchBackend):
 
             elapsed = time.monotonic() - started
             # aiohttp keeps each redirect response in ``history`` (ticket 122).
-            redirect_chain = [
-                {"url": str(hop.url), "status": hop.status} for hop in response.history
-            ]
+            redirect_chain = [{"url": str(hop.url), "status": hop.status} for hop in response.history]
             result = FetchResponse(
                 url=str(response.url),
                 requested_url=url,

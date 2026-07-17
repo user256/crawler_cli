@@ -14,7 +14,9 @@ def _artifact(path, results):
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _result(requested, final, *, status=200, chain=None, raw_html="<html><body><p>hello world</p></body></html>", title="T"):
+def _result(
+    requested, final, *, status=200, chain=None, raw_html="<html><body><p>hello world</p></body></html>", title="T"
+):
     extracted = ExtractedContent(
         title=title,
         meta_description=None,
@@ -114,6 +116,48 @@ def test_compare_urls_clean_mapping_passes(tmp_path):
         ]
     )
     assert code == 0
+
+
+def test_compare_urls_source_resolution_ignores_final_url(tmp_path):
+    # Artifact holds A->B then B->C (a chained migration mapping). The pair
+    # B->C must resolve to the crawl of B (requested_url), not the A result
+    # that merely redirected to B — otherwise B's verdict is computed from
+    # A's redirect and reports redirect_wrong_target on a correct mapping.
+    src = tmp_path / "src.json"
+    tgt = tmp_path / "tgt.json"
+    pairs = tmp_path / "pairs.csv"
+    out = tmp_path / "out.json"
+
+    _artifact(
+        src,
+        [
+            _result("https://old/a", "https://old/b", chain=[{"url": "https://old/a", "status": 301}]),
+            _result("https://old/b", "https://new/c", chain=[{"url": "https://old/b", "status": 301}]),
+        ],
+    )
+    _artifact(tgt, [_result("https://new/c", "https://new/c")])
+    pairs.write_text("source_url,target_url\nhttps://old/b,https://new/c\n", encoding="utf-8")
+
+    code = _run(
+        [
+            "compare-urls",
+            "--pairs",
+            str(pairs),
+            "--source-artifact",
+            str(src),
+            "--target-artifact",
+            str(tgt),
+            "--output",
+            str(out),
+            "--fail-on",
+            "redirect_mismatch",
+        ]
+    )
+    assert code == 0
+
+    rows = json.loads(out.read_text(encoding="utf-8"))
+    assert rows[0]["redirect_verdict"] == "redirect_ok"
+    assert rows[0]["source_final_url"] == "https://new/c"
 
 
 def test_redirect_chain_survives_serialization_round_trip(tmp_path):

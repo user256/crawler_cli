@@ -1771,6 +1771,7 @@ async def _resolve_compare_urls_side(
     store_dsn: str | None,
     run_id: str | None,
     fetch_missing: bool,
+    match_final_url: bool = True,
     args: argparse.Namespace,
 ) -> dict[str, "CrawlResult"]:
     """Resolve page data for one side of ``compare-urls`` in precedence order:
@@ -1778,15 +1779,28 @@ async def _resolve_compare_urls_side(
 
     A single batched ``crawl_list`` runs for whatever remains unresolved when
     ``--fetch-missing`` is set — never one fetch per row.
+
+    ``match_final_url=False`` (the source side) matches results by
+    ``requested_url`` only: a result that merely *redirected to* a source URL
+    must not stand in for a crawl of that URL, or its redirect verdict would be
+    attributed to the wrong pair. The target side keeps ``final_url`` as a
+    fallback, where content — not redirect behaviour — is what's compared.
     """
     wanted = list(dict.fromkeys(urls))
+    wanted_set = set(wanted)
     resolved: dict[str, CrawlResult] = {}
 
     def _index(results: "list[CrawlResult]") -> None:
         for result in results:
-            for key in (result.requested_url, result.final_url):
-                if key in wanted and key not in resolved:
-                    resolved[key] = result
+            key = result.requested_url
+            if key in wanted_set and key not in resolved:
+                resolved[key] = result
+        if not match_final_url:
+            return
+        for result in results:
+            key = result.final_url
+            if key in wanted_set and key not in resolved:
+                resolved[key] = result
 
     if artifact:
         _index(_load_saved_crawl(Path(artifact)).results)
@@ -1883,6 +1897,7 @@ async def _run_compare_urls(args: argparse.Namespace) -> int:
         store_dsn=args.source_store,
         run_id=args.source_run,
         fetch_missing=args.fetch_missing,
+        match_final_url=False,
         args=args,
     )
     target_by_url = await _resolve_compare_urls_side(
@@ -2294,7 +2309,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "compare",
         help="Compare two crawls (saved JSON artifacts or stored runs), with optional host remapping",
     )
-    cmp_parser.add_argument("baseline_json", nargs="?", help="Baseline crawl JSON path (omit when using --baseline-store)")
+    cmp_parser.add_argument(
+        "baseline_json", nargs="?", help="Baseline crawl JSON path (omit when using --baseline-store)"
+    )
     cmp_parser.add_argument(
         "candidate_json", nargs="?", help="Candidate crawl JSON path (omit when using --candidate-store)"
     )
@@ -2335,8 +2352,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Compare mapped source->target URL pairs from a CSV and validate redirects",
     )
     urls_parser.add_argument("--pairs", required=True, metavar="CSV", help="Mapping CSV with source/target columns")
-    urls_parser.add_argument("--source-column", default="source_url", help="CSV source URL column (default: source_url)")
-    urls_parser.add_argument("--target-column", default="target_url", help="CSV target URL column (default: target_url)")
+    urls_parser.add_argument(
+        "--source-column", default="source_url", help="CSV source URL column (default: source_url)"
+    )
+    urls_parser.add_argument(
+        "--target-column", default="target_url", help="CSV target URL column (default: target_url)"
+    )
     urls_parser.add_argument("--source-artifact", metavar="JSON", help="Source-side crawl JSON to resolve pages from")
     urls_parser.add_argument("--target-artifact", metavar="JSON", help="Target-side crawl JSON to resolve pages from")
     urls_parser.add_argument("--source-store", metavar="DSN", help="Source-side PostgreSQL crawl (DSN)")
