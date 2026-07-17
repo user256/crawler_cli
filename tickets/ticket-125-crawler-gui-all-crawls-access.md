@@ -79,4 +79,41 @@ landed in the repo with tests instead of living as untracked local WIP.
   regress (fixture parity guard from ticket 118 stays green).
 
 ## Status
-open (2026-07-17) — prerequisite for ticket 124.
+done (2026-07-17) — landed as commit `ee7ae6e`.
+
+### Delivery notes
+- **A:** `crawler_gui/server.py` committed with its mapping layer split into pure
+  functions (`page_from_row`, `attach_link_graph`, `overview_from_counts`,
+  `structured_data_of`, `is_external`). Tests: `tests/test_crawler_gui_server.py`
+  (11 unit tests, no DB) + a DSN-gated
+  `test_crawler_gui_bridge_serves_run_scoped_paginated_snapshots` in
+  `test_persistence_integration.py`. README documents usage, endpoints, security
+  posture, and behaviours.
+- **B:** `offset`/`limit` pagination on `/api/live/snapshot` with
+  `live.hasMore`/`totalPages`/`windowEnd`; toolbar shows
+  `Showing X of Y URLs` + **Load more** until fully loaded. The overview and
+  issue counts moved to a **whole-run SQL aggregate** (`_run_counts`), so they
+  no longer describe only the loaded window and stay correct while paging.
+- **C:** legacy (pre-095) databases collapse to a single `current-state` entry
+  with `runScoped: false`, surfaced in the UI as *current state — not
+  run-scoped*. Verified against a simulated pre-095 DB: 3 `crawl_runs` rows that
+  each claimed all 12 URLs became one honest entry.
+- **D:** inlinks/outlinks (with anchor text) from `internal_links`, bounded to
+  the loaded window; structured data from `schema_json`; response time from
+  `total_duration_seconds` (stays `null`, not 0, when unrecorded).
+
+### Fixed beyond the original scope
+- **Content-type never matched.** Live rows carry `text/html; charset=utf-8`,
+  but `category_hints`/`overview` compare to exactly `text/html` — so in live
+  mode every HTML category tab (titles/meta/h1/canonicals/links) and every
+  content stat silently read as zero. `page_from_row` now normalises to the base
+  media type.
+- **`legacy` placeholder run** (`DEFAULT_CRAWL_RUN_ID`, empty seeds, 0 pages) is
+  hidden from the run list when it holds no pages.
+
+### Evidence
+- Real Postgres, 12-page seeded run: `?limit=5` → banner `Showing 5 of 12 URLs`,
+  Load more → 10 → 12, button hides, 12 unique rows, no duplicates, sidebar
+  showing whole-run totals throughout, zero JS errors (headless Chromium).
+- Link graph on real data: 11 real inlinks with anchor text on the seed page.
+- Integration + unit suites green; full suite 691 passed / 42 skipped.

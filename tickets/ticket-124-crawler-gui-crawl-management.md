@@ -88,4 +88,57 @@ Turn crawler_gui from a viewer into a local crawl manager:
   Obscura backend. Windows app-bound cookie encryption is the known risk.
 
 ## Status
-open (2026-07-17) — depends on ticket 125.
+done (2026-07-17) — landed as commit `13911e1` (on top of 125's `ee7ae6e`).
+
+### Delivery notes
+- **A:** `#run-selector` dropdown in the crawl bar (live mode only) listing every
+  run with domain/URL count/date/status; `switchRun()` re-fetches in place and
+  `replaceState`s `?run=` so URLs stay shareable. History-modal cards are
+  clickable and switch the same way. The `legacy` migration run is labelled
+  *legacy (migrated current state)* rather than shown as a nameless crawl.
+- **B:** `POST /api/live/crawls` → 202 `{jobId, runId}`; `GET
+  /api/live/crawls/{jobId}` → state/exit code/log tail. `CrawlLauncher` spawns
+  `python -m crawler_cli crawl …` (argv list, no shell) against the bridge DSN.
+  Single active job: a second submission returns **409** naming the running job.
+  The GUI polls, shows `Crawl running · run …` in the status bar, auto-loads the
+  new run on success, and surfaces the crawler's own output tail on failure.
+  `parse_crawl_spec`/`build_crawl_argv` are pure and unit-tested (7 tests).
+- **C:** README documents the boundary change, endpoints, config mapping, list
+  mode, the empty-database flow, and the `legacy` quirk.
+
+### Decisions
+- Only fields with a real CLI flag are mapped; the Configuration modal's
+  `delay` has **no** crawl-side flag and was deliberately not invented.
+- List mode requires a local CSV path — `crawler_cli` does not ingest hosted URL
+  lists — and says so instead of guessing.
+- **Delete stays out** of the GUI, per the ticket constraint.
+
+### Fixed during implementation (found by running it)
+- **Empty database 500'd.** `/api/live/runs` raised on a database with no
+  schema — precisely 124's opening flow (point at a fresh DB, start the first
+  crawl). Now returns `[]`, and `/api/live/snapshot` returns a valid empty shell
+  so New Crawl works. An explicitly requested unknown run still 404s.
+- **Stale schema flag.** `has_run_snapshots` was cached at connect time, so a
+  bridge started against an empty DB kept mislabelling every later run as
+  unscoped *current state* until restarted. The schema is now re-read per
+  request.
+
+### Evidence (real crawls, headless Chromium)
+- Empty DB → GUI opens on *"No crawls in this database yet"* → **New crawl** on
+  a real local site → `Crawl running · run gui-…` → crawl completes (4 pages,
+  `durability=durable`) → run auto-loads, 4 rows, selector appears, `?run=` set.
+- Second crawl → 2 runs listed with correct per-run counts (4 and 2), both
+  `runScoped: true`; dropdown switch 2↔4 rows; history-card switch back; zero
+  JS errors.
+- Guards: concurrent submit → `409 a crawl is already running (job …)`;
+  `ftp://` target → `400 seed URL must be an http(s) URL`.
+- Suites: 698 passed / 42 skipped, 27 Postgres integration tests, node 5/5,
+  ruff + mypy clean.
+
+### Follow-up worth a ticket
+`AsyncpgStore.initialize()` backfills current-state rows into a one-time
+`legacy` snapshot run (`persistence.py:1276`) on **every** init, not just for
+genuinely pre-095 installs. On a modern database the next crawl therefore
+mirrors the previous crawl's pages — including `html_compressed` — into a
+phantom `legacy` run, roughly doubling snapshot storage for those pages. Engine
+behaviour, out of scope here; surfaced by the GUI making all runs visible.

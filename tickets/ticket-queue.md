@@ -15,12 +15,13 @@ Ticket files remain the source of truth for scope and DoD.
 - The 2026-07-16 batch is fully landed: 114–117 (PRs #36/#37/#38/#39),
   118/119 (GUI, PRs #42/#45), and 095+120 (run-aware snapshots, PR #44).
 - Tickets **101–108** form the completed intent-overlap reporting baseline.
-- Tickets **124** (GUI crawl management) and **125** (GUI all-crawls DB
-  access) are filed 2026-07-17; **125 lands first** (it commits the untracked
-  `crawler_gui/server.py` bridge that 124 builds on). A GUI Chrome-profile
-  picker is a planned follow-up recorded in 124 — the engine side already
+- Tickets **125** (GUI all-crawls DB access, `ee7ae6e`) and **124** (GUI crawl
+  management, `13911e1`) are **done** (2026-07-17), landed in that order. The
+  `crawler_gui/server.py` bridge is now tracked, paginates every run, tells the
+  truth on legacy schemas, and can start crawls locally. A GUI Chrome-profile
+  picker remains the planned follow-up recorded in 124 — the engine side already
   ships (`--playwright-user-data-dir` / `--playwright-channel chrome`).
-- Ticket **110** remains unused/rejected; next unreserved number is **126**.
+- Ticket **110** remains unused/rejected; next unreserved number is **127**.
 - Leftover review worktrees (`/tmp/crawler_cli_pr33`, `/tmp/crawler_cli_pr44`)
   removed 2026-07-17.
 
@@ -30,7 +31,7 @@ Ticket files remain the source of truth for scope and DoD.
   the affected fields.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**126**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**127**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -299,11 +300,15 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 - `121` `done` (2026-07-16) [ticket-121-crawler-gui-shell-hygiene.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-121-crawler-gui-shell-hygiene.md) — **P3:** offline shell, no competitor capture/screenshots, and documented grid HTTP requirement
 - `122` `done` (2026-07-17, PR #47; remediations → 123) [ticket-122-compare-remap-and-url-pair-mapping.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-122-compare-remap-and-url-pair-mapping.md) — **P2:** site-to-site compare: `--replace` host remapping + simhash hamming tolerance on `compare`, and the `compare-urls` CSV pair/redirect-mapping command (redirect-chain capture, store-backed page loading, `--fail-on` CI gating). Reviewed MERGE+REMEDIATE: two review bugs fixed pre-merge (root-URL trailing-slash matching in `normalize_url_for_match`; source-side resolution now matches `requested_url` only) + 4 regression tests; store-loader evidence recorded against real Postgres; suite 680 passed / 41 skipped, ruff+mypy clean
 
-### Open work — priority order (2026-07-17, updated after PR #47 review)
+### crawler_gui live operation (2026-07-17)
+
+- `125` `done` (2026-07-17, commit `ee7ae6e`) [ticket-125-crawler-gui-all-crawls-access.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-125-crawler-gui-all-crawls-access.md) — **P2:** GUI live mode reaches every crawl run in the connected DB — `server.py` bridge landed with 11 unit tests + a DSN-gated integration test; `offset`/`limit` pagination with a `Showing X of Y` banner and Load more (no more silent 5k truncation); overview/issues moved to a whole-run SQL aggregate so they stay correct while paging; legacy pre-095 DBs collapse to one honest `current-state` entry instead of N runs each claiming the whole database; inlinks/outlinks/structured-data/response-time filled from the DB (absent stays `null`, not 0). Also fixed live-mode content-type never matching `text/html` (every HTML category tab and content stat silently read zero) and hid the empty `legacy` placeholder run
+- `124` `done` (2026-07-17, commit `13911e1`) [ticket-124-crawler-gui-crawl-management.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-124-crawler-gui-crawl-management.md) — **P2, depended on 125:** manage crawls from the GUI — run-selector dropdown + clickable history cards (replacing hand-edited `?run=`, URLs stay shareable) and a working "+ New Crawl" via `POST /api/live/crawls` spawning the real `crawler_cli` CLI, with single-job 409 guard, progress polling, auto-load of the finished run, and failure output surfaced. Consciously extends the read-only bridge for local submission; **delete stays CLI/API-only**. Verified end-to-end against real crawls in headless Chromium. Fixed: empty-DB 500 and a stale `has_run_snapshots` flag that mislabelled runs until restart. Chrome-profile picker is the recorded follow-up; `legacy` backfill duplication → 126
+
+### Open work — priority order (2026-07-17)
 
 - `123` `open` [ticket-123-compare-urls-review-remediations.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-123-compare-urls-review-remediations.md) — **P2:** ticket-122 review remediations — flag-less `compare` hash-recompute behaviour change (+ double recompute per row), `--replace` silently no-op for store-loaded sides (falls back to un-remapped stored hashes), persisted-session/`--persist` test gap, CSV redirect-hops output, distinct `--fail-on` exit code, identity-mapping verdicts, artifact-path error handling, hreflang-diff scope correction
-- `125` `open` [ticket-125-crawler-gui-all-crawls-access.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-125-crawler-gui-all-crawls-access.md) — **P2:** GUI live mode gets complete access to every crawl run in the connected DB — land the untracked `server.py` bridge with tests, kill the 5k-page silent truncation (pagination/load-more), fix the legacy-schema run-scoping lie (global counts claimed by every run), fill stubbed inlinks/response-time fields from the DB. Prerequisite for 124
-- `124` `open` [ticket-124-crawler-gui-crawl-management.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-124-crawler-gui-crawl-management.md) — **P2, depends on 125:** manage crawls from the GUI — in-UX run-selector dropdown (+ clickable history cards) replacing hand-edited `?run=` params, and a working "+ New Crawl" (`POST /api/live/crawls` bridge endpoint spawning the `crawler_cli` CLI, single-job guard, progress + failure surfacing). Consciously extends the read-only-bridge boundary for local submission; delete stays CLI/API-only. Chrome-profile picker recorded as the follow-up
+- `126` `open` [ticket-126-legacy-snapshot-backfill-duplication.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-126-legacy-snapshot-backfill-duplication.md) — **P3:** `AsyncpgStore.initialize()` re-runs the pre-095 `legacy` snapshot backfill on every init, so on a never-legacy database the next crawl mirrors the previous crawl's pages (including `html_compressed`) into a phantom `legacy` run — roughly doubling snapshot storage for those pages. Gate it on the database actually being legacy. Found while building 124
 
 Deferred lanes remain below.
 
