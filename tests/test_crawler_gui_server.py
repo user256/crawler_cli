@@ -9,6 +9,7 @@ integration test in ``test_persistence_integration.py``.
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ _SERVER_PATH = Path(__file__).resolve().parents[1] / "crawler_gui" / "server.py"
 _spec = importlib.util.spec_from_file_location("crawler_gui_server", _SERVER_PATH)
 assert _spec and _spec.loader
 server = importlib.util.module_from_spec(_spec)
+# Register before exec: dataclasses resolve field types via sys.modules.
+sys.modules["crawler_gui_server"] = server
 _spec.loader.exec_module(server)
 
 
@@ -175,3 +178,86 @@ def test_parse_int_clamps_and_rejects():
     assert server._parse_int("99", minimum=1, maximum=10, name="limit") == 10  # clamped down
     with pytest.raises(server.web.HTTPBadRequest):
         server._parse_int("abc", minimum=1, maximum=10, name="limit")
+
+
+# --- ticket 124: crawl submission -------------------------------------------
+
+
+def test_parse_crawl_spec_defaults_and_run_id():
+    spec = server.parse_crawl_spec({"url": "https://site.example"})
+    assert spec.target == "https://site.example"
+    assert spec.mode == "Spider"
+    assert spec.respect_robots is True
+    assert spec.run_id.startswith("gui-")  # generated, unique per submission
+
+
+def test_parse_crawl_spec_rejects_bad_input():
+    with pytest.raises(ValueError, match="target is required"):
+        server.parse_crawl_spec({"url": "  "})
+    with pytest.raises(ValueError, match="http"):
+        server.parse_crawl_spec({"url": "ftp://site.example"})
+    with pytest.raises(ValueError, match="unknown crawl mode"):
+        server.parse_crawl_spec({"url": "https://s.example", "mode": "Sideways"})
+    with pytest.raises(ValueError, match="unknown backend"):
+        server.parse_crawl_spec({"url": "https://s.example", "backend": "telepathy"})
+    with pytest.raises(ValueError, match="whole number"):
+        server.parse_crawl_spec({"url": "https://s.example", "maxPages": "lots"})
+
+
+def test_parse_crawl_spec_list_mode_requires_local_csv(tmp_path):
+    with pytest.raises(ValueError, match="local CSV file"):
+        server.parse_crawl_spec({"url": "https://site.example/urls.txt", "mode": "List"})
+    csv_file = tmp_path / "urls.csv"
+    csv_file.write_text("url\nhttps://site.example/a\n", encoding="utf-8")
+    spec = server.parse_crawl_spec({"url": str(csv_file), "mode": "List"})
+    assert spec.mode == "List"
+
+
+def test_build_crawl_argv_spider():
+    spec = server.parse_crawl_spec(
+        {
+            "url": "https://site.example",
+            "runId": "gui-run-1",
+            "maxPages": 200,
+            "concurrency": 5,
+            "backend": "aiohttp",
+            "userAgent": "test-agent",
+            "respectRobots": True,
+        }
+    )
+    argv = server.build_crawl_argv(spec, "postgresql://u:p@h/db")
+    assert argv[1:4] == ["-m", "crawler_cli", "crawl"]
+    assert "https://site.example" in argv
+    assert argv[argv.index("--postgres-dsn") + 1] == "postgresql://u:p@h/db"
+    assert argv[argv.index("--crawl-run-id") + 1] == "gui-run-1"
+    assert argv[argv.index("--max-pages") + 1] == "200"
+    assert argv[argv.index("--concurrency") + 1] == "5"
+    assert argv[argv.index("--http-backend") + 1] == "aiohttp"
+    assert argv[argv.index("--custom-ua") + 1] == "test-agent"
+    assert "--ignore-robots" not in argv  # robots respected
+
+
+def test_build_crawl_argv_ignore_robots_and_js():
+    spec = server.parse_crawl_spec({"url": "https://site.example", "respectRobots": False, "backend": "playwright"})
+    argv = server.build_crawl_argv(spec, "dsn")
+    assert "--ignore-robots" in argv
+    assert "--js" in argv  # playwright maps to --js, not --http-backend
+    assert "--http-backend" not in argv
+
+
+def test_build_crawl_argv_list_mode(tmp_path):
+    csv_file = tmp_path / "urls.csv"
+    csv_file.write_text("url\nhttps://site.example/a\n", encoding="utf-8")
+    spec = server.parse_crawl_spec({"url": str(csv_file), "mode": "List"})
+    argv = server.build_crawl_argv(spec, "dsn")
+    assert argv[argv.index("--csv-file") + 1] == str(csv_file)
+    assert argv[argv.index("--csv-column") + 1] == "url"
+
+
+def test_build_crawl_argv_is_argv_not_shell():
+    # Values are passed as argv entries and spawned without a shell, so shell
+    # metacharacters in a target cannot inject a second command.
+    spec = server.parse_crawl_spec({"url": "https://site.example/a;rm -rf /"})
+    argv = server.build_crawl_argv(spec, "dsn")
+    assert "https://site.example/a;rm -rf /" in argv
+    assert all(isinstance(part, str) for part in argv)

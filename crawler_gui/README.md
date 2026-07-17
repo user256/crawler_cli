@@ -100,12 +100,60 @@ python3 crawler_gui/server.py --postgres-dsn postgresql://user:pass@localhost:54
 |---|---|
 | `GET /api/live/runs` | Every crawl run in the database with per-run URL/HTML counts |
 | `GET /api/live/snapshot?run=&limit=&offset=` | One page window of a run, plus whole-run overview/issues |
+| `POST /api/live/crawls` | Start a crawl (ticket 124) — 202 with `{jobId, runId}` |
+| `GET /api/live/crawls/{jobId}` | Job state, exit code, and a tail of its output |
 
 URL params: `?live=1` enables live mode, `?run=<run_id>` selects a run (the URL
 stays shareable), `?limit=<n>` sets the page-window size.
 
-**Security posture:** binds `127.0.0.1` only, no auth, read-only. It is a
-development bridge, not the `crawler_api` control plane — do not expose it.
+**Security posture:** binds `127.0.0.1` only, no auth. It is a development
+bridge, not the `crawler_api` control plane — do not expose it.
+
+## Managing crawls (ticket 124)
+
+**Boundary decision.** This bridge was read-only by design, with crawl
+submission reserved for `crawler_api`. Ticket 124 consciously relaxes that for
+local-first use: submission runs here, over loopback. **Delete stays out** —
+`delete-crawl` remains a CLI/API action, and there is no cancel. When
+`crawler_api` owns jobs (auth, isolation, concurrency), submission should move
+there.
+
+- **Run selector.** In live mode the crawl bar shows a dropdown of every run in
+  the database; picking one loads it in place and updates `?run=` so the URL
+  stays shareable. History-modal cards switch runs the same way. (Previously the
+  only way to change run was hand-editing the URL.)
+- **New crawl.** The New Crawl modal submits to `POST /api/live/crawls`, which
+  spawns `python -m crawler_cli crawl …` as a subprocess against the bridge's
+  DSN — the real CLI, so robots/politeness/backends all apply. The status bar
+  polls the job; on success the new run loads automatically, and on failure the
+  tail of the crawler's own output is surfaced rather than the run vanishing.
+- **One job at a time.** A second submission while one runs returns `409` naming
+  the active job. Job records are in-memory: restarting the bridge forgets them
+  (the crawl runs themselves are in Postgres and unaffected).
+- **Config mapping.** Only fields with a real CLI flag are mapped
+  (`maxPages`→`--max-pages`, `concurrency`→`--concurrency`,
+  `respectRobots`→`--ignore-robots`, `userAgent`→`--custom-ua`, backend→
+  `--http-backend`/`--js`). The Configuration modal's `delay` has no crawl-side
+  CLI flag and is deliberately **not** invented.
+- **List mode** needs a path to a local CSV file — `crawler_cli` does not ingest
+  hosted URL lists, so a hosted list is rejected with that message.
+- **Empty database.** A database with no crawls is a valid starting point: the
+  GUI opens on an empty shell and New Crawl works. The bridge re-reads which
+  tables exist per request, so a first crawl that creates the schema is picked
+  up without a restart.
+
+Values are passed as an argv list and spawned without a shell, so a crawl target
+cannot inject a second command.
+
+### Known upstream quirk — the `legacy` run
+
+`AsyncpgStore.initialize()` backfills current-state rows into a one-time
+`legacy` snapshot run so pre-095 data stays visible to run-scoped readers. It
+re-runs on every init, so on a modern database the *next* crawl mirrors the
+previous crawl's pages into a `legacy` run. The selector labels it
+*legacy (migrated current state)* rather than hiding it, and hides it entirely
+when it holds no pages. The duplication itself is engine behaviour, not the
+bridge's.
 
 ### Behaviours worth knowing
 

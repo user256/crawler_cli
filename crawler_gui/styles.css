@@ -210,6 +210,11 @@ button.ghost {
   padding: 0.4rem 0.5rem;
 }
 
+#run-selector {
+  max-width: 22rem;
+  color: var(--text-dim);
+}
+
 .mini-progress {
   width: 72px;
   height: 18px;

@@ -17,6 +17,7 @@ const state = {
   intentViewer: null,
   live: false,
   pageLimit: null,
+  crawlJobId: null,
 };
 
 const INTENT_ONLY_DATA = {
@@ -203,6 +204,37 @@ function renderCrawlBar() {
   const pct = c.progress.pct;
   $("#mini-progress-fill").style.width = `${pct}%`;
   $("#mini-progress-label").textContent = `${Math.round(pct)}%`;
+  renderRunSelector();
+}
+
+function runOptionLabel(run) {
+  // "legacy" is crawler_cli's migration run holding pre-run-scoped current
+  // state, not a crawl someone started — say so instead of showing "—".
+  const name = run.id === "legacy" ? "legacy (migrated current state)" : run.domain || run.url || run.id;
+  const bits = [name, `${run.urls} URLs`];
+  if (run.date) bits.push(run.date);
+  if (run.status && run.id !== "legacy") bits.push(run.status);
+  return bits.join(" · ");
+}
+
+function renderRunSelector() {
+  const select = $("#run-selector");
+  const runs = state.data.history || [];
+  // The fixture prototype has no bridge to switch against, so the selector is
+  // live-only; history cards still render in both modes.
+  if (!state.live || runs.length === 0) {
+    select.hidden = true;
+    return;
+  }
+  select.hidden = false;
+  select.innerHTML = runs
+    .map(
+      (run) =>
+        `<option value="${escapeHtml(run.id)}"${run.id === state.data.crawl.id ? " selected" : ""}>${escapeHtml(
+          runOptionLabel(run)
+        )}</option>`
+    )
+    .join("");
 }
 
 function renderCategoryTabs() {
@@ -458,7 +490,7 @@ function renderHistoryModal() {
   list.innerHTML = items
     .map(
       (h) => `
-    <div class="history-card${h.viewing ? " viewing" : ""}">
+    <div class="history-card${h.viewing ? " viewing" : ""}" data-run="${escapeHtml(h.id)}">
       <div>
         <div>
           <span class="badge ${escapeHtml(h.status)}">${escapeHtml(h.status)}</span>
@@ -580,6 +612,15 @@ function bindEvents() {
 
   $("#btn-load-more").addEventListener("click", loadMore);
 
+  $("#run-selector").addEventListener("change", (e) => switchRun(e.target.value));
+
+  $("#history-list").addEventListener("click", (e) => {
+    const card = e.target.closest("[data-run]");
+    if (!card || !state.live) return;
+    closeModals();
+    switchRun(card.dataset.run);
+  });
+
   $("#btn-options").addEventListener("click", () => {
     state.configContext = "crawl";
     renderOptionsModal();
@@ -636,7 +677,7 @@ function bindEvents() {
       return;
     }
     if (state.live) {
-      toast("Live GUI is read-only for now; crawl submission will go through crawler_api.");
+      startLiveCrawl(url);
       return;
     }
     state.data.crawl.url = url;
@@ -745,6 +786,115 @@ async function fetchSnapshot({ run, offset = 0, limit = state.pageLimit } = {}) 
   return res.json();
 }
 
+function liveChipLabel() {
+  return state.data.crawl.id ? `live Postgres · ${state.data.crawl.id}` : "live Postgres · no crawls yet";
+}
+
+async function startLiveCrawl(url) {
+  const btn = $("#btn-start-crawl");
+  btn.disabled = true;
+  btn.textContent = "Starting…";
+  try {
+    const cfg = state.data.configDefaults || {};
+    const res = await fetch(new URL("./api/live/crawls", window.location.href), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url,
+        mode: state.newCrawlType,
+        name: $("#new-crawl-name").value.trim(),
+        maxPages: cfg.maxPages,
+        concurrency: cfg.concurrency,
+        backend: cfg.useJs ? "playwright" : cfg.backend,
+        userAgent: cfg.userAgent,
+        respectRobots: cfg.respectRobots,
+      }),
+    });
+    // Read the body once: bridge errors are plain text, successes are JSON.
+    const raw = await res.text();
+    let body = null;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      /* A refusal (409 already running, 400 bad target) explains itself in text. */
+    }
+    if (!res.ok) throw new Error(raw || `${res.status} ${res.statusText}`);
+    closeModals();
+    state.crawlJobId = body.jobId;
+    toast(`Crawl started — run ${body.runId}`);
+    pollCrawlJob(body.jobId);
+  } catch (err) {
+    toast(`Could not start crawl: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Start crawl";
+  }
+}
+
+async function pollCrawlJob(jobId) {
+  clearTimeout(pollCrawlJob._t);
+  let job = null;
+  try {
+    const res = await fetch(new URL(`./api/live/crawls/${jobId}`, window.location.href), { cache: "no-store" });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    job = await res.json();
+  } catch (err) {
+    toast(`Lost track of the crawl job: ${err.message}`);
+    return;
+  }
+  $("#status-label").textContent = `Crawl ${job.state} · run ${job.runId}`;
+  if (job.state === "running") {
+    pollCrawlJob._t = setTimeout(() => pollCrawlJob(jobId), 2000);
+    return;
+  }
+  if (job.state === "failed") {
+    // Surface the real reason instead of letting the run vanish silently.
+    const tail = (job.log || []).slice(-3).join(" | ") || `exit code ${job.exitCode}`;
+    toast(`Crawl failed: ${tail}`);
+  } else {
+    toast(`Crawl finished — loading run ${job.runId}`);
+  }
+  await refreshRuns(job.runId);
+}
+
+async function refreshRuns(preferRunId) {
+  try {
+    const res = await fetch(new URL("./api/live/runs", window.location.href), { cache: "no-store" });
+    if (!res.ok) return;
+    const { runs } = await res.json();
+    const target = runs.find((r) => r.id === preferRunId);
+    if (target) {
+      // The new run exists now, so show it without restarting the bridge.
+      state.data.history = runs;
+      await switchRun(preferRunId);
+    } else {
+      state.data.history = runs.map((r) => ({ ...r, viewing: r.id === state.data.crawl.id }));
+      renderRunSelector();
+    }
+  } catch {
+    /* Leave the current view intact; the selector still shows known runs. */
+  }
+}
+
+async function switchRun(runId) {
+  if (!state.live || !runId || runId === state.data.crawl.id) return;
+  try {
+    const next = await fetchSnapshot({ run: runId });
+    state.data = next;
+    state.selectedId = state.data.pages[0]?.id ?? null;
+    // Keep the URL shareable: the selected run stays addressable via ?run=.
+    const url = new URL(window.location.href);
+    url.searchParams.set("run", runId);
+    window.history.replaceState({}, "", url);
+    $(".user-chip").textContent = liveChipLabel();
+    renderAll();
+    toast(`Viewing run ${runId}`);
+  } catch (err) {
+    toast(`Could not load run ${runId}: ${err.message}`);
+    renderRunSelector(); // put the selector back on the run actually shown
+  }
+}
+
 async function loadMore() {
   const live = state.data.live;
   if (!live?.hasMore) return;
@@ -808,7 +958,7 @@ async function main() {
     state.selectedId = state.data.pages[0]?.id ?? null;
     bindEvents();
     renderAll();
-    if (state.live) $(".user-chip").textContent = `live Postgres · ${state.data.crawl.id}`;
+    if (state.live) $(".user-chip").textContent = liveChipLabel();
   } catch (err) {
     const source = state.live ? "the live crawler snapshot" : "sample-data.json";
     const remedy = state.live

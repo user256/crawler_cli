@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Local, read-only bridge between ``crawler_gui`` and crawler_cli Postgres.
+"""Local bridge between ``crawler_gui`` and a crawler_cli Postgres database.
 
 This is deliberately a development server, not the product control plane. It
 binds loopback only, serves the static GUI, and exposes immutable run snapshots
-through JSON endpoints. Crawl submission, cancellation, and deletion stay out of
-this read-only bridge (ticket 125); local submission is added separately by
-ticket 124.
+through JSON endpoints.
+
+**Boundary (ticket 124).** The bridge was read-only by design, with crawl
+submission reserved for ``crawler_api``. Ticket 124 consciously relaxes that for
+local-first use: ``POST /api/live/crawls`` starts a real crawl by spawning the
+``crawler_cli`` CLI as a subprocess against this bridge's DSN. Cancellation and
+**deletion stay out** — ``delete-crawl`` remains a CLI/API action. Submission is
+in-memory and single-job: it is a local convenience, not job management.
 
 Two database shapes are supported:
 
@@ -29,10 +34,14 @@ extraction time, so they are genuinely absent rather than hidden here.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import copy
 import json
 import os
-from collections import defaultdict
+import sys
+import uuid
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -47,6 +56,7 @@ TEMPLATE_PATH = GUI_DIR / "sample-data.json"
 MAX_PAGE_LIMIT = 10_000
 DEFAULT_PAGE_LIMIT = 5_000
 LEGACY_RUN_ID = "current-state"
+LOG_TAIL_LINES = 40
 
 
 def status_label(code: int | None) -> str:
@@ -244,17 +254,200 @@ def attach_link_graph(
         page["outlinks"] = outlinks.get(uid, []) + page["outlinks"]
 
 
+@dataclass
+class CrawlSpec:
+    """A validated New Crawl request from the GUI."""
+
+    target: str
+    mode: str = "Spider"
+    run_id: str = ""
+    name: str = ""
+    max_pages: int | None = None
+    concurrency: int | None = None
+    backend: str = ""
+    user_agent: str = ""
+    respect_robots: bool = True
+    csv_column: str = "url"
+
+
+def new_run_id() -> str:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"gui-{stamp}-{uuid.uuid4().hex[:8]}"
+
+
+def parse_crawl_spec(payload: dict[str, Any]) -> CrawlSpec:
+    """Validate a New Crawl payload into a CrawlSpec (pure).
+
+    Raises ``ValueError`` with an operator-readable message; the caller maps
+    that to a 400 rather than a traceback."""
+    target = str(payload.get("url") or "").strip()
+    if not target:
+        raise ValueError("a crawl target is required")
+    mode = str(payload.get("mode") or "Spider").strip() or "Spider"
+    if mode not in {"Spider", "List"}:
+        raise ValueError(f"unknown crawl mode: {mode}")
+    if mode == "Spider":
+        scheme = urlparse(target).scheme.lower()
+        if scheme not in {"http", "https"}:
+            raise ValueError("seed URL must be an http(s) URL")
+    else:
+        # The CLI's list mode reads a local CSV file; a hosted list URL is not
+        # something crawler_cli ingests today, so say so instead of guessing.
+        if not Path(target).expanduser().is_file():
+            raise ValueError(
+                "list mode needs a path to a local CSV file of URLs (hosted URL lists are not supported)"
+            )
+
+    def _positive_int(key: str) -> int | None:
+        raw = payload.get(key)
+        if raw in (None, ""):
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a whole number") from None
+        if value < 0:
+            raise ValueError(f"{key} must not be negative")
+        return value
+
+    backend = str(payload.get("backend") or "").strip()
+    if backend and backend not in {"aiohttp", "curl_cffi", "playwright"}:
+        raise ValueError(f"unknown backend: {backend}")
+
+    return CrawlSpec(
+        target=target,
+        mode=mode,
+        run_id=str(payload.get("runId") or "").strip() or new_run_id(),
+        name=str(payload.get("name") or "").strip(),
+        max_pages=_positive_int("maxPages"),
+        concurrency=_positive_int("concurrency"),
+        backend=backend,
+        user_agent=str(payload.get("userAgent") or "").strip(),
+        respect_robots=bool(payload.get("respectRobots", True)),
+        csv_column=str(payload.get("csvColumn") or "url").strip() or "url",
+    )
+
+
+def build_crawl_argv(spec: CrawlSpec, dsn: str) -> list[str]:
+    """Map a CrawlSpec onto a ``crawler_cli crawl`` argv (pure).
+
+    Only fields with a real CLI flag are mapped — the GUI's ``delay`` has no
+    crawl-side equivalent and is deliberately not invented here. Built as an
+    argv list and spawned without a shell, so values cannot inject."""
+    argv = [sys.executable, "-m", "crawler_cli", "crawl"]
+    if spec.mode == "List":
+        argv += ["--csv-file", spec.target, "--csv-column", spec.csv_column]
+    else:
+        argv.append(spec.target)
+    argv += ["--postgres-dsn", dsn, "--crawl-run-id", spec.run_id]
+    if spec.max_pages is not None:
+        argv += ["--max-pages", str(spec.max_pages)]
+    if spec.concurrency:
+        argv += ["--concurrency", str(spec.concurrency)]
+    if not spec.respect_robots:
+        argv.append("--ignore-robots")
+    if spec.user_agent:
+        argv += ["--custom-ua", spec.user_agent]
+    if spec.backend == "playwright":
+        argv.append("--js")
+    elif spec.backend:
+        argv += ["--http-backend", spec.backend]
+    return argv
+
+
+@dataclass
+class CrawlJob:
+    id: str
+    run_id: str
+    target: str
+    mode: str
+    state: str = "running"  # running | succeeded | failed
+    started_at: str = ""
+    finished_at: str | None = None
+    exit_code: int | None = None
+    log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_TAIL_LINES))
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "jobId": self.id, "runId": self.run_id, "target": self.target, "mode": self.mode,
+            "state": self.state, "startedAt": self.started_at, "finishedAt": self.finished_at,
+            "exitCode": self.exit_code, "log": list(self.log),
+        }
+
+
+class CrawlLauncher:
+    """Runs one crawl at a time by spawning the crawler_cli CLI (ticket 124).
+
+    Deliberately minimal: in-memory job records, single active job, no cancel
+    and no delete. Real job management belongs to ``crawler_api``.
+    """
+
+    def __init__(self, dsn: str) -> None:
+        self.dsn = dsn
+        self.jobs: dict[str, CrawlJob] = {}
+        self._active_id: str | None = None
+
+    def active_job(self) -> CrawlJob | None:
+        job = self.jobs.get(self._active_id or "")
+        return job if job and job.state == "running" else None
+
+    async def start(self, spec: CrawlSpec) -> CrawlJob:
+        running = self.active_job()
+        if running is not None:
+            raise RuntimeError(running.id)
+        job = CrawlJob(
+            id=uuid.uuid4().hex[:12], run_id=spec.run_id, target=spec.target,
+            mode=spec.mode, started_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        )
+        argv = build_crawl_argv(spec, self.dsn)
+        proc = await asyncio.create_subprocess_exec(
+            *argv, cwd=str(GUI_DIR.parent),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        self.jobs[job.id] = job
+        self._active_id = job.id
+        asyncio.create_task(self._watch(job, proc))
+        return job
+
+    async def _watch(self, job: CrawlJob, proc: asyncio.subprocess.Process) -> None:
+        assert proc.stdout
+        async for raw in proc.stdout:
+            job.log.append(raw.decode("utf-8", "replace").rstrip())
+        job.exit_code = await proc.wait()
+        job.state = "succeeded" if job.exit_code == 0 else "failed"
+        job.finished_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
 class LiveStore:
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn
         self.pool: asyncpg.Pool | None = None
         self.has_run_snapshots = False
+        self.has_crawl_schema = False
         self.template = json.loads(TEMPLATE_PATH.read_text(encoding="utf-8"))
 
     async def connect(self) -> None:
         self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=4)
+        await self._refresh_schema()
+
+    async def _refresh_schema(self) -> None:
+        """Re-read which tables exist, per request.
+
+        Not cached at startup: the bridge may be pointed at an empty database
+        and the first GUI-started crawl (ticket 124) creates the schema
+        underneath it. A stale 'no snapshots' flag would then mislabel every
+        run as unscoped current state until the bridge was restarted."""
+        assert self.pool
         async with self.pool.acquire() as conn:
-            self.has_run_snapshots = bool(await conn.fetchval("SELECT to_regclass('page_run_snapshots')"))
+            row = await conn.fetchrow(
+                """
+                SELECT to_regclass('crawl_runs') IS NOT NULL AS has_runs,
+                       to_regclass('page_run_snapshots') IS NOT NULL AS has_snapshots,
+                       to_regclass('page_metadata') IS NOT NULL AS has_pages
+                """
+            )
+        self.has_crawl_schema = bool(row["has_runs"] and row["has_pages"])
+        self.has_run_snapshots = bool(row["has_snapshots"])
 
     async def close(self) -> None:
         if self.pool:
@@ -262,6 +455,11 @@ class LiveStore:
 
     async def runs(self) -> list[dict[str, Any]]:
         assert self.pool
+        await self._refresh_schema()
+        if not self.has_crawl_schema:
+            # An empty database is a legitimate starting point: the GUI can
+            # still open and start its first crawl (ticket 124).
+            return []
         if self.has_run_snapshots:
             # The 'legacy' DEFAULT_CRAWL_RUN_ID row is a schema compatibility
             # placeholder, not a user crawl; hide it when it holds no pages.
@@ -448,10 +646,38 @@ class LiveStore:
         async with self.pool.acquire() as conn:
             return await conn.fetch(query, limit, offset)
 
+    def _empty_snapshot(self) -> dict[str, Any]:
+        """A valid, empty payload for a database with no crawls yet.
+
+        Returned instead of a 404 so the GUI shell renders and New Crawl works
+        against a fresh database (ticket 124). An explicitly requested but
+        unknown run still 404s — that is a different, real error."""
+        data = copy.deepcopy(self.template)
+        data["meta"] = {"uiName": "crawler_gui · live", "source": "PostgreSQL (no crawls yet)", "runId": None}
+        data["nav"] = [item for item in data["nav"] if item["id"] != "intent-overlap"]
+        data["pages"] = []
+        data["history"] = []
+        data["crawl"] = {
+            "id": None, "url": "", "mode": "Spider", "status": "none",
+            "statusLabel": "No crawls in this database yet — start one with New crawl",
+            "progress": {"completed": 0, "total": 0, "pct": 0.0, "remaining": 0},
+            "speed": {"average": 0.0, "current": 0.0}, "startedAt": None, "finishedAt": None,
+        }
+        data["overview"] = overview_from_counts({})
+        data["issues"] = []
+        data["live"] = {
+            "runId": None, "totalPages": 0, "snapshotBacked": self.has_run_snapshots,
+            "runScoped": True, "offset": 0, "limit": 0, "loaded": 0, "windowEnd": 0,
+            "hasMore": False, "truncated": False, "empty": True,
+        }
+        return data
+
     async def snapshot(self, run_id: str | None, limit: int, offset: int = 0) -> dict[str, Any]:
         runs = await self.runs()
         if not runs:
-            raise web.HTTPNotFound(text="No crawl runs found in this database.")
+            if run_id:
+                raise web.HTTPNotFound(text=f"Crawl run not found: {run_id}")
+            return self._empty_snapshot()
         if self.has_run_snapshots:
             selected = next((run for run in runs if run["id"] == run_id), runs[0])
             if run_id and selected["id"] != run_id:
@@ -519,6 +745,36 @@ async def runs_handler(request: web.Request) -> web.Response:
     return web.json_response({"runs": await store.runs()})
 
 
+async def create_crawl_handler(request: web.Request) -> web.Response:
+    """Start a crawl (ticket 124). 409 while another job is running."""
+    launcher: CrawlLauncher = request.app["launcher"]
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise web.HTTPBadRequest(text="body must be JSON") from None
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="body must be a JSON object")
+    try:
+        spec = parse_crawl_spec(payload)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc)) from None
+    try:
+        job = await launcher.start(spec)
+    except RuntimeError as exc:
+        raise web.HTTPConflict(text=f"a crawl is already running (job {exc})") from None
+    except OSError as exc:
+        raise web.HTTPInternalServerError(text=f"could not start crawl: {exc}") from None
+    return web.json_response(job.as_json(), status=202)
+
+
+async def crawl_status_handler(request: web.Request) -> web.Response:
+    launcher: CrawlLauncher = request.app["launcher"]
+    job = launcher.jobs.get(request.match_info["job_id"])
+    if job is None:
+        raise web.HTTPNotFound(text=f"unknown job: {request.match_info['job_id']}")
+    return web.json_response(job.as_json())
+
+
 async def index_handler(_: web.Request) -> web.FileResponse:
     return web.FileResponse(GUI_DIR / "index.html")
 
@@ -538,11 +794,14 @@ async def no_cache(_: web.Request, response: web.StreamResponse) -> None:
 def build_app(dsn: str) -> web.Application:
     app = web.Application()
     app["store"] = LiveStore(dsn)
+    app["launcher"] = CrawlLauncher(dsn)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     app.on_response_prepare.append(no_cache)
     app.router.add_get("/api/live/runs", runs_handler)
     app.router.add_get("/api/live/snapshot", snapshot_handler)
+    app.router.add_post("/api/live/crawls", create_crawl_handler)
+    app.router.add_get("/api/live/crawls/{job_id}", crawl_status_handler)
     app.router.add_get("/", index_handler)
     app.router.add_static("/", GUI_DIR, show_index=True)
     return app
