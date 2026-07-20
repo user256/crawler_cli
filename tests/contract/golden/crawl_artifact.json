@@ -1,0 +1,398 @@
+{
+  "schema_version": "crawler-cli/crawl-artifact/1",
+  "mode": "list",
+  "run_id": "run-3344",
+  "seed_urls": [
+    "https://old.example/a"
+  ],
+  "saved_to": "crawl.json",
+  "crawled_count": 8,
+  "blocked_count": 0,
+  "challenge_blocked_count": 0,
+  "persist_error_count": 0,
+  "persist_failed_urls": [],
+  "durability": "durable",
+  "frontier_mark_done_error_count": 0,
+  "frontier_mark_done_failed_urls": [],
+  "crawl_run_status": null,
+  "retry_attempts": 0,
+  "interrupted": false,
+  "refresh_skipped_count": 0,
+  "results": [
+    {
+      "requested_url": "https://old.example/a",
+      "final_url": "https://new.example/a",
+      "status": 200,
+      "headers": {},
+      "content_type": "text/html",
+      "fetch_backend": "aiohttp",
+      "raw_html": "<html><body><h1>Alpha</h1><p>the quick brown fox jumps over the lazy dog near the quiet river bank today</p></body></html>",
+      "content_hash_sha256": "eb44bf891485053a7983b4e5bc08bea0b42e2d5340bb79bee84a660596d75624",
+      "content_hash_simhash": 1149681161556551646,
+      "discovered_links": [],
+      "allowed_by_robots": null,
+      "skip_reason": null,
+      "persist_error": null,
+      "challenge": null,
+      "ttfb_seconds": null,
+      "total_duration_seconds": null,
+      "lcp_ms": null,
+      "cls": null,
+      "inp_ms": null,
+      "redirect_chain": [
+        {
+          "url": "https://old.example/a",
+          "status": 301
+        }
+      ],
+      "custom_data": null,
+      "detected_cms": null,
+      "detected_analytics": null,
+      "extracted": {
+        "title": "Alpha",
+        "meta_description": null,
+        "meta_robots": [],
+        "x_robots_tag": [],
+        "canonical": null,
+        "x_canonical": null,
+        "hreflang_links": [],
+        "html_lang": "en",
+        "headings": {
+          "h1": [
+            "Alpha"
+          ],
+          "h2": []
+        },
+        "text": "",
+        "word_count": 18,
+        "metadata": {},
+        "schema_data": []
+      }
+    },
+    {
+      "requested_url": "https://old.example/b",
+      "final_url": "https://new.example/b",
+      "status": 200,
+      "headers": {},
+      "content_type": "text/html",
+      "fetch_backend": "aiohttp",
+      "raw_html": "<html><body><h1>Alpha</h1><p>the quick brown fox jumps over the lazy dog near the quiet river bank today</p></body></html>",
+      "content_hash_sha256": "eb44bf891485053a7983b4e5bc08bea0b42e2d5340bb79bee84a660596d75624",
+      "content_hash_simhash": 1149681161556551646,
+      "discovered_links": [],
+      "allowed_by_robots": null,
+      "skip_reason": null,
+      "persist_error": null,
+      "challenge": null,
+      "ttfb_seconds": null,
+      "total_duration_seconds": null,
+      "lcp_ms": null,
+      "cls": null,
+      "inp_ms": null,
+      "redirect_chain": [
+        {
+          "url": "https://old.example/b",
+          "status": 301
+        },
+        {
+          "url": "https://old.example/b-interim",
+          "status": 301
+        }
+      ],
+      "custom_data": null,
+      "detected_cms": null,
+      "detected_analytics": null,
+      "extracted": {
+        "title": "Beta",
+        "meta_description": null,
+        "meta_robots": [],
+        "x_robots_tag": [],
+        "canonical": null,
+        "x_canonical": null,
+        "hreflang_links": [],
+        "html_lang": "en",
+        "headings": {
+          "h1": [
+            "Beta"
+          ],
+          "h2": []
+        },
+        "text": "",
+        "word_count": 18,
+        "metadata": {},
+        "schema_data": []
+      }
+    },
+    {
+      "requested_url": "https://old.example/c",
+      "final_url": "https://new.example/c",
+      "status": 200,
+      "headers": {},
+      "content_type": "text/html",
+      "fetch_backend": "aiohttp",
+      "raw_html": "<html><body><h1>Alpha</h1><p>the quick brown fox jumps over the lazy dog near the quiet river bank today</p></body></html>",
+      "content_hash_sha256": "eb44bf891485053a7983b4e5bc08bea0b42e2d5340bb79bee84a660596d75624",
+      "content_hash_simhash": 1149681161556551646,
+      "discovered_links": [],
+      "allowed_by_robots": null,
+      "skip_reason": null,
+      "persist_error": null,
+      "challenge": null,
+      "ttfb_seconds": null,
+      "total_duration_seconds": null,
+      "lcp_ms": null,
+      "cls": null,
+      "inp_ms": null,
+      "redirect_chain": [
+        {
+          "url": "https://old.example/c",
+          "status": 302
+        }
+      ],
+      "custom_data": null,
+      "detected_cms": null,
+      "detected_analytics": null,
+      "extracted": {
+        "title": "Gamma",
+        "meta_description": null,
+        "meta_robots": [],
+        "x_robots_tag": [],
+        "canonical": null,
+        "x_canonical": null,
+        "hreflang_links": [],
+        "html_lang": "en",
+        "headings": {
+          "h1": [
+            "Gamma"
+          ],
+          "h2": []
+        },
+        "text": "",
+        "word_count": 18,
+        "metadata": {},
+        "schema_data": []
+      }
+    },
+    {
+      "requested_url": "https://old.example/d",
+      "final_url": "https://old.example/d",
+      "status": 200,
+      "headers": {},
+      "content_type": "text/html",
+      "fetch_backend": "aiohttp",
+      "raw_html": "<html><body><h1>Alpha</h1><p>the quick brown fox jumps over the lazy dog near the quiet river bank today</p></body></html>",
+      "content_hash_sha256": "eb44bf891485053a7983b4e5bc08bea0b42e2d5340bb79bee84a660596d75624",
+      "content_hash_simhash": 1149681161556551646,
+      "discovered_links": [],
+      "allowed_by_robots": null,
+      "skip_reason": null,
+      "persist_error": null,
+      "challenge": null,
+      "ttfb_seconds": null,
+      "total_duration_seconds": null,
+      "lcp_ms": null,
+      "cls": null,
+      "inp_ms": null,
+      "redirect_chain": [],
+      "custom_data": null,
+      "detected_cms": null,
+      "detected_analytics": null,
+      "extracted": {
+        "title": "Delta",
+        "meta_description": null,
+        "meta_robots": [],
+        "x_robots_tag": [],
+        "canonical": null,
+        "x_canonical": null,
+        "hreflang_links": [],
+        "html_lang": "en",
+        "headings": {
+          "h1": [
+            "Delta"
+          ],
+          "h2": []
+        },
+        "text": "",
+        "word_count": 18,
+        "metadata": {},
+        "schema_data": []
+      }
+    },
+    {
+      "requested_url": "https://old.example/e",
+      "final_url": "https://new.example/elsewhere",
+      "status": 200,
+      "headers": {},
+      "content_type": "text/html",
+      "fetch_backend": "aiohttp",
+      "raw_html": "<html><body><h1>Alpha</h1><p>the quick brown fox jumps over the lazy dog near the quiet river bank today</p></body></html>",
+      "content_hash_sha256": "eb44bf891485053a7983b4e5bc08bea0b42e2d5340bb79bee84a660596d75624",
+      "content_hash_simhash": 1149681161556551646,
+      "discovered_links": [],
+      "allowed_by_robots": null,
+      "skip_reason": null,
+      "persist_error": null,
+      "challenge": null,
+      "ttfb_seconds": null,
+      "total_duration_seconds": null,
+      "lcp_ms": null,
+      "cls": null,
+      "inp_ms": null,
+      "redirect_chain": [
+        {
+          "url": "https://old.example/e",
+          "status": 301
+        }
+      ],
+      "custom_data": null,
+      "detected_cms": null,
+      "detected_analytics": null,
+      "extracted": {
+        "title": "Epsilon",
+        "meta_description": null,
+        "meta_robots": [],
+        "x_robots_tag": [],
+        "canonical": null,
+        "x_canonical": null,
+        "hreflang_links": [],
+        "html_lang": "en",
+        "headings": {
+          "h1": [
+            "Epsilon"
+          ],
+          "h2": []
+        },
+        "text": "",
+        "word_count": 18,
+        "metadata": {},
+        "schema_data": []
+      }
+    },
+    {
+      "requested_url": "https://old.example/f",
+      "final_url": "https://old.example/f",
+      "status": 404,
+      "headers": {},
+      "content_type": null,
+      "fetch_backend": "aiohttp",
+      "raw_html": null,
+      "content_hash_sha256": null,
+      "content_hash_simhash": null,
+      "discovered_links": [],
+      "allowed_by_robots": null,
+      "skip_reason": null,
+      "persist_error": null,
+      "challenge": null,
+      "ttfb_seconds": null,
+      "total_duration_seconds": null,
+      "lcp_ms": null,
+      "cls": null,
+      "inp_ms": null,
+      "redirect_chain": [],
+      "custom_data": null,
+      "detected_cms": null,
+      "detected_analytics": null,
+      "extracted": null
+    },
+    {
+      "requested_url": "https://old.example/h",
+      "final_url": "https://new.example/h",
+      "status": 200,
+      "headers": {},
+      "content_type": "text/html",
+      "fetch_backend": "aiohttp",
+      "raw_html": "<html><body><h1>Alpha</h1><p>the quick brown fox jumps over the lazy dog near the quiet river bank today</p></body></html>",
+      "content_hash_sha256": "eb44bf891485053a7983b4e5bc08bea0b42e2d5340bb79bee84a660596d75624",
+      "content_hash_simhash": 1149681161556551646,
+      "discovered_links": [],
+      "allowed_by_robots": null,
+      "skip_reason": null,
+      "persist_error": null,
+      "challenge": null,
+      "ttfb_seconds": null,
+      "total_duration_seconds": null,
+      "lcp_ms": null,
+      "cls": null,
+      "inp_ms": null,
+      "redirect_chain": [
+        {
+          "url": "https://old.example/h",
+          "status": 301
+        }
+      ],
+      "custom_data": null,
+      "detected_cms": null,
+      "detected_analytics": null,
+      "extracted": {
+        "title": "Eta",
+        "meta_description": null,
+        "meta_robots": [],
+        "x_robots_tag": [],
+        "canonical": null,
+        "x_canonical": null,
+        "hreflang_links": [],
+        "html_lang": "en",
+        "headings": {
+          "h1": [
+            "Eta"
+          ],
+          "h2": []
+        },
+        "text": "",
+        "word_count": 18,
+        "metadata": {},
+        "schema_data": []
+      }
+    },
+    {
+      "requested_url": "https://old.example/i",
+      "final_url": "https://new.example/i",
+      "status": 200,
+      "headers": {},
+      "content_type": "text/html",
+      "fetch_backend": "aiohttp",
+      "raw_html": null,
+      "content_hash_sha256": "sha-source-i",
+      "content_hash_simhash": -6955753827659690935,
+      "discovered_links": [],
+      "allowed_by_robots": null,
+      "skip_reason": null,
+      "persist_error": null,
+      "challenge": null,
+      "ttfb_seconds": null,
+      "total_duration_seconds": null,
+      "lcp_ms": null,
+      "cls": null,
+      "inp_ms": null,
+      "redirect_chain": [
+        {
+          "url": "https://old.example/i",
+          "status": 301
+        }
+      ],
+      "custom_data": null,
+      "detected_cms": null,
+      "detected_analytics": null,
+      "extracted": {
+        "title": "Iota",
+        "meta_description": null,
+        "meta_robots": [],
+        "x_robots_tag": [],
+        "canonical": null,
+        "x_canonical": null,
+        "hreflang_links": [],
+        "html_lang": "en",
+        "headings": {
+          "h1": [
+            "Iota"
+          ],
+          "h2": []
+        },
+        "text": "",
+        "word_count": 18,
+        "metadata": {},
+        "schema_data": []
+      }
+    }
+  ]
+}

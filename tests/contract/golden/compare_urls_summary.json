@@ -1,0 +1,13 @@
+{
+  "schema_version": "crawler-cli/compare-urls/1",
+  "pairs": 9,
+  "redirect_verdicts": {
+    "redirect_ok": 3,
+    "redirect_chain": 1,
+    "redirect_temporary": 1,
+    "no_redirect": 1,
+    "redirect_wrong_target": 1,
+    "error_status": 1,
+    "not_crawled": 1
+  }
+}

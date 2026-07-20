@@ -1,0 +1,17 @@
+{
+  "schema_version": "crawler-cli/compare/1",
+  "missing_urls": [
+    "https://old.example/gone"
+  ],
+  "new_urls": [
+    "https://new.example/fresh"
+  ],
+  "title_changes": 1,
+  "url_moves": 1,
+  "schema_changes": 0,
+  "link_changes": 1,
+  "content_verdicts": {
+    "near": 1,
+    "identical": 2
+  }
+}

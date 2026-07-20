@@ -1,0 +1,10 @@
+source_url,target_url,source_status,target_status,source_final_url,redirect_verdict,redirect_hops,sha256_equal,simhash_distance,content_verdict,note
+https://old.example/a,https://new.example/a,200,200,https://new.example/a,redirect_ok,1,True,0,identical,homepage
+https://old.example/b,https://new.example/b,200,200,https://new.example/b,redirect_chain,2,False,1,near,
+https://old.example/c,https://new.example/c,200,200,https://new.example/c,redirect_temporary,1,False,27,changed,
+https://old.example/d,https://new.example/d,200,200,https://old.example/d,no_redirect,0,True,0,identical,
+https://old.example/e,https://new.example/e,200,200,https://new.example/elsewhere,redirect_wrong_target,1,True,0,identical,
+https://old.example/f,https://new.example/f,404,200,https://old.example/f,error_status,0,False,,changed,
+https://old.example/g,https://new.example/g,,,,not_crawled,0,,,missing,
+https://old.example/h,https://new.example/h,200,,https://new.example/h,redirect_ok,1,,,missing,
+https://old.example/i,https://new.example/i,200,200,https://new.example/i,redirect_ok,1,False,0,near,

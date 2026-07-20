@@ -614,7 +614,7 @@ def test_run_compare_accepts_open_crawl_jsonl_and_preserves_deep_diff_fields():
         code = asyncio.run(_run_compare(args))
         assert code == 0
 
-        rows = json.loads(out_path.read_text(encoding="utf-8"))
+        rows = json.loads(out_path.read_text(encoding="utf-8"))["rows"]
         assert rows[0]["baseline_title"] == "Old title"
         assert rows[0]["candidate_title"] == "New title"
         assert rows[0]["baseline_h1"] == "Old H1"

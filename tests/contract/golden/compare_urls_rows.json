@@ -1,0 +1,346 @@
+{
+  "schema_version": "crawler-cli/compare-urls/1",
+  "rows": [
+    {
+      "source_url": "https://old.example/a",
+      "target_url": "https://new.example/a",
+      "source_status": 200,
+      "target_status": 200,
+      "source_final_url": "https://new.example/a",
+      "redirect_verdict": "redirect_ok",
+      "redirect_chain": [
+        {
+          "url": "https://old.example/a",
+          "status": 301
+        }
+      ],
+      "sha256_equal": true,
+      "simhash_distance": 0,
+      "content_verdict": "identical",
+      "field_deltas": {
+        "title": {
+          "source": "Alpha",
+          "target": "Alpha",
+          "changed": false
+        },
+        "h1": {
+          "source": "Alpha",
+          "target": "Alpha",
+          "changed": false
+        },
+        "meta_description": {
+          "source": null,
+          "target": null,
+          "changed": false
+        },
+        "word_count": {
+          "source": 18,
+          "target": 18,
+          "changed": false
+        }
+      },
+      "note": "homepage"
+    },
+    {
+      "source_url": "https://old.example/b",
+      "target_url": "https://new.example/b",
+      "source_status": 200,
+      "target_status": 200,
+      "source_final_url": "https://new.example/b",
+      "redirect_verdict": "redirect_chain",
+      "redirect_chain": [
+        {
+          "url": "https://old.example/b",
+          "status": 301
+        },
+        {
+          "url": "https://old.example/b-interim",
+          "status": 301
+        }
+      ],
+      "sha256_equal": false,
+      "simhash_distance": 1,
+      "content_verdict": "near",
+      "field_deltas": {
+        "title": {
+          "source": "Beta",
+          "target": "Beta",
+          "changed": false
+        },
+        "h1": {
+          "source": "Beta",
+          "target": "Beta",
+          "changed": false
+        },
+        "meta_description": {
+          "source": null,
+          "target": null,
+          "changed": false
+        },
+        "word_count": {
+          "source": 18,
+          "target": 18,
+          "changed": false
+        }
+      }
+    },
+    {
+      "source_url": "https://old.example/c",
+      "target_url": "https://new.example/c",
+      "source_status": 200,
+      "target_status": 200,
+      "source_final_url": "https://new.example/c",
+      "redirect_verdict": "redirect_temporary",
+      "redirect_chain": [
+        {
+          "url": "https://old.example/c",
+          "status": 302
+        }
+      ],
+      "sha256_equal": false,
+      "simhash_distance": 27,
+      "content_verdict": "changed",
+      "field_deltas": {
+        "title": {
+          "source": "Gamma",
+          "target": "Gamma Rewritten",
+          "changed": true
+        },
+        "h1": {
+          "source": "Gamma",
+          "target": "Gamma",
+          "changed": false
+        },
+        "meta_description": {
+          "source": null,
+          "target": null,
+          "changed": false
+        },
+        "word_count": {
+          "source": 18,
+          "target": 11,
+          "changed": true
+        }
+      }
+    },
+    {
+      "source_url": "https://old.example/d",
+      "target_url": "https://new.example/d",
+      "source_status": 200,
+      "target_status": 200,
+      "source_final_url": "https://old.example/d",
+      "redirect_verdict": "no_redirect",
+      "redirect_chain": [],
+      "sha256_equal": true,
+      "simhash_distance": 0,
+      "content_verdict": "identical",
+      "field_deltas": {
+        "title": {
+          "source": "Delta",
+          "target": "Delta",
+          "changed": false
+        },
+        "h1": {
+          "source": "Delta",
+          "target": "Delta",
+          "changed": false
+        },
+        "meta_description": {
+          "source": null,
+          "target": null,
+          "changed": false
+        },
+        "word_count": {
+          "source": 18,
+          "target": 18,
+          "changed": false
+        }
+      }
+    },
+    {
+      "source_url": "https://old.example/e",
+      "target_url": "https://new.example/e",
+      "source_status": 200,
+      "target_status": 200,
+      "source_final_url": "https://new.example/elsewhere",
+      "redirect_verdict": "redirect_wrong_target",
+      "redirect_chain": [
+        {
+          "url": "https://old.example/e",
+          "status": 301
+        }
+      ],
+      "sha256_equal": true,
+      "simhash_distance": 0,
+      "content_verdict": "identical",
+      "field_deltas": {
+        "title": {
+          "source": "Epsilon",
+          "target": "Epsilon",
+          "changed": false
+        },
+        "h1": {
+          "source": "Epsilon",
+          "target": "Epsilon",
+          "changed": false
+        },
+        "meta_description": {
+          "source": null,
+          "target": null,
+          "changed": false
+        },
+        "word_count": {
+          "source": 18,
+          "target": 18,
+          "changed": false
+        }
+      }
+    },
+    {
+      "source_url": "https://old.example/f",
+      "target_url": "https://new.example/f",
+      "source_status": 404,
+      "target_status": 200,
+      "source_final_url": "https://old.example/f",
+      "redirect_verdict": "error_status",
+      "redirect_chain": [],
+      "sha256_equal": false,
+      "simhash_distance": null,
+      "content_verdict": "changed",
+      "field_deltas": {
+        "title": {
+          "source": null,
+          "target": "Zeta",
+          "changed": true
+        },
+        "h1": {
+          "source": null,
+          "target": "Zeta",
+          "changed": true
+        },
+        "meta_description": {
+          "source": null,
+          "target": null,
+          "changed": false
+        },
+        "word_count": {
+          "source": null,
+          "target": 18,
+          "changed": true
+        }
+      }
+    },
+    {
+      "source_url": "https://old.example/g",
+      "target_url": "https://new.example/g",
+      "source_status": null,
+      "target_status": null,
+      "source_final_url": null,
+      "redirect_verdict": "not_crawled",
+      "redirect_chain": [],
+      "sha256_equal": null,
+      "simhash_distance": null,
+      "content_verdict": "missing",
+      "field_deltas": {
+        "title": {
+          "source": null,
+          "target": null,
+          "changed": false
+        },
+        "h1": {
+          "source": null,
+          "target": null,
+          "changed": false
+        },
+        "meta_description": {
+          "source": null,
+          "target": null,
+          "changed": false
+        },
+        "word_count": {
+          "source": null,
+          "target": null,
+          "changed": false
+        }
+      }
+    },
+    {
+      "source_url": "https://old.example/h",
+      "target_url": "https://new.example/h",
+      "source_status": 200,
+      "target_status": null,
+      "source_final_url": "https://new.example/h",
+      "redirect_verdict": "redirect_ok",
+      "redirect_chain": [
+        {
+          "url": "https://old.example/h",
+          "status": 301
+        }
+      ],
+      "sha256_equal": null,
+      "simhash_distance": null,
+      "content_verdict": "missing",
+      "field_deltas": {
+        "title": {
+          "source": "Eta",
+          "target": null,
+          "changed": true
+        },
+        "h1": {
+          "source": "Eta",
+          "target": null,
+          "changed": true
+        },
+        "meta_description": {
+          "source": null,
+          "target": null,
+          "changed": false
+        },
+        "word_count": {
+          "source": 18,
+          "target": null,
+          "changed": true
+        }
+      }
+    },
+    {
+      "source_url": "https://old.example/i",
+      "target_url": "https://new.example/i",
+      "source_status": 200,
+      "target_status": 200,
+      "source_final_url": "https://new.example/i",
+      "redirect_verdict": "redirect_ok",
+      "redirect_chain": [
+        {
+          "url": "https://old.example/i",
+          "status": 301
+        }
+      ],
+      "sha256_equal": false,
+      "simhash_distance": 0,
+      "content_verdict": "near",
+      "field_deltas": {
+        "title": {
+          "source": "Iota",
+          "target": "Iota",
+          "changed": false
+        },
+        "h1": {
+          "source": "Iota",
+          "target": "Iota",
+          "changed": false
+        },
+        "meta_description": {
+          "source": null,
+          "target": null,
+          "changed": false
+        },
+        "word_count": {
+          "source": 18,
+          "target": 18,
+          "changed": false
+        }
+      }
+    }
+  ]
+}
