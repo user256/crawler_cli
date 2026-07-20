@@ -121,9 +121,7 @@ def _resolve_store_dsn(args: argparse.Namespace, side: str) -> str | None:
     if env_var:
         value = os.environ.get(env_var)
         if not value:
-            raise ValueError(
-                f"Environment variable {env_var!r} for --{side}-store-env is not set or is empty"
-            )
+            raise ValueError(f"Environment variable {env_var!r} for --{side}-store-env is not set or is empty")
         return value
     for name in store_dsn_env_vars(side):
         value = os.environ.get(name)

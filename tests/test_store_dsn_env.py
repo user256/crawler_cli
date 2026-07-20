@@ -59,9 +59,7 @@ def test_store_env_flag_beats_fixed_env_var(monkeypatch):
 def test_inline_flag_wins_over_everything(monkeypatch):
     monkeypatch.setenv("CRAWLER_CLI_BASELINE_POSTGRES_DSN", VIA_FIXED_ENV)
     monkeypatch.setenv("MY_DEV_DSN", VIA_ENV_FLAG)
-    args = _compare_args(
-        ["a.json", "b.json", "--baseline-store", INLINE, "--baseline-store-env", "MY_DEV_DSN"]
-    )
+    args = _compare_args(["a.json", "b.json", "--baseline-store", INLINE, "--baseline-store-env", "MY_DEV_DSN"])
     assert _resolve_store_dsn(args, "baseline") == INLINE
 
 
