@@ -4,6 +4,14 @@ from typing import Any
 
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, ExtractedContent, FetchResponse
 
+CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/1"
+"""Schema identifier stamped on saved crawl artifacts (ticket 3344).
+
+Downstream consumers (e.g. the portal migration worker) pin on this string; any
+backward-incompatible change to the artifact shape must bump the trailing
+number and be called out in the changelog. Loaders keep accepting artifacts
+without the field (legacy list and pre-3344 dict formats)."""
+
 
 def serialize_browser_runtime(runtime: BrowserRuntime) -> dict[str, object]:
     return {
@@ -136,6 +144,7 @@ def serialize_job_summary_metadata(job: CrawlJobResult, *, saved_to: str | None 
 def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> dict[str, object]:
     resolved_saved_to = job.saved_to if saved_to is None else saved_to
     payload: dict[str, object] = {
+        "schema_version": CRAWL_ARTIFACT_SCHEMA_VERSION,
         "mode": job.mode,
         "run_id": job.run_id,
         "seed_urls": job.seed_urls,

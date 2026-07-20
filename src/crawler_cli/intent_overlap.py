@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 from urllib.parse import urlparse
 
 from .embeddings import ensure_single_model
+from .exit_codes import EXIT_FINDINGS
 from .hreflang_groups import (
     UnionFind,
     _strip_tracking_query,
@@ -1640,9 +1641,9 @@ async def run_intent_overlap(
 
     exit_code = 0
     if fail_on == "duplicate" and summary.get("duplicate_pages"):
-        exit_code = 3
+        exit_code = EXIT_FINDINGS
     elif fail_on == "overlap" and summary.get("overlap_pairs"):
-        exit_code = 3
+        exit_code = EXIT_FINDINGS
 
     return IntentOverlapRun(result=result, written=written, exit_code=exit_code)
 

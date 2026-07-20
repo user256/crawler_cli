@@ -38,7 +38,7 @@ from .cookies import (
 from .csv_urls import load_urls_from_csv
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
-from .exit_codes import EXIT_VALIDATION, resolve_crawl_exit_code
+from .exit_codes import EXIT_FINDINGS, EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .remap import Remap
@@ -57,6 +57,12 @@ from .validators import (
 )
 
 logger = logging.getLogger(__name__)
+
+COMPARE_SCHEMA_VERSION = "crawler-cli/compare/1"
+"""Schema identifier for ``compare --output`` JSON and its stdout summary (ticket 3344)."""
+
+COMPARE_URLS_SCHEMA_VERSION = "crawler-cli/compare-urls/1"
+"""Schema identifier for ``compare-urls --output`` JSON/CSV and its stdout summary (ticket 3344)."""
 
 
 def _env_or_default(prefix: str, key: str, default: str | None = None) -> str | None:
@@ -158,7 +164,14 @@ def _password_source_flag(args: argparse.Namespace) -> str | None:
 def _build_auth(args: argparse.Namespace) -> AuthConfig | None:
     auth_type = getattr(args, "auth_type", "") or ""
     username = getattr(args, "auth_username", "") or ""
-    token = getattr(args, "auth_token", "") or ""
+    # Bearer tokens accept the same secret sources as basic-auth passwords so
+    # automation can keep tokens out of process argv (ticket 3344).
+    token = _resolve_secret_sources(
+        value=getattr(args, "auth_token", "") or "",
+        env_var=getattr(args, "auth_token_env", "") or "",
+        file_path=getattr(args, "auth_token_file", "") or "",
+        label="auth-token",
+    )
     password_flag = _password_source_flag(args)
     password = _resolve_secret_sources(
         value=getattr(args, "auth_password", "") or "",
@@ -1055,6 +1068,8 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     auth.add_argument("--auth-password-env", help="Read the basic auth password from this environment variable")
     auth.add_argument("--auth-password-file", help="Read the basic auth password from this file")
     auth.add_argument("--auth-token", help="Bearer token or password fallback")
+    auth.add_argument("--auth-token-env", help="Read the bearer token from this environment variable")
+    auth.add_argument("--auth-token-file", help="Read the bearer token from this file")
     _add_postgres_args(parser)
 
 
@@ -1766,7 +1781,8 @@ async def _run_compare(args: argparse.Namespace) -> int:
     )
 
     if args.output:
-        Path(args.output).write_text(json.dumps(comparison_rows(diff), indent=2), encoding="utf-8")
+        payload = {"schema_version": COMPARE_SCHEMA_VERSION, "rows": comparison_rows(diff)}
+        Path(args.output).write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(f"Wrote comparison rows to {args.output}")
 
     if args.persist:
@@ -1791,6 +1807,7 @@ async def _run_compare(args: argparse.Namespace) -> int:
         print(
             json.dumps(
                 {
+                    "schema_version": COMPARE_SCHEMA_VERSION,
                     "missing_urls": diff.missing_urls,
                     "new_urls": diff.new_urls,
                     "title_changes": len(diff.title_changes),
@@ -1986,17 +2003,48 @@ async def _run_compare_urls(args: argparse.Namespace) -> int:
     for row in rows:
         key = str(row["redirect_verdict"])
         verdict_counts[key] = verdict_counts.get(key, 0) + 1
-    print(json.dumps({"pairs": len(rows), "redirect_verdicts": verdict_counts}, indent=2))
+    print(
+        json.dumps(
+            {
+                "schema_version": COMPARE_URLS_SCHEMA_VERSION,
+                "pairs": len(rows),
+                "redirect_verdicts": verdict_counts,
+            },
+            indent=2,
+        )
+    )
 
     if args.fail_on:
         failures = rows_failing(rows, args.fail_on)
         if failures:
+            # Findings, not a usage error: the run completed and the data
+            # failed the gate — distinct from EXIT_VALIDATION so CI callers can
+            # tell "bad invocation" from "bad mapping" (ticket 3344).
             print(
                 f"FAIL: {len(failures)} pair(s) tripped --fail-on {args.fail_on}",
                 file=sys.stderr,
             )
-            return EXIT_VALIDATION
+            return EXIT_FINDINGS
     return 0
+
+
+COMPARE_URLS_CSV_COLUMNS = [
+    "source_url",
+    "target_url",
+    "source_status",
+    "target_status",
+    "source_final_url",
+    "redirect_verdict",
+    "redirect_hops",
+    "sha256_equal",
+    "simhash_distance",
+    "content_verdict",
+    "note",
+]
+"""Frozen CSV column order for ``compare-urls --output *.csv`` (ticket 3344).
+
+Appending columns is allowed within ``compare-urls/1``; renaming, removing or
+reordering existing columns requires a schema-version bump."""
 
 
 def _write_compare_urls_output(rows: list[dict[str, object]], output: str) -> None:
@@ -2004,30 +2052,20 @@ def _write_compare_urls_output(rows: list[dict[str, object]], output: str) -> No
     if path.suffix.lower() == ".csv":
         import csv as _csv
 
-        fieldnames = [
-            "source_url",
-            "target_url",
-            "source_status",
-            "target_status",
-            "source_final_url",
-            "redirect_verdict",
-            "sha256_equal",
-            "simhash_distance",
-            "content_verdict",
-            "note",
-        ]
         with path.open("w", encoding="utf-8", newline="") as handle:
-            writer = _csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+            writer = _csv.DictWriter(handle, fieldnames=COMPARE_URLS_CSV_COLUMNS, extrasaction="ignore")
             writer.writeheader()
             for row in rows:
-                flat = {key: row.get(key) for key in fieldnames}
+                flat = {key: row.get(key) for key in COMPARE_URLS_CSV_COLUMNS}
+                # Hop count is its own column so ``source_final_url`` stays a
+                # clean URL for machine consumers (ticket 3344; previously the
+                # count was appended to the URL as decoration).
                 chain = cast("list[dict[str, object]]", row.get("redirect_chain", []))
-                flat["source_final_url"] = row.get("source_final_url")
-                if chain:
-                    flat["source_final_url"] = f"{row.get('source_final_url')} ({len(chain)} hop)"
+                flat["redirect_hops"] = len(chain)
                 writer.writerow(flat)
     else:
-        path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        payload = {"schema_version": COMPARE_URLS_SCHEMA_VERSION, "rows": rows}
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 async def _run_compact_html(args: argparse.Namespace) -> int:

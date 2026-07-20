@@ -85,9 +85,11 @@ def test_compare_urls_fail_on_redirect_mismatch(tmp_path, capsys):
             "redirect_mismatch",
         ]
     )
-    assert code != 0  # one pair does not redirect
+    assert code == 3  # findings gate: one pair does not redirect (EXIT_FINDINGS)
 
-    rows = json.loads(out.read_text(encoding="utf-8"))
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "crawler-cli/compare-urls/1"
+    rows = payload["rows"]
     verdicts = {r["source_url"]: r["redirect_verdict"] for r in rows}
     assert verdicts["https://old/a"] == "redirect_ok"
     assert verdicts["https://old/b"] == "no_redirect"
@@ -155,7 +157,7 @@ def test_compare_urls_source_resolution_ignores_final_url(tmp_path):
     )
     assert code == 0
 
-    rows = json.loads(out.read_text(encoding="utf-8"))
+    rows = json.loads(out.read_text(encoding="utf-8"))["rows"]
     assert rows[0]["redirect_verdict"] == "redirect_ok"
     assert rows[0]["source_final_url"] == "https://new/c"
 
