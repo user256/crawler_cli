@@ -175,7 +175,14 @@ crawler-cli --csv-file urls.csv --auth-type basic --auth-username admin --auth-p
 
 HTTP authentication supports Basic and Bearer credentials. Digest authentication
 is not advertised because the crawler does not perform Digest challenge/nonce
-negotiation and will not downgrade Digest credentials to Basic.
+negotiation and will not downgrade Digest credentials to Basic. Bearer tokens
+take the same secret sources as passwords — `--auth-token-env VAR` /
+`--auth-token-file PATH` keep the token out of process argv (provide only one
+of the three token sources). Credentials apply to the configured site only:
+they are stripped on cross-origin redirects and, with `AuthConfig.domain`
+scoping, never sent to other hosts (proven in
+`tests/contract/test_security_proofs.py`; the Playwright backend is excluded
+until ticket 129).
 
 Page HTML is **gzip-compressed by default** in `pages.html_compressed`. Use `--no-html-compression` only for debugging. Legacy uncompressed rows can be migrated with `compact-html`.
 
@@ -490,7 +497,9 @@ crawler-cli compare-urls --pairs mapping.csv \
     --fail-on redirect_mismatch
 ```
 
-Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any`. Replacements are literal strings applied in order (no regex in v1).
+Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any` and exits **3** (findings) when tripped — distinct from `2` (usage error). Replacements are literal strings applied in order (no regex in v1).
+
+JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/1`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
 
 ### 4. Storage lifecycle
 

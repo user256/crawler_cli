@@ -21,9 +21,24 @@ Ticket files remain the source of truth for scope and DoD.
   truth on legacy schemas, and can start crawls locally. A GUI Chrome-profile
   picker remains the planned follow-up recorded in 124 — the engine side already
   ships (`--playwright-user-data-dir` / `--playwright-channel chrome`).
-- Ticket **110** remains unused/rejected; **127** is now reserved (compare store-DSN env resolution); next unreserved number is **128**.
+- Ticket **110** remains unused/rejected; **127** is now reserved (compare store-DSN env resolution); **128** is reserved for the in-flight GUI Chrome-profile picker work (ticket 124 follow-up); next unreserved number is **130**.
 - Leftover review worktrees (`/tmp/crawler_cli_pr33`, `/tmp/crawler_cli_pr44`)
   removed 2026-07-17.
+
+### Current position (2026-07-20)
+
+- Portal ticket **3344** (Migration Manager release/contract spike) landed the
+  0.2.0 release-prep branch `agent/3344-release-contract`: golden contract
+  suite (`tests/contract/`) freezing the `compare` / `compare-urls` / crawl
+  artifact schemas (now stamped with explicit `schema_version` identifiers),
+  security proofs for argv/log credential hygiene and redirect credential
+  scoping, `--auth-token-env`/`--auth-token-file`, and the distinct
+  `EXIT_FINDINGS` (3) `--fail-on` exit code. That closes two ticket **123**
+  sub-items (CSV redirect-hops output; distinct `--fail-on` exit code) — the
+  rest of 123 stays open.
+- Ticket **129** filed: the Playwright backend applies auth as context-wide
+  headers/`http_credentials` without origin scoping — excluded from the
+  contract's security guarantees until fixed.
 
 ### Ordering rules
 
@@ -31,7 +46,7 @@ Ticket files remain the source of truth for scope and DoD.
   the affected fields.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**128**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**130**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -309,6 +324,7 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 
 - `123` `open` [ticket-123-compare-urls-review-remediations.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-123-compare-urls-review-remediations.md) — **P2:** ticket-122 review remediations — flag-less `compare` hash-recompute behaviour change (+ double recompute per row), `--replace` silently no-op for store-loaded sides (falls back to un-remapped stored hashes), persisted-session/`--persist` test gap, CSV redirect-hops output, distinct `--fail-on` exit code, identity-mapping verdicts, artifact-path error handling, hreflang-diff scope correction
 - `127` `in-review` [ticket-127-compare-store-dsn-env.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-127-compare-store-dsn-env.md) — **P2:** the ticket-122 per-side compare store flags take a literal DSN, putting credentials in shell history and the process list. Resolve each side from the environment instead — `CRAWLER_CLI_<SIDE>_POSTGRES_DSN` (also `PostgreSQLCrawler_` prefix) plus `--<side>-store-env VAR`, with inline `--<side>-store` kept as an override; named-but-unset variable fails fast. Implemented on `agent/127-compare-store-dsn-env`
+- `129` `open` [ticket-129-playwright-auth-origin-scoping.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-129-playwright-auth-origin-scoping.md) — **P2 (security):** the Playwright backend sets `http_credentials` without an `origin` restriction and merges Bearer/custom auth headers into context-level `extra_http_headers`, so credentials go to every origin (cross-origin redirects, third-party subresources) and `AuthConfig.domain` scoping is ignored. Scope credentials/headers per-origin and add `playwright_smoke` twins of the contract security proofs. Until then Playwright is excluded from the auth guarantees in `docs/portal-integration-contract.md`. Found during the 3344 contract spike
 - `126` `open` [ticket-126-legacy-snapshot-backfill-duplication.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-126-legacy-snapshot-backfill-duplication.md) — **P3:** `AsyncpgStore.initialize()` re-runs the pre-095 `legacy` snapshot backfill on every init, so on a never-legacy database the next crawl mirrors the previous crawl's pages (including `html_compressed`) into a phantom `legacy` run — roughly doubling snapshot storage for those pages. Gate it on the database actually being legacy. Found while building 124
 
 Deferred lanes remain below.

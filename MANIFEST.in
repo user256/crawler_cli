@@ -7,6 +7,7 @@ include RELEASING.md
 include pyproject.toml
 graft src
 graft tests
+graft docs
 global-exclude *.py[cod] *.so .DS_Store
 global-exclude */__pycache__/*
 prune runs
