@@ -32,7 +32,7 @@ async def test_fetch_page_uses_backend_and_closes_it(monkeypatch):
 
     def fake_build_backend(config):
         assert config.backend == "aiohttp"
-        assert config.user_agent == "GuardGeeseBot/1.0"
+        assert config.user_agent == "SentinelBot/1.0"
         assert config.timeout_seconds == 12.5
         assert config.follow_redirects is False
         assert config.playwright_cdp_endpoint == "http://127.0.0.1:9222"
@@ -43,7 +43,7 @@ async def test_fetch_page_uses_backend_and_closes_it(monkeypatch):
 
     result = await fetch_page(
         "https://example.com/check",
-        user_agent="GuardGeeseBot/1.0",
+        user_agent="SentinelBot/1.0",
         headers={"X-Monitor": "1"},
         timeout_seconds=12.5,
         follow_redirects=False,
@@ -60,7 +60,7 @@ def test_extract_page_reuses_core_extraction():
         """
         <html lang="en">
           <head>
-            <title>GuardGeese Check</title>
+            <title>Sentinel Check</title>
             <meta name="description" content="Monitor me">
             <meta name="robots" content="noindex">
             <link rel="canonical" href="/canonical">
@@ -76,7 +76,7 @@ def test_extract_page_reuses_core_extraction():
         "https://example.com/check",
     )
 
-    assert extracted.title == "GuardGeese Check"
+    assert extracted.title == "Sentinel Check"
     assert extracted.meta_description == "Monitor me"
     assert extracted.meta_robots.noindex is True
     assert extracted.x_robots_tag.nofollow is True

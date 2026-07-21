@@ -31,6 +31,11 @@ REDIRECT_CHAIN = "redirect_chain"
 NO_REDIRECT = "no_redirect"
 ERROR_STATUS = "error_status"
 NOT_CRAWLED = "not_crawled"
+NO_REDIRECT_EXPECTED = "no_redirect_expected"
+"""An identity mapping (source == target) that correctly did *not* redirect
+(ticket 123). Mapping CSVs routinely carry retained URLs alongside moved ones;
+verdicting those ``no_redirect`` made every such row fail
+``--fail-on redirect_mismatch`` and forced operators to strip them by hand."""
 
 _TEMPORARY_STATUSES = {302, 303, 307}
 _MISMATCH_VERDICTS = {REDIRECT_WRONG_TARGET, NO_REDIRECT, ERROR_STATUS, NOT_CRAWLED}
@@ -120,8 +125,9 @@ def load_url_pairs(
 def classify_redirect(pair: UrlPair, source: CrawlResult | None) -> str:
     """Verdict the source page's redirect behaviour against its mapped target.
 
-    Precedence: not-crawled → error status → no redirect → wrong target →
-    temporary (302/303/307 in chain) → multi-hop chain → ok.
+    Precedence: not-crawled → error status → no redirect (or, for an identity
+    mapping, no-redirect-expected) → wrong target → temporary (302/303/307 in
+    chain) → multi-hop chain → ok.
     """
     if source is None:
         return NOT_CRAWLED
@@ -129,12 +135,14 @@ def classify_redirect(pair: UrlPair, source: CrawlResult | None) -> str:
     if status == 0 or status >= 400:
         return ERROR_STATUS
 
+    is_identity = normalize_url_for_match(pair.source_url) == normalize_url_for_match(pair.target_url)
     chain = source.redirect_chain or []
     redirected = bool(chain) or normalize_url_for_match(source.final_url) != normalize_url_for_match(
         source.requested_url
     )
     if not redirected:
-        return NO_REDIRECT
+        # A retained URL mapped to itself is behaving correctly by staying put.
+        return NO_REDIRECT_EXPECTED if is_identity else NO_REDIRECT
 
     if normalize_url_for_match(source.final_url) != normalize_url_for_match(pair.target_url):
         return REDIRECT_WRONG_TARGET

@@ -41,6 +41,7 @@ import os
 import sys
 import uuid
 from collections import defaultdict, deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,15 +58,166 @@ MAX_PAGE_LIMIT = 10_000
 DEFAULT_PAGE_LIMIT = 5_000
 LEGACY_RUN_ID = "current-state"
 LOG_TAIL_LINES = 40
+CHROME_LOCK_NAMES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+
+
+def _chrome_user_data_candidates(
+    *, home: Path | None = None, platform_name: str | None = None, environ: Mapping[str, str] | None = None
+) -> list[tuple[str, Path]]:
+    """Return standard Chrome/Chromium user-data directories for an OS.
+
+    This is deliberately discovery-only: it reads Chrome's ``Local State``
+    metadata, never profile cookies or browser databases (ticket 128).
+    """
+    home = home if home is not None else Path.home()
+    platform_name = platform_name if platform_name is not None else sys.platform
+    environ = environ if environ is not None else os.environ
+    candidates: list[tuple[str, Path]] = []
+
+    def add(browser: str, path: Path) -> None:
+        path = path.expanduser()
+        if (browser, path) not in candidates:
+            candidates.append((browser, path))
+
+    if platform_name.startswith("win"):
+        local_appdata = Path(environ.get("LOCALAPPDATA", str(home / "AppData" / "Local")))
+        add("chrome", local_appdata / "Google" / "Chrome" / "User Data")
+        add("chromium", local_appdata / "Chromium" / "User Data")
+    elif platform_name == "darwin":
+        app_support = home / "Library" / "Application Support"
+        add("chrome", app_support / "Google" / "Chrome")
+        add("chromium", app_support / "Chromium")
+    else:
+        config_home = Path(environ.get("XDG_CONFIG_HOME", str(home / ".config")))
+        add("chrome", config_home / "google-chrome")
+        add("chromium", config_home / "chromium")
+
+    return candidates
+
+
+def _path_has_lock(path: Path) -> bool:
+    """Detect Chrome's lock files, including broken SingletonLock symlinks."""
+    return any((path / name).exists() or (path / name).is_symlink() for name in CHROME_LOCK_NAMES)
+
+
+def _safe_profile_directory(value: str) -> bool:
+    """Only accept a single Chrome profile-directory component."""
+    return bool(value) and value not in {".", ".."} and "/" not in value and "\\" not in value
+
+
+def _is_default_chrome_user_data_dir(path: Path) -> bool:
+    """Whether *path* is one of Chrome's normal, user-owned data roots."""
+    return path.name in {"User Data", "google-chrome", "chromium", "Chrome", "Chromium"}
+
+
+def discover_chrome_profiles(
+    *, home: Path | None = None, platform_name: str | None = None, environ: Mapping[str, str] | None = None
+) -> list[dict[str, Any]]:
+    """Discover named Chrome profiles without reading private profile data.
+
+    The returned paths are intended for the loopback GUI only. ``Local State``
+    contains profile labels and the last-used directory; cookies and browsing
+    history remain untouched. Missing or malformed browser metadata is skipped.
+    """
+    profiles: list[dict[str, Any]] = []
+    for browser, user_data_dir in _chrome_user_data_candidates(home=home, platform_name=platform_name, environ=environ):
+        state_path = user_data_dir / "Local State"
+        if not state_path.is_file():
+            continue
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        profile_root = state.get("profile") if isinstance(state, dict) else None
+        info_cache = profile_root.get("info_cache") if isinstance(profile_root, dict) else None
+        if not isinstance(info_cache, dict):
+            continue
+        last_used = profile_root.get("last_used") if isinstance(profile_root, dict) else None
+        default_root = _is_default_chrome_user_data_dir(user_data_dir)
+        locked = _path_has_lock(user_data_dir)
+        for directory, info in sorted(info_cache.items()):
+            directory = str(directory)
+            if not _safe_profile_directory(directory) or not isinstance(info, dict):
+                continue
+            profile_path = user_data_dir / directory
+            warning = None
+            if locked:
+                warning = "Chrome appears to be using this profile; close Chrome before starting the crawl."
+            elif default_root:
+                warning = (
+                    "Chrome 136+ may block automation from the default user-data directory; "
+                    "a dedicated directory is recommended."
+                )
+            profiles.append(
+                {
+                    "id": f"{browser}:{user_data_dir}:{directory}",
+                    "browser": browser,
+                    "name": str(info.get("name") or info.get("gaia_name") or directory),
+                    "email": str(info.get("user_name") or ""),
+                    "userDataDir": str(user_data_dir),
+                    "profileDirectory": directory,
+                    "lastUsed": directory == last_used,
+                    "profileExists": profile_path.is_dir(),
+                    "locked": locked,
+                    "requiresDedicatedUserDataDir": default_root,
+                    "warning": warning,
+                }
+            )
+    return sorted(profiles, key=lambda item: (not item["lastUsed"], item["name"].lower()))
+
+
+def chrome_profile_preflight(user_data_dir: str, profile_directory: str) -> dict[str, Any]:
+    """Validate a selected profile before spawning Playwright.
+
+    Lock detection is fail-closed because launching against a live personal
+    profile can corrupt the profile or fail unpredictably. The default-data-dir
+    warning is advisory: dedicated profile guidance is returned to the UI while
+    preserving the engine's existing persistent-profile capability.
+    """
+    if not user_data_dir:
+        raise ValueError("a Chrome user-data directory is required")
+    if not _safe_profile_directory(profile_directory):
+        raise ValueError("profile directory must be one Chrome profile name, such as 'Default' or 'Profile 1'")
+    root = Path(user_data_dir).expanduser()
+    profile = root / profile_directory
+    if not root.is_dir():
+        raise ValueError(f"Chrome user-data directory does not exist: {root}")
+    if not profile.is_dir():
+        raise ValueError(f"Chrome profile does not exist: {profile_directory}")
+    locked = _path_has_lock(root)
+    default_root = _is_default_chrome_user_data_dir(root)
+    return {
+        "locked": locked,
+        "profileExists": True,
+        "requiresDedicatedUserDataDir": default_root,
+        "warning": (
+            "Chrome 136+ may block automation from the default user-data directory; "
+            "a dedicated directory is recommended."
+            if default_root
+            else None
+        ),
+    }
 
 
 def status_label(code: int | None) -> str:
     return {
-        200: "OK", 201: "Created", 204: "No Content", 301: "Moved Permanently",
-        302: "Found", 307: "Temporary Redirect", 308: "Permanent Redirect",
-        400: "Bad Request", 401: "Unauthorised", 403: "Forbidden", 404: "Not Found",
-        410: "Gone", 429: "Too Many Requests", 500: "Server Error", 502: "Bad Gateway",
-        503: "Service Unavailable", 504: "Gateway Timeout",
+        200: "OK",
+        201: "Created",
+        204: "No Content",
+        301: "Moved Permanently",
+        302: "Found",
+        307: "Temporary Redirect",
+        308: "Permanent Redirect",
+        400: "Bad Request",
+        401: "Unauthorised",
+        403: "Forbidden",
+        404: "Not Found",
+        410: "Gone",
+        429: "Too Many Requests",
+        500: "Server Error",
+        502: "Bad Gateway",
+        503: "Service Unavailable",
+        504: "Gateway Timeout",
     }.get(code, "Unknown" if code is not None else "Not fetched")
 
 
@@ -156,14 +308,34 @@ def overview_from_counts(counts: dict[str, int]) -> dict[str, list[dict[str, Any
             {"label": "HTTPS", "count": counts.get("https", 0), "pct": percent(counts.get("https", 0), total)},
         ],
         "responseCodes": [
-            {"label": label, "count": value, "pct": percent(value, total), "tone": "ok" if label.startswith("2") else "warn" if label.startswith("3") else "bad"}
+            {
+                "label": label,
+                "count": value,
+                "pct": percent(value, total),
+                "tone": "ok" if label.startswith("2") else "warn" if label.startswith("3") else "bad",
+            }
             for label, value in codes.items()
         ],
         "content": [
             {"label": "HTML", "count": html, "pct": percent(html, total)},
-            {"label": "Missing Title", "count": counts.get("missing_title", 0), "pct": percent(counts.get("missing_title", 0), total), "tone": "warn"},
-            {"label": "Missing Meta Description", "count": counts.get("missing_meta", 0), "pct": percent(counts.get("missing_meta", 0), total), "tone": "warn"},
-            {"label": "Missing H1", "count": counts.get("missing_h1", 0), "pct": percent(counts.get("missing_h1", 0), total), "tone": "warn"},
+            {
+                "label": "Missing Title",
+                "count": counts.get("missing_title", 0),
+                "pct": percent(counts.get("missing_title", 0), total),
+                "tone": "warn",
+            },
+            {
+                "label": "Missing Meta Description",
+                "count": counts.get("missing_meta", 0),
+                "pct": percent(counts.get("missing_meta", 0), total),
+                "tone": "warn",
+            },
+            {
+                "label": "Missing H1",
+                "count": counts.get("missing_h1", 0),
+                "pct": percent(counts.get("missing_h1", 0), total),
+                "tone": "warn",
+            },
         ],
     }
 
@@ -194,7 +366,9 @@ def page_from_row(row: dict[str, Any], *, has_snapshots: bool) -> dict[str, Any]
     page_host = host_of(address)
     # Normalise "text/html; charset=utf-8" -> "text/html" so the exact-match
     # content-type checks in category_hints/overview work on live data.
-    raw_content_type = response_headers.get("content-type") or ("text/html" if row.get("kind") == "html" else row.get("kind") or "unknown")
+    raw_content_type = response_headers.get("content-type") or (
+        "text/html" if row.get("kind") == "html" else row.get("kind") or "unknown"
+    )
     content_type = str(raw_content_type).split(";")[0].strip().lower()
 
     if has_snapshots:
@@ -219,18 +393,27 @@ def page_from_row(row: dict[str, Any], *, has_snapshots: bool) -> dict[str, Any]
         "address": address,
         "path": urlparse(address).path or "/",
         "contentType": content_type,
-        "statusCode": code, "status": status_label(code),
+        "statusCode": code,
+        "status": status_label(code),
         "indexability": "Indexable" if row.get("overall_indexable") else "Non-Indexable",
         "indexabilityStatus": "" if row.get("overall_indexable") else "blocked or non-indexable",
-        "title": row.get("title") or "", "titleLength": len(row.get("title") or ""),
-        "metaDescription": row.get("meta_description") or "", "metaDescriptionLength": len(row.get("meta_description") or ""),
-        "h1": h1_tags, "h1Count": 1 if h1_tags else 0,
+        "title": row.get("title") or "",
+        "titleLength": len(row.get("title") or ""),
+        "metaDescription": row.get("meta_description") or "",
+        "metaDescriptionLength": len(row.get("meta_description") or ""),
+        "h1": h1_tags,
+        "h1Count": 1 if h1_tags else 0,
         "responseTimeMs": round(float(duration) * 1000) if duration else None,
-        "redirectUrl": row.get("redirect_url"), "internalInlinks": 0, "externalInlinks": 0,
-        "wordCount": int(row.get("word_count") or 0), "canonical": canonical_values[0] if canonical_values else None,
+        "redirectUrl": row.get("redirect_url"),
+        "internalInlinks": 0,
+        "externalInlinks": 0,
+        "wordCount": int(row.get("word_count") or 0),
+        "canonical": canonical_values[0] if canonical_values else None,
         "robots": "index, follow" if row.get("overall_indexable") else "non-indexable",
-        "headers": response_headers, "structuredData": structured,
-        "inlinks": [], "outlinks": external_outlinks,
+        "headers": response_headers,
+        "structuredData": structured,
+        "inlinks": [],
+        "outlinks": external_outlinks,
     }
     page["categoryHints"] = category_hints(page)
     return page
@@ -268,6 +451,10 @@ class CrawlSpec:
     user_agent: str = ""
     respect_robots: bool = True
     csv_column: str = "url"
+    browser_channel: str = ""
+    user_data_dir: str = ""
+    profile_directory: str = ""
+    headed: bool = False
 
 
 def new_run_id() -> str:
@@ -294,9 +481,7 @@ def parse_crawl_spec(payload: dict[str, Any]) -> CrawlSpec:
         # The CLI's list mode reads a local CSV file; a hosted list URL is not
         # something crawler_cli ingests today, so say so instead of guessing.
         if not Path(target).expanduser().is_file():
-            raise ValueError(
-                "list mode needs a path to a local CSV file of URLs (hosted URL lists are not supported)"
-            )
+            raise ValueError("list mode needs a path to a local CSV file of URLs (hosted URL lists are not supported)")
 
     def _positive_int(key: str) -> int | None:
         raw = payload.get(key)
@@ -311,8 +496,27 @@ def parse_crawl_spec(payload: dict[str, Any]) -> CrawlSpec:
         return value
 
     backend = str(payload.get("backend") or "").strip()
-    if backend and backend not in {"aiohttp", "curl_cffi", "playwright"}:
+    if backend and backend not in {"aiohttp", "curl_cffi", "playwright", "obscura"}:
         raise ValueError(f"unknown backend: {backend}")
+
+    browser_channel = str(payload.get("browserChannel") or "").strip()
+    user_data_dir = str(payload.get("userDataDir") or "").strip()
+    profile_directory = str(payload.get("profileDirectory") or "").strip()
+    headed = bool(payload.get("headed", False))
+    has_profile = bool(user_data_dir or profile_directory)
+    if has_profile or browser_channel or headed:
+        if backend == "obscura":
+            raise ValueError("Chrome profile launch flags cannot be combined with the Obscura backend")
+        if backend not in {"", "playwright"}:
+            raise ValueError("Chrome profiles require the Playwright backend")
+        backend = "playwright"
+    if has_profile:
+        try:
+            preflight = chrome_profile_preflight(user_data_dir, profile_directory)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from None
+        if preflight["locked"]:
+            raise ValueError("Chrome appears to be using this profile; close Chrome first")
 
     return CrawlSpec(
         target=target,
@@ -325,6 +529,10 @@ def parse_crawl_spec(payload: dict[str, Any]) -> CrawlSpec:
         user_agent=str(payload.get("userAgent") or "").strip(),
         respect_robots=bool(payload.get("respectRobots", True)),
         csv_column=str(payload.get("csvColumn") or "url").strip() or "url",
+        browser_channel=browser_channel,
+        user_data_dir=user_data_dir,
+        profile_directory=profile_directory,
+        headed=headed,
     )
 
 
@@ -348,10 +556,20 @@ def build_crawl_argv(spec: CrawlSpec, dsn: str) -> list[str]:
         argv.append("--ignore-robots")
     if spec.user_agent:
         argv += ["--custom-ua", spec.user_agent]
-    if spec.backend == "playwright":
+    if spec.backend == "obscura":
+        argv.append("--obscura")
+    elif spec.backend == "playwright":
         argv.append("--js")
     elif spec.backend:
         argv += ["--http-backend", spec.backend]
+    if spec.browser_channel:
+        argv += ["--playwright-channel", spec.browser_channel]
+    if spec.user_data_dir:
+        argv += ["--playwright-user-data-dir", spec.user_data_dir]
+    if spec.profile_directory:
+        argv += ["--playwright-profile-directory", spec.profile_directory]
+    if spec.headed:
+        argv.append("--headed")
     return argv
 
 
@@ -369,9 +587,15 @@ class CrawlJob:
 
     def as_json(self) -> dict[str, Any]:
         return {
-            "jobId": self.id, "runId": self.run_id, "target": self.target, "mode": self.mode,
-            "state": self.state, "startedAt": self.started_at, "finishedAt": self.finished_at,
-            "exitCode": self.exit_code, "log": list(self.log),
+            "jobId": self.id,
+            "runId": self.run_id,
+            "target": self.target,
+            "mode": self.mode,
+            "state": self.state,
+            "startedAt": self.started_at,
+            "finishedAt": self.finished_at,
+            "exitCode": self.exit_code,
+            "log": list(self.log),
         }
 
 
@@ -396,13 +620,18 @@ class CrawlLauncher:
         if running is not None:
             raise RuntimeError(running.id)
         job = CrawlJob(
-            id=uuid.uuid4().hex[:12], run_id=spec.run_id, target=spec.target,
-            mode=spec.mode, started_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            id=uuid.uuid4().hex[:12],
+            run_id=spec.run_id,
+            target=spec.target,
+            mode=spec.mode,
+            started_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         )
         argv = build_crawl_argv(spec, self.dsn)
         proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=str(GUI_DIR.parent),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            *argv,
+            cwd=str(GUI_DIR.parent),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
         self.jobs[job.id] = job
         self._active_id = job.id
@@ -482,19 +711,28 @@ class LiveStore:
         # instead of repeating global counts against every crawl_runs row.
         async with self.pool.acquire() as conn:
             urls = int(await conn.fetchval("SELECT COUNT(*)::int FROM page_metadata") or 0)
-            html_stored = int(await conn.fetchval("SELECT COUNT(*)::int FROM pages WHERE html_compressed IS NOT NULL") or 0)
+            html_stored = int(
+                await conn.fetchval("SELECT COUNT(*)::int FROM pages WHERE html_compressed IS NOT NULL") or 0
+            )
             latest = await conn.fetchrow(
                 "SELECT mode, seed_urls_json, created_at, updated_at FROM crawl_runs ORDER BY updated_at DESC LIMIT 1"
             )
         url = self._first_seed(latest["seed_urls_json"]) if latest else ""
-        return [{
-            "id": LEGACY_RUN_ID, "mode": str(latest["mode"]) if latest else "open", "status": "current state",
-            "url": url, "domain": urlparse(url).netloc or "—", "urls": urls, "htmlStored": html_stored,
-            "date": ((iso_time(latest["updated_at"]) if latest else "") or "")[:10],
-            "createdAt": iso_time(latest["created_at"]) if latest else None,
-            "updatedAt": iso_time(latest["updated_at"]) if latest else None,
-            "runScoped": False,
-        }]
+        return [
+            {
+                "id": LEGACY_RUN_ID,
+                "mode": str(latest["mode"]) if latest else "open",
+                "status": "current state",
+                "url": url,
+                "domain": urlparse(url).netloc or "—",
+                "urls": urls,
+                "htmlStored": html_stored,
+                "date": ((iso_time(latest["updated_at"]) if latest else "") or "")[:10],
+                "createdAt": iso_time(latest["created_at"]) if latest else None,
+                "updatedAt": iso_time(latest["updated_at"]) if latest else None,
+                "runScoped": False,
+            }
+        ]
 
     @staticmethod
     def _first_seed(seed_urls_json: Any) -> str:
@@ -508,10 +746,16 @@ class LiveStore:
         url = self._first_seed(row["seed_urls_json"])
         date = (iso_time(row["updated_at"]) or "")[:10]
         return {
-            "id": str(row["run_id"]), "mode": str(row["mode"]), "status": str(row["status"]),
-            "url": url, "domain": urlparse(url).netloc or "—", "urls": int(row["urls"]),
-            "htmlStored": int(row["html_stored"]), "date": date,
-            "createdAt": iso_time(row["created_at"]), "updatedAt": iso_time(row["updated_at"]),
+            "id": str(row["run_id"]),
+            "mode": str(row["mode"]),
+            "status": str(row["status"]),
+            "url": url,
+            "domain": urlparse(url).netloc or "—",
+            "urls": int(row["urls"]),
+            "htmlStored": int(row["html_stored"]),
+            "date": date,
+            "createdAt": iso_time(row["created_at"]),
+            "updatedAt": iso_time(row["updated_at"]),
             "runScoped": True,
         }
 
@@ -658,17 +902,30 @@ class LiveStore:
         data["pages"] = []
         data["history"] = []
         data["crawl"] = {
-            "id": None, "url": "", "mode": "Spider", "status": "none",
+            "id": None,
+            "url": "",
+            "mode": "Spider",
+            "status": "none",
             "statusLabel": "No crawls in this database yet — start one with New crawl",
             "progress": {"completed": 0, "total": 0, "pct": 0.0, "remaining": 0},
-            "speed": {"average": 0.0, "current": 0.0}, "startedAt": None, "finishedAt": None,
+            "speed": {"average": 0.0, "current": 0.0},
+            "startedAt": None,
+            "finishedAt": None,
         }
         data["overview"] = overview_from_counts({})
         data["issues"] = []
         data["live"] = {
-            "runId": None, "totalPages": 0, "snapshotBacked": self.has_run_snapshots,
-            "runScoped": True, "offset": 0, "limit": 0, "loaded": 0, "windowEnd": 0,
-            "hasMore": False, "truncated": False, "empty": True,
+            "runId": None,
+            "totalPages": 0,
+            "snapshotBacked": self.has_run_snapshots,
+            "runScoped": True,
+            "offset": 0,
+            "limit": 0,
+            "loaded": 0,
+            "windowEnd": 0,
+            "hasMore": False,
+            "truncated": False,
+            "empty": True,
         }
         return data
 
@@ -704,23 +961,43 @@ class LiveStore:
         window_end = offset + len(pages)
         status_label_text = "snapshot" if self.has_run_snapshots else "legacy state"
         data["crawl"] = {
-            "id": selected["id"], "url": selected["url"], "mode": "Spider" if selected["mode"] == "open" else selected["mode"],
-            "status": selected["status"], "statusLabel": f"Live {status_label_text} · {selected['status']}",
-            "progress": {"completed": min(window_end, total), "total": total, "pct": percent(min(window_end, total), total), "remaining": max(0, total - window_end)},
-            "speed": {"average": 0.0, "current": 0.0}, "startedAt": selected["createdAt"], "finishedAt": selected["updatedAt"],
+            "id": selected["id"],
+            "url": selected["url"],
+            "mode": "Spider" if selected["mode"] == "open" else selected["mode"],
+            "status": selected["status"],
+            "statusLabel": f"Live {status_label_text} · {selected['status']}",
+            "progress": {
+                "completed": min(window_end, total),
+                "total": total,
+                "pct": percent(min(window_end, total), total),
+                "remaining": max(0, total - window_end),
+            },
+            "speed": {"average": 0.0, "current": 0.0},
+            "startedAt": selected["createdAt"],
+            "finishedAt": selected["updatedAt"],
         }
         # Overview/issues describe the whole run (SQL aggregate), so they stay
         # correct while the grid pages through a large run.
         data["overview"] = overview_from_counts(counts)
         data["issues"] = [
-            {"severity": "warn", "label": "Non-indexable", "count": counts.get("total", 0) - counts.get("indexable", 0)},
+            {
+                "severity": "warn",
+                "label": "Non-indexable",
+                "count": counts.get("total", 0) - counts.get("indexable", 0),
+            },
             {"severity": "warn", "label": "Non-200 response", "count": counts.get("total", 0) - counts.get("c2xx", 0)},
         ]
         data["live"] = {
-            "runId": selected["id"], "totalPages": total, "snapshotBacked": self.has_run_snapshots,
+            "runId": selected["id"],
+            "totalPages": total,
+            "snapshotBacked": self.has_run_snapshots,
             "runScoped": selected.get("runScoped", True),
-            "offset": offset, "limit": limit, "loaded": len(pages), "windowEnd": window_end,
-            "hasMore": window_end < total, "truncated": window_end < total,
+            "offset": offset,
+            "limit": limit,
+            "loaded": len(pages),
+            "windowEnd": window_end,
+            "hasMore": window_end < total,
+            "truncated": window_end < total,
         }
         return data
 
@@ -735,7 +1012,9 @@ def _parse_int(value: str, *, minimum: int, maximum: int, name: str) -> int:
 
 async def snapshot_handler(request: web.Request) -> web.Response:
     store: LiveStore = request.app["store"]
-    limit = _parse_int(request.query.get("limit", str(DEFAULT_PAGE_LIMIT)), minimum=1, maximum=MAX_PAGE_LIMIT, name="limit")
+    limit = _parse_int(
+        request.query.get("limit", str(DEFAULT_PAGE_LIMIT)), minimum=1, maximum=MAX_PAGE_LIMIT, name="limit"
+    )
     offset = _parse_int(request.query.get("offset", "0"), minimum=0, maximum=2**31, name="offset")
     return web.json_response(await store.snapshot(request.query.get("run"), limit, offset))
 
@@ -743,6 +1022,11 @@ async def snapshot_handler(request: web.Request) -> web.Response:
 async def runs_handler(request: web.Request) -> web.Response:
     store: LiveStore = request.app["store"]
     return web.json_response({"runs": await store.runs()})
+
+
+async def chrome_profiles_handler(_: web.Request) -> web.Response:
+    """List local Chrome profile metadata for the profile picker (ticket 128)."""
+    return web.json_response({"profiles": discover_chrome_profiles()})
 
 
 async def create_crawl_handler(request: web.Request) -> web.Response:
@@ -800,6 +1084,7 @@ def build_app(dsn: str) -> web.Application:
     app.on_response_prepare.append(no_cache)
     app.router.add_get("/api/live/runs", runs_handler)
     app.router.add_get("/api/live/snapshot", snapshot_handler)
+    app.router.add_get("/api/live/chrome-profiles", chrome_profiles_handler)
     app.router.add_post("/api/live/crawls", create_crawl_handler)
     app.router.add_get("/api/live/crawls/{job_id}", crawl_status_handler)
     app.router.add_get("/", index_handler)
@@ -809,7 +1094,11 @@ def build_app(dsn: str) -> web.Application:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve crawler_gui against a live crawler_cli PostgreSQL database.")
-    parser.add_argument("--postgres-dsn", default=os.environ.get("CRAWLER_CLI_POSTGRES_DSN"), help="Postgres DSN (or set CRAWLER_CLI_POSTGRES_DSN)")
+    parser.add_argument(
+        "--postgres-dsn",
+        default=os.environ.get("CRAWLER_CLI_POSTGRES_DSN"),
+        help="Postgres DSN (or set CRAWLER_CLI_POSTGRES_DSN)",
+    )
     parser.add_argument("--port", type=int, default=8766)
     args = parser.parse_args()
     if not args.postgres_dsn:

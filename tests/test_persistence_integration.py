@@ -13,6 +13,7 @@ Local usage:
 from __future__ import annotations
 
 import csv
+import json
 import os
 from pathlib import Path
 
@@ -21,6 +22,7 @@ import pytest
 import pytest_asyncio
 
 from crawler_cli.detection.analytics import AnalyticsDetectionResult, AnalyticsHit
+from crawler_cli.hashing import sha256_hash, simhash64
 from crawler_cli.models import DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
 from crawler_cli.models import CrawlResult, FetchResponse
 from crawler_cli import CrawlConfig, CrawlEngine
@@ -50,6 +52,14 @@ async def store(dsn: str) -> AsyncpgStore:
     await s.close()
 
 
+async def _drop_all_crawl_tables(dsn: str) -> None:
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute(f"DROP TABLE IF EXISTS {', '.join(CRAWL_TABLES)} CASCADE")
+    finally:
+        await conn.close()
+
+
 class FakeBackend:
     def __init__(self, pages: dict[str, str]) -> None:
         self.pages = pages
@@ -71,6 +81,90 @@ async def test_initialize_is_idempotent(store: AsyncpgStore) -> None:
     """Running initialize() twice must not raise."""
     await store.initialize()
     await store.initialize()
+
+
+@pytest.mark.asyncio
+async def test_initialize_does_not_add_legacy_run_to_run_scoped_database(store: AsyncpgStore) -> None:
+    """A later crawl setup must not mirror the first real run into ``legacy``."""
+    url = "https://run-scoped.example/"
+    result = CrawlResult(
+        requested_url=url,
+        final_url=url,
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="test",
+        extracted=None,
+        raw_html="<html><body>first run</body></html>",
+    )
+    await store.create_crawl_run("real-run-one", seed_urls=[url], config_hash="one", config={})
+    await store.persist(result)
+
+    # This is what a second CLI/GUI crawl does before it creates its own run.
+    await store.initialize()
+    assert await store.resolve_reporting_run_id() == "real-run-one"
+
+    await store.create_crawl_run("real-run-two", seed_urls=[url], config_hash="two", config={})
+    await store.persist(result)
+    await store.initialize()
+
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        runs = await conn.fetch("SELECT run_id FROM crawl_runs ORDER BY run_id")
+        legacy_snapshots = await conn.fetchval(
+            "SELECT COUNT(*) FROM page_run_snapshots WHERE run_id = 'legacy'"
+        )
+    assert [row["run_id"] for row in runs] == ["real-run-one", "real-run-two"]
+    assert legacy_snapshots == 0
+
+
+@pytest.mark.asyncio
+async def test_initialize_backfills_a_pre_snapshot_database_once(dsn: str) -> None:
+    """A genuine pre-095 current-state database still receives its legacy run."""
+    await _drop_all_crawl_tables(dsn)
+    source = AsyncpgStore(dsn)
+    await source.initialize()
+    url = "https://pre-snapshot.example/"
+    await source.create_crawl_run("temporary-run", seed_urls=[url], config_hash="old", config={})
+    await source.persist(
+        CrawlResult(
+            requested_url=url,
+            final_url=url,
+            status=200,
+            headers={"content-type": "text/html"},
+            content_type="text/html",
+            fetch_backend="test",
+            extracted=None,
+            raw_html="<html><body>pre-snapshot state</body></html>",
+        )
+    )
+    assert source.pool is not None
+    async with source.pool.acquire() as conn:
+        # Keep the old mutable tables but remove all run-aware structures, as
+        # they would be on a database created before ticket 095.
+        await conn.execute("TRUNCATE TABLE crawl_runs CASCADE")
+        await conn.execute("DROP TABLE page_run_snapshots")
+    await source.close()
+
+    upgraded = AsyncpgStore(dsn)
+    await upgraded.initialize()
+    try:
+        assert await upgraded.resolve_reporting_run_id() == "legacy"
+        assert upgraded.pool is not None
+        async with upgraded.pool.acquire() as conn:
+            first_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM page_run_snapshots WHERE run_id = 'legacy'"
+            )
+        await upgraded.initialize()
+        async with upgraded.pool.acquire() as conn:
+            second_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM page_run_snapshots WHERE run_id = 'legacy'"
+            )
+        assert first_count == 1
+        assert second_count == first_count
+    finally:
+        await upgraded.truncate_crawl_tables()
+        await upgraded.close()
 
 
 @pytest.mark.asyncio
@@ -1327,3 +1421,160 @@ async def test_crawler_gui_bridge_serves_run_scoped_paginated_snapshots(store: A
         assert all(page["responseTimeMs"] == 500 for page in timed["pages"])
     finally:
         await live.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_pages_for_comparison_include_html_enables_remap(store: AsyncpgStore) -> None:
+    """Ticket 123 B: --replace can only take effect on a store-backed side if the
+    loader hands back HTML to re-hash; stored hashes are un-remapped."""
+    from crawler_cli.comparison import can_rehash, compare_deep
+    from crawler_cli.remap import Remap
+
+    url = "https://dev.cmp.example/page"
+    html = (
+        "<html><head><title>T</title></head><body><h1>H</h1>"
+        "<p>Contact us at dev.cmp.example for details about this page.</p></body></html>"
+    )
+    config = CrawlConfig(
+        max_concurrency=1,
+        default_open_crawl_limit=1,
+        discover_sitemaps=False,
+        respect_robots_txt=False,
+        enable_content_hashing=True,
+    )
+    engine = CrawlEngine(config, store=store)
+    engine.backend = FakeBackend({url: html})
+    await engine.crawl_open([url], max_urls=1, run_id="remap-run")
+    run_id = await store.resolve_reporting_run_id("remap-run")
+
+    # Without include_html the row carries no content, so a remap cannot apply.
+    without_html = await store.fetch_pages_for_comparison(run_id=run_id)
+    assert without_html[0].raw_html is None
+    assert not can_rehash(without_html[0])
+
+    with_html = await store.fetch_pages_for_comparison(run_id=run_id, include_html=True)
+    assert with_html[0].raw_html is not None
+    assert can_rehash(with_html[0])
+
+    # The remapped store-backed side now hashes identically to the prod page.
+    prod_html = html.replace("dev.cmp.example", "cmp.example")
+    prod = CrawlResult(
+        requested_url="https://cmp.example/page",
+        final_url="https://cmp.example/page",
+        status=200,
+        headers={},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=with_html[0].extracted,
+        raw_html=prod_html,
+        content_hash_sha256=sha256_hash(prod_html),
+        content_hash_simhash=simhash64(prod_html),
+    )
+    remap = Remap.from_specs(["dev.cmp.example=cmp.example"])
+    diff = compare_deep(with_html, [prod], remap=remap)
+    assert diff.remap_fallback_paths == []
+    assert diff.content_verdicts["/page"] == "identical"
+
+    # ...whereas the HTML-less side silently falls back and is flagged.
+    fallback_diff = compare_deep(without_html, [prod], remap=remap)
+    assert fallback_diff.remap_fallback_paths == ["/page"]
+
+
+@pytest.mark.asyncio
+async def test_persist_comparison_session_roundtrips_new_columns(store: AsyncpgStore) -> None:
+    """Ticket 123 C: the ticket-122 content_verdict / simhash_distance columns
+    are actually written and readable."""
+    rows = [
+        {
+            "path": "/a",
+            "baseline_url": "https://base/a",
+            "candidate_url": "https://cand/a",
+            "exists_on_baseline": True,
+            "exists_on_candidate": True,
+            "content_verdict": "near",
+            "simhash_distance": 3,
+        },
+        {
+            "path": "/b",
+            "baseline_url": "https://base/b",
+            "candidate_url": None,
+            "exists_on_baseline": True,
+            "exists_on_candidate": False,
+            "content_verdict": "missing",
+            "simhash_distance": None,
+        },
+    ]
+    session_id = await store.persist_comparison_session(
+        baseline_label="base", candidate_label="cand", rows=rows
+    )
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        persisted = await conn.fetch(
+            "SELECT path, content_verdict, simhash_distance FROM crawl_comparison_urls "
+            "WHERE session_id = $1 ORDER BY path",
+            session_id,
+        )
+    assert [(r["path"], r["content_verdict"], r["simhash_distance"]) for r in persisted] == [
+        ("/a", "near", 3),
+        ("/b", "missing", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compare_urls_persist_writes_a_session(store: AsyncpgStore, dsn: str, tmp_path) -> None:
+    """Ticket 123 C: `compare-urls --persist` is exercised end-to-end."""
+    from crawler_cli.__main__ import _build_parser, _dispatch
+    from crawler_cli.serialization import serialize_crawl_result
+
+    def _page(requested, final, chain):
+        html = "<html><body><p>migrated page body</p></body></html>"
+        return CrawlResult(
+            requested_url=requested,
+            final_url=final,
+            status=200,
+            headers={},
+            content_type="text/html",
+            fetch_backend="aiohttp",
+            extracted=None,
+            raw_html=html,
+            content_hash_sha256=sha256_hash(html),
+            content_hash_simhash=simhash64(html),
+            redirect_chain=chain,
+        )
+
+    src = tmp_path / "src.json"
+    tgt = tmp_path / "tgt.json"
+    pairs = tmp_path / "pairs.csv"
+    for path, results in (
+        (src, [_page("https://old/a", "https://new/a", [{"url": "https://old/a", "status": 301}])]),
+        (tgt, [_page("https://new/a", "https://new/a", [])]),
+    ):
+        path.write_text(
+            json.dumps({"mode": "list", "seed_urls": [], "results": [serialize_crawl_result(r) for r in results]}),
+            encoding="utf-8",
+        )
+    pairs.write_text("source_url,target_url\nhttps://old/a,https://new/a\n", encoding="utf-8")
+
+    args = _build_parser().parse_args(
+        [
+            "compare-urls",
+            "--pairs", str(pairs),
+            "--source-artifact", str(src),
+            "--target-artifact", str(tgt),
+            "--persist",
+            "--postgres-dsn", dsn,
+        ]
+    )
+    assert await _dispatch(args) == 0
+
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT path, candidate_url, redirect_chain, content_verdict FROM crawl_comparison_urls "
+            "ORDER BY id DESC LIMIT 1"
+        )
+    assert row is not None
+    assert row["path"] == "https://old/a"
+    assert row["candidate_url"] == "https://new/a"
+    assert "redirect_ok" in row["redirect_chain"]
+    assert row["content_verdict"] == "identical"

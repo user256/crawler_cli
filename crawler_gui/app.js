@@ -1,6 +1,7 @@
 /* crawler_gui — bind sample-data.json into the layout shell */
 import { adaptReportData, mountIntentOverlapViewer } from "./intent-overlap.mjs";
 import { REPORT_DATA } from "./intent-report-fixture.mjs";
+import { REPORT_DATA as THOMPSONS_REPORT_DATA } from "./thompsons-intent-report.mjs";
 
 const state = {
   data: null,
@@ -15,9 +16,11 @@ const state = {
   configContext: "crawl",
   view: "crawler",
   intentViewer: null,
+  intentDataset: "fixture",
   live: false,
   pageLimit: null,
   crawlJobId: null,
+  chromeProfiles: [],
 };
 
 const INTENT_ONLY_DATA = {
@@ -505,6 +508,65 @@ function renderHistoryModal() {
     .join("") || `<p class="muted">No crawls in this filter.</p>`;
 }
 
+function syncChromeProfileControls() {
+  const select = $("#opt-chrome-profile");
+  const backend = $("#opt-backend").value;
+  const selected = state.chromeProfiles.find((profile) => profile.id === select.value);
+  const obscura = $("#opt-backend option[value='obscura']");
+  if (obscura) obscura.disabled = Boolean(selected);
+  if (selected && backend === "obscura") {
+    $("#opt-backend").value = "playwright";
+  }
+  const hint = $("#opt-chrome-profile-hint");
+  if (!selected) {
+    hint.textContent = state.live
+      ? "Choose a discovered profile to launch headed Chrome. Close Chrome before starting; dedicated user-data directories are recommended."
+      : "Available in live mode. Profile metadata is read locally; cookies are never returned.";
+  } else if (selected.locked) {
+    hint.textContent = "Chrome is using this profile. Close Chrome first, then start the crawl.";
+  } else if (selected.warning) {
+    hint.textContent = selected.warning;
+  } else {
+    hint.textContent = `${selected.name} · ${selected.profileDirectory} · persistent Playwright profile`;
+  }
+}
+
+async function loadChromeProfiles() {
+  const select = $("#opt-chrome-profile");
+  if (!state.live) {
+    select.disabled = true;
+    select.innerHTML = "<option value=\"\">No persistent profile</option>";
+    state.chromeProfiles = [];
+    syncChromeProfileControls();
+    return;
+  }
+  try {
+    const res = await fetch(new URL("./api/live/chrome-profiles", window.location.href), { cache: "no-store" });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const body = await res.json();
+    state.chromeProfiles = Array.isArray(body.profiles) ? body.profiles : [];
+    const selectedId = state.data.configDefaults.chromeProfileId || "";
+    select.innerHTML = "<option value=\"\">No persistent profile</option>";
+    state.chromeProfiles.forEach((profile) => {
+      const option = document.createElement("option");
+      option.value = profile.id;
+      option.textContent = `${profile.name}${profile.email ? ` · ${profile.email}` : ""}${profile.lastUsed ? " · last used" : ""}`;
+      select.appendChild(option);
+    });
+    select.value = state.chromeProfiles.some((profile) => profile.id === selectedId) ? selectedId : "";
+    select.disabled = state.chromeProfiles.length === 0;
+    if (!state.chromeProfiles.length) {
+      $("#opt-chrome-profile-hint").textContent = "No Chrome profiles were discovered. Create a profile or use a dedicated Playwright user-data directory.";
+    }
+  } catch (err) {
+    state.chromeProfiles = [];
+    select.disabled = true;
+    select.innerHTML = "<option value=\"\">Profile discovery unavailable</option>";
+    $("#opt-chrome-profile-hint").textContent = `Could not inspect local Chrome profiles: ${err.message}`;
+  }
+  syncChromeProfileControls();
+}
+
 function renderOptionsModal() {
   const cfg = state.data.configDefaults;
   const isSchedule = state.configContext === "schedule";
@@ -522,6 +584,8 @@ function renderOptionsModal() {
   $("#opt-nofollow").checked = cfg.ignoreNoFollow;
   $("#opt-images").checked = cfg.crawlImages;
   $("#opt-concurrency-value").textContent = cfg.concurrency;
+  loadChromeProfiles();
+  syncChromeProfileControls();
 }
 
 function renderScheduleModal() {
@@ -724,6 +788,7 @@ function bindEvents() {
   });
 
   $("#btn-save-options").addEventListener("click", () => {
+    const selectedProfile = state.chromeProfiles.find((profile) => profile.id === $("#opt-chrome-profile").value);
     state.data.configDefaults = {
       maxPages: Number($("#opt-max-pages").value),
       concurrency: Number($("#opt-concurrency").value),
@@ -734,6 +799,10 @@ function bindEvents() {
       ignoreNoFollow: $("#opt-nofollow").checked,
       crawlImages: $("#opt-images").checked,
       userAgent: $("#opt-user-agent").value,
+      chromeProfileId: selectedProfile?.id || "",
+      browserChannel: selectedProfile?.browser === "chromium" ? "chromium" : selectedProfile ? "chrome" : "",
+      userDataDir: selectedProfile?.userDataDir || "",
+      profileDirectory: selectedProfile?.profileDirectory || "",
     };
     closeModals();
     toast(state.configContext === "schedule" ? "Scheduled crawl options saved" : "Configuration updated in local fixture state only");
@@ -741,6 +810,13 @@ function bindEvents() {
 
   $("#opt-concurrency").addEventListener("input", (e) => {
     $("#opt-concurrency-value").textContent = e.target.value;
+  });
+
+  $("#opt-chrome-profile").addEventListener("change", () => {
+    syncChromeProfileControls();
+  });
+  $("#opt-backend").addEventListener("change", () => {
+    syncChromeProfileControls();
   });
 
   document.addEventListener("keydown", (e) => {
@@ -763,15 +839,19 @@ function showIntentOverlap() {
   const root = $("#intent-overlap-root");
   root.hidden = false;
   if (!state.intentViewer) {
+    const isThompsons = state.intentDataset === "thompsons";
+    const report = isThompsons ? THOMPSONS_REPORT_DATA : REPORT_DATA;
     // Static fixture today; replace only this adapter input with the future
     // deterministic GET /crawls/{crawl_id}/runs/{run_id}/intent-report endpoint.
-    state.intentViewer = mountIntentOverlapViewer(root, adaptReportData(REPORT_DATA, {
-      id: "crawl_whiskipedia_demo/run_2026-07-15T14:08:04Z",
-      label: "Whiskipedia completed crawl snapshot",
-      completedAt: "2026-07-15T14:08:04Z",
-      artifact: "./report.html",
-      source: "static Ticket 106 fixture (no API request)",
+    state.intentViewer = mountIntentOverlapViewer(root, adaptReportData(report, {
+      id: isThompsons ? "thompsons-scotland-20260715" : "crawl_whiskipedia_demo/run_2026-07-15T14:08:04Z",
+      label: isThompsons ? "Thompsons Scotland completed crawl" : "Whiskipedia completed crawl snapshot",
+      completedAt: isThompsons ? "2026-07-15T11:46:25Z" : "2026-07-15T14:08:04Z",
+      artifact: isThompsons ? "./thompsons-intent-report.mjs" : "./report.html",
+      artifactLabel: isThompsons ? "View report data" : "Export HTML (offline artifact)",
+      source: isThompsons ? "exported crawl CSV reports; deterministic map layout" : "static Ticket 106 fixture (no API request)",
     }));
+    if (isThompsons) $(".user-chip").textContent = "Thompsons Scotland · crawl export";
   }
   renderNav();
 }
@@ -808,6 +888,9 @@ async function startLiveCrawl(url) {
         backend: cfg.useJs ? "playwright" : cfg.backend,
         userAgent: cfg.userAgent,
         respectRobots: cfg.respectRobots,
+        browserChannel: cfg.browserChannel,
+        userDataDir: cfg.userDataDir,
+        profileDirectory: cfg.profileDirectory,
       }),
     });
     // Read the body once: bridge errors are plain text, successes are JSON.
@@ -932,6 +1015,7 @@ function renderAll() {
 async function main() {
   const params = new URLSearchParams(window.location.search);
   const intentOnly = params.get("view") === "intent-overlap";
+  state.intentDataset = params.get("dataset") === "thompsons" ? "thompsons" : "fixture";
   state.live = params.get("live") === "1";
   // Optional ?limit= sets the page-window size; the server clamps it.
   state.pageLimit = params.get("limit") || null;

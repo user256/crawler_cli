@@ -71,6 +71,22 @@ The grid shell loads `sample-data.json`, so it needs HTTP as above. The intent
 overlap route (`index.html?view=intent-overlap`) does not fetch that JSON or any
 third-party resource; it uses its imported static fixture instead.
 
+The Thompson Scotland crawl export has its own report route:
+
+```
+http://127.0.0.1:8765/?view=intent-overlap&dataset=thompsons
+```
+
+It reads the exact exported pages, pairs, clusters, thresholds, and summary
+from `runs/thompsons-scotland-20260715`. That older run has no saved embedding
+projection, so its map uses a labelled deterministic cluster/URL layout rather
+than presenting it as PCA or UMAP. Regenerate and verify its static adapter:
+
+```bash
+python3 crawler_gui/build_thompsons_intent_fixture.py
+python3 crawler_gui/build_thompsons_intent_fixture.py --check
+```
+
 Regenerate fixture:
 
 ```bash
@@ -102,6 +118,7 @@ python3 crawler_gui/server.py --postgres-dsn postgresql://user:pass@localhost:54
 | `GET /api/live/snapshot?run=&limit=&offset=` | One page window of a run, plus whole-run overview/issues |
 | `POST /api/live/crawls` | Start a crawl (ticket 124) — 202 with `{jobId, runId}` |
 | `GET /api/live/crawls/{jobId}` | Job state, exit code, and a tail of its output |
+| `GET /api/live/chrome-profiles` | Local Chrome/Chromium profile labels and preflight warnings (ticket 128) |
 
 URL params: `?live=1` enables live mode, `?run=<run_id>` selects a run (the URL
 stays shareable), `?limit=<n>` sets the page-window size.
@@ -144,6 +161,20 @@ there.
 
 Values are passed as an argv list and spawned without a shell, so a crawl target
 cannot inject a second command.
+
+### Chrome personal profiles (ticket 128)
+
+Live-mode Configuration can discover Chrome/Chromium profiles from the
+operating system's standard `Local State` file and select one for a persistent
+Playwright crawl. Only profile labels, account labels, paths, and lock/guidance
+metadata are read; cookies and browsing data are never returned by the bridge.
+
+The bridge refuses to start a selected profile while Chrome's Singleton lock is
+present and asks the operator to close Chrome first. Chrome 136+ may block
+automation from the normal default user-data directory, so the picker warns
+that a dedicated user-data directory is preferred. Profile launch is mutually
+exclusive with Obscura; the existing `--obscura` path remains available without
+a personal profile.
 
 ### Known upstream quirk — the `legacy` run
 
@@ -232,6 +263,28 @@ The view supports map hover/pin, wheel zoom and drag pan, URL search,
 relation/page-type/risk filters, cluster selection, and synchronised
 pages/pairs/clusters tables and detail. It uses the shell theme variables, so
 the existing light/dark toggle applies to it too.
+
+### Live Postgres development mode
+
+`server.py` is a loopback-only, **read-only** development bridge for the main
+crawler grid. It reads immutable `page_run_snapshots` and `crawl_runs` from a
+real `crawler_cli` PostgreSQL database; it falls back to the legacy mutable
+tables when snapshots have not been migrated yet, and labels that state in the
+UI. It does not submit, cancel, or delete crawls. Those writes remain a future
+`crawler_api` responsibility.
+
+```bash
+python3 crawler_gui/server.py --postgres-dsn 'postgresql://USER:PASSWORD@HOST:5432/DB'
+# open the newest run
+# http://127.0.0.1:8766/?live=1
+# or pin an immutable run
+# http://127.0.0.1:8766/?live=1&run=YOUR_RUN_ID
+```
+
+The server also accepts `CRAWLER_CLI_POSTGRES_DSN`, serves `GET /api/live/runs`
+and `GET /api/live/snapshot?run=…`, and limits the grid payload to 5,000 pages
+by default (up to 10,000 with `limit`). It sends `Cache-Control: no-store` so
+the browser reflects database reads on refresh.
 
 Validate its generated fixture and interaction model without installing any
 browser packages:

@@ -1582,6 +1582,130 @@ class _SavedJob(TypedDict, total=False):
     results: list[_SavedResult]
 
 
+_REPORT_NAMES = (
+    "orphans",
+    "indexability",
+    "redirect-chains",
+    "hub-pages",
+    "slowest",
+    "cwv",
+    "analytics-inventory",
+    "missing-analytics",
+    "missing-expected-id",
+)
+
+
+async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespace) -> list[dict[str, object]]:
+    if name == "orphans":
+        return await reports.orphan_pages()
+    if name == "indexability":
+        return await reports.indexability_reasons()
+    if name == "redirect-chains":
+        return await reports.redirect_chains()
+    if name == "hub-pages":
+        return await reports.site_hub_pages(min_outlinks=args.min_outlinks)
+    if name == "slowest":
+        return await reports.slowest_pages(limit=args.limit)
+    if name == "cwv":
+        return await reports.worst_cwv_pages(limit=args.limit)
+    if name == "analytics-inventory":
+        return await reports.analytics_inventory()
+    if name == "missing-analytics":
+        return await reports.pages_missing_analytics(vendor=args.vendor)
+    if name == "missing-expected-id":
+        return await reports.pages_missing_expected_id(args.expected_id)
+    raise ValueError(f"unknown report: {name}")
+
+
+def _report_cell(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _render_report_table(name: str, rows: list[dict[str, object]]) -> str:
+    lines = [f"# {name} ({len(rows)} rows)"]
+    if not rows:
+        lines.append("(no rows)")
+        return "\n".join(lines)
+    columns = list(rows[0].keys())
+    widths = {col: max(len(col), *(len(_report_cell(row.get(col))) for row in rows)) for col in columns}
+    lines.append("  ".join(col.ljust(widths[col]) for col in columns).rstrip())
+    for row in rows:
+        lines.append("  ".join(_report_cell(row.get(col)).ljust(widths[col]) for col in columns).rstrip())
+    return "\n".join(lines)
+
+
+def _emit_report_results(results: dict[str, list[dict[str, object]]], args: argparse.Namespace) -> None:
+    if args.format == "json":
+        text = json.dumps(results, indent=2, sort_keys=True, default=str)
+        if args.out:
+            Path(args.out).write_text(text + "\n", encoding="utf-8")
+        else:
+            print(text)
+        return
+    if args.format == "csv":
+        import csv as _csv
+
+        out_dir = Path(args.out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for name, rows in results.items():
+            path = out_dir / f"{name.replace('-', '_')}.csv"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                if rows:
+                    writer = _csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+                    writer.writeheader()
+                    writer.writerows(rows)
+            print(f"{name}: {len(rows)} rows -> {path}")
+        return
+    text = "\n\n".join(_render_report_table(name, rows) for name, rows in results.items())
+    if args.out:
+        Path(args.out).write_text(text + "\n", encoding="utf-8")
+    else:
+        print(text)
+
+
+async def _run_report(args: argparse.Namespace) -> int:
+    requested = list(dict.fromkeys(args.reports))
+    unknown = [name for name in requested if name not in _REPORT_NAMES]
+    if unknown:
+        print(
+            f"Error: unknown report(s): {', '.join(unknown)}. Valid reports: {', '.join(_REPORT_NAMES)}",
+            file=sys.stderr,
+        )
+        return EXIT_VALIDATION
+    if not requested:
+        # missing-expected-id needs an identifier, so it only joins the default
+        # set when --expected-id makes it answerable.
+        requested = [name for name in _REPORT_NAMES if name != "missing-expected-id" or args.expected_id]
+    if "missing-expected-id" in requested and not args.expected_id:
+        print("Error: report 'missing-expected-id' requires --expected-id", file=sys.stderr)
+        return EXIT_VALIDATION
+    if args.format == "csv" and not args.out:
+        print("Error: --format csv requires --out DIRECTORY", file=sys.stderr)
+        return EXIT_VALIDATION
+
+    import asyncpg
+
+    store = _store_from_args(args)
+    reports = CrawlReports(store, run_id=args.crawl_run_id)
+    try:
+        results: dict[str, list[dict[str, object]]] = {}
+        for name in requested:
+            results[name] = await _fetch_report(reports, name, args)
+    except asyncpg.exceptions.UndefinedTableError as exc:
+        print(
+            f"Error: {exc}. This database has no run-aware snapshot schema — it either "
+            "predates snapshots (re-crawl with a current version) or is not a crawler_cli database.",
+            file=sys.stderr,
+        )
+        return EXIT_VALIDATION
+    finally:
+        await store.close()
+    _emit_report_results(results, args)
+    return 0
+
+
 def _load_saved_crawl(path: Path) -> "CrawlJobResult":
     from .models import (
         BrowserRuntime,
@@ -1723,26 +1847,45 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
     raise ValueError(f"Unsupported crawl artifact format: {path}")
 
 
+def _load_artifact(path: str, label: str) -> "CrawlJobResult":
+    """Load a crawl artifact, reporting a missing/unreadable file as a clean
+    error instead of an uncaught traceback (ticket 123)."""
+    try:
+        return _load_saved_crawl(Path(path))
+    except OSError as exc:
+        raise ValueError(f"cannot read {label} artifact {path!r}: {exc}") from exc
+
+
 async def _load_compare_side(
     *,
     json_path: str | None,
     store_dsn: str | None,
     run_id: str | None,
     side: str,
+    include_html: bool = False,
 ) -> "list[CrawlResult] | CrawlJobResult":
     """Resolve one side of a ``compare`` from either a JSON artifact or a stored
-    PostgreSQL crawl run (ticket 122)."""
+    PostgreSQL crawl run (ticket 122).
+
+    Passing both is rejected rather than silently preferring one (ticket 123).
+    ``include_html`` is forwarded to the store loader so an active ``--replace``
+    can re-hash real HTML instead of falling back to un-remapped stored hashes.
+    """
+    if store_dsn and json_path:
+        raise ValueError(
+            f"provide either a {side} JSON path or --{side}-store, not both (got {json_path!r} and a {side} store DSN)"
+        )
     if store_dsn:
         store = AsyncpgStore(store_dsn)
         await store.initialize()
         try:
             resolved = await store.resolve_reporting_run_id(run_id)
-            return await store.fetch_pages_for_comparison(run_id=resolved)
+            return await store.fetch_pages_for_comparison(run_id=resolved, include_html=include_html)
         finally:
             await store.close()
     if not json_path:
         raise ValueError(f"provide a {side} JSON path or --{side}-store DSN")
-    return _load_saved_crawl(Path(json_path))
+    return _load_artifact(json_path, side)
 
 
 async def _run_compare(args: argparse.Namespace) -> int:
@@ -1759,12 +1902,14 @@ async def _run_compare(args: argparse.Namespace) -> int:
             store_dsn=_resolve_store_dsn(args, "baseline"),
             run_id=getattr(args, "baseline_run", None),
             side="baseline",
+            include_html=bool(remap),
         )
         candidate_job = await _load_compare_side(
             json_path=args.candidate_json,
             store_dsn=_resolve_store_dsn(args, "candidate"),
             run_id=getattr(args, "candidate_run", None),
             side="candidate",
+            include_html=bool(remap),
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -1777,6 +1922,21 @@ async def _run_compare(args: argparse.Namespace) -> int:
         remap=remap if remap else None,
         simhash_threshold=getattr(args, "simhash_threshold", DEFAULT_SIMHASH_THRESHOLD),
     )
+
+    if diff.remap_fallback_paths:
+        # A silently-ineffective --replace looks exactly like a clean diff, so
+        # say so loudly rather than let host noise read as real change (t123).
+        count = len(diff.remap_fallback_paths)
+        print(
+            f"Warning: --replace could not be applied to {count} page(s) — no stored HTML to re-hash, "
+            "so their content verdicts use un-remapped hashes and may report host-derived noise. "
+            "Re-crawl with --content-hashing (and without --no-store-html), or compare JSON artifacts.",
+            file=sys.stderr,
+        )
+        for path in diff.remap_fallback_paths[:10]:
+            print(f"  - {path}", file=sys.stderr)
+        if count > 10:
+            print(f"  … and {count - 10} more", file=sys.stderr)
 
     if args.output:
         payload = {"schema_version": COMPARE_SCHEMA_VERSION, "rows": comparison_rows(diff)}
@@ -1823,11 +1983,13 @@ async def _run_compare(args: argparse.Namespace) -> int:
 async def _resolve_compare_urls_side(
     urls: list[str],
     *,
+    side: str,
     artifact: str | None,
     store_dsn: str | None,
     run_id: str | None,
     fetch_missing: bool,
     match_final_url: bool = True,
+    include_html: bool = False,
     args: argparse.Namespace,
 ) -> dict[str, "CrawlResult"]:
     """Resolve page data for one side of ``compare-urls`` in precedence order:
@@ -1859,14 +2021,16 @@ async def _resolve_compare_urls_side(
                 resolved[key] = result
 
     if artifact:
-        _index(_load_saved_crawl(Path(artifact)).results)
+        _index(_load_artifact(artifact, side).results)
     remaining = [url for url in wanted if url not in resolved]
     if remaining and store_dsn:
         store = AsyncpgStore(store_dsn)
         await store.initialize()
         try:
             resolved_run = await store.resolve_reporting_run_id(run_id)
-            _index(await store.fetch_pages_for_comparison(urls=remaining, run_id=resolved_run))
+            _index(
+                await store.fetch_pages_for_comparison(urls=remaining, run_id=resolved_run, include_html=include_html)
+            )
         finally:
             await store.close()
     remaining = [url for url in wanted if url not in resolved]
@@ -1954,23 +2118,31 @@ async def _run_compare_urls(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
 
-    source_by_url = await _resolve_compare_urls_side(
-        [pair.source_url for pair in parsed.pairs],
-        artifact=args.source_artifact,
-        store_dsn=source_dsn,
-        run_id=args.source_run,
-        fetch_missing=args.fetch_missing,
-        match_final_url=False,
-        args=args,
-    )
-    target_by_url = await _resolve_compare_urls_side(
-        [pair.target_url for pair in parsed.pairs],
-        artifact=args.target_artifact,
-        store_dsn=target_dsn,
-        run_id=args.target_run,
-        fetch_missing=args.fetch_missing,
-        args=args,
-    )
+    try:
+        source_by_url = await _resolve_compare_urls_side(
+            [pair.source_url for pair in parsed.pairs],
+            side="source",
+            artifact=args.source_artifact,
+            store_dsn=source_dsn,
+            run_id=args.source_run,
+            fetch_missing=args.fetch_missing,
+            match_final_url=False,
+            include_html=bool(remap),
+            args=args,
+        )
+        target_by_url = await _resolve_compare_urls_side(
+            [pair.target_url for pair in parsed.pairs],
+            side="target",
+            artifact=args.target_artifact,
+            store_dsn=target_dsn,
+            run_id=args.target_run,
+            fetch_missing=args.fetch_missing,
+            include_html=bool(remap),
+            args=args,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
 
     rows = build_pair_rows(
         parsed.pairs,
@@ -2034,6 +2206,7 @@ COMPARE_URLS_CSV_COLUMNS = [
     "source_final_url",
     "redirect_verdict",
     "redirect_hops",
+    "redirect_chain",
     "sha256_equal",
     "simhash_distance",
     "content_verdict",
@@ -2045,6 +2218,15 @@ Appending columns is allowed within ``compare-urls/1``; renaming, removing or
 reordering existing columns requires a schema-version bump."""
 
 
+def _format_redirect_chain(chain: list[dict[str, object]]) -> str:
+    """Render hops for the CSV report as ``url (301) -> url (302)`` (ticket 123).
+
+    Ticket 122 required the report to carry the hops; the first CSV writer
+    dropped them and appended ``(N hop)`` into ``source_final_url``, which
+    corrupted that column for anything consuming the URL."""
+    return " -> ".join(f"{hop.get('url')} ({hop.get('status')})" for hop in chain)
+
+
 def _write_compare_urls_output(rows: list[dict[str, object]], output: str) -> None:
     path = Path(output)
     if path.suffix.lower() == ".csv":
@@ -2054,12 +2236,11 @@ def _write_compare_urls_output(rows: list[dict[str, object]], output: str) -> No
             writer = _csv.DictWriter(handle, fieldnames=COMPARE_URLS_CSV_COLUMNS, extrasaction="ignore")
             writer.writeheader()
             for row in rows:
-                flat = {key: row.get(key) for key in COMPARE_URLS_CSV_COLUMNS}
-                # Hop count is its own column so ``source_final_url`` stays a
-                # clean URL for machine consumers (ticket 3344; previously the
-                # count was appended to the URL as decoration).
                 chain = cast("list[dict[str, object]]", row.get("redirect_chain", []))
+                flat = {key: row.get(key) for key in COMPARE_URLS_CSV_COLUMNS}
+                # URLs stay clean; hop count and the chain get their own columns.
                 flat["redirect_hops"] = len(chain)
+                flat["redirect_chain"] = _format_redirect_chain(chain)
                 writer.writerow(flat)
     else:
         payload = {"schema_version": COMPARE_URLS_SCHEMA_VERSION, "rows": rows}
@@ -2389,6 +2570,49 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output HTML path (default: report.html)",
     )
 
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Print SEO audit reports (orphans, redirect chains, CWV, analytics coverage) from a stored crawl",
+    )
+    report_parser.add_argument(
+        "reports",
+        nargs="*",
+        metavar="REPORT",
+        help=(f"Reports to run (default: all that need no extra flags). Valid: {', '.join(_REPORT_NAMES)}"),
+    )
+    report_parser.add_argument(
+        "--format",
+        choices=("table", "json", "csv"),
+        default="table",
+        help="table: aligned text; json: one object keyed by report; csv: one file per report (default: table)",
+    )
+    report_parser.add_argument(
+        "--out",
+        help="Output path: a file for table/json (default stdout), a directory for csv (required)",
+    )
+    report_parser.add_argument(
+        "--limit",
+        type=non_negative_int,
+        default=50,
+        help="Row cap for the slowest and cwv reports (default 50)",
+    )
+    report_parser.add_argument(
+        "--min-outlinks",
+        type=non_negative_int,
+        default=5,
+        help="Minimum outlinks for the hub-pages report (default 5)",
+    )
+    report_parser.add_argument(
+        "--vendor",
+        help="Restrict missing-analytics to pages lacking this vendor (e.g. 'ga4')",
+    )
+    report_parser.add_argument(
+        "--expected-id",
+        help="Analytics identifier the missing-expected-id report checks for (e.g. 'G-XXXX')",
+    )
+    _add_postgres_args(report_parser)
+    _add_reporting_run_selector(report_parser)
+
     cmp_parser = subparsers.add_parser(
         "compare",
         help="Compare two crawls (saved JSON artifacts or stored runs), with optional host remapping",
@@ -2639,7 +2863,9 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "hreflang-groups",
         "intent-overlap",
         "render-report",
+        "report",
         "compare",
+        "compare-urls",
         "compact-html",
         "delete-crawl",
         "compact-crawl",
@@ -2682,6 +2908,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_intent_overlap(args)
     if command == "render-report":
         return _run_render_report(args)
+    if command == "report":
+        return await _run_report(args)
     if command == "compare":
         return await _run_compare(args)
     if command == "compare-urls":

@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `--auth-token-env VAR` / `--auth-token-file PATH`: bearer tokens accept
     the same argv-free secret sources as basic-auth passwords.
 
+- Compare review hardening (ticket 123): hash-less flag-free compares retain
+  their prior behaviour, store-backed remaps can rehash stored HTML, CSV reports
+  expose redirect hops, identity mappings are accepted, and CI check failures
+  use a distinct exit code.
+- Live GUI Chrome profile support (ticket 128): local profile discovery,
+  lock/default-directory preflight, persistent Playwright launch wiring, and
+  Obscura/profile mutual exclusion.
+
 ### Changed
 
 - `compare-urls --fail-on` findings now exit **3** (`EXIT_FINDINGS`, matching

@@ -64,5 +64,17 @@ Consequences:
   behaviour the original backfill exists to protect (ticket 095).
 - No destructive cleanup without an explicit opt-in flag.
 
+## Resolution (2026-07-18)
+- `initialize()` now records whether `page_run_snapshots` existed before schema
+  setup. The mutable-table projection runs only when that table is newly added,
+  which is the pre-095 upgrade path.
+- The compatibility `legacy` run is now created only when that upgrade has
+  actual legacy state to project; fresh databases have no placeholder run.
+- Existing duplicated legacy snapshots are deliberately retained: cleanup
+  remains an explicit future operation.
+- Added integration coverage for a two-run fresh database and for an idempotent
+  pre-snapshot upgrade.
+
 ## Status
-open (2026-07-17) — filed from the ticket-124 implementation.
+implemented (2026-07-18) — targeted ruff and mypy checks pass; the new
+PostgreSQL integration tests require a designated test DSN.
