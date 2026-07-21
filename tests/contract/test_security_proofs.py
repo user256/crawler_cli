@@ -6,12 +6,6 @@ Proves, with running code rather than documentation:
     argv, and never appear in log output or saved artifacts; and
 (b) Basic and Bearer credentials are attached to the configured site and are
     STRIPPED on cross-origin redirects, while surviving same-origin redirects.
-
-Scope note (documented gap, ticket 129): these guarantees are proven for the
-aiohttp and curl_cffi backends. The Playwright backend applies auth as
-context-wide headers/credentials without origin scoping and is NOT covered by
-(b); the portal must not use the Playwright backend for authenticated crawls
-until ticket 129 lands.
 """
 
 from __future__ import annotations
@@ -24,7 +18,7 @@ from aiohttp import web
 
 from crawler_cli.__main__ import _build_auth, _build_parser
 from crawler_cli.auth import AuthConfig
-from crawler_cli.backends import AiohttpBackend, CurlCffiBackend
+from crawler_cli.backends import AiohttpBackend, CurlCffiBackend, PlaywrightBackend
 from crawler_cli.config import CrawlConfig
 from crawler_cli.engine import CrawlEngine
 from crawler_cli.persistence import MemoryStore
@@ -142,9 +136,14 @@ async def test_authenticated_crawl_logs_and_artifact_never_contain_secret(auth: 
 
 
 def _backend(backend_cls, auth: AuthConfig):
+    name_map = {
+        AiohttpBackend: "aiohttp",
+        CurlCffiBackend: "curl_cffi",
+        PlaywrightBackend: "playwright",
+    }
     return backend_cls(
         CrawlConfig(
-            backend="curl_cffi" if backend_cls is CurlCffiBackend else "aiohttp",
+            backend=name_map[backend_cls],
             auth=auth,
             follow_redirects=True,
         )
@@ -152,7 +151,7 @@ def _backend(backend_cls, auth: AuthConfig):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_cls", [AiohttpBackend, CurlCffiBackend], ids=["aiohttp", "curl_cffi"])
+@pytest.mark.parametrize("backend_cls", [AiohttpBackend, CurlCffiBackend, PlaywrightBackend], ids=["aiohttp", "curl_cffi", "playwright"])
 async def test_bearer_token_not_forwarded_to_cross_origin_redirect(backend_cls) -> None:
     seen: dict[str, str | None] = {}
     redirect_to = ""
@@ -186,7 +185,7 @@ async def test_bearer_token_not_forwarded_to_cross_origin_redirect(backend_cls) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_cls", [AiohttpBackend, CurlCffiBackend], ids=["aiohttp", "curl_cffi"])
+@pytest.mark.parametrize("backend_cls", [AiohttpBackend, CurlCffiBackend, PlaywrightBackend], ids=["aiohttp", "curl_cffi", "playwright"])
 @pytest.mark.parametrize(
     "auth",
     [
@@ -225,7 +224,7 @@ async def test_credentials_survive_same_origin_redirect(backend_cls, auth: AuthC
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_cls", [AiohttpBackend, CurlCffiBackend], ids=["aiohttp", "curl_cffi"])
+@pytest.mark.parametrize("backend_cls", [AiohttpBackend, CurlCffiBackend, PlaywrightBackend], ids=["aiohttp", "curl_cffi", "playwright"])
 async def test_domain_scoped_auth_not_sent_to_other_hosts(backend_cls) -> None:
     """--auth is host-scoped via AuthConfig.domain: a fetch of a different host
     must not carry the Authorization header at all."""

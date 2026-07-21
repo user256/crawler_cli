@@ -610,15 +610,8 @@ class PlaywrightBackend(FetchBackend):
             proxy_setting = self._playwright_proxy_setting()
             if proxy_setting is not None:
                 context_kwargs["proxy"] = proxy_setting
-        auth = self.config.auth
-        if auth and auth.enabled and auth.basic_credentials():
-            user, password = auth.basic_credentials()  # type: ignore[misc]
-            context_kwargs["http_credentials"] = {"username": user, "password": password}
-        if auth and auth.enabled:
-            context_kwargs["extra_http_headers"] = {
-                **extra_headers,
-                **auth.auth_headers(),
-            }
+        # Auth is applied per-page in fetch() via page.route so it can be safely
+        # origin-scoped (ticket 129).
         return context_kwargs
 
     def _playwright_cookie_payload(self) -> list[dict[str, object]]:
@@ -875,6 +868,35 @@ class PlaywrightBackend(FetchBackend):
         page = None
         try:
             page = await context.new_page()
+
+            auth = self.config.auth
+            if auth and auth.enabled:
+                from urllib.parse import urlparse
+                allowed_netloc = auth.domain.lower() if auth.domain else urlparse(url).netloc.lower()
+                auth_headers = auth.auth_headers()
+                if auth.auth_type == "basic" and auth.username and auth.password:
+                    import base64
+                    encoded = base64.b64encode(f"{auth.username}:{auth.password}".encode()).decode("utf-8")
+                    auth_headers["Authorization"] = f"Basic {encoded}"
+
+                def _auth_match(request_url: str) -> bool:
+                    return urlparse(request_url).netloc.lower() == allowed_netloc
+
+                async def _auth_route(route, request):
+                    headers = request.headers.copy()
+                    headers.update(auth_headers)
+                    try:
+                        # route.fetch automatically follows redirects and natively
+                        # strips custom headers (like Authorization) on cross-origin
+                        # hops, while preserving them for same-origin (ticket 129).
+                        response = await route.fetch(headers=headers)
+                        await route.fulfill(response=response)
+                    except Exception:
+                        await route.continue_(headers=headers)
+
+                with contextlib.suppress(Exception):
+                    await page.route(_auth_match, _auth_route)
+
             # Per-domain User-Agent override (ticket 080). The context carries the
             # default UA; a per-page extra header swaps the sent User-Agent for
             # this domain without recycling the shared context.

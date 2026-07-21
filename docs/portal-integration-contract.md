@@ -83,10 +83,6 @@ Proven upstream (aiohttp + curl_cffi backends):
 
 **Gaps the portal must wrap (guarantees that do NOT live upstream):**
 
-- **Playwright backend is excluded from guarantee 3** (ticket 129): context
-  `http_credentials` are not origin-restricted and bearer headers ride on
-  every request. Do not dispatch authenticated crawls on `--backend
-  playwright` until 129 lands.
 - **SSRF/target authorisation**: crawler-cli fetches whatever URL it is given
   (private ranges, metadata endpoints included) and `--fetch-missing` performs
   live fetches. The portal's `url_policy` layer must authorise every target;
