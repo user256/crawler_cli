@@ -206,7 +206,7 @@
       "redirect_chain": [],
       "sha256_equal": false,
       "simhash_distance": null,
-      "content_verdict": "changed",
+      "content_verdict": "unknown",
       "field_deltas": {
         "title": {
           "source": null,

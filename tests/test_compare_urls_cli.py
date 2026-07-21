@@ -177,7 +177,7 @@ def test_redirect_chain_survives_serialization_round_trip(tmp_path):
 
 def test_fail_on_uses_distinct_exit_code(tmp_path):
     # A tripped CI gate must be distinguishable from a usage error (both were 2).
-    from crawler_cli.exit_codes import EXIT_CHECK_FAILED, EXIT_VALIDATION
+    from crawler_cli.exit_codes import EXIT_FINDINGS, EXIT_VALIDATION
 
     src, tgt, pairs = tmp_path / "s.json", tmp_path / "t.json", tmp_path / "p.csv"
     _artifact(src, [_result("https://old/b", "https://old/b", chain=[])])
@@ -188,7 +188,7 @@ def test_fail_on_uses_distinct_exit_code(tmp_path):
         ["compare-urls", "--pairs", str(pairs), "--source-artifact", str(src),
          "--target-artifact", str(tgt), "--fail-on", "redirect_mismatch"]
     )
-    assert code == EXIT_CHECK_FAILED
+    assert code == EXIT_FINDINGS
     assert code != EXIT_VALIDATION
 
 
