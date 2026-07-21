@@ -9,6 +9,7 @@ integration test in ``test_persistence_integration.py``.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -261,3 +262,89 @@ def test_build_crawl_argv_is_argv_not_shell():
     argv = server.build_crawl_argv(spec, "dsn")
     assert "https://site.example/a;rm -rf /" in argv
     assert all(isinstance(part, str) for part in argv)
+
+
+# --- ticket 128: Chrome profile discovery and preflight --------------------
+
+
+def _write_local_state(root, *, profiles, last_used="Profile 1"):
+    state_path = root / "Local State"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    (root / "Profile 1").mkdir(exist_ok=True)
+    state_path.write_text(json.dumps({"profile": {"last_used": last_used, "info_cache": profiles}}), encoding="utf-8")
+
+
+def test_discover_chrome_profiles_reads_labels_without_private_data(tmp_path):
+    chrome_root = tmp_path / ".config" / "google-chrome"
+    _write_local_state(
+        chrome_root,
+        profiles={
+            "Profile 1": {"name": "Work", "user_name": "work@example.com"},
+            "Profile 2": {"gaia_name": "Personal", "user_name": ""},
+            "../escape": {"name": "Do not expose"},
+        },
+    )
+    (chrome_root / "Profile 2").mkdir()
+    profiles = server.discover_chrome_profiles(home=tmp_path, platform_name="linux", environ={})
+    assert [profile["name"] for profile in profiles] == ["Work", "Personal"]
+    assert profiles[0]["lastUsed"] is True
+    assert profiles[0]["email"] == "work@example.com"
+    assert profiles[0]["userDataDir"] == str(chrome_root)
+    assert "Cookies" not in json.dumps(profiles)
+
+
+def test_discover_chrome_profiles_reports_lock_and_default_dir_guidance(tmp_path):
+    chrome_root = tmp_path / ".config" / "google-chrome"
+    _write_local_state(chrome_root, profiles={"Profile 1": {"name": "Work"}})
+    (chrome_root / "SingletonLock").write_text("locked", encoding="utf-8")
+    profile = server.discover_chrome_profiles(home=tmp_path, platform_name="linux", environ={})[0]
+    assert profile["locked"] is True
+    assert profile["requiresDedicatedUserDataDir"] is True
+    assert "close Chrome" in profile["warning"]
+
+
+def test_profile_preflight_rejects_locked_profile_and_warns_on_default_dir(tmp_path):
+    root = tmp_path / "User Data"
+    (root / "Default").mkdir(parents=True)
+    check = server.chrome_profile_preflight(str(root), "Default")
+    assert check["locked"] is False
+    assert check["requiresDedicatedUserDataDir"] is True
+    (root / "SingletonLock").touch()
+    assert server.chrome_profile_preflight(str(root), "Default")["locked"] is True
+    with pytest.raises(ValueError, match="one Chrome profile"):
+        server.chrome_profile_preflight(str(root), "../secrets")
+
+
+def test_build_crawl_argv_wires_persistent_chrome_profile(tmp_path):
+    root = tmp_path / "ChromeProfileRoot"
+    (root / "Profile 1").mkdir(parents=True)
+    spec = server.parse_crawl_spec(
+        {
+            "url": "https://site.example",
+            "backend": "playwright",
+            "browserChannel": "chrome",
+            "userDataDir": str(root),
+            "profileDirectory": "Profile 1",
+            "headed": True,
+        }
+    )
+    argv = server.build_crawl_argv(spec, "dsn")
+    assert "--js" in argv
+    assert argv[argv.index("--playwright-channel") + 1] == "chrome"
+    assert argv[argv.index("--playwright-user-data-dir") + 1] == str(root)
+    assert argv[argv.index("--playwright-profile-directory") + 1] == "Profile 1"
+    assert "--headed" in argv
+
+
+def test_profile_launch_is_mutually_exclusive_with_obscura(tmp_path):
+    root = tmp_path / "ChromeProfileRoot"
+    (root / "Default").mkdir(parents=True)
+    with pytest.raises(ValueError, match="Obscura"):
+        server.parse_crawl_spec(
+            {
+                "url": "https://site.example",
+                "backend": "obscura",
+                "userDataDir": str(root),
+                "profileDirectory": "Default",
+            }
+        )

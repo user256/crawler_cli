@@ -57,31 +57,45 @@ class DeepCrawlDiff(CrawlDiff):
     link_changes: dict[str, LinkChange] = field(default_factory=dict)
     simhash_distances: dict[str, int | None] = field(default_factory=dict)
     content_verdicts: dict[str, str] = field(default_factory=dict)
+    remap_fallback_paths: list[str] = field(default_factory=list)
+    """Paths where a remap was requested but could not be applied — the side
+    carried no HTML/text to re-hash, so the verdict rests on un-remapped stored
+    hashes (ticket 123). Callers should surface this rather than let a
+    silently-ineffective ``--replace`` read as a clean diff."""
 
 
 def _path_of(url: str) -> str:
     return urlparse(url).path or "/"
 
 
+def can_rehash(result: CrawlResult) -> bool:
+    """Whether *result* carries content a remap can actually re-hash (ticket 123).
+
+    A store-loaded row without HTML has neither ``raw_html`` nor extracted text,
+    so a remap cannot be applied to it — the caller must not silently compare
+    un-remapped stored hashes as though the remap had taken effect."""
+    if result.raw_html is not None:
+        return True
+    text = result.extracted.text if result.extracted else None
+    return bool(text and text.strip())
+
+
 def _content_hashes(result: CrawlResult, remap: Remap | None) -> tuple[str | None, int | None]:
-    """Return ``(sha256, simhash64)`` for *result* (ticket 122).
+    """Return ``(sha256, simhash64)`` for *result* (tickets 122, 123).
 
     With a remap active, re-hash remapped content so host-derived text
-    differences don't break equality. Without one, prefer the stored hashes but
-    compute from ``raw_html``/text when both are absent — so a verdict is still
-    available for crawls that ran without ``--content-hashing`` or artifacts that
-    predate it. Falls back to the stored (possibly ``None``) hashes when there is
-    nothing to hash (e.g. a store-loaded row carrying no raw_html)."""
+    differences don't break equality; without one, the stored hashes are used
+    verbatim. Flag-less ``compare`` therefore behaves exactly as it did pre-122
+    (no hashes stored -> no content signal, rather than an implicit
+    BeautifulSoup pass per page). Where a remap cannot be applied — nothing to
+    re-hash — the stored (possibly ``None``) hashes are returned and
+    :func:`can_rehash` lets the caller report the fallback."""
     stored = (result.content_hash_sha256, result.content_hash_simhash)
+    if not remap:
+        return stored
     text = result.extracted.text if result.extracted else None
-    if remap:
-        rehashed = remap.rehash(raw_html=result.raw_html, text=text)
-        return stored if rehashed == (None, None) else rehashed
-    if stored == (None, None):
-        computed = Remap().rehash(raw_html=result.raw_html, text=text)
-        if computed != (None, None):
-            return computed
-    return stored
+    rehashed = remap.rehash(raw_html=result.raw_html, text=text)
+    return stored if rehashed == (None, None) else rehashed
 
 
 def _content_verdict(
@@ -90,9 +104,17 @@ def _content_verdict(
     distance: int | None,
     threshold: int,
 ) -> str:
-    """Classify a shared page: ``identical`` (sha256 equal, incl. both absent),
-    ``near`` (simhash within *threshold*), else ``changed``."""
-    if base_sha == cand_sha:
+    """Classify a shared page (tickets 122, 123).
+
+    ``identical`` (sha256 equal), ``near`` (simhash within *threshold*),
+    ``changed``, or ``unknown`` when neither side carries a hash to compare.
+    ``unknown`` matters: two hash-less pages are not evidence of sameness, and
+    calling that ``identical`` would silently pass a crawl that never ran with
+    ``--content-hashing``."""
+    if base_sha is None or cand_sha is None:
+        if distance is None:
+            return "unknown"
+    elif base_sha == cand_sha:
         return "identical"
     if distance is not None and distance <= threshold:
         return "near"
@@ -101,11 +123,17 @@ def _content_verdict(
 
 @dataclass(slots=True)
 class ContentComparison:
-    """sha256/simhash comparison between two pages (ticket 122)."""
+    """sha256/simhash comparison between two pages (ticket 122).
+
+    Carries the resolved hashes so callers never have to recompute them
+    (ticket 123: ``compare_deep`` used to re-hash both sides a second time to
+    fill ``content_hash_mismatches``)."""
 
     sha256_equal: bool
     simhash_distance: int | None
     verdict: str
+    base_sha256: str | None = None
+    candidate_sha256: str | None = None
 
 
 def content_comparison(
@@ -126,6 +154,8 @@ def content_comparison(
         sha256_equal=base_sha == cand_sha,
         simhash_distance=distance,
         verdict=_content_verdict(base_sha, cand_sha, distance, simhash_threshold),
+        base_sha256=base_sha,
+        candidate_sha256=cand_sha,
     )
 
 
@@ -241,9 +271,13 @@ def compare_deep(
         diff.simhash_distances[path] = content.simhash_distance
         diff.content_verdicts[path] = content.verdict
         if not content.sha256_equal:
-            base_sha, _ = _content_hashes(base_result, remap)
-            cand_sha, _ = _content_hashes(cand_result, remap)
-            diff.content_hash_mismatches[base_result.final_url] = (base_sha, cand_sha)
+            # Hashes come back on the comparison itself — re-deriving them here
+            # meant a second normalization pass per mismatching row (ticket 123).
+            diff.content_hash_mismatches[base_result.final_url] = (content.base_sha256, content.candidate_sha256)
+        if remap and not (can_rehash(base_result) and can_rehash(cand_result)):
+            # The remap could not be applied to at least one side, so this row's
+            # verdict rests on un-remapped stored hashes and is host-noise-bound.
+            diff.remap_fallback_paths.append(path)
 
         base_title = base_result.extracted.title if base_result.extracted else None
         cand_title = cand_result.extracted.title if cand_result.extracted else None

@@ -11,7 +11,9 @@ Ticket files remain the source of truth for scope and DoD.
   command. Two review bugs (root-URL redirect matching; source-side pair
   resolution by `final_url`) were fixed on the branch pre-merge; the
   store-loader blocker was cleared with a real-Postgres run of the DSN-gated
-  integration test. Remaining review findings are ticket **123**.
+  integration test. The remaining compare review work is now recorded as
+  implemented ticket **123**; ticket **127** adds separate DSN credential
+  hygiene and remains in review.
 - The 2026-07-16 batch is fully landed: 114–117 (PRs #36/#37/#38/#39),
   118/119 (GUI, PRs #42/#45), and 095+120 (run-aware snapshots, PR #44).
 - Tickets **101–108** form the completed intent-overlap reporting baseline.
@@ -21,7 +23,8 @@ Ticket files remain the source of truth for scope and DoD.
   truth on legacy schemas, and can start crawls locally. A GUI Chrome-profile
   picker remains the planned follow-up recorded in 124 — the engine side already
   ships (`--playwright-user-data-dir` / `--playwright-channel chrome`).
-- Ticket **110** remains unused/rejected; **127** is now reserved (compare store-DSN env resolution); next unreserved number is **128**.
+- Ticket **110** remains unused/rejected; **127** is implemented and in review,
+  and **128** is implemented locally; next unreserved number is **129**.
 - Leftover review worktrees (`/tmp/crawler_cli_pr33`, `/tmp/crawler_cli_pr44`)
   removed 2026-07-17.
 
@@ -305,11 +308,12 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 - `125` `done` (2026-07-17, commit `ee7ae6e`) [ticket-125-crawler-gui-all-crawls-access.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-125-crawler-gui-all-crawls-access.md) — **P2:** GUI live mode reaches every crawl run in the connected DB — `server.py` bridge landed with 11 unit tests + a DSN-gated integration test; `offset`/`limit` pagination with a `Showing X of Y` banner and Load more (no more silent 5k truncation); overview/issues moved to a whole-run SQL aggregate so they stay correct while paging; legacy pre-095 DBs collapse to one honest `current-state` entry instead of N runs each claiming the whole database; inlinks/outlinks/structured-data/response-time filled from the DB (absent stays `null`, not 0). Also fixed live-mode content-type never matching `text/html` (every HTML category tab and content stat silently read zero) and hid the empty `legacy` placeholder run
 - `124` `done` (2026-07-17, commit `13911e1`) [ticket-124-crawler-gui-crawl-management.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-124-crawler-gui-crawl-management.md) — **P2, depended on 125:** manage crawls from the GUI — run-selector dropdown + clickable history cards (replacing hand-edited `?run=`, URLs stay shareable) and a working "+ New Crawl" via `POST /api/live/crawls` spawning the real `crawler_cli` CLI, with single-job 409 guard, progress polling, auto-load of the finished run, and failure output surfaced. Consciously extends the read-only bridge for local submission; **delete stays CLI/API-only**. Verified end-to-end against real crawls in headless Chromium. Fixed: empty-DB 500 and a stale `has_run_snapshots` flag that mislabelled runs until restart. Chrome-profile picker is the recorded follow-up; `legacy` backfill duplication → 126
 
-### Open work — priority order (2026-07-17)
+### Active work — priority order (2026-07-18)
 
-- `123` `open` [ticket-123-compare-urls-review-remediations.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-123-compare-urls-review-remediations.md) — **P2:** ticket-122 review remediations — flag-less `compare` hash-recompute behaviour change (+ double recompute per row), `--replace` silently no-op for store-loaded sides (falls back to un-remapped stored hashes), persisted-session/`--persist` test gap, CSV redirect-hops output, distinct `--fail-on` exit code, identity-mapping verdicts, artifact-path error handling, hreflang-diff scope correction
+- `123` `implemented` [ticket-123-compare-urls-review-remediations.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-123-compare-urls-review-remediations.md) — **P2:** flag-less hash behaviour is explicit and single-pass; store-backed remaps load HTML or warn on fallback; persistence/CSV/exit-code/identity/error-path coverage added; hreflang scope corrected. Focused compare suite passes.
 - `127` `in-review` [ticket-127-compare-store-dsn-env.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-127-compare-store-dsn-env.md) — **P2:** the ticket-122 per-side compare store flags take a literal DSN, putting credentials in shell history and the process list. Resolve each side from the environment instead — `CRAWLER_CLI_<SIDE>_POSTGRES_DSN` (also `PostgreSQLCrawler_` prefix) plus `--<side>-store-env VAR`, with inline `--<side>-store` kept as an override; named-but-unset variable fails fast. Implemented on `agent/127-compare-store-dsn-env`
-- `126` `open` [ticket-126-legacy-snapshot-backfill-duplication.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-126-legacy-snapshot-backfill-duplication.md) — **P3:** `AsyncpgStore.initialize()` re-runs the pre-095 `legacy` snapshot backfill on every init, so on a never-legacy database the next crawl mirrors the previous crawl's pages (including `html_compressed`) into a phantom `legacy` run — roughly doubling snapshot storage for those pages. Gate it on the database actually being legacy. Found while building 124
+- `126` `implemented` (2026-07-18) [ticket-126-legacy-snapshot-backfill-duplication.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-126-legacy-snapshot-backfill-duplication.md) — **P3:** `initialize()` now backfills only when `page_run_snapshots` is newly created over genuine legacy state, so a fresh database keeps only real crawl runs. Existing duplicated snapshots are intentionally retained pending an explicit cleanup option; integration coverage needs a designated test DSN.
+- `128` `implemented` (2026-07-18) [ticket-128-crawler-gui-chrome-profile-picker.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-128-crawler-gui-chrome-profile-picker.md) — **P2:** live GUI Chrome/Chromium profile discovery, lock preflight, dedicated-user-data guidance, persistent Playwright argv mapping, and Obscura/profile exclusion.
 
 Deferred lanes remain below.
 

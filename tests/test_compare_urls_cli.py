@@ -168,3 +168,68 @@ def test_redirect_chain_survives_serialization_round_trip(tmp_path):
     _artifact(artifact, [result])
     job = _load_saved_crawl(artifact)
     assert job.results[0].redirect_chain == [{"url": "https://old/a", "status": 301}]
+
+
+# --- ticket 123: exit code, CSV hops, arg handling -------------------------
+
+
+def test_fail_on_uses_distinct_exit_code(tmp_path):
+    # A tripped CI gate must be distinguishable from a usage error (both were 2).
+    from crawler_cli.exit_codes import EXIT_CHECK_FAILED, EXIT_VALIDATION
+
+    src, tgt, pairs = tmp_path / "s.json", tmp_path / "t.json", tmp_path / "p.csv"
+    _artifact(src, [_result("https://old/b", "https://old/b", chain=[])])
+    _artifact(tgt, [_result("https://new/b", "https://new/b")])
+    pairs.write_text("source_url,target_url\nhttps://old/b,https://new/b\n", encoding="utf-8")
+
+    code = _run(
+        ["compare-urls", "--pairs", str(pairs), "--source-artifact", str(src),
+         "--target-artifact", str(tgt), "--fail-on", "redirect_mismatch"]
+    )
+    assert code == EXIT_CHECK_FAILED
+    assert code != EXIT_VALIDATION
+
+
+def test_csv_output_has_hops_column_and_clean_final_url(tmp_path):
+    import csv as _csv
+
+    src, tgt, pairs, out = tmp_path / "s.json", tmp_path / "t.json", tmp_path / "p.csv", tmp_path / "o.csv"
+    _artifact(
+        src,
+        [_result(
+            "https://old/a", "https://new/a",
+            chain=[{"url": "https://old/a", "status": 301}, {"url": "https://mid/a", "status": 302}],
+        )],
+    )
+    _artifact(tgt, [_result("https://new/a", "https://new/a")])
+    pairs.write_text("source_url,target_url\nhttps://old/a,https://new/a\n", encoding="utf-8")
+
+    assert _run(["compare-urls", "--pairs", str(pairs), "--source-artifact", str(src),
+                 "--target-artifact", str(tgt), "--output", str(out)]) == 0
+
+    row = next(iter(_csv.DictReader(out.read_text(encoding="utf-8").splitlines())))
+    # source_final_url is a clean URL — no "(N hop)" appended into it.
+    assert row["source_final_url"] == "https://new/a"
+    # Hops live in their own columns and carry per-hop status.
+    assert row["redirect_hops"] == "2"
+    assert row["redirect_chain"] == "https://old/a (301) -> https://mid/a (302)"
+
+
+def test_missing_artifact_reports_clean_error(tmp_path, capsys):
+    from crawler_cli.exit_codes import EXIT_VALIDATION
+
+    pairs = tmp_path / "p.csv"
+    pairs.write_text("source_url,target_url\nhttps://old/a,https://new/a\n", encoding="utf-8")
+    code = _run(["compare-urls", "--pairs", str(pairs), "--source-artifact", str(tmp_path / "nope.json")])
+    assert code == EXIT_VALIDATION
+    assert "nope.json" in capsys.readouterr().err
+
+
+def test_compare_rejects_both_json_and_store(tmp_path, capsys):
+    from crawler_cli.exit_codes import EXIT_VALIDATION
+
+    a = tmp_path / "a.json"
+    _artifact(a, [_result("https://x/1", "https://x/1")])
+    code = _run(["compare", str(a), str(a), "--baseline-store", "postgresql://nope/db"])
+    assert code == EXIT_VALIDATION
+    assert "not both" in capsys.readouterr().err

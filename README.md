@@ -87,16 +87,16 @@ README). See [HTTP API](#http-api).
 Release metadata, versioning, and publish steps: [RELEASING.md](./RELEASING.md).
 Changelog: [CHANGELOG.md](./CHANGELOG.md).
 
-## GuardGeese Monitoring
+## Sentinel Monitoring
 
-`crawler_cli` exposes a small bridge for GuardGeese-style monitoring without running `CrawlEngine`, the CLI, or PostgreSQL persistence:
+`crawler_cli` exposes a small bridge for [Sentinel](https://selfhostedseo.com/)-style monitoring without running `CrawlEngine`, the CLI, or PostgreSQL persistence:
 
 ```python
 from crawler_cli import extract_page, fetch_page
 
 response = await fetch_page(
     "https://example.com/health",
-    user_agent="GuardGeeseBot/1.0",
+    user_agent="SentinelBot/1.0",
     headers={"X-Monitor": "1"},
 )
 extracted = extract_page(response.text, response.headers, response.url)
@@ -104,12 +104,12 @@ extracted = extract_page(response.text, response.headers, response.url)
 
 This boundary is intentional:
 
-- `fetch_page()` and `extract_page()` are the supported integration surface for `guardgeese-worker`
+- `fetch_page()` and `extract_page()` are the supported integration surface for the Sentinel worker
 - `AsyncpgStore` and the resumable frontier are for standalone crawl jobs in this repo
-- portal MariaDB state and scheduling remain authoritative in `GuardGueeseRedux`, not in `crawler_cli`
+- portal MariaDB state and scheduling remain authoritative in Sentinel, not in `crawler_cli`
 - there is no `crawler-cli worker` subcommand in this package unless the architecture changes
 
-For `guardgeese-worker[crawler]`, depend on the base package with `pip install -e ../../crawler_cli`. Add the `playwright` extra only if JS rendering is actually required.
+For the Sentinel worker's crawler dependency, depend on the base package with `pip install -e ../../crawler_cli`. Add the `playwright` extra only if JS rendering is actually required.
 
 ## CLI Usage
 
@@ -408,6 +408,38 @@ raw count, low diagnostic lengths) is the tell.
 Periodic re-runs: `crawl --refresh-days 30` skips URLs fetched successfully
 within the window, and `--ua "domain=User Agent"` sets a per-domain User-Agent
 (matches subdomains) for portfolio crawls.
+
+### 2c. Audit reports
+
+`report` prints SEO audit reports straight from a stored crawl run — no GUI or
+API needed:
+
+```bash
+# All flag-free reports as aligned tables on stdout
+crawler-cli report --postgres-dsn ... --crawl-run-id crawl-20260716-a
+
+# Specific reports, tuned
+crawler-cli report slowest cwv --limit 20 --postgres-dsn ...
+crawler-cli report hub-pages --min-outlinks 10 --postgres-dsn ...
+
+# Analytics coverage: pages missing a vendor, or missing a specific ID
+crawler-cli report missing-analytics --vendor ga4 --postgres-dsn ...
+crawler-cli report missing-expected-id --expected-id G-XXXX --postgres-dsn ...
+
+# Machine-readable output
+crawler-cli report --format json --out report.json --postgres-dsn ...
+crawler-cli report --format csv --out ./reports/ --postgres-dsn ...   # one CSV per report
+```
+
+Available reports: `orphans` (snapshot pages with no inlink), `indexability`
+(meta/header/overall indexability per URL), `redirect-chains`, `hub-pages`
+(pages with `--min-outlinks`+ outlinks), `slowest` (TTFB/duration),
+`cwv` (lab LCP/CLS/INP — needs a crawl with `--web-vitals`),
+`analytics-inventory`, `missing-analytics`, and `missing-expected-id`.
+Passing no report names runs everything except `missing-expected-id`, which
+joins the default set only when `--expected-id` is supplied. Like the other
+snapshot readers, `report` requires `--crawl-run-id` when the database holds
+multiple runs.
 
 ### Run snapshots and retention
 

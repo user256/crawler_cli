@@ -32,7 +32,9 @@ already computes and persists for every page.
   only, so differing hosts inside `href` attributes do *not* break the sha256.
   What does break it: staging banners, host names mentioned in visible text,
   cookie/consent variants, environment footers — exactly what a dev site has.
-- **Canonical, discovered-link, and hreflang diffs compare absolute URLs**,
+- **Canonical and discovered-link diffs compare absolute URLs**,
+  (~~hreflang~~ — **scope correction, ticket 123**: no hreflang comparison exists
+  anywhere in the compare path; this background line overstated the state.)
   so in a dev-vs-prod compare *every* page reports a canonical change
   (dev canonical → dev host) and every link diff is noise.
 - **Redirect data is thin**: `CrawlResult` has only `requested_url` /
@@ -59,7 +61,8 @@ already computes and persists for every page.
      `raw_html` when present, else `extracted.text`; stored hashes were
      computed without replacements so they cannot be reused when `--replace`
      is given);
-   - canonical / link / hreflang URLs before equality diffs;
+   - canonical / link URLs before equality diffs (~~hreflang~~ — struck per
+     ticket 123: there is no hreflang diff to remap);
    - path keying, so path-level renames (e.g. `/en/…=/…`) can align too.
 2. **Use simhash for tolerance, not just storage.** Add `hamming64()` to
    `hashing.py` and report per-row `simhash_distance`, classifying rows as
@@ -98,7 +101,7 @@ already computes and persists for every page.
 ### B. Near-site compare (`compare` extensions)
 - `--replace FROM=TO` (repeatable, ordered) and `--simhash-threshold N`.
 - `compare_deep()` accepts the remap + threshold: remap-aware path keying and
-  canonical/link/hreflang diffs; per-row `simhash_distance` and
+  canonical/link diffs (~~hreflang~~ — struck per ticket 123); per-row `simhash_distance` and
   `content_verdict` (`identical|near|changed|missing`).
 - Allow either side of `compare` to come from the store
   (`--baseline-store`/`--candidate-store` + run selector) using the A-loader,

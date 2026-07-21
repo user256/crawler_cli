@@ -87,7 +87,9 @@ def hamming64(a: int, b: int) -> int:
     keeps distances consistent regardless of which side a fingerprint was loaded
     from, including the high-bit/sign-mapping edge (see the ticket-081 history).
     """
-    ua = simhash_to_unsigned(a)
-    ub = simhash_to_unsigned(b)
-    assert ua is not None and ub is not None  # non-None ints in, non-None out
+    # Inlined rather than routed through simhash_to_unsigned(), whose None-taking
+    # signature previously forced an `assert` here — stripped under `python -O`
+    # (ticket 123).
+    ua = a + _UINT64 if a < 0 else a
+    ub = b + _UINT64 if b < 0 else b
     return (ua ^ ub).bit_count()

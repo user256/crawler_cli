@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>crawler_gui — interface prototype</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=filters-20260716" />
   </head>
   <body>
     <div class="app">
@@ -233,6 +233,12 @@
               <input id="opt-user-agent" type="text" readonly />
             </label>
             <label class="check-option"><input id="opt-js" type="checkbox" /><span><strong>Render JavaScript</strong><small>Use a browser renderer for client-side content.</small></span></label>
+            <label>Chrome personal profile
+              <select id="opt-chrome-profile" disabled>
+                <option value="">No persistent profile</option>
+              </select>
+            </label>
+            <p class="field-hint" id="opt-chrome-profile-hint">Available in live mode. Profile metadata is read locally; cookies are never returned.</p>
           </section>
           <section class="config-section full">
             <h3>Behaviour</h3>
@@ -249,6 +255,6 @@
     </div>
 
     <div class="toast" id="toast" role="status"></div>
-    <script src="./app.js" type="module"></script>
+    <script src="./app.js?v=filters-20260716" type="module"></script>
   </body>
 </html>

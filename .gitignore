@@ -27,3 +27,6 @@ AGENTS.md
 *.whl
 coverage/
 htmlcov/
+
+# crawl run outputs
+runs/

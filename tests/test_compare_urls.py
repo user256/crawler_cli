@@ -5,6 +5,7 @@ import pytest
 from crawler_cli.compare_urls import (
     ERROR_STATUS,
     NO_REDIRECT,
+    NO_REDIRECT_EXPECTED,
     NOT_CRAWLED,
     REDIRECT_CHAIN,
     REDIRECT_OK,
@@ -176,10 +177,38 @@ def test_verdict_ok_bare_host_target():
 
 def test_verdict_no_redirect_for_client_normalized_root():
     # A chainless bare-host fetch whose final URL only gained the root slash
-    # has not redirected.
-    pair = UrlPair("http://example.com", "http://example.com")
+    # has not redirected. Uses a non-identity mapping so this isolates the
+    # normalization property from the identity-mapping verdict below.
+    pair = UrlPair("http://example.com", "https://elsewhere.example/")
     src = _src("http://example.com", "http://example.com/", chain=[])
     assert classify_redirect(pair, src) == NO_REDIRECT
+
+
+def test_verdict_identity_mapping_not_redirecting_is_expected():
+    # A retained URL mapped to itself is behaving correctly by staying put — it
+    # must not fail --fail-on redirect_mismatch (ticket 123).
+    pair = UrlPair("https://site/keep", "https://site/keep")
+    src = _src("https://site/keep", "https://site/keep", chain=[])
+    assert classify_redirect(pair, src) == NO_REDIRECT_EXPECTED
+
+
+def test_verdict_identity_mapping_tolerates_root_slash():
+    pair = UrlPair("http://example.com", "http://example.com")
+    src = _src("http://example.com", "http://example.com/", chain=[])
+    assert classify_redirect(pair, src) == NO_REDIRECT_EXPECTED
+
+
+def test_identity_mapping_passes_fail_on_redirect_mismatch():
+    rows = [{"redirect_verdict": NO_REDIRECT_EXPECTED, "content_verdict": "identical"}]
+    assert rows_failing(rows, "redirect_mismatch") == []
+    assert rows_failing(rows, "any") == []
+
+
+def test_identity_mapping_that_does_redirect_is_wrong_target():
+    # Mapped to itself but actually redirecting away is a real problem.
+    pair = UrlPair("https://site/keep", "https://site/keep")
+    src = _src("https://site/keep", "https://site/moved", chain=[{"url": "https://site/keep", "status": 301}])
+    assert classify_redirect(pair, src) == REDIRECT_WRONG_TARGET
 
 
 # --- row building + fail-on -------------------------------------------------

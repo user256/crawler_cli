@@ -515,11 +515,6 @@ SCHEMA_STATEMENTS = [
     ALTER TABLE crawl_metadata ALTER COLUMN run_id SET NOT NULL
     """,
     """
-    INSERT INTO crawl_runs (run_id, mode, status, seed_urls_json, config_hash, config_json, created_at, updated_at)
-    VALUES ('legacy', 'open', 'legacy', '[]', '', '{}', EXTRACT(EPOCH FROM NOW())::INTEGER, EXTRACT(EPOCH FROM NOW())::INTEGER)
-    ON CONFLICT (run_id) DO NOTHING
-    """,
-    """
     CREATE TABLE IF NOT EXISTS url_sources (
         url_id INTEGER NOT NULL REFERENCES urls(id),
         source TEXT NOT NULL CHECK (source IN ('seed', 'link', 'sitemap', 'archive_org', 'robots_sitemap')),
@@ -1268,13 +1263,49 @@ class AsyncpgStore:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
+            # The legacy projection is a one-time migration.  Capture whether
+            # the snapshot table existed *before* this initialization: once a
+            # database is already run-scoped, its mutable current-state tables
+            # are merely a convenience projection and must never be copied
+            # into a synthetic ``legacy`` run.
+            snapshots_existed = bool(
+                await conn.fetchval("SELECT to_regclass('page_run_snapshots') IS NOT NULL")
+            )
             for statement in SCHEMA_STATEMENTS:
                 await conn.execute(statement)
-            # Existing installations had only current-state rows.  Preserve a
-            # one-time ``legacy`` snapshot rather than silently making those
-            # rows disappear from the newly run-scoped readers.
-            await conn.execute(
-                """
+            if not snapshots_existed:
+                # Existing installations had only current-state rows. Preserve
+                # a one-time ``legacy`` snapshot rather than silently making
+                # those rows disappear from the newly run-scoped readers. Do
+                # not create an empty legacy run on a fresh database.
+                has_legacy_state = bool(
+                    await conn.fetchval(
+                        """
+                        SELECT EXISTS (SELECT 1 FROM pages)
+                            OR EXISTS (SELECT 1 FROM intent_signatures)
+                            OR EXISTS (SELECT 1 FROM page_embeddings)
+                            OR EXISTS (SELECT 1 FROM frontier)
+                            OR EXISTS (SELECT 1 FROM crawl_metadata)
+                        """
+                    )
+                )
+                if has_legacy_state:
+                    await conn.execute(
+                        """
+                        INSERT INTO crawl_runs (
+                            run_id, mode, status, seed_urls_json, config_hash,
+                            config_json, created_at, updated_at
+                        )
+                        VALUES (
+                            'legacy', 'open', 'legacy', '[]', '', '{}',
+                            EXTRACT(EPOCH FROM NOW())::INTEGER,
+                            EXTRACT(EPOCH FROM NOW())::INTEGER
+                        )
+                        ON CONFLICT (run_id) DO NOTHING
+                        """
+                    )
+                    await conn.execute(
+                        """
                 INSERT INTO page_run_snapshots (
                     run_id, url_id, final_url_id, initial_status_code, final_status_code, fetched_at,
                     headers_json, html_compressed, title, meta_description, h1_tags, h2_tags,
@@ -1316,12 +1347,13 @@ class AsyncpgStore:
                 LEFT JOIN indexability ix ON ix.url_id = p.url_id
                 ON CONFLICT (run_id, url_id) DO NOTHING
                 """
-            )
-            # A pre-095 database may already have AMP labels on its mutable
-            # URL identity.  Carry them into the one-time legacy projection so
-            # the snapshot-backed reader keeps the existing exclusion result.
-            await conn.execute(
-                """
+                    )
+                    # A pre-095 database may already have AMP labels on its
+                    # mutable URL identity. Carry them into the one-time legacy
+                    # projection so the snapshot-backed reader keeps the
+                    # existing exclusion result.
+                    await conn.execute(
+                        """
                 UPDATE page_run_snapshots snapshot
                 SET variant_kind = urls.variant_kind
                 FROM urls
@@ -1330,22 +1362,22 @@ class AsyncpgStore:
                   AND snapshot.variant_kind IS NULL
                   AND urls.variant_kind IS NOT NULL
                 """
-            )
-            await conn.execute(
-                """
+                    )
+                    await conn.execute(
+                        """
                 INSERT INTO run_intent_signatures
                     (run_id, url_id, main_text_compressed, extraction_method, signal_confidence, signature_hash, signature_model_input)
                 SELECT 'legacy', url_id, main_text_compressed, extraction_method, signal_confidence, signature_hash, signature_model_input
                 FROM intent_signatures ON CONFLICT (run_id, url_id) DO NOTHING
                 """
-            )
-            await conn.execute(
-                """
+                    )
+                    await conn.execute(
+                        """
                 INSERT INTO run_page_embeddings (run_id, url_id, embedding_json, model, text_length, signature_hash, dim)
                 SELECT 'legacy', url_id, embedding_json, model, text_length, signature_hash, dim
                 FROM page_embeddings ON CONFLICT (run_id, url_id) DO NOTHING
                 """
-            )
+                    )
 
     async def initialize_comparison_views(self) -> None:
         await self.connect()
@@ -3203,6 +3235,7 @@ class AsyncpgStore:
         *,
         urls: Sequence[str] | None = None,
         run_id: str | None = None,
+        include_html: bool = False,
     ) -> list[CrawlResult]:
         """Reconstruct comparison-grade :class:`CrawlResult` rows from a stored
         crawl run (ticket 122).
@@ -3217,11 +3250,19 @@ class AsyncpgStore:
         the run never fetched are simply absent). Simhash fingerprints are
         mapped back to their unsigned form so :func:`hamming64` stays consistent
         with fetch-time values.
+
+        ``include_html`` additionally pulls each snapshot's stored HTML into
+        ``raw_html`` (ticket 123). Compare passes it when ``--replace`` is
+        active: stored hashes were computed *without* replacements, so a remap
+        can only take effect on a store-backed side if the HTML is available to
+        re-hash. It is off by default because decompressing every page is
+        expensive and pointless for a remap-free diff.
         """
         await self.connect()
         assert self.pool is not None
         resolved = self._resolve_run_id(run_id)
-        query = """
+        html_column = ", s.html_compressed" if include_html else ""
+        query = f"""
             SELECT u.url AS requested_url,
                    COALESCE(fu.url, u.url) AS final_url,
                    s.final_status_code AS status,
@@ -3230,7 +3271,7 @@ class AsyncpgStore:
                    s.content_hash_sha256, s.content_hash_simhash,
                    s.canonical_urls_json ->> 0 AS canonical,
                    s.hreflang_json AS hreflang_json,
-                   s.skip_reason, s.challenge
+                   s.skip_reason, s.challenge{html_column}
             FROM page_run_snapshots s
             JOIN urls u ON u.id = s.url_id
             LEFT JOIN urls fu ON fu.id = s.final_url_id
@@ -3272,6 +3313,14 @@ class AsyncpgStore:
                 word_count=int(r["word_count"]) if r["word_count"] is not None else 0,
                 metadata={},
             )
+            raw_html: str | None = None
+            if include_html:
+                blob = r["html_compressed"]
+                # A run that was compacted (or crawled with --no-store-html) has
+                # no HTML: leave raw_html None so the caller reports the remap
+                # fallback rather than silently comparing un-remapped hashes.
+                if blob:
+                    raw_html = decompress_html(bytes(blob))
             results.append(
                 CrawlResult(
                     requested_url=str(r["requested_url"]),
@@ -3281,7 +3330,7 @@ class AsyncpgStore:
                     content_type="text/html",
                     fetch_backend="store",
                     extracted=extracted,
-                    raw_html=None,
+                    raw_html=raw_html,
                     content_hash_sha256=r["content_hash_sha256"],
                     content_hash_simhash=simhash_to_unsigned(r["content_hash_simhash"]),
                     skip_reason=r["skip_reason"],

@@ -66,4 +66,7 @@ the README advertises.
 - ruff / mypy / tests green.
 
 ## Status
-open (2026-07-17) — filed from the PR #47 review.
+implemented (2026-07-18) — flag-less hash behaviour, store-backed remap
+fallbacks, persistence/CSV/exit-code/identity/error-path coverage, and the
+hreflang scope correction are in the working tree. Focused compare tests and
+the full project suite pass; PostgreSQL-backed cases remain DSN-gated.

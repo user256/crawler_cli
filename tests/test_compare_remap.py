@@ -130,3 +130,59 @@ def test_missing_verdict_for_one_sided_paths():
     rows = {row["path"]: row for row in comparison_rows(diff)}
     assert rows["/about"]["content_verdict"] == "missing"
     assert rows["/about"]["exists_on_candidate"] is False
+
+
+# --- ticket 123: flag-less behaviour + remap fallback ----------------------
+
+
+def _hashless(url, raw_html):
+    """A page as crawled without --content-hashing: HTML but no stored hashes."""
+    result = _result(url, raw_html=raw_html)
+    result.content_hash_sha256 = None
+    result.content_hash_simhash = None
+    return result
+
+
+def test_flagless_compare_on_hashless_artifacts_reports_no_mismatches():
+    # Ticket 123 A: pre-122 behaviour. Without --replace, compare must not
+    # implicitly re-hash raw_html — hash-less crawls yield no content signal.
+    baseline = [_hashless("https://a/p", "<html><body><p>one</p></body></html>")]
+    candidate = [_hashless("https://a/p", "<html><body><p>two totally different</p></body></html>")]
+    diff = compare_deep(baseline, candidate)
+    assert diff.content_hash_mismatches == {}
+
+
+def test_flagless_compare_on_hashless_artifacts_verdict_is_unknown():
+    # ...but the verdict says "unknown", not "identical": two hash-less pages
+    # are not evidence of sameness.
+    baseline = [_hashless("https://a/p", "<html><body><p>one</p></body></html>")]
+    candidate = [_hashless("https://a/p", "<html><body><p>two totally different</p></body></html>")]
+    diff = compare_deep(baseline, candidate)
+    assert diff.content_verdicts["/p"] == "unknown"
+    rows = comparison_rows(diff)
+    assert rows[0]["content_verdict"] == "unknown"
+
+
+def test_stored_hashes_still_drive_flagless_verdicts():
+    baseline, candidate = _dev_prod_pair()
+    diff = compare_deep(baseline, candidate)
+    # Fixtures carry real stored hashes, so flag-less compare still verdicts.
+    assert diff.content_verdicts["/"] == "changed"  # host differs in visible text
+    assert diff.content_hash_mismatches
+
+
+def test_remap_fallback_is_recorded_when_side_has_no_html():
+    # Ticket 123 B: a store-loaded row (no raw_html, empty text) cannot be
+    # remapped; the diff must record the fallback rather than pass silently.
+    baseline, candidate = _dev_prod_pair()
+    stripped = candidate[0]
+    stripped.raw_html = None
+    stripped.extracted.text = ""
+    diff = compare_deep(baseline[:1], [stripped], remap=Remap.from_specs(["dev.example.com=example.com"]))
+    assert diff.remap_fallback_paths == ["/"]
+
+
+def test_no_remap_fallback_when_html_present():
+    baseline, candidate = _dev_prod_pair()
+    diff = compare_deep(baseline, candidate, remap=Remap.from_specs(["dev.example.com=example.com"]))
+    assert diff.remap_fallback_paths == []
