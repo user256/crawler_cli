@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crawler-cli"
-version = "0.2.0"
+version = "0.2.1"
 description = "Reusable async crawler module extracted from PostgreSQLCrawlerWIP"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -102,6 +102,7 @@ where = ["src"]
 
 [project.scripts]
 crawler-cli = "crawler_cli.__main__:main"
+migration-manager-crawler = "crawler_cli.portal_adapter:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

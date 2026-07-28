@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-28
+
+### Added
+
+- A dedicated `migration-manager-crawler` console entry point for Portal
+  Migration Manager. It consumes the versioned dispatch envelope only through
+  `--config-fd`, emits the immutable run-result envelope, and exposes a
+  machine-readable `--capabilities` probe.
+- `portal-url-policy/1` enforcement for the reduced HTTP crawl: every page,
+  robots, sitemap, and redirect-hop connection is freshly resolved, checked
+  as a complete DNS answer set, and pinned to the validated address at the
+  transport layer. Browser and live-compare operations fail closed before
+  network access.
+- Process-wide request, response-byte, page, redirect, response-size, and
+  wall-clock budgets for the Portal adapter, plus adversarial SSRF, rebinding,
+  budget, identity, malformed-dispatch, and secret-hygiene coverage.
+
+### Security
+
+- Public targets reject loopback, private, link-local/metadata, reserved,
+  multicast, unspecified, ULA, and mixed public/private DNS answers. RFC1918
+  and IPv6 ULA targets are enabled only for an `appliance` dispatch with an
+  explicit private-network grant; link-local and metadata ranges stay denied.
+- Bearer credentials are read only from the declared environment variable and
+  sent only to the exact configured origin. Inline credential switches,
+  URL userinfo, browser requests, and embeddings are rejected.
+
 ## [0.2.0] - 2026-07-20
 
 ### Added
