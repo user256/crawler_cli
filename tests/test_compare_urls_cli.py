@@ -185,8 +185,17 @@ def test_fail_on_uses_distinct_exit_code(tmp_path):
     pairs.write_text("source_url,target_url\nhttps://old/b,https://new/b\n", encoding="utf-8")
 
     code = _run(
-        ["compare-urls", "--pairs", str(pairs), "--source-artifact", str(src),
-         "--target-artifact", str(tgt), "--fail-on", "redirect_mismatch"]
+        [
+            "compare-urls",
+            "--pairs",
+            str(pairs),
+            "--source-artifact",
+            str(src),
+            "--target-artifact",
+            str(tgt),
+            "--fail-on",
+            "redirect_mismatch",
+        ]
     )
     assert code == EXIT_FINDINGS
     assert code != EXIT_VALIDATION
@@ -198,16 +207,33 @@ def test_csv_output_has_hops_column_and_clean_final_url(tmp_path):
     src, tgt, pairs, out = tmp_path / "s.json", tmp_path / "t.json", tmp_path / "p.csv", tmp_path / "o.csv"
     _artifact(
         src,
-        [_result(
-            "https://old/a", "https://new/a",
-            chain=[{"url": "https://old/a", "status": 301}, {"url": "https://mid/a", "status": 302}],
-        )],
+        [
+            _result(
+                "https://old/a",
+                "https://new/a",
+                chain=[{"url": "https://old/a", "status": 301}, {"url": "https://mid/a", "status": 302}],
+            )
+        ],
     )
     _artifact(tgt, [_result("https://new/a", "https://new/a")])
     pairs.write_text("source_url,target_url\nhttps://old/a,https://new/a\n", encoding="utf-8")
 
-    assert _run(["compare-urls", "--pairs", str(pairs), "--source-artifact", str(src),
-                 "--target-artifact", str(tgt), "--output", str(out)]) == 0
+    assert (
+        _run(
+            [
+                "compare-urls",
+                "--pairs",
+                str(pairs),
+                "--source-artifact",
+                str(src),
+                "--target-artifact",
+                str(tgt),
+                "--output",
+                str(out),
+            ]
+        )
+        == 0
+    )
 
     row = next(iter(_csv.DictReader(out.read_text(encoding="utf-8").splitlines())))
     # source_final_url is a clean URL — no "(N hop)" appended into it.

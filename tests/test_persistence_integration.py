@@ -111,9 +111,7 @@ async def test_initialize_does_not_add_legacy_run_to_run_scoped_database(store: 
     assert store.pool is not None
     async with store.pool.acquire() as conn:
         runs = await conn.fetch("SELECT run_id FROM crawl_runs ORDER BY run_id")
-        legacy_snapshots = await conn.fetchval(
-            "SELECT COUNT(*) FROM page_run_snapshots WHERE run_id = 'legacy'"
-        )
+        legacy_snapshots = await conn.fetchval("SELECT COUNT(*) FROM page_run_snapshots WHERE run_id = 'legacy'")
     assert [row["run_id"] for row in runs] == ["real-run-one", "real-run-two"]
     assert legacy_snapshots == 0
 
@@ -134,7 +132,23 @@ async def test_initialize_backfills_a_pre_snapshot_database_once(dsn: str) -> No
             headers={"content-type": "text/html"},
             content_type="text/html",
             fetch_backend="test",
-            extracted=None,
+            # A pre-095 current-state database contained extracted page rows;
+            # use one so this fixture exercises the legacy snapshot query
+            # rather than only a metadata-only fetch.
+            extracted=ExtractedContent(
+                title="Pre-snapshot state",
+                meta_description=None,
+                meta_robots=RobotsDirectives(),
+                x_robots_tag=RobotsDirectives(),
+                canonical=None,
+                x_canonical=None,
+                hreflang_links=[],
+                html_lang="en",
+                headings={"h1": ["Pre-snapshot state"], "h2": []},
+                text="pre-snapshot state",
+                word_count=2,
+                metadata={},
+            ),
             raw_html="<html><body>pre-snapshot state</body></html>",
         )
     )
@@ -152,14 +166,10 @@ async def test_initialize_backfills_a_pre_snapshot_database_once(dsn: str) -> No
         assert await upgraded.resolve_reporting_run_id() == "legacy"
         assert upgraded.pool is not None
         async with upgraded.pool.acquire() as conn:
-            first_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM page_run_snapshots WHERE run_id = 'legacy'"
-            )
+            first_count = await conn.fetchval("SELECT COUNT(*) FROM page_run_snapshots WHERE run_id = 'legacy'")
         await upgraded.initialize()
         async with upgraded.pool.acquire() as conn:
-            second_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM page_run_snapshots WHERE run_id = 'legacy'"
-            )
+            second_count = await conn.fetchval("SELECT COUNT(*) FROM page_run_snapshots WHERE run_id = 'legacy'")
         assert first_count == 1
         assert second_count == first_count
     finally:
@@ -1504,9 +1514,7 @@ async def test_persist_comparison_session_roundtrips_new_columns(store: AsyncpgS
             "simhash_distance": None,
         },
     ]
-    session_id = await store.persist_comparison_session(
-        baseline_label="base", candidate_label="cand", rows=rows
-    )
+    session_id = await store.persist_comparison_session(baseline_label="base", candidate_label="cand", rows=rows)
     assert store.pool is not None
     async with store.pool.acquire() as conn:
         persisted = await conn.fetch(
@@ -1558,11 +1566,15 @@ async def test_compare_urls_persist_writes_a_session(store: AsyncpgStore, dsn: s
     args = _build_parser().parse_args(
         [
             "compare-urls",
-            "--pairs", str(pairs),
-            "--source-artifact", str(src),
-            "--target-artifact", str(tgt),
+            "--pairs",
+            str(pairs),
+            "--source-artifact",
+            str(src),
+            "--target-artifact",
+            str(tgt),
             "--persist",
-            "--postgres-dsn", dsn,
+            "--postgres-dsn",
+            dsn,
         ]
     )
     assert await _dispatch(args) == 0

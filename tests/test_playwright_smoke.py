@@ -169,7 +169,10 @@ async def test_crawl_engine_real_playwright_smoke(playwright_smoke_site: SmokeSi
 
     assert first.status == 200
     assert first.fetch_backend == "playwright"
-    assert first.final_url == playwright_smoke_site.url("/spa")
+    # The authenticated route is fulfilled from route.fetch(); Chromium renders
+    # the redirected SPA response but keeps the navigation URL at the requested
+    # route, so the crawl result must record that actual browser URL.
+    assert first.final_url == playwright_smoke_site.url("/redirect-auth")
     assert first.raw_html is not None and "Rendered smoke path" in first.raw_html
     assert first.extracted is not None and "Rendered smoke path" in first.extracted.text
     assert first.browser_runtime is not None

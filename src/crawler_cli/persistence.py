@@ -1268,9 +1268,7 @@ class AsyncpgStore:
             # database is already run-scoped, its mutable current-state tables
             # are merely a convenience projection and must never be copied
             # into a synthetic ``legacy`` run.
-            snapshots_existed = bool(
-                await conn.fetchval("SELECT to_regclass('page_run_snapshots') IS NOT NULL")
-            )
+            snapshots_existed = bool(await conn.fetchval("SELECT to_regclass('page_run_snapshots') IS NOT NULL"))
             for statement in SCHEMA_STATEMENTS:
                 await conn.execute(statement)
             if not snapshots_existed:

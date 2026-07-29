@@ -249,8 +249,11 @@ jobs:
       - name: Install supported Chromium
         run: python -m playwright install --with-deps chromium
 
-      - name: Run Playwright smoke tests
-        run: pytest -x -q --tb=short --run-playwright-smoke -m playwright_smoke tests/test_playwright_smoke.py
+      - name: Run Playwright smoke and browser security tests
+        run: >-
+          pytest -x -q --tb=short --run-playwright-smoke
+          -m playwright_smoke
+          tests/test_playwright_smoke.py tests/contract/test_security_proofs.py
 
   lint:
     name: "Lint & typecheck"
