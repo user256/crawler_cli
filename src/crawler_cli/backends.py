@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import os
 import signal
+import socket
 import ssl
 import sys
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 from curl_cffi.requests import AsyncSession
@@ -19,6 +21,7 @@ from .config import CrawlConfig
 from .cookies import build_cookie_header, build_scoped_cookie_header
 from .models import FetchResponse
 from .proxy_pool import ProxyPool
+from .portal_policy import ConnectionPurpose, PortalPolicyError, PinnedConnection, validate_pinned_connection
 
 # Content-type prefixes that are never HTML/XML and should not be fully
 # downloaded. The list is intentionally conservative: only clearly binary
@@ -250,6 +253,16 @@ class FetchBackend(ABC):
             result = await self.fetch(url)
         return result
 
+    async def fetch_for_purpose(self, url: str, purpose: ConnectionPurpose) -> FetchResponse:
+        """Fetch a URL from a known call site.
+
+        Backends without Portal policy support preserve their usual behaviour;
+        the engine refuses to use them when a policy is configured.
+        """
+        if self.config.portal_connection_policy is not None:
+            raise PortalPolicyError("This backend cannot enforce the Portal connection policy")
+        return await self.fetch_resilient(url)
+
     async def close(self) -> None:
         return None
 
@@ -353,10 +366,121 @@ class AiohttpBackend(FetchBackend):
             self._report_proxy(proxy, ok=True)
             return result
 
+    async def fetch_for_purpose(self, url: str, purpose: ConnectionPurpose) -> FetchResponse:
+        """Fetch through the optional Portal policy, following redirects manually."""
+        policy = self.config.portal_connection_policy
+        if policy is None:
+            return await self.fetch_resilient(url)
+
+        requested_url = url
+        current_url = url
+        current_purpose = purpose
+        redirect_chain: list[dict[str, object]] = []
+        max_redirects = 10
+        for _ in range(max_redirects + 1):
+            pinned = await policy.authorize(current_url, current_purpose)
+            validate_pinned_connection(current_url, pinned)
+            result, location = await self._fetch_pinned(current_url, pinned, requested_url)
+            if not self.config.follow_redirects or result.status not in {301, 302, 303, 307, 308}:
+                result.redirect_chain = redirect_chain
+                return result
+            if not location:
+                result.redirect_chain = redirect_chain
+                return result
+            redirect_chain.append({"url": current_url, "status": result.status})
+            current_url = urljoin(current_url, location)
+            current_purpose = "redirect"
+        raise PortalPolicyError(f"Too many redirects while fetching {requested_url!r}")
+
+    async def _fetch_pinned(
+        self,
+        url: str,
+        pinned: PinnedConnection,
+        requested_url: str,
+    ) -> tuple[FetchResponse, str | None]:
+        """Open one connection whose resolver can return only *pinned.address*."""
+        timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
+        connector = aiohttp.TCPConnector(
+            resolver=_PinnedResolver(pinned),
+            use_dns_cache=False,
+            force_close=True,
+            limit=1,
+            ssl=self._get_ssl_context(),
+        )
+        started = time.monotonic()
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            async with session.get(
+                url,
+                headers=_request_headers(self.config, url),
+                allow_redirects=False,
+                ssl=self._get_ssl_context(),
+                auth=_basic_auth(self.config, url),
+            ) as response:
+                ttfb = time.monotonic() - started
+                header_map = dict(response.headers)
+                ct = header_map.get("Content-Type")
+                truncated = False
+                if _is_skippable_content_type(ct):
+                    body = await response.content.read(_SNIFF_BYTES)
+                else:
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.content.iter_chunked(65536):
+                        remaining = self.config.max_response_bytes - total
+                        if len(chunk) >= remaining:
+                            chunks.append(chunk[:remaining])
+                            total += remaining
+                            truncated = True
+                            break
+                        chunks.append(chunk)
+                        total += len(chunk)
+                    body = b"".join(chunks)
+                elapsed = time.monotonic() - started
+                return (
+                    FetchResponse(
+                        url=str(response.url),
+                        requested_url=requested_url,
+                        status=response.status,
+                        headers=header_map,
+                        body=body,
+                        text=_decode_body(body, ct),
+                        ttfb_seconds=ttfb,
+                        elapsed_seconds=elapsed,
+                        body_truncated=truncated,
+                    ),
+                    response.headers.get("Location"),
+                )
+
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
             await self._session.close()
             self._session = None
+
+
+class _PinnedResolver(aiohttp.abc.AbstractResolver):
+    """Resolver for one request; it never asks DNS for a policy-guarded host."""
+
+    def __init__(self, pinned: PinnedConnection) -> None:
+        self._pinned = pinned
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_UNSPEC) -> list[dict[str, object]]:
+        if host.lower().rstrip(".") != self._pinned.hostname.lower().rstrip(".") or port != self._pinned.port:
+            raise PortalPolicyError("Resolver request differs from the policy-approved origin")
+        parsed = ipaddress.ip_address(self._pinned.address)
+        resolved_family = socket.AF_INET6 if parsed.version == 6 else socket.AF_INET
+        return [
+            {
+                "hostname": host,
+                "host": self._pinned.address,
+                "port": port,
+                "family": resolved_family,
+                "proto": 0,
+                "flags": 0,
+            }
+        ]
+
+    async def close(self) -> None:
+        return None
 
 
 class CurlCffiBackend(FetchBackend):

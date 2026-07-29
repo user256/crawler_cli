@@ -24,6 +24,7 @@ from .extract import extract_links, extract_page_data, parse_html
 from .hashing import sha256_hash, simhash64
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, DiscoveredLink, ExtractedContent
 from .persistence import AsyncpgStore, MemoryStore
+from .portal_policy import ConnectionPurpose
 from .robots import RobotsPolicyCache
 from .serialization import serialize_crawl_job, serialize_crawl_result, serialize_job_summary_metadata
 from .sitemap import SitemapParser, discover_sitemap_paths
@@ -92,6 +93,8 @@ def _crawl_run_config_snapshot(config: CrawlConfig, seeds: list[str]) -> dict[st
         "seed_from_archive": config.seed_from_archive,
         "csv_seed_mode": config.csv_seed_mode,
         "csv_urls": list(dict.fromkeys(config.csv_urls)),
+        # A guarded job must not be resumed by an unguarded worker.
+        "portal_connection_policy": config.portal_connection_policy is not None,
     }
 
 
@@ -172,7 +175,11 @@ class CrawlEngine:
             return response, None
 
         # Already a browser backend, or escalation disabled → just flag it.
-        if self._is_browser_backend(self.backend) or not self.config.challenge_escalate_to_browser:
+        if (
+            self.config.portal_connection_policy is not None
+            or self._is_browser_backend(self.backend)
+            or not self.config.challenge_escalate_to_browser
+        ):
             logger.warning("Bot challenge (%s) on %s — recorded as blocked", kind, url)
             return response, kind
 
@@ -276,11 +283,7 @@ class CrawlEngine:
                     # Prefer the gateway-retry wrapper (ticket 072); fall back to
                     # plain fetch for backends that don't implement it (test fakes,
                     # external backends).
-                    fetch_resilient = getattr(self.backend, "fetch_resilient", None)
-                    if fetch_resilient is not None:
-                        response = await fetch_resilient(url)
-                    else:
-                        response = await self.backend.fetch(url)
+                    response = await self._fetch_for_purpose(url, "initial")
                 finally:
                     if _host_sem is not None:
                         _host_sem.release()
@@ -571,11 +574,7 @@ class CrawlEngine:
                 if host_sem is not None:
                     await host_sem.acquire()
                 try:
-                    fetch_resilient = getattr(self.backend, "fetch_resilient", None)
-                    if fetch_resilient is not None:
-                        response = await fetch_resilient(url)
-                    else:
-                        response = await self.backend.fetch(url)
+                    response = await self._fetch_for_purpose(url, "sitemap")
                 finally:
                     if host_sem is not None:
                         host_sem.release()
@@ -608,6 +607,18 @@ class CrawlEngine:
                     circuit = self._circuit_breakers.for_host(host)
                     self._record_breaker_failure(circuit, host, f"fetch_error:{type(exc).__name__}")
                 return None
+
+    async def _fetch_for_purpose(self, url: str, purpose: ConnectionPurpose):
+        """Route guarded call sites through the Portal-aware backend API."""
+        if self.config.portal_connection_policy is not None:
+            fetch_for_purpose = getattr(self.backend, "fetch_for_purpose", None)
+            if fetch_for_purpose is None:
+                raise RuntimeError("Portal connection policy requires a policy-aware backend")
+            return await fetch_for_purpose(url, purpose)
+        fetch_resilient = getattr(self.backend, "fetch_resilient", None)
+        if fetch_resilient is not None:
+            return await fetch_resilient(url)
+        return await self.backend.fetch(url)
 
     async def _remaining_frontier_budget(self, limit: int) -> int | None:
         """Return remaining run-global frontier slots, or None when unlimited."""

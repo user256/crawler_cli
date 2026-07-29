@@ -570,8 +570,11 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     playwright_headless = False if using_real_profile and not headed else not headed
 
     from .config import parse_ua_map
+    from .portal_policy import load_connection_policy
 
     ua_map = parse_ua_map(getattr(args, "ua", None) or [])
+    policy_spec = getattr(args, "portal_url_policy", "") or ""
+    portal_connection_policy = load_connection_policy(policy_spec) if policy_spec else None
 
     return CrawlConfig(
         # backend is built from the --http-backend choices plus the "playwright"
@@ -616,7 +619,12 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         proxy_cooldown_seconds=getattr(args, "proxy_cooldown_seconds", 60.0),
         proxy_gateway_max_retries=getattr(args, "proxy_gateway_max_retries", 2),
         detect_challenges=not getattr(args, "no_challenge_detection", False),
-        challenge_escalate_to_browser=not getattr(args, "no_challenge_escalation", False),
+        # The policy covers HTTP only; never let its guarded crawl silently
+        # escape into an unguarded browser challenge escalation.
+        challenge_escalate_to_browser=(
+            False if portal_connection_policy is not None else not getattr(args, "no_challenge_escalation", False)
+        ),
+        portal_connection_policy=portal_connection_policy,
         extraction_rules=extraction_rules,
         discover_sitemaps=not args.skip_sitemaps,
         allowed_hosts=allowed_hosts,
@@ -835,6 +843,15 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Detect challenges but do not escalate HTTP fetches to the browser "
         "backend; just record them as blocked (ticket 074).",
+    )
+    parser.add_argument(
+        "--portal-url-policy",
+        metavar="MODULE:FACTORY",
+        help=(
+            "Load this local Portal-owned async connection-policy factory. It pins every initial, "
+            "redirect and sitemap HTTP connection; browser navigation, browser subresources and "
+            "live comparisons are unsupported, and challenge browser escalation is disabled."
+        ),
     )
     parser.add_argument(
         "--memory-high-watermark",
