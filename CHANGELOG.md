@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-29
+
+### Added
+
+- Portal-managed HTTP connection policy hook (ticket 130): `crawl
+  --portal-url-policy MODULE:FACTORY` loads an operator-installed async policy
+  that authorizes and pins the initial URL, every HTTP redirect, and sitemap
+  fetch to one literal IP address.  The policy capability report deliberately
+  leaves browser navigation, browser subresources, and live comparison false;
+  callers must keep those paths disabled until they have their own guard.
+
+### Changed
+
+- The Portal integration contract is prepared for the `0.2.2` artifact.  Its
+  schemas and existing CLI/output guarantees remain at major version 1; this
+  patch adds the opt-in connection-policy seam without changing an unguarded
+  crawl's behaviour.
+
 ## [0.2.0] - 2026-07-20
 
 ### Added

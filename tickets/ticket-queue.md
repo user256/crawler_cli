@@ -42,13 +42,25 @@ Ticket files remain the source of truth for scope and DoD.
   headers/`http_credentials` without origin scoping — excluded from the
   contract's security guarantees until fixed.
 
+### Current position (2026-07-29)
+
+- Ticket **130** is the release-safety lane for crawler-cli **0.2.2**. It
+  prepares the reviewed HTTP-only `portal-url-policy/1` hook from PR #51 for a
+  future immutable release: version/changelog, contract boundary, and artifact
+  evidence checks only. It must not tag, publish, alter Portal, or enable a
+  Migration Manager worker.
+- The pre-existing remote **v0.2.1** annotated tag points to closed, unmerged
+  PR #50 and is not an ancestor of `master`; it has no GitHub Release or
+  artifacts. It is permanently excluded from the release sequence. The next
+  safe release candidate is v0.2.2; next unreserved ticket number is **131**.
+
 ### Ordering rules
 
 - Correctness and evidence hardening precede presentation work that consumes
   the affected fields.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**130**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**131**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -329,6 +341,7 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 - `127` `done` [ticket-127-compare-store-dsn-env.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-127-compare-store-dsn-env.md) — **P2:** the ticket-122 per-side compare store flags take a literal DSN, putting credentials in shell history and the process list. Resolve each side from the environment instead — `CRAWLER_CLI_<SIDE>_POSTGRES_DSN` (also `PostgreSQLCrawler_` prefix) plus `--<side>-store-env VAR`, with inline `--<side>-store` kept as an override; named-but-unset variable fails fast. Implemented on `agent/127-compare-store-dsn-env`
 - `128` `done` (2026-07-18) [ticket-128-crawler-gui-chrome-profile-picker.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-128-crawler-gui-chrome-profile-picker.md) — **P2:** live GUI Chrome/Chromium profile discovery, lock preflight, dedicated-user-data guidance, persistent Playwright argv mapping, and Obscura/profile exclusion.
 - `129` `done` (2026-07-21) [ticket-129-playwright-auth-origin-scoping.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-129-playwright-auth-origin-scoping.md) — **P2 (security):** Playwright backend sets `http_credentials` without an `origin` restriction. Scoped credentials/headers per-origin natively using `route.fetch` to ensure cross-origin redirects strip credentials while same-origin redirects retain them. Playwright now passes all security proof tests and is fully supported in the portal-integration contract.
+- `130` `in review` (2026-07-29) [ticket-130-v022-release-prep.md](./ticket-130-v022-release-prep.md) — **P0 release safety:** prepare, but do not publish, crawler-cli v0.2.2 for the reviewed PR #51 HTTP-only Portal policy hook. The remote v0.2.1 tag is unusable (closed/unmerged PR #50, off-master) and must never be reused or moved. Immutable release evidence, not a mutable branch/tag, is required before Portal can pin it.
 
 Deferred lanes remain below.
 
