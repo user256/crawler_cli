@@ -1,19 +1,22 @@
-# Portal integration contract — crawler-cli 0.2.0
+# Portal integration contract — crawler-cli 0.2.2
 
-**Status:** frozen at release 0.2.0 (portal ticket 3344, crawler ticket 122
-line). This document is the single reference for what the portal Migration
-Manager (epic 3334) may rely on. Anything not listed here is NOT contract and
-may change without notice.
+**Status:** release-preparation contract for 0.2.2 (crawler ticket 130). It is
+not an immutable release until the release checklist records the `v0.2.2` tag,
+the exact release commit, and the uploaded wheel/sdist SHA-256 values. This
+document is the single reference for what the portal Migration Manager (epic
+3334) may rely on. Anything not listed here is NOT contract and may change
+without notice.
 
 ## Base commit
 
-- Contract audited and frozen from `origin/master` at commit **`b248a3e`**
-  ("Register bridge module in sys.modules so its dataclasses resolve under the
-  test loader"), plus the pushed branch commit **`aba2c57`**
-  (`agent/127-compare-store-dsn-env`, env-based store-DSN resolution) merged
-  into the release branch. No other unmerged or uncommitted work is included.
-- Release: `[project].version = 0.2.0`; install pin `crawler-cli==0.2.0`
-  (immutable by version + recorded artifact sha256s; see CHANGELOG 0.2.0).
+- Release candidate is the dedicated 0.2.2 release-prep PR, based on
+  `origin/master` commit **`f074c23`** (the reviewed `portal-url-policy/1`
+  hook). The final release commit must be captured in the GitHub Release;
+  source branches, mutable refs, and the pre-existing `v0.2.1` tag are not
+  valid install pins.
+- Release candidate: `[project].version = 0.2.2`; intended install pin
+  `crawler-cli==0.2.2`. It becomes a supported immutable pin only after the
+  recorded wheel and sdist checksums are attached to the `v0.2.2` release.
 - Python `>=3.11`, POSIX. Extras: `playwright` (`playwright>=1.44`), `intent`
   (`trafilatura>=1.8`), `embeddings-local` (`sentence-transformers>=2.2`,
   `numpy>=1.24`); also `ann`, `viz`, `test` (see `pyproject.toml`).
@@ -56,6 +59,7 @@ All paths relative to the repo root.
 | Persisted-run lookup / store-backed compare sides | `persistence.py` (`AsyncpgStore.resolve_reporting_run_id`, `fetch_pages_for_comparison`); `__main__._load_compare_side`, `_resolve_compare_urls_side` | `tests/test_persistence_integration.py` (requires `CRAWLER_CLI_TEST_DSN`); `tests/test_compare_urls.py` unit paths |
 | Output schemas | see table above | `tests/contract/` golden suite |
 | Exit-code taxonomy | `src/crawler_cli/exit_codes.py` | `tests/contract/test_exit_code_contract.py`, `tests/test_persist_exit_policy.py` |
+| Portal HTTP connection policy | `portal_policy.py`; `crawl --portal-url-policy MODULE:FACTORY`; one-shot aiohttp resolver/connector in `backends.py` | `tests/test_portal_policy_hook.py` (initial URL, redirect, sitemap, DNS pinning, literal-IP mismatch, CLI factory loading) |
 
 ## Exit codes (frozen)
 
@@ -85,8 +89,10 @@ Proven upstream (aiohttp + curl_cffi backends):
 
 - **SSRF/target authorisation**: crawler-cli fetches whatever URL it is given
   (private ranges, metadata endpoints included) and `--fetch-missing` performs
-  live fetches. The portal's `url_policy` layer must authorise every target;
-  crawler-cli runs outside PHP `url_policy` (epic 3334 §risk B3).
+  live fetches. `--portal-url-policy` can guard only the initial HTTP URL,
+  HTTP redirects, and sitemaps; it is opt-in and does not guard browser or
+  live-comparison paths. The portal's `url_policy` layer must authorise every
+  enabled target path (epic 3334 §risk B3).
 - **Inline secrets remain possible**: `--auth-password`, `--auth-token`,
   `--<side>-store DSN` overrides still accept literal secrets. The portal
   worker must always use the env/file forms.
@@ -95,6 +101,30 @@ Proven upstream (aiohttp + curl_cffi backends):
   and treat 130 as a clean drain).
 - **URL-embedded credentials** (`https://user:pass@host/`) are not scrubbed
   from logs/artifacts; the portal must not construct such URLs.
+
+## Portal HTTP policy hook (0.2.2)
+
+`crawl --portal-url-policy MODULE:FACTORY` imports a local, zero-argument
+factory. It must return an object with async
+`authorize(url, purpose) -> PinnedConnection`. Each authorization returns the
+requested hostname and port plus one literal IP address. The aiohttp path
+creates a one-shot resolver/connector for that address, so a later DNS lookup
+or pooled connection cannot replace the approved destination.
+
+The `policy_capabilities()` report is intentionally narrow:
+
+| Path | 0.2.2 guarded? |
+|---|---|
+| Initial HTTP URL | Yes |
+| HTTP redirect | Yes |
+| Sitemap fetch | Yes |
+| Browser navigation | No |
+| Browser subresource | No |
+| Live comparison | No |
+
+Portal must fail closed for every required path whose value is false. The hook
+does not accept an FD3 protocol, proxy a browser, or turn browser/live paths
+into guarded paths.
 
 ## Notes for consumers
 
