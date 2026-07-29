@@ -872,10 +872,12 @@ class PlaywrightBackend(FetchBackend):
             auth = self.config.auth
             if auth and auth.enabled:
                 from urllib.parse import urlparse
+
                 allowed_netloc = auth.domain.lower() if auth.domain else urlparse(url).netloc.lower()
                 auth_headers = auth.auth_headers()
                 if auth.auth_type == "basic" and auth.username and auth.password:
                     import base64
+
                     encoded = base64.b64encode(f"{auth.username}:{auth.password}".encode()).decode("utf-8")
                     auth_headers["Authorization"] = f"Basic {encoded}"
 

@@ -27,6 +27,16 @@ from crawler_cli.serialization import serialize_crawl_job
 BASIC_SECRET = "argv-free-basic-secret"
 BEARER_SECRET = "argv-free-bearer-secret"
 
+HTTP_BACKENDS = [
+    AiohttpBackend,
+    CurlCffiBackend,
+    pytest.param(
+        PlaywrightBackend,
+        marks=pytest.mark.playwright_smoke,
+        id="playwright",
+    ),
+]
+
 
 async def _start_app(app: web.Application) -> tuple[web.AppRunner, str]:
     runner = web.AppRunner(app)
@@ -151,7 +161,7 @@ def _backend(backend_cls, auth: AuthConfig):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_cls", [AiohttpBackend, CurlCffiBackend, PlaywrightBackend], ids=["aiohttp", "curl_cffi", "playwright"])
+@pytest.mark.parametrize("backend_cls", HTTP_BACKENDS, ids=["aiohttp", "curl_cffi", "playwright"])
 async def test_bearer_token_not_forwarded_to_cross_origin_redirect(backend_cls) -> None:
     seen: dict[str, str | None] = {}
     redirect_to = ""
@@ -185,7 +195,7 @@ async def test_bearer_token_not_forwarded_to_cross_origin_redirect(backend_cls) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_cls", [AiohttpBackend, CurlCffiBackend, PlaywrightBackend], ids=["aiohttp", "curl_cffi", "playwright"])
+@pytest.mark.parametrize("backend_cls", HTTP_BACKENDS, ids=["aiohttp", "curl_cffi", "playwright"])
 @pytest.mark.parametrize(
     "auth",
     [
@@ -224,7 +234,7 @@ async def test_credentials_survive_same_origin_redirect(backend_cls, auth: AuthC
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend_cls", [AiohttpBackend, CurlCffiBackend, PlaywrightBackend], ids=["aiohttp", "curl_cffi", "playwright"])
+@pytest.mark.parametrize("backend_cls", HTTP_BACKENDS, ids=["aiohttp", "curl_cffi", "playwright"])
 async def test_domain_scoped_auth_not_sent_to_other_hosts(backend_cls) -> None:
     """--auth is host-scoped via AuthConfig.domain: a fetch of a different host
     must not carry the Authorization header at all."""
