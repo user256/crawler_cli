@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from .auth import AuthConfig
 from .validators import (
@@ -12,6 +12,9 @@ from .validators import (
     require_positive_float,
     require_positive_int,
 )
+
+if TYPE_CHECKING:
+    from .portal_policy import PortalConnectionPolicy
 
 
 BackendName = Literal["aiohttp", "curl_cffi", "playwright"]
@@ -142,6 +145,10 @@ class CrawlConfig:
     challenge_escalate_to_browser: bool = True
     """On a challenge from an HTTP backend, escalate the fetch to the
     Playwright/Obscura browser backend through a fresh IP (ticket 074)."""
+    portal_connection_policy: PortalConnectionPolicy | None = None
+    """Optional Portal-owned, per-connection URL policy.  It is supported only
+    by the aiohttp backend and covers initial HTTP requests, redirects and
+    sitemap fetches; browser navigation and live comparison remain unsupported."""
     challenge_max_escalations: int = 1
     """Max browser escalations per URL before recording it as blocked."""
     cookies: dict[str, str] = field(default_factory=dict)
@@ -271,6 +278,16 @@ class CrawlConfig:
         require_positive_int(self.obscura_port, field="obscura_port")
         if self.obscura_port > 65535:
             raise ValueError(f"obscura_port must be <= 65535, got {self.obscura_port}")
+        if self.portal_connection_policy is not None:
+            if self.backend != "aiohttp":
+                raise ValueError("portal_connection_policy requires the aiohttp backend")
+            if self.proxy or self.proxies:
+                raise ValueError("portal_connection_policy cannot be combined with a proxy")
+            if self.challenge_escalate_to_browser:
+                raise ValueError(
+                    "portal_connection_policy requires challenge_escalate_to_browser=False "
+                    "because browser navigation is not guarded"
+                )
 
     @staticmethod
     def _url_path(url: str) -> str:
