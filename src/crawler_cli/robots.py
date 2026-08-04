@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from functools import lru_cache
 from email.utils import parsedate_to_datetime
+from collections.abc import Awaitable, Callable
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -13,6 +14,8 @@ import aiohttp
 
 from .backends import _proxy_url, build_proxy_pool
 from .config import CrawlConfig
+from .models import FetchResponse
+from .portal_policy import ConnectionPurpose
 from .proxy_pool import ProxyPool
 
 
@@ -303,8 +306,16 @@ class RobotsPolicyCache:
     of the session. HTTP 4xx remains allow-all (§2.3.1.3).
     """
 
-    def __init__(self, config: CrawlConfig) -> None:
+    def __init__(
+        self,
+        config: CrawlConfig,
+        fetch_response: Callable[[str, ConnectionPurpose], Awaitable[FetchResponse]] | None = None,
+    ) -> None:
         self.config = config
+        # Portal-managed crawls inject the engine's policy-aware fetch path so
+        # robots.txt has the same connection pinning and run-budget admission
+        # as initial, redirect, and sitemap requests.
+        self._fetch_response = fetch_response
         self.cache = RobotsCache(default_ttl=int(config.robots_cache_ttl_seconds))
         self._locks: dict[str, asyncio.Lock] = {}
         self._proxy_pool: ProxyPool | None = build_proxy_pool(config)
@@ -398,6 +409,12 @@ class RobotsPolicyCache:
         parsed = urlparse(url)
         robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
         req_headers = {"User-Agent": self._user_agent_for(robots_url)}
+        if self._fetch_response is not None:
+            try:
+                response = await self._fetch_response(robots_url, "robots")
+                return response.text if response.status == 200 else None, response.headers, response.status
+            except Exception:
+                return None, {}, 0
         proxy = self._select_proxy(robots_url)
         try:
             timeout = aiohttp.ClientTimeout(total=min(self.config.timeout_seconds, 10.0))

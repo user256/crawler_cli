@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from .amp import is_amp_url_shape
 from .archive import discover_historical_urls
 from .backends import ObscuraFetchBackend, PlaywrightBackend, RateLimiter, build_backend
+from .budget import RunBudget
 from .challenge import detect_challenge
 from .circuit_breaker import CircuitBreaker, CircuitBreakerRegistry, CircuitState
 from .config import CrawlConfig
@@ -111,10 +112,30 @@ class CrawlEngine:
     def __init__(self, config: CrawlConfig, store: AsyncpgStore | MemoryStore | None = None) -> None:
         self.config = config
         self.backend = build_backend(config)
+        self._run_budget: RunBudget | None = None
+        if config.max_requests or config.max_bytes:
+            self._run_budget = RunBudget(
+                max_requests=config.max_requests,
+                max_bytes=config.max_bytes,
+                max_response_bytes=config.max_response_bytes,
+            )
+            # Config validation pins this feature to AiohttpBackend's manual
+            # Portal-policy request path. Keep the runtime check defensive for
+            # external config construction and custom backend factories.
+            set_run_budget = getattr(self.backend, "set_run_budget", None)
+            if set_run_budget is None:
+                raise RuntimeError("budgeted Portal crawl requires an aiohttp budget-aware backend")
+            set_run_budget(self._run_budget)
         self.store = store
         self._semaphore = asyncio.Semaphore(config.max_concurrency)
         self._rate_limiter = RateLimiter(config.min_interval_seconds)
-        self._robots = RobotsPolicyCache(config)
+        self._robots = RobotsPolicyCache(
+            config,
+            # The legacy cache fetcher is retained for ordinary crawls. A
+            # Portal-policy crawl must not bypass its connection guard (or the
+            # budget attached to it) while resolving robots.txt.
+            fetch_response=self._fetch_for_purpose if config.portal_connection_policy is not None else None,
+        )
         self._host_delays: dict[str, asyncio.Lock] = {}
         self._host_last_fetch: dict[str, float] = {}
         self._host_semaphores: dict[str, asyncio.Semaphore] = {}
