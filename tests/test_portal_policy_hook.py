@@ -10,6 +10,7 @@ from aiohttp import web
 
 from crawler_cli.__main__ import _build_config, _build_parser
 from crawler_cli.backends import AiohttpBackend, _PinnedResolver
+from crawler_cli.budget import RunBudget, RunBudgetExhausted
 from crawler_cli.config import CrawlConfig
 from crawler_cli.engine import CrawlEngine
 from crawler_cli.portal_policy import (
@@ -73,6 +74,114 @@ async def test_policy_pins_initial_request_and_every_redirect() -> None:
     assert result.text == "guarded"
     assert result.redirect_chain == [{"url": f"{guarded_base}/start", "status": 302}]
     assert policy.calls == [(f"{guarded_base}/start", "initial"), (f"{guarded_base}/finish", "redirect")]
+
+
+@pytest.mark.asyncio
+async def test_portal_aiohttp_budget_blocks_before_a_second_connection() -> None:
+    calls = 0
+    policy = RecordingPolicy()
+
+    async def page(_request: web.Request) -> web.Response:
+        nonlocal calls
+        calls += 1
+        return web.Response(body=b"abc", content_type="text/plain")
+
+    app = web.Application()
+    app.router.add_get("/page", page)
+    runner, base = await _start_app(app)
+    guarded_url = f"{base.replace('127.0.0.1', 'localhost')}/page"
+    config = CrawlConfig(
+        portal_connection_policy=policy,
+        challenge_escalate_to_browser=False,
+        respect_robots_txt=False,
+        max_requests=1,
+        max_response_bytes=10,
+    )
+    backend = AiohttpBackend(config)
+    backend.set_run_budget(RunBudget(max_requests=1, max_response_bytes=10))
+    try:
+        first = await backend.fetch_for_purpose(guarded_url, "initial")
+        with pytest.raises(RunBudgetExhausted, match="before request emission"):
+            await backend.fetch_for_purpose(guarded_url, "initial")
+    finally:
+        await backend.close()
+        await runner.cleanup()
+
+    assert first.body == b"abc"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_portal_aiohttp_budget_settles_stream_bytes_not_content_length() -> None:
+    policy = RecordingPolicy()
+
+    async def page(request: web.Request) -> web.StreamResponse:
+        # Chunked response has no Content-Length. Aggregate accounting must
+        # come from the actual stream reads.
+        response = web.StreamResponse(headers={"Content-Type": "text/plain"})
+        await response.prepare(request)
+        await response.write(b"abc")
+        await response.write_eof()
+        return response
+
+    app = web.Application()
+    app.router.add_get("/page", page)
+    runner, base = await _start_app(app)
+    guarded_url = f"{base.replace('127.0.0.1', 'localhost')}/page"
+    config = CrawlConfig(
+        portal_connection_policy=policy,
+        challenge_escalate_to_browser=False,
+        respect_robots_txt=False,
+        max_bytes=13,
+        max_response_bytes=10,
+    )
+    backend = AiohttpBackend(config)
+    budget = RunBudget(max_bytes=13, max_response_bytes=10)
+    backend.set_run_budget(budget)
+    try:
+        await backend.fetch_for_purpose(guarded_url, "initial")
+        await backend.fetch_for_purpose(guarded_url, "initial")
+    finally:
+        await backend.close()
+        await runner.cleanup()
+
+    snapshot = await budget.snapshot()
+    assert snapshot.response_bytes == 6
+    assert snapshot.requests_started == 2
+
+
+@pytest.mark.asyncio
+async def test_portal_engine_routes_robots_through_the_budgeted_policy_path() -> None:
+    policy = RecordingPolicy()
+
+    async def robots(_request: web.Request) -> web.Response:
+        return web.Response(text="User-agent: *\nAllow: /\n", content_type="text/plain")
+
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(text="guarded", content_type="text/html")
+
+    app = web.Application()
+    app.router.add_get("/robots.txt", robots)
+    app.router.add_get("/page", page)
+    runner, base = await _start_app(app)
+    guarded_url = f"{base.replace('127.0.0.1', 'localhost')}/page"
+    engine = CrawlEngine(
+        CrawlConfig(
+            portal_connection_policy=policy,
+            challenge_escalate_to_browser=False,
+            rate_limit_per_second=0,
+            max_requests=2,
+            max_response_bytes=1_000,
+        )
+    )
+    try:
+        result = await engine.crawl(guarded_url)
+    finally:
+        await engine.close()
+        await runner.cleanup()
+
+    assert result.status == 200
+    assert [purpose for _url, purpose in policy.calls] == ["robots", "initial"]
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,7 @@ import aiohttp
 from curl_cffi.requests import AsyncSession
 
 from .config import CrawlConfig
+from .budget import RunBudget
 from .cookies import build_cookie_header, build_scoped_cookie_header
 from .models import FetchResponse
 from .proxy_pool import ProxyPool
@@ -272,6 +273,13 @@ class AiohttpBackend(FetchBackend):
         super().__init__(config)
         self._session: aiohttp.ClientSession | None = None
         self._ssl_context: ssl.SSLContext | None = None
+        # Set per CrawlEngine run.  Direct backend users retain the legacy
+        # unlimited behaviour unless they explicitly attach a RunBudget.
+        self._run_budget: RunBudget | None = None
+
+    def set_run_budget(self, budget: RunBudget | None) -> None:
+        """Attach the engine-owned ledger for policy-pinned requests."""
+        self._run_budget = budget
 
     def _get_ssl_context(self) -> ssl.SSLContext | None:
         if not self.config.verify_ssl:
@@ -407,49 +415,57 @@ class AiohttpBackend(FetchBackend):
             limit=1,
             ssl=self._get_ssl_context(),
         )
-        started = time.monotonic()
-        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-            async with session.get(
-                url,
-                headers=_request_headers(self.config, url),
-                allow_redirects=False,
-                ssl=self._get_ssl_context(),
-                auth=_basic_auth(self.config, url),
-            ) as response:
-                ttfb = time.monotonic() - started
-                header_map = dict(response.headers)
-                ct = header_map.get("Content-Type")
-                truncated = False
-                if _is_skippable_content_type(ct):
-                    body = await response.content.read(_SNIFF_BYTES)
-                else:
-                    chunks: list[bytes] = []
-                    total = 0
-                    async for chunk in response.content.iter_chunked(65536):
-                        remaining = self.config.max_response_bytes - total
-                        if len(chunk) >= remaining:
-                            chunks.append(chunk[:remaining])
-                            total += remaining
-                            truncated = True
-                            break
-                        chunks.append(chunk)
-                        total += len(chunk)
-                    body = b"".join(chunks)
-                elapsed = time.monotonic() - started
-                return (
-                    FetchResponse(
-                        url=str(response.url),
-                        requested_url=requested_url,
-                        status=response.status,
-                        headers=header_map,
-                        body=body,
-                        text=_decode_body(body, ct),
-                        ttfb_seconds=ttfb,
-                        elapsed_seconds=elapsed,
-                        body_truncated=truncated,
-                    ),
-                    response.headers.get("Location"),
-                )
+        reservation = await self._run_budget.reserve() if self._run_budget is not None else None
+        body_bytes_read = 0
+        try:
+            started = time.monotonic()
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+                async with session.get(
+                    url,
+                    headers=_request_headers(self.config, url),
+                    allow_redirects=False,
+                    ssl=self._get_ssl_context(),
+                    auth=_basic_auth(self.config, url),
+                ) as response:
+                    ttfb = time.monotonic() - started
+                    header_map = dict(response.headers)
+                    ct = header_map.get("Content-Type")
+                    cap = self.config.max_response_bytes
+                    truncated = False
+                    if _is_skippable_content_type(ct):
+                        body = await response.content.read(min(_SNIFF_BYTES, cap))
+                        body_bytes_read = len(body)
+                    else:
+                        chunks: list[bytes] = []
+                        while body_bytes_read < cap:
+                            # ``read(n)`` rather than a larger iterator chunk
+                            # means the counter tracks the actual capped stream
+                            # reads, not Content-Length or a sliced buffer.
+                            chunk = await response.content.read(min(65536, cap - body_bytes_read))
+                            if not chunk:
+                                break
+                            chunks.append(chunk)
+                            body_bytes_read += len(chunk)
+                        body = b"".join(chunks)
+                        truncated = body_bytes_read == cap
+                    elapsed = time.monotonic() - started
+                    return (
+                        FetchResponse(
+                            url=str(response.url),
+                            requested_url=requested_url,
+                            status=response.status,
+                            headers=header_map,
+                            body=body,
+                            text=_decode_body(body, ct),
+                            ttfb_seconds=ttfb,
+                            elapsed_seconds=elapsed,
+                            body_truncated=truncated,
+                        ),
+                        response.headers.get("Location"),
+                    )
+        finally:
+            if reservation is not None:
+                await self._run_budget.settle(reservation, body_bytes_read)
 
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
