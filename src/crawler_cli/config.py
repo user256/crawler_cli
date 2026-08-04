@@ -32,6 +32,11 @@ CB_RECOVERY_SECONDS_DEFAULT = 30.0
 # Overridable per run via the --max-response-bytes CLI flag.
 MAX_RESPONSE_BYTES_DEFAULT = 25_000_000
 DEFAULT_OPEN_CRAWL_LIMIT = 200
+# Run-wide network budgets are opt-in.  A zero value is deliberately distinct
+# from --max-pages: the latter limits frontier URLs, whereas these limits guard
+# every budget-aware request attempt and all response bodies it reads.
+MAX_REQUESTS_DEFAULT = 0
+MAX_BYTES_DEFAULT = 0
 
 
 def _env_bool(name: str) -> bool | None:
@@ -81,6 +86,14 @@ class CrawlConfig:
     follow_redirects: bool = True
     verify_ssl: bool = True
     max_response_bytes: int = MAX_RESPONSE_BYTES_DEFAULT
+    max_requests: int = MAX_REQUESTS_DEFAULT
+    """Maximum network requests in one run (0 = unlimited)."""
+    max_bytes: int = MAX_BYTES_DEFAULT
+    """Aggregate response-body bytes for one run (0 = unlimited).
+
+    Enforced only for the Portal-policy aiohttp path, whose manually followed
+    requests can reserve capacity immediately before every connection attempt.
+    """
     playwright_network_idle_timeout_seconds: float = 5.0
     playwright_wait_for_selector: str = ""
     """If set, the Playwright backend waits for this CSS selector to appear
@@ -230,6 +243,8 @@ class CrawlConfig:
         require_non_negative_int(self.default_open_crawl_limit, field="default_open_crawl_limit")
         require_non_negative_int(self.per_host_concurrency, field="per_host_concurrency")
         require_positive_int(self.max_response_bytes, field="max_response_bytes")
+        require_non_negative_int(self.max_requests, field="max_requests")
+        require_non_negative_int(self.max_bytes, field="max_bytes")
         require_positive_float(self.timeout_seconds, field="timeout_seconds")
         require_non_negative_float(
             self.playwright_network_idle_timeout_seconds,
@@ -287,6 +302,12 @@ class CrawlConfig:
                 raise ValueError(
                     "portal_connection_policy requires challenge_escalate_to_browser=False "
                     "because browser navigation is not guarded"
+                )
+        if self.max_requests or self.max_bytes:
+            if self.backend != "aiohttp" or self.portal_connection_policy is None:
+                raise ValueError(
+                    "max_requests/max_bytes require the Portal-policy aiohttp path; "
+                    "other backends cannot truthfully guard every network request"
                 )
 
     @staticmethod

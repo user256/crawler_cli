@@ -81,6 +81,8 @@ def test_argparse_float_types_reject_nan_inf(fn, raw):
         ["--timeout", "inf"],
         ["--max-response-bytes", "0"],
         ["--max-response-bytes", "-10"],
+        ["--max-requests", "-1"],
+        ["--max-bytes", "-1"],
         ["--max-pages", "-1"],
         ["--per-host-concurrency", "-3"],
         ["--refresh-days", "-1"],
@@ -108,6 +110,8 @@ def test_cli_rejects_invalid_numeric_flags(flags):
         ["--per-host-concurrency", "0"],
         ["--refresh-days", "0"],
         ["--max-requests-per-context", "0"],
+        ["--max-requests", "0"],
+        ["--max-bytes", "0"],
         ["--wait-for-network-idle", "0"],
         ["--timeout", "0.001"],
         ["--memory-high-watermark", "100"],
@@ -189,6 +193,24 @@ def test_crawl_config_rejects_zero_concurrency():
 def test_crawl_config_rejects_non_positive_response_cap():
     with pytest.raises(ValueError, match="max_response_bytes"):
         CrawlConfig(max_response_bytes=0)
+
+
+def test_crawl_config_rejects_negative_run_budgets():
+    with pytest.raises(ValueError, match="max_requests"):
+        CrawlConfig(max_requests=-1)
+    with pytest.raises(ValueError, match="max_bytes"):
+        CrawlConfig(max_bytes=-1)
+
+
+def test_run_budgets_fail_closed_outside_the_portal_aiohttp_path():
+    with pytest.raises(ValueError, match="Portal-policy aiohttp"):
+        CrawlConfig(max_requests=1)
+    cfg = CrawlConfig(
+        max_requests=1,
+        portal_connection_policy=object(),
+        challenge_escalate_to_browser=False,
+    )
+    assert cfg.respect_robots_txt is True
 
 
 def test_crawl_config_rejects_negative_timeout():
