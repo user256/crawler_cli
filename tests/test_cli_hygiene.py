@@ -50,7 +50,10 @@ def test_normalize_localhost():
 
 def test_normalize_bare_csv_crawl_invocation():
     assert _normalize_argv(["--csv-file", "seeds.csv", "--csv-seed"]) == [
-        "crawl", "--csv-file", "seeds.csv", "--csv-seed",
+        "crawl",
+        "--csv-file",
+        "seeds.csv",
+        "--csv-seed",
     ]
 
 
