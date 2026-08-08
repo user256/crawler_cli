@@ -1094,7 +1094,11 @@ async def _run_crawl(args: argparse.Namespace) -> int:
         print("Error: provide a seed URL, one or more --seed-url values, or --csv-file", file=sys.stderr)
         return EXIT_VALIDATION
     if args.csv_file and not seeds and not args.csv_seed:
-        args.url = load_urls_from_csv(args.csv_file, column=args.csv_column)[0]
+        csv_urls = load_urls_from_csv(args.csv_file, column=args.csv_column)
+        if not csv_urls:
+            print("Error: CSV contains no crawl URLs", file=sys.stderr)
+            return EXIT_VALIDATION
+        args.url = csv_urls[0]
         seeds = _collect_seed_urls(args)
     if args.resume and args.crawl_run_id:
         print("Error: use --resume RUN_ID or --crawl-run-id for a new run, not both", file=sys.stderr)
@@ -2894,6 +2898,11 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         return ["crawl", *argv]
     if _looks_like_hostname(argv[0]):
         return ["crawl", f"https://{argv[0]}", *argv[1:]]
+    # A CSV can provide every seed, so it is a complete bare crawl invocation
+    # even without a positional URL. Keep the documented command form routed
+    # to the crawl parser rather than treating --csv-file as a top-level flag.
+    if argv[0] == "--csv-file":
+        return ["crawl", *argv]
     return argv
 
 
