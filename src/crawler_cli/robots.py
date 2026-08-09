@@ -411,8 +411,12 @@ class RobotsPolicyCache:
         req_headers = {"User-Agent": self._user_agent_for(robots_url)}
         if self._fetch_response is not None:
             try:
-                response = await self._fetch_response(robots_url, "robots")
-                return response.text if response.status == 200 else None, response.headers, response.status
+                guarded_response = await self._fetch_response(robots_url, "robots")
+                return (
+                    guarded_response.text if guarded_response.status == 200 else None,
+                    guarded_response.headers,
+                    guarded_response.status,
+                )
             except Exception:
                 return None, {}, 0
         proxy = self._select_proxy(robots_url)
@@ -425,11 +429,11 @@ class RobotsPolicyCache:
                     ssl=self.config.verify_ssl,
                     proxy=proxy or None,
                     allow_redirects=True,
-                ) as response:
-                    headers = dict(response.headers)
-                    status = response.status
+                ) as http_response:
+                    headers = dict(http_response.headers)
+                    status = http_response.status
                     if status == 200:
-                        return await response.text(errors="ignore"), headers, status
+                        return await http_response.text(errors="ignore"), headers, status
                     return None, headers, status
         except Exception:
             return None, {}, 0
