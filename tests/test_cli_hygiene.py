@@ -48,6 +48,15 @@ def test_normalize_localhost():
     assert result == ["crawl", "https://localhost:8080"]
 
 
+def test_normalize_bare_csv_crawl_invocation():
+    assert _normalize_argv(["--csv-file", "seeds.csv", "--csv-seed"]) == [
+        "crawl",
+        "--csv-file",
+        "seeds.csv",
+        "--csv-seed",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # _build_dsn: credential URL-encoding
 # ---------------------------------------------------------------------------
@@ -360,6 +369,49 @@ async def test_run_crawl_uses_memory_store_when_postgres_not_configured(monkeypa
     assert rc == 0
     assert isinstance(observed["store"], MemoryStore)
     assert observed["seeds"] == ["https://x.com"]
+
+
+@pytest.mark.asyncio
+async def test_run_crawl_routes_bare_csv_seed_mode_to_open_crawl(monkeypatch, tmp_path):
+    observed: dict[str, object] = {}
+    csv_path = tmp_path / "seeds.csv"
+    csv_path.write_text("url\nhttps://example.com/\nhttps://example.com/orphan\n", encoding="utf-8")
+
+    class StubEngine:
+        def __init__(self, config, store=None) -> None:
+            observed["config"] = config
+
+        def request_stop(self) -> None:
+            return None
+
+        async def crawl_open(self, seeds, **kwargs):
+            observed["open_seeds"] = list(seeds)
+            return CrawlJobResult(mode="open", seed_urls=list(seeds), results=[])
+
+        async def crawl_list(self, *args, **kwargs):
+            raise AssertionError("--csv-seed must use crawl_open, not crawl_list")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("crawler_cli.__main__.CrawlEngine", StubEngine)
+    argv = _normalize_argv(["--csv-file", str(csv_path), "--csv-seed", "--max-pages", "2"])
+    args = _build_parser().parse_args(argv)
+
+    assert await _run_crawl(args) == 0
+    config = observed["config"]
+    assert config.csv_seed_mode is True
+    assert config.csv_urls == ["https://example.com/", "https://example.com/orphan"]
+    assert observed["open_seeds"] == []
+
+
+@pytest.mark.asyncio
+async def test_run_crawl_rejects_empty_bare_csv(monkeypatch, tmp_path):
+    csv_path = tmp_path / "empty.csv"
+    csv_path.write_text("url\n", encoding="utf-8")
+    args = _build_parser().parse_args(_normalize_argv(["--csv-file", str(csv_path)]))
+
+    assert await _run_crawl(args) == 2
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,18 @@ def test_load_urls_from_csv_with_header(tmp_path):
     assert load_urls_from_csv(csv_path) == ["https://example.com/a", "https://example.com/b"]
 
 
+def test_load_urls_from_csv_single_row_header(tmp_path):
+    csv_path = tmp_path / "urls.csv"
+    csv_path.write_text("url\nhttps://example.com/only\n", encoding="utf-8")
+    assert load_urls_from_csv(csv_path) == ["https://example.com/only"]
+
+
+def test_load_urls_from_csv_preserves_quoted_commas(tmp_path):
+    csv_path = tmp_path / "urls.csv"
+    csv_path.write_text('url\n"https://example.com/b?x=1,2"\n', encoding="utf-8")
+    assert load_urls_from_csv(csv_path) == ["https://example.com/b?x=1,2"]
+
+
 def test_load_urls_from_plain_lines(tmp_path):
     csv_path = tmp_path / "urls.txt"
     csv_path.write_text("https://example.com/x\n# comment\nhttps://example.com/y\n", encoding="utf-8")

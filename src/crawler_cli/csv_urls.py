@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from itertools import chain
 from pathlib import Path
 
 
@@ -15,23 +16,19 @@ def load_urls_from_csv(path: str | Path, *, column: str = "url") -> list[str]:
     if not text.strip():
         return urls
 
-    try:
-        sample = text[:1024]
-        dialect = csv.Sniffer().has_header(sample)
-    except csv.Error:
-        dialect = False
+    reader = csv.reader(text.splitlines())
+    first_row = next(reader, [])
+    headers = [header.strip() for header in first_row]
+    if column in headers:
+        column_index = headers.index(column)
+        for row in reader:
+            value = (row[column_index] if len(row) > column_index else "").strip()
+            if value:
+                urls.append(value)
+        return urls
 
-    if dialect:
-        reader = csv.DictReader(text.splitlines())
-        if reader.fieldnames and column in reader.fieldnames:
-            for row in reader:
-                value = (row.get(column) or "").strip()
-                if value:
-                    urls.append(value)
-            return urls
-
-    for line in text.splitlines():
-        value = line.strip()
+    for row in chain((first_row,), reader):
+        value = ",".join(row).strip()
         if value and not value.startswith("#"):
             urls.append(value)
     return urls
