@@ -86,8 +86,7 @@ class RunBudget:
                 raise RunBudgetExhausted("max_requests exhausted before request emission")
             if (
                 self.max_bytes
-                and self._response_bytes + self._response_bytes_reserved + self.max_response_bytes
-                > self.max_bytes
+                and self._response_bytes + self._response_bytes_reserved + self.max_response_bytes > self.max_bytes
             ):
                 raise RunBudgetExhausted("max_bytes exhausted before request emission")
 
