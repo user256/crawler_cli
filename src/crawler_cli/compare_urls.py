@@ -57,9 +57,7 @@ class PairParseResult:
     skipped_reasons: list[str]
 
 
-_UNRESERVED_CHARACTERS = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-)
+_UNRESERVED_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _VALID_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
 
 
@@ -80,8 +78,7 @@ def _encode_text_run(run: bytes) -> str:
         return "".join(chr(byte) if byte < 0x80 else f"%{byte:02X}" for byte in run)
     text = unicodedata.normalize("NFC", text)
     return "".join(
-        char if ord(char) < 0x80 else "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
-        for char in text
+        char if ord(char) < 0x80 else "".join(f"%{byte:02X}" for byte in char.encode("utf-8")) for char in text
     )
 
 
