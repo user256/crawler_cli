@@ -270,6 +270,52 @@ async def test_budgeted_policy_fetch_stops_gzip_expansion_at_accounted_byte_cap(
 
 
 @pytest.mark.asyncio
+async def test_budgeted_policy_fetch_drains_large_gzip_decoder_tail_under_new_leases() -> None:
+    """A tiny compressed body can require several decoded-output leases.
+
+    zlib retains source bytes in ``unconsumed_tail`` once its output limit is
+    reached. They must be decoded before another socket read, otherwise a
+    permitted body larger than one 64 KiB lease is silently truncated.
+    """
+    policy = RecordingPolicy()
+    source = (b"large gzip body " * 12_500) + b"end"  # > 64 KiB after decode
+    encoded = gzip.compress(source)
+    assert len(source) > 64 * 1024
+    assert len(encoded) < 64 * 1024
+
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(body=encoded, headers={"Content-Type": "text/html", "Content-Encoding": "gzip"})
+
+    app = web.Application()
+    app.router.add_get("/page", page)
+    runner, base = await _start_app(app)
+    guarded_url = f"{base.replace('127.0.0.1', 'localhost')}/page"
+    cap = len(source) + 1
+    budget = RunBudget(max_bytes=cap, max_response_bytes=cap)
+    backend = AiohttpBackend(
+        CrawlConfig(
+            portal_connection_policy=policy,
+            challenge_escalate_to_browser=False,
+            respect_robots_txt=False,
+            max_bytes=cap,
+            max_response_bytes=cap,
+        )
+    )
+    backend.set_run_budget(budget)
+    try:
+        result = await backend.fetch_for_purpose(guarded_url, "initial")
+    finally:
+        await backend.close()
+        await runner.cleanup()
+
+    assert result.body == source
+    assert result.body_truncated is False
+    assert result.wire_bytes == len(encoded)
+    assert result.decoded_bytes == result.accounted_bytes == len(source)
+    assert (await budget.snapshot()).accounted_bytes == len(source)
+
+
+@pytest.mark.asyncio
 async def test_budgeted_policy_fetch_decodes_all_concatenated_gzip_members() -> None:
     policy = RecordingPolicy()
     first = b"<html><body>first "

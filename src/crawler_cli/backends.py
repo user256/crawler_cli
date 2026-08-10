@@ -197,6 +197,7 @@ class _WireBodyDecoder:
     def __init__(self, content_encoding: str | None) -> None:
         self._encoding = (content_encoding or "").lower().strip()
         self._decoder: zlib.Decompress | None = None
+        self._pending_input = b""
         self._member_open = False
         self._complete = self._encoding in {"", "identity"}
         self._supported = self._encoding in {"", "identity", "gzip", "deflate"}
@@ -209,12 +210,19 @@ class _WireBodyDecoder:
     def complete(self) -> bool:
         return self._complete
 
+    @property
+    def has_unconsumed_tail(self) -> bool:
+        """Whether a bounded decode left already-read wire input buffered."""
+        return bool(self._pending_input)
+
     def _new_decoder(self) -> zlib.Decompress:
         if self._encoding == "gzip":
             return zlib.decompressobj(16 + zlib.MAX_WBITS)
         return zlib.decompressobj()
 
-    def decode(self, wire: bytes, limit: int) -> bytes:
+    def decode(self, wire: bytes, limit: int, *, _draining_tail: bool = False) -> bytes:
+        if self.has_unconsumed_tail and not _draining_tail:
+            raise RuntimeError("decoder input must be drained before reading more wire bytes")
         if self._encoding in {"", "identity"}:
             return wire[:limit]
 
@@ -230,24 +238,52 @@ class _WireBodyDecoder:
             if decoded:
                 chunks.append(decoded)
                 remaining -= len(decoded)
+            if self._decoder.eof:
+                pending = self._decoder.unused_data
+                self._decoder = None
+                self._member_open = False
+                self._complete = True
+                # ``pending`` starts the next gzip member (RFC 1952 permits
+                # concatenation). For deflate, trailing bytes are rejected as
+                # a second malformed member rather than silently ignored.
+                if pending and self._encoding == "deflate":
+                    self._complete = False
+                    self._member_open = True
+                    break
+                if remaining == 0:
+                    # Preserve a following gzip member for a fresh output
+                    # lease rather than losing already-read wire bytes.
+                    self._pending_input = pending
+                    break
+                continue
+            pending = self._decoder.unconsumed_tail
+            if pending:
+                # A bounded decompress output left wire input in zlib. Keep
+                # it for ``decode_unconsumed_tail`` rather than reading the
+                # next socket chunk and overwriting the implicit state.
+                self._pending_input = pending
+                break
             if remaining == 0:
                 break
             if not self._decoder.eof:
                 # All supplied input belongs to an unfinished member. Its
                 # validity is decided only once the stream reaches EOF.
                 break
-            pending = self._decoder.unused_data
-            self._decoder = None
-            self._member_open = False
-            self._complete = True
-            # ``pending`` starts the next gzip member (RFC 1952 permits
-            # concatenation). For deflate, trailing bytes are rejected as a
-            # second malformed member rather than silently ignored.
-            if pending and self._encoding == "deflate":
-                self._complete = False
-                self._member_open = True
-                break
         return b"".join(chunks)
+
+    def decode_unconsumed_tail(self, limit: int) -> bytes:
+        """Drain bytes zlib retained after a bounded-output decode.
+
+        Those bytes were already consumed from the socket, so callers must
+        account them as decoded output under a fresh lease with *zero* wire
+        bytes.  Reading another socket chunk first would silently discard the
+        tail and truncate otherwise permitted large gzip/deflate bodies.
+        """
+        if not self._pending_input:
+            return b""
+        pending = self._pending_input
+        self._pending_input = b""
+        return self.decode(pending, limit, _draining_tail=True)
 
     def flush(self, limit: int) -> bytes:
         if self._decoder is None or limit <= 0 or not self._decoder.eof:
@@ -288,7 +324,10 @@ async def _read_budgeted_body(
         # Cap both transfer and decoded bytes per response.  The transfer cap
         # prevents a badly-compressible/opaque encoding from bypassing the
         # response ceiling while the decoded cap prevents expansion bombs.
-        wanted = min(65536, cap - decoded_total, cap - wire_total)
+        drain_unconsumed_tail = decoder.has_unconsumed_tail
+        wanted = min(65536, cap - decoded_total)
+        if not drain_unconsumed_tail:
+            wanted = min(wanted, cap - wire_total)
         lease = None
         wire = b""
         decoded = b""
@@ -296,12 +335,18 @@ async def _read_budgeted_body(
             if budget is not None and reservation is not None:
                 lease = await budget.reserve_bytes(reservation, wanted)
                 wanted = lease.reserved_bytes
-            wire = await response.content.read(wanted)
             # The decoder output limit is the byte lease as well as the
             # per-response cap.  A gzip/deflate expansion therefore cannot
             # overspend ``max_bytes`` between ledger settlements.
             decoded_limit = min(cap - decoded_total, wanted)
-            decoded = decoder.decode(wire, decoded_limit) if wire else b""
+            if drain_unconsumed_tail:
+                # The next lease is decoded-output capacity for input that
+                # zlib already buffered; it intentionally performs no socket
+                # read and therefore settles with wire_bytes=0.
+                decoded = decoder.decode_unconsumed_tail(decoded_limit)
+            else:
+                wire = await response.content.read(wanted)
+                decoded = decoder.decode(wire, decoded_limit) if wire else b""
         except RunBudgetExhausted as exc:
             truncated = True
             stop_reason = exc.reason
@@ -322,6 +367,15 @@ async def _read_budgeted_body(
         decoded_total += len(decoded)
         if decoded:
             chunks.append(decoded)
+        if drain_unconsumed_tail:
+            if decoded_total >= cap:
+                truncated = True
+                stop_reason = "max_response_bytes"
+                break
+            # Keep draining already-read compressed input before pulling a
+            # fresh socket chunk. A non-empty tail always makes progress under
+            # a positive output limit; the next iteration gets a fresh lease.
+            continue
         if not wire:
             # No more transfer bytes: flush the incremental decoder (gzip
             # trailers, etc.) while retaining the decoded response cap.

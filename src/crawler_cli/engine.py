@@ -27,7 +27,12 @@ from .models import BrowserRuntime, CrawlJobResult, CrawlResult, DiscoveredLink,
 from .persistence import AsyncpgStore, MemoryStore
 from .portal_policy import ConnectionPurpose
 from .robots import RobotsPolicyCache
-from .serialization import serialize_crawl_job, serialize_crawl_result, serialize_job_summary_metadata
+from .serialization import (
+    CRAWL_ARTIFACT_SCHEMA_VERSION,
+    serialize_crawl_job,
+    serialize_crawl_result,
+    serialize_job_summary_metadata,
+)
 from .sitemap import SitemapParser, discover_sitemap_paths
 
 logger = logging.getLogger(__name__)
@@ -1297,7 +1302,7 @@ class CrawlEngine:
                     # ``crawl_open`` writes NDJSON rather than the regular
                     # JSON artifact. Stamp its terminal record too so the CLI
                     # output has the same versioned handoff boundary.
-                    "schema_version": "crawler-cli/crawl-artifact/2",
+                    "schema_version": CRAWL_ARTIFACT_SCHEMA_VERSION,
                     "mode": job.mode,
                     "run_id": job.run_id,
                     "seed_urls": job.seed_urls,
