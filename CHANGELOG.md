@@ -7,27 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Brotli support on the Portal-guarded path (ticket 3685). `br` is now both
-  advertised and decoded under the same bounded byte leases as gzip/deflate,
-  so a compressed page is real content there instead of an opaque
-  `unsupported_content_encoding` body. `Brotli` becomes a declared runtime
-  dependency; the guarded request advertises exactly `gzip, deflate, br` rather
-  than inheriting whatever codecs happen to be importable.
+## [0.3.0] - 2026-08-10
 
 ### Added
 
-- Draft Portal runtime-budget release contract (ticket 3685): guarded aiohttp
-  crawls account actual streamed wire bytes separately from decoded bytes,
-  terminate with typed `max_requests`/`max_bytes` reasons, and serialize the
-  terminal counters in `crawler-cli/crawl-artifact/2`. Truncated responses are
-  deliberately not extracted, linked, or content-hashed. The guarded path pins
-  `Accept-Encoding` to what it can decode and keeps robots.txt resolution
-  credential-free. Opaque-body handling is scoped to that path, so ordinary
-  crawls that clip a page at `max_response_bytes` are unchanged. This is
-  crawler-side groundwork only: it neither enables Portal dispatch nor declares
-  the Portal integration/release complete.
+- Run-scoped network budgets for the Portal-guarded aiohttp path (ticket 3685):
+  `--max-requests` and `--max-bytes`. Both are rejected by configuration
+  validation on any other backend or without a Portal connection policy,
+  because no other path can truthfully guard every request. A request slot is
+  consumed immediately before each policy-pinned connection, and every body
+  read takes a bounded byte lease rather than reserving the full per-response
+  ceiling up front.
+- Wire, decoded and accounted byte counters on results and run summaries.
+  `max_bytes` is charged as `sum(max(response wire bytes, response decoded
+  bytes))`, so a compressed response is accounted for what it expands to and a
+  decompression bomb cannot outrun the ceiling.
+- Typed terminal budget stops. A run that exhausts a budget ends as a clean
+  partial crawl with `budget_stop_reason` of `max_requests` or `max_bytes` and
+  `crawl_run_status: partial_budget_exhausted`, never as an uncaught error.
+- `crawler_cli.runtime_budget.enforcement_capabilities()`, a no-network probe
+  declaring which limits this build enforces.
+- Brotli decoding on the guarded path. `br` is advertised and decoded under the
+  same bounded leases as gzip and deflate. `Brotli>=1.1` is therefore a new
+  **declared runtime dependency**, and the guarded request advertises exactly
+  `gzip, deflate, br` instead of inheriting whichever codecs happen to be
+  importable in the deployment environment.
+
+### Changed
+
+- **Breaking for artifact consumers:** saved crawl artifacts are stamped
+  `crawler-cli/crawl-artifact/2`. Consumers pinning the schema string with
+  strict equality must accept `/2` before installing this release. Loaders here
+  still read legacy artifacts that carry no `schema_version`, but reject a
+  stamped unknown one.
+- A body stopped by a run budget or a broken transfer encoding is opaque on the
+  guarded path: no extraction, link discovery, or content hash from a prefix.
+  Unguarded backends are unchanged, including a page clipped at
+  `max_response_bytes`.
+- robots.txt resolution on the guarded path goes through the same connection
+  pinning and budget admission as page, redirect and sitemap fetches, and keeps
+  the credential-free header set the legacy robots fetch already used.
+- Redirect-target matching normalises percent-encoding spelling per RFC 3986
+  section 6.2.2 (ticket 3755), so `%c8%99` matches `%C8%99` and raw non-ASCII
+  matches its encoded form.
+
+### Fixed
+
+- `crawl --save-to` accepts bare CSV seed files.
+- A missing robots.txt no longer refetches on every URL check: CDN cache
+  headers on a 4xx are not treated as robots policy, and `no-cache` or
+  `max-age=0` falls back to the session default TTL.
 
 ## [0.2.2] - 2026-07-29
 
