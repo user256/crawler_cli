@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from .amp import is_amp_url_shape
 from .archive import discover_historical_urls
 from .backends import ObscuraFetchBackend, PlaywrightBackend, RateLimiter, build_backend
-from .budget import RunBudget
+from .budget import RunBudget, RunBudgetExhausted
 from .challenge import detect_challenge
 from .circuit_breaker import CircuitBreaker, CircuitBreakerRegistry, CircuitState
 from .config import CrawlConfig
@@ -278,6 +278,17 @@ class CrawlEngine:
             skip_reason=reason,
         )
 
+    async def _apply_budget_summary(self, job: CrawlJobResult) -> None:
+        """Copy the engine-owned terminal ledger into a portable job result."""
+        if self._run_budget is None:
+            return
+        snapshot = await self._run_budget.snapshot()
+        job.budget_requests_started = snapshot.requests_started
+        job.budget_wire_bytes = snapshot.wire_bytes
+        job.budget_decoded_bytes = snapshot.decoded_bytes
+        job.budget_accounted_bytes = snapshot.accounted_bytes
+        job.budget_stop_reason = snapshot.stop_reason
+
     async def crawl(self, url: str) -> CrawlResult:
         async with self._semaphore:
             try:
@@ -313,7 +324,12 @@ class CrawlEngine:
                 # Unresolved challenges hard-stop before extraction/persistence
                 # of interstitial HTML as page content (ticket 089).
                 challenge_kind = None
-                if self.config.detect_challenges:
+                # ``body_truncation_reason`` is set only by the budget-aware
+                # guarded path.  Legacy backends keep their prior behaviour for
+                # a plain max_response_bytes prefix; this feature must not
+                # silently change ordinary crawls.
+                body_opaque = response.body_truncated and response.body_truncation_reason is not None
+                if self.config.detect_challenges and not body_opaque:
                     response, challenge_kind = await self._handle_challenge(url, response)
                 # Case-insensitive header lookup (Playwright returns lowercase keys)
                 headers_lower = {k.lower(): v for k, v in response.headers.items()}
@@ -331,6 +347,10 @@ class CrawlEngine:
                     # Blocked: keep fetch metadata + vendor, never treat the
                     # interstitial as extractable/crawled content.
                     skip_reason = "bot_challenge"
+                elif body_opaque:
+                    # A prefix is not a document: do not hash, extract, or
+                    # discover links from content stopped by either byte cap.
+                    skip_reason = "body_truncated"
                 elif content_type and "html" in content_type.lower():
                     raw_html = response.text
                     # Large documents are parsed in a worker thread so a
@@ -370,6 +390,11 @@ class CrawlEngine:
                     fetch_backend=self.config.backend,
                     extracted=extracted,
                     raw_html=raw_html,
+                    body_truncated=response.body_truncated,
+                    wire_bytes=response.wire_bytes,
+                    decoded_bytes=response.decoded_bytes,
+                    accounted_bytes=response.accounted_bytes,
+                    body_truncation_reason=response.body_truncation_reason,
                     content_hash_sha256=content_hash_sha256,
                     content_hash_simhash=content_hash_simhash,
                     discovered_links=discovered_links,
@@ -393,6 +418,10 @@ class CrawlEngine:
                         self._record_breaker_failure(circuit, host, f"http_{response.status}")
                     else:
                         circuit.record_success()
+            except RunBudgetExhausted as exc:
+                # Admission exhaustion is an expected partial terminal result,
+                # not a failed fetch or a circuit-breaker event.
+                return self._skip_result(url, f"budget_exhausted:{exc.reason}")
             except Exception as exc:
                 host = urlparse(url).netloc.lower()
                 logger.warning("fetch_error for %s: %s: %s", url, type(exc).__name__, exc)
@@ -468,7 +497,10 @@ class CrawlEngine:
         while pending_indices or in_flight:
             # Honour request_stop(): drain in-flight, schedule nothing new
             # (ticket-069, parity with crawl_open's ticket-064 behaviour).
-            if not self._stop_requested:
+            budget_exhausted = (
+                self._run_budget is not None and (await self._run_budget.snapshot()).stop_reason is not None
+            )
+            if not self._stop_requested and not budget_exhausted:
                 fill_n = max(0, self._current_worker_limit() - len(in_flight))
                 while fill_n > 0 and pending_indices:
                     idx = pending_indices.pop(0)
@@ -486,10 +518,9 @@ class CrawlEngine:
 
         results = [r for r in ordered if r is not None]
         if save_to:
-            await self._save_results(
-                CrawlJobResult(mode="list", seed_urls=url_list, results=results, interrupted=self._stop_requested),
-                save_to,
-            )
+            job = CrawlJobResult(mode="list", seed_urls=url_list, results=results, interrupted=self._stop_requested)
+            await self._apply_budget_summary(job)
+            await self._save_results(job, save_to)
         return results
 
     async def _enqueue_frontier(
@@ -527,6 +558,7 @@ class CrawlEngine:
             saved_to=save_to,
             interrupted=self._stop_requested,
         )
+        await self._apply_budget_summary(job)
         if job.persist_error_count:
             logger.warning(
                 "Crawl persistence incomplete: %d failure(s), durability=%s, urls=%s",
@@ -612,6 +644,14 @@ class CrawlEngine:
                     if self.config.circuit_breaker_enabled:
                         circuit = self._circuit_breakers.for_host(host)
                         self._record_breaker_failure(circuit, host, f"challenge:{challenge_kind}")
+                    return None
+
+                if response.body_truncated:
+                    logger.warning(
+                        "Skipping truncated sitemap fetch for %s: %s",
+                        url,
+                        response.body_truncation_reason or "max_response_bytes",
+                    )
                     return None
 
                 if self.config.circuit_breaker_enabled:
@@ -1154,6 +1194,18 @@ class CrawlEngine:
                     await _flush_completed(done)
                     continue
 
+                # A budget terminal state is a clean partial crawl. Drain
+                # already-emitted work, but never take another frontier URL.
+                budget_exhausted = (
+                    self._run_budget is not None and (await self._run_budget.snapshot()).stop_reason is not None
+                )
+                if budget_exhausted:
+                    if not in_flight:
+                        break
+                    done, _ = await asyncio.wait(set(in_flight.keys()), return_when=asyncio.FIRST_COMPLETED)
+                    await _flush_completed(done)
+                    continue
+
                 # How many more slots can we fill?
                 worker_limit = self._current_worker_limit()
                 if limit > 0:
@@ -1198,6 +1250,7 @@ class CrawlEngine:
                 refresh_skipped_count=self._refresh_skipped,
                 frontier_mark_done_failed_urls=frontier_mark_done_failed_urls,
             )
+            await self._apply_budget_summary(job)
             if interrupted:
                 logger.warning("Crawl interrupted: %d URLs crawled before stop", session_crawled)
             if job.persist_error_count:
@@ -1227,6 +1280,8 @@ class CrawlEngine:
             crawl_run_status = (
                 "interrupted"
                 if interrupted
+                else "partial_budget_exhausted"
+                if job.budget_stop_reason is not None
                 else "complete_with_errors"
                 if job.persist_error_count or job.frontier_mark_done_error_count
                 else "complete"

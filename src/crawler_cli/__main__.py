@@ -770,8 +770,8 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         default=MAX_BYTES_DEFAULT,
         help=(
             "Maximum aggregate response-body bytes for this crawl run (0 = unlimited). "
-            "Requires --portal-url-policy; requests reserve "
-            "--max-response-bytes before dispatch."
+            "Requires --portal-url-policy; charges actual streamed wire bytes "
+            "and ends with a typed partial-result stop reason when exhausted."
         ),
     )
     parser.add_argument(
@@ -1593,6 +1593,13 @@ class _SavedResult(TypedDict, total=False):
     fetch_backend: str
     extracted: _SavedExtracted | None
     raw_html: str | None
+    body_truncated: bool
+    wire_bytes: int
+    decoded_bytes: int
+    accounted_bytes: int
+    body_truncation_reason: (
+        Literal["max_response_bytes", "max_bytes", "incomplete_content_encoding", "unsupported_content_encoding"] | None
+    )
     content_hash_sha256: str | None
     content_hash_simhash: int | None
     discovered_links: list[_SavedDiscoveredLink]
@@ -1620,6 +1627,11 @@ class _SavedJob(TypedDict, total=False):
     run_id: str | None
     frontier_mark_done_failed_urls: list[str]
     crawl_run_status: str | None
+    budget_requests_started: int
+    budget_wire_bytes: int
+    budget_decoded_bytes: int
+    budget_accounted_bytes: int
+    budget_stop_reason: Literal["max_requests", "max_bytes"] | None
     results: list[_SavedResult]
 
 
@@ -1830,6 +1842,11 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             fetch_backend=str(item.get("fetch_backend", "aiohttp")),
             extracted=_load_extracted(item.get("extracted")),
             raw_html=item.get("raw_html"),
+            body_truncated=bool(item.get("body_truncated", False)),
+            wire_bytes=int(item.get("wire_bytes", 0) or 0),
+            decoded_bytes=int(item.get("decoded_bytes", 0) or 0),
+            accounted_bytes=int(item.get("accounted_bytes", 0) or 0),
+            body_truncation_reason=item.get("body_truncation_reason"),
             content_hash_sha256=item.get("content_hash_sha256"),
             content_hash_simhash=item.get("content_hash_simhash"),
             discovered_links=_load_discovered_links(item.get("discovered_links")),
@@ -1868,6 +1885,11 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             interrupted=bool(summary.get("interrupted", False)),
             frontier_mark_done_failed_urls=list(summary.get("frontier_mark_done_failed_urls", []) or []),
             crawl_run_status=summary.get("crawl_run_status"),
+            budget_requests_started=int(summary.get("budget_requests_started", 0) or 0),
+            budget_wire_bytes=int(summary.get("budget_wire_bytes", 0) or 0),
+            budget_decoded_bytes=int(summary.get("budget_decoded_bytes", 0) or 0),
+            budget_accounted_bytes=int(summary.get("budget_accounted_bytes", 0) or 0),
+            budget_stop_reason=summary.get("budget_stop_reason"),
         )
 
     if isinstance(payload, dict) and "results" in payload:
@@ -1883,6 +1905,11 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             interrupted=bool(job.get("interrupted", False)),
             frontier_mark_done_failed_urls=list(job.get("frontier_mark_done_failed_urls", []) or []),
             crawl_run_status=job.get("crawl_run_status"),
+            budget_requests_started=int(job.get("budget_requests_started", 0) or 0),
+            budget_wire_bytes=int(job.get("budget_wire_bytes", 0) or 0),
+            budget_decoded_bytes=int(job.get("budget_decoded_bytes", 0) or 0),
+            budget_accounted_bytes=int(job.get("budget_accounted_bytes", 0) or 0),
+            budget_stop_reason=job.get("budget_stop_reason"),
         )
 
     raise ValueError(f"Unsupported crawl artifact format: {path}")

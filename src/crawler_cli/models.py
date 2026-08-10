@@ -8,6 +8,14 @@ if TYPE_CHECKING:
     from .detection.cms import CMSDetectionResult
 
 
+BodyTruncationReason = Literal[
+    "max_response_bytes",
+    "max_bytes",
+    "incomplete_content_encoding",
+    "unsupported_content_encoding",
+]
+
+
 @dataclass(slots=True)
 class BrowserRuntime:
     provider: Literal["chromium", "cdp", "obscura"]
@@ -36,6 +44,14 @@ class FetchResponse:
     """Total fetch duration: request send → full body received (ticket 029)."""
     body_truncated: bool = False
     """True when the response body was capped at max_response_bytes during streaming."""
+    wire_bytes: int = 0
+    """Raw HTTP transfer bytes read, before Content-Encoding decoding."""
+    decoded_bytes: int = 0
+    """Decoded response bytes retained for consumers, before text decoding."""
+    accounted_bytes: int = 0
+    """Bytes charged to a run ``max_bytes`` budget (currently wire bytes)."""
+    body_truncation_reason: BodyTruncationReason | None = None
+    """The response cap or run budget that made this body partial."""
     lcp_ms: float | None = None
     """Largest Contentful Paint in ms — lab metric, Playwright only (ticket 046)."""
     cls: float | None = None
@@ -106,6 +122,11 @@ class CrawlResult:
     fetch_backend: str
     extracted: ExtractedContent | None
     raw_html: str | None
+    body_truncated: bool = False
+    wire_bytes: int = 0
+    decoded_bytes: int = 0
+    accounted_bytes: int = 0
+    body_truncation_reason: BodyTruncationReason | None = None
     content_hash_sha256: str | None = None
     content_hash_simhash: int | None = None
     discovered_links: list[DiscoveredLink] = field(default_factory=list)
@@ -158,6 +179,12 @@ class CrawlJobResult:
     """
     crawl_run_status: str | None = None
     """Final status recorded for the open crawl run, when applicable."""
+    budget_requests_started: int = 0
+    budget_wire_bytes: int = 0
+    budget_decoded_bytes: int = 0
+    budget_accounted_bytes: int = 0
+    budget_stop_reason: Literal["max_requests", "max_bytes"] | None = None
+    """Typed terminal cause for a deliberately partial budgeted crawl."""
 
     @property
     def crawled_count(self) -> int:

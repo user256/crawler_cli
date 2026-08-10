@@ -4,13 +4,12 @@ from typing import Any
 
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, ExtractedContent, FetchResponse
 
-CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/1"
+CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/2"
 """Schema identifier stamped on saved crawl artifacts (ticket 3344).
 
-Downstream consumers (e.g. the portal migration worker) pin on this string; any
-backward-incompatible change to the artifact shape must bump the trailing
-number and be called out in the changelog. Loaders keep accepting artifacts
-without the field (legacy list and pre-3344 dict formats)."""
+Downstream consumers (e.g. the portal migration worker) pin on this string;
+v2 adds explicit partial-body and run-budget terminal data. Loaders keep
+accepting legacy v1 artifacts and artifacts without the field."""
 
 
 def serialize_browser_runtime(runtime: BrowserRuntime) -> dict[str, object]:
@@ -35,6 +34,11 @@ def serialize_fetch_response(response: FetchResponse, *, include_text: bool = Tr
         "status": response.status,
         "headers": response.headers,
         "body_length": len(response.body),
+        "body_truncated": response.body_truncated,
+        "wire_bytes": response.wire_bytes,
+        "decoded_bytes": response.decoded_bytes,
+        "accounted_bytes": response.accounted_bytes,
+        "body_truncation_reason": response.body_truncation_reason,
     }
     if include_text:
         payload["text"] = response.text
@@ -70,6 +74,11 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
         "content_type": result.content_type,
         "fetch_backend": result.fetch_backend,
         "raw_html": result.raw_html,
+        "body_truncated": result.body_truncated,
+        "wire_bytes": result.wire_bytes,
+        "decoded_bytes": result.decoded_bytes,
+        "accounted_bytes": result.accounted_bytes,
+        "body_truncation_reason": result.body_truncation_reason,
         "content_hash_sha256": result.content_hash_sha256,
         "content_hash_simhash": result.content_hash_simhash,
         "discovered_links": [
@@ -138,6 +147,11 @@ def serialize_job_summary_metadata(job: CrawlJobResult, *, saved_to: str | None 
         "saved_to": job.saved_to if saved_to is None else saved_to,
         "refresh_skipped_count": job.refresh_skipped_count,
         "challenge_blocked_count": job.challenge_blocked_count,
+        "budget_requests_started": job.budget_requests_started,
+        "budget_wire_bytes": job.budget_wire_bytes,
+        "budget_decoded_bytes": job.budget_decoded_bytes,
+        "budget_accounted_bytes": job.budget_accounted_bytes,
+        "budget_stop_reason": job.budget_stop_reason,
     }
 
 
@@ -161,6 +175,11 @@ def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> 
         "retry_attempts": job.retry_attempts,
         "interrupted": job.interrupted,
         "refresh_skipped_count": job.refresh_skipped_count,
+        "budget_requests_started": job.budget_requests_started,
+        "budget_wire_bytes": job.budget_wire_bytes,
+        "budget_decoded_bytes": job.budget_decoded_bytes,
+        "budget_accounted_bytes": job.budget_accounted_bytes,
+        "budget_stop_reason": job.budget_stop_reason,
         "results": [serialize_crawl_result(result) for result in job.results],
     }
     if job.max_urls is not None:

@@ -28,7 +28,7 @@ Machine-readable outputs are stamped with an explicit schema identifier
 
 | Schema id | Surface | Golden proof |
 |---|---|---|
-| `crawler-cli/crawl-artifact/1` | saved crawl JSON (`serialize_crawl_job`) | `tests/contract/golden/crawl_artifact.json` |
+| `crawler-cli/crawl-artifact/2` | saved crawl JSON (`serialize_crawl_job`), including body accounting and typed budget terminal state | `tests/contract/golden/crawl_artifact.json` |
 | `crawler-cli/compare/1` | `compare --output` JSON + stdout summary | `golden/compare_rows.json`, `golden/compare_summary.json` |
 | `crawler-cli/compare-urls/1` | `compare-urls --output` JSON/CSV + stdout summary | `golden/compare_urls_rows.json`, `golden/compare_urls_rows.csv`, `golden/compare_urls_summary.json` |
 
@@ -37,6 +37,28 @@ CSV has no in-band version field; its column set
 columns may be appended, never renamed/removed/reordered. Loaders accept
 legacy artifacts without `schema_version`
 (`tests/contract/test_crawl_artifact_contract.py`).
+
+## Draft runtime-budget contract (ticket 3685)
+
+This is a **crawler-side draft only**, stacked on the budget-foundation PR. It
+does not authorise Portal dispatch, advertise a worker capability, or complete
+Portal #1511. A future immutable release must pin a reviewed commit/artifact
+before any Portal worker consumes this schema.
+
+For guarded aiohttp requests, `max_bytes` charges `accounted_bytes` (actual
+HTTP wire bytes); artifacts also expose `decoded_bytes` after transfer decoding
+and cap both dimensions per response. A run ends cleanly but partially with
+`budget_stop_reason: "max_requests" | "max_bytes"`; result/job counters are
+actual values, not reservations. A result carrying a `body_truncation_reason`
+is opaque: there is no extracted payload, link discovery, or full-content hash.
+Unguarded backends, which set `body_truncated` with no reason when a body is
+clipped at `max_response_bytes`, keep their pre-3685 behaviour.
+
+Because `auto_decompress` is off on this path, guarded requests advertise only
+`Accept-Encoding: gzip, deflate` — aiohttp's default varies with whichever
+optional codecs are installed in the deployment environment. Robots.txt
+resolution over the guarded path sends only the effective User-Agent, matching
+the credential-free legacy robots fetch.
 
 ## Capability inventory
 

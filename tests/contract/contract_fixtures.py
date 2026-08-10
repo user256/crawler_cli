@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 
 from crawler_cli.models import CrawlResult, DiscoveredLink, ExtractedContent, RobotsDirectives
-from crawler_cli.serialization import serialize_crawl_result
+from crawler_cli.serialization import CRAWL_ARTIFACT_SCHEMA_VERSION, serialize_crawl_result
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
@@ -113,7 +113,7 @@ def make_result(
 def write_artifact(path: Path, results: list[CrawlResult]) -> None:
     """Write a saved-crawl JSON artifact in the documented dict format."""
     payload = {
-        "schema_version": "crawler-cli/crawl-artifact/1",
+        "schema_version": CRAWL_ARTIFACT_SCHEMA_VERSION,
         "mode": "list",
         "seed_urls": [],
         "results": [serialize_crawl_result(result) for result in results],
