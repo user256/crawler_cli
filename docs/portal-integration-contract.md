@@ -45,9 +45,10 @@ does not authorise Portal dispatch, advertise a worker capability, or complete
 Portal #1511. A future immutable release must pin a reviewed commit/artifact
 before any Portal worker consumes this schema.
 
-For guarded aiohttp requests, `max_bytes` charges `accounted_bytes` (actual
-HTTP wire bytes); artifacts also expose `decoded_bytes` after transfer decoding
-and cap both dimensions per response. A run ends cleanly but partially with
+For guarded aiohttp requests, `max_bytes` charges `accounted_bytes`
+(`sum(max(response_wire_bytes, response_decoded_bytes))`); artifacts expose
+both dimensions after transfer decoding and cap both dimensions per response.
+A run ends cleanly but partially with
 `budget_stop_reason: "max_requests" | "max_bytes"`; result/job counters are
 actual values, not reservations. A result carrying a `body_truncation_reason`
 is opaque: there is no extracted payload, link discovery, or full-content hash.

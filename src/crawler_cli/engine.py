@@ -1294,6 +1294,10 @@ class CrawlEngine:
                 # re-scanning all result lines (ticket-059 / ticket-092).
                 summary = {
                     "__type": "summary",
+                    # ``crawl_open`` writes NDJSON rather than the regular
+                    # JSON artifact. Stamp its terminal record too so the CLI
+                    # output has the same versioned handoff boundary.
+                    "schema_version": "crawler-cli/crawl-artifact/2",
                     "mode": job.mode,
                     "run_id": job.run_id,
                     "seed_urls": job.seed_urls,

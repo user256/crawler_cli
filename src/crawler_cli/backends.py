@@ -265,10 +265,12 @@ async def _read_budgeted_body(
 ) -> tuple[bytes, int, int, bool, BodyTruncationReason | None]:
     """Read a body using bounded wire leases and explicit decode accounting.
 
-    ``max_bytes`` charges wire bytes (the resource actually transferred).
-    Decoded bytes are separately counted and capped by ``max_response_bytes``
-    before they can reach parsing/hashing.  A budget hit is a partial terminal
-    response, not an uncaught worker exception.
+    ``max_bytes`` charges ``max(wire, decoded)``.  Every lease bounds both the
+    next wire read and decoder output, so a compressed response cannot expand
+    beyond the remaining run capacity before the ledger observes it. Decoded
+    bytes are also capped by ``max_response_bytes`` before they can reach
+    parsing/hashing. A budget hit is a partial terminal response, not an
+    uncaught worker exception.
     """
     cap = min(max_response_bytes, _SNIFF_BYTES) if _is_skippable_content_type(content_type) else max_response_bytes
     decoder = _WireBodyDecoder(response.headers.get("Content-Encoding"))
@@ -295,7 +297,11 @@ async def _read_budgeted_body(
                 lease = await budget.reserve_bytes(reservation, wanted)
                 wanted = lease.reserved_bytes
             wire = await response.content.read(wanted)
-            decoded = decoder.decode(wire, cap - decoded_total) if wire else b""
+            # The decoder output limit is the byte lease as well as the
+            # per-response cap.  A gzip/deflate expansion therefore cannot
+            # overspend ``max_bytes`` between ledger settlements.
+            decoded_limit = min(cap - decoded_total, wanted)
+            decoded = decoder.decode(wire, decoded_limit) if wire else b""
         except RunBudgetExhausted as exc:
             truncated = True
             stop_reason = exc.reason
@@ -635,7 +641,7 @@ class AiohttpBackend(FetchBackend):
                             body_truncated=truncated,
                             wire_bytes=wire_bytes,
                             decoded_bytes=decoded_bytes,
-                            accounted_bytes=wire_bytes,
+                            accounted_bytes=max(wire_bytes, decoded_bytes),
                             body_truncation_reason=truncation_reason,
                         ),
                         response.headers.get("Location"),
