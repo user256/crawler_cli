@@ -574,7 +574,7 @@ toml = [
 
 [[package]]
 name = "crawler-cli"
-version = "0.2.2"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
