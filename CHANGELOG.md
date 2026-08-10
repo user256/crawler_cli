@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Brotli support on the Portal-guarded path (ticket 3685). `br` is now both
+  advertised and decoded under the same bounded byte leases as gzip/deflate,
+  so a compressed page is real content there instead of an opaque
+  `unsupported_content_encoding` body. `Brotli` becomes a declared runtime
+  dependency; the guarded request advertises exactly `gzip, deflate, br` rather
+  than inheriting whatever codecs happen to be importable.
+
+### Added
+
 - Draft Portal runtime-budget release contract (ticket 3685): guarded aiohttp
   crawls account actual streamed wire bytes separately from decoded bytes,
   terminate with typed `max_requests`/`max_bytes` reasons, and serialize the
