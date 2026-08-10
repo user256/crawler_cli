@@ -1,4 +1,4 @@
-"""Ticket 3685: run-budget admission is decided before request emission."""
+"""Ticket 3685: request admission and streamed byte accounting."""
 
 from __future__ import annotations
 
@@ -25,20 +25,22 @@ async def test_request_limit_blocks_a_second_dispatch_before_it_starts() -> None
 
 
 @pytest.mark.asyncio
-async def test_aggregate_budget_reserves_response_cap_before_dispatch() -> None:
+async def test_aggregate_budget_does_not_reserve_the_default_response_cap() -> None:
     budget = RunBudget(max_bytes=25, max_response_bytes=20)
     first = await budget.reserve()
-
-    # Even though the first body may ultimately be tiny, a concurrent 20-byte
-    # request cannot be emitted while its full response cap is reserved.
-    with pytest.raises(RunBudgetExhausted, match="max_bytes"):
-        await budget.reserve()
-
-    await budget.settle(first, 5)
     second = await budget.reserve()
-    await budget.settle(second, 20)
+
+    # A 25 MB-style per-response ceiling must not prevent a small aggregate
+    # run from starting two connections. Capacity is leased per actual read.
+    first_read = await budget.reserve_bytes(first, 20)
+    await budget.settle_bytes(first_read, wire_bytes=5, decoded_bytes=5)
+    second_read = await budget.reserve_bytes(second, 20)
+    await budget.settle_bytes(second_read, wire_bytes=20, decoded_bytes=20)
+    await budget.settle(first)
+    await budget.settle(second)
+
     snapshot = await budget.snapshot()
-    assert snapshot.response_bytes == 25
+    assert snapshot.wire_bytes == snapshot.decoded_bytes == snapshot.accounted_bytes == 25
 
 
 @pytest.mark.asyncio
@@ -55,15 +57,20 @@ async def test_failed_request_still_uses_request_slot_but_releases_byte_reservat
 @pytest.mark.asyncio
 async def test_parallel_reservations_cannot_race_past_aggregate_cap() -> None:
     budget = RunBudget(max_bytes=20, max_response_bytes=20)
+    first, second = await asyncio.gather(budget.reserve(), budget.reserve())
 
-    outcomes = await asyncio.gather(budget.reserve(), budget.reserve(), return_exceptions=True)
+    outcomes = await asyncio.gather(
+        budget.reserve_bytes(first, 20), budget.reserve_bytes(second, 20), return_exceptions=True
+    )
 
     reservations = [outcome for outcome in outcomes if not isinstance(outcome, Exception)]
     failures = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
     assert len(reservations) == 1
     assert len(failures) == 1
     assert isinstance(failures[0], RunBudgetExhausted)
-    await budget.settle(reservations[0], 20)
+    await budget.settle_bytes(reservations[0], wire_bytes=20, decoded_bytes=20)
+    await budget.settle(first)
+    await budget.settle(second)
 
 
 @pytest.mark.asyncio
@@ -75,3 +82,39 @@ async def test_distinct_equal_size_reservations_settle_independently() -> None:
     await budget.settle(first, 1)
     await budget.settle(second, 2)
     assert (await budget.snapshot()).response_bytes == 3
+
+
+@pytest.mark.asyncio
+async def test_short_final_stream_lease_sets_typed_max_bytes_stop_reason() -> None:
+    budget = RunBudget(max_bytes=7, max_response_bytes=1_000)
+    request = await budget.reserve()
+
+    lease = await budget.reserve_bytes(request, 64)
+    assert lease.reserved_bytes == 7
+    await budget.settle_bytes(lease, wire_bytes=7, decoded_bytes=11)
+
+    with pytest.raises(RunBudgetExhausted, match="max_bytes") as exc_info:
+        await budget.reserve_bytes(request, 1)
+    assert exc_info.value.reason == "max_bytes"
+    assert (await budget.snapshot()).stop_reason == "max_bytes"
+    await budget.settle(request)
+
+
+@pytest.mark.asyncio
+async def test_equal_sized_concurrent_leases_on_one_request_are_distinct() -> None:
+    """Leases are identified individually, not by (request, size)."""
+    budget = RunBudget(max_requests=0, max_bytes=1000, max_response_bytes=1000)
+    reservation = await budget.reserve()
+    first = await budget.reserve_bytes(reservation, 100)
+    second = await budget.reserve_bytes(reservation, 100)
+    assert first.lease_id != second.lease_id
+    assert (await budget.snapshot()).bytes_reserved == 200
+
+    await budget.settle_bytes(first, wire_bytes=100, decoded_bytes=100)
+    assert (await budget.snapshot()).bytes_reserved == 100
+    await budget.settle_bytes(second, wire_bytes=50, decoded_bytes=50)
+    snapshot = await budget.snapshot()
+    assert snapshot.bytes_reserved == 0
+    assert snapshot.wire_bytes == 150
+
+    await budget.settle(reservation)

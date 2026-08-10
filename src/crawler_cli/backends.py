@@ -10,6 +10,7 @@ import socket
 import ssl
 import sys
 import time
+import zlib
 from abc import ABC, abstractmethod
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -18,9 +19,9 @@ import aiohttp
 from curl_cffi.requests import AsyncSession
 
 from .config import CrawlConfig
-from .budget import RunBudget
+from .budget import BudgetReservation, RunBudget, RunBudgetExhausted
 from .cookies import build_cookie_header, build_scoped_cookie_header
-from .models import FetchResponse
+from .models import BodyTruncationReason, FetchResponse
 from .proxy_pool import ProxyPool
 from .portal_policy import ConnectionPurpose, PortalPolicyError, PinnedConnection, validate_pinned_connection
 
@@ -111,6 +112,28 @@ def _request_headers(config: CrawlConfig, url: str) -> dict[str, str]:
     return headers
 
 
+# The policy-guarded path disables aiohttp's transparent decompression so the
+# run ledger can see real transfer bytes.  aiohttp's default Accept-Encoding is
+# built from whatever optional codecs happen to be installed ("br"/"zstd" when
+# brotli/zstandard are importable), so it must be pinned to what
+# ``_WireBodyDecoder`` can actually decode.  Otherwise a server honouring "br"
+# returns a body this path can only mark ``unsupported_content_encoding``.
+_GUARDED_ACCEPT_ENCODING = "gzip, deflate"
+
+
+def _guarded_request_headers(config: CrawlConfig, url: str, *, minimal: bool) -> dict[str, str]:
+    """Headers for one policy-pinned request.
+
+    ``minimal`` reproduces the robots.txt hardening documented on
+    ``RobotsPolicyCache._fetch_robots_txt``: crawl-target cookies,
+    Authorization, and ``request_headers`` are intentionally omitted so site
+    credentials are never sent while resolving a robots policy.
+    """
+    headers = {"User-Agent": config.user_agent_for(url)} if minimal else _request_headers(config, url)
+    headers["Accept-Encoding"] = _GUARDED_ACCEPT_ENCODING
+    return headers
+
+
 def _proxy_url(config: CrawlConfig) -> str | None:
     """Build the effective proxy URL, folding in ``proxy_auth`` if given.
 
@@ -159,6 +182,159 @@ def _decode_body(body: bytes, content_type: str | None) -> str:
         return body.decode(charset, errors="replace")
     except LookupError:
         return body.decode("utf-8", errors="replace")
+
+
+class _WireBodyDecoder:
+    """Incrementally decode a policy-path response without hiding wire bytes.
+
+    aiohttp's default transparent decompression deliberately stays enabled for
+    legacy backends. The policy/budget path turns it off so its artifact can
+    distinguish transfer bytes from decoded bytes. Unsupported and composite
+    encodings are rejected before bytes can reach parsers; gzip members are
+    decoded one-by-one so a partial/concatenated transfer cannot look complete.
+    """
+
+    def __init__(self, content_encoding: str | None) -> None:
+        self._encoding = (content_encoding or "").lower().strip()
+        self._decoder: zlib.Decompress | None = None
+        self._member_open = False
+        self._complete = self._encoding in {"", "identity"}
+        self._supported = self._encoding in {"", "identity", "gzip", "deflate"}
+
+    @property
+    def supported(self) -> bool:
+        return self._supported
+
+    @property
+    def complete(self) -> bool:
+        return self._complete
+
+    def _new_decoder(self) -> zlib.Decompress:
+        if self._encoding == "gzip":
+            return zlib.decompressobj(16 + zlib.MAX_WBITS)
+        return zlib.decompressobj()
+
+    def decode(self, wire: bytes, limit: int) -> bytes:
+        if self._encoding in {"", "identity"}:
+            return wire[:limit]
+
+        chunks: list[bytes] = []
+        remaining = limit
+        pending = wire
+        while pending and remaining > 0:
+            if self._decoder is None:
+                self._decoder = self._new_decoder()
+                self._member_open = True
+                self._complete = False
+            decoded = self._decoder.decompress(pending, remaining)
+            if decoded:
+                chunks.append(decoded)
+                remaining -= len(decoded)
+            if remaining == 0:
+                break
+            if not self._decoder.eof:
+                # All supplied input belongs to an unfinished member. Its
+                # validity is decided only once the stream reaches EOF.
+                break
+            pending = self._decoder.unused_data
+            self._decoder = None
+            self._member_open = False
+            self._complete = True
+            # ``pending`` starts the next gzip member (RFC 1952 permits
+            # concatenation). For deflate, trailing bytes are rejected as a
+            # second malformed member rather than silently ignored.
+            if pending and self._encoding == "deflate":
+                self._complete = False
+                self._member_open = True
+                break
+        return b"".join(chunks)
+
+    def flush(self, limit: int) -> bytes:
+        if self._decoder is None or limit <= 0 or not self._decoder.eof:
+            return b""
+        return self._decoder.flush(limit)
+
+
+async def _read_budgeted_body(
+    response: aiohttp.ClientResponse,
+    *,
+    budget: RunBudget | None,
+    reservation: BudgetReservation | None,
+    max_response_bytes: int,
+    content_type: str | None,
+) -> tuple[bytes, int, int, bool, BodyTruncationReason | None]:
+    """Read a body using bounded wire leases and explicit decode accounting.
+
+    ``max_bytes`` charges wire bytes (the resource actually transferred).
+    Decoded bytes are separately counted and capped by ``max_response_bytes``
+    before they can reach parsing/hashing.  A budget hit is a partial terminal
+    response, not an uncaught worker exception.
+    """
+    cap = min(max_response_bytes, _SNIFF_BYTES) if _is_skippable_content_type(content_type) else max_response_bytes
+    decoder = _WireBodyDecoder(response.headers.get("Content-Encoding"))
+    if not decoder.supported:
+        # A composite encoding needs reverse-order decoding and an unknown one
+        # cannot be safely represented as HTML. Keep the response opaque.
+        return b"", 0, 0, True, "unsupported_content_encoding"
+    chunks: list[bytes] = []
+    wire_total = 0
+    decoded_total = 0
+    truncated = False
+    stop_reason: BodyTruncationReason | None = None
+
+    while decoded_total < cap and wire_total < cap:
+        # Cap both transfer and decoded bytes per response.  The transfer cap
+        # prevents a badly-compressible/opaque encoding from bypassing the
+        # response ceiling while the decoded cap prevents expansion bombs.
+        wanted = min(65536, cap - decoded_total, cap - wire_total)
+        lease = None
+        wire = b""
+        decoded = b""
+        try:
+            if budget is not None and reservation is not None:
+                lease = await budget.reserve_bytes(reservation, wanted)
+                wanted = lease.reserved_bytes
+            wire = await response.content.read(wanted)
+            decoded = decoder.decode(wire, cap - decoded_total) if wire else b""
+        except RunBudgetExhausted as exc:
+            truncated = True
+            stop_reason = exc.reason
+            break
+        except zlib.error:
+            # Treat a corrupt encoded body exactly like a premature EOF: its
+            # prefix is diagnostics only and must never be extracted/hashed.
+            truncated = True
+            stop_reason = "incomplete_content_encoding"
+            break
+        finally:
+            if lease is not None:
+                # A failed read accounts no wire/decoded bytes but must always
+                # release the concurrent lease.
+                await budget.settle_bytes(lease, wire_bytes=len(wire), decoded_bytes=len(decoded))
+
+        wire_total += len(wire)
+        decoded_total += len(decoded)
+        if decoded:
+            chunks.append(decoded)
+        if not wire:
+            # No more transfer bytes: flush the incremental decoder (gzip
+            # trailers, etc.) while retaining the decoded response cap.
+            tail = decoder.flush(cap - decoded_total)
+            if tail:
+                chunks.append(tail)
+                decoded_total += len(tail)
+                if budget is not None and reservation is not None:
+                    await budget.record_decoded_bytes(reservation, len(tail))
+            if not decoder.complete:
+                truncated = True
+                stop_reason = "incomplete_content_encoding"
+            break
+        if decoded_total >= cap or wire_total >= cap:
+            truncated = True
+            stop_reason = "max_response_bytes"
+            break
+
+    return b"".join(chunks), wire_total, decoded_total, truncated, stop_reason
 
 
 async def _playwright_redirect_chain(response: object) -> list[dict[str, object]]:
@@ -383,12 +559,16 @@ class AiohttpBackend(FetchBackend):
         requested_url = url
         current_url = url
         current_purpose = purpose
+        # A robots.txt resolution stays credential-free across its redirects.
+        minimal_headers = purpose == "robots"
         redirect_chain: list[dict[str, object]] = []
         max_redirects = 10
         for _ in range(max_redirects + 1):
             pinned = await policy.authorize(current_url, current_purpose)
             validate_pinned_connection(current_url, pinned)
-            result, location = await self._fetch_pinned(current_url, pinned, requested_url)
+            result, location = await self._fetch_pinned(
+                current_url, pinned, requested_url, minimal_headers=minimal_headers
+            )
             if not self.config.follow_redirects or result.status not in {301, 302, 303, 307, 308}:
                 result.redirect_chain = redirect_chain
                 return result
@@ -405,6 +585,8 @@ class AiohttpBackend(FetchBackend):
         url: str,
         pinned: PinnedConnection,
         requested_url: str,
+        *,
+        minimal_headers: bool = False,
     ) -> tuple[FetchResponse, str | None]:
         """Open one connection whose resolver can return only *pinned.address*."""
         timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
@@ -416,38 +598,29 @@ class AiohttpBackend(FetchBackend):
             ssl=self._get_ssl_context(),
         )
         reservation = await self._run_budget.reserve() if self._run_budget is not None else None
-        body_bytes_read = 0
         try:
             started = time.monotonic()
-            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            # Disable transparent decompression only on this guarded path so
+            # the run ledger sees the actual transfer bytes and we can report
+            # decoded bytes separately.
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector, auto_decompress=False) as session:
                 async with session.get(
                     url,
-                    headers=_request_headers(self.config, url),
+                    headers=_guarded_request_headers(self.config, url, minimal=minimal_headers),
                     allow_redirects=False,
                     ssl=self._get_ssl_context(),
-                    auth=_basic_auth(self.config, url),
+                    auth=None if minimal_headers else _basic_auth(self.config, url),
                 ) as response:
                     ttfb = time.monotonic() - started
                     header_map = dict(response.headers)
                     ct = header_map.get("Content-Type")
-                    cap = self.config.max_response_bytes
-                    truncated = False
-                    if _is_skippable_content_type(ct):
-                        body = await response.content.read(min(_SNIFF_BYTES, cap))
-                        body_bytes_read = len(body)
-                    else:
-                        chunks: list[bytes] = []
-                        while body_bytes_read < cap:
-                            # ``read(n)`` rather than a larger iterator chunk
-                            # means the counter tracks the actual capped stream
-                            # reads, not Content-Length or a sliced buffer.
-                            chunk = await response.content.read(min(65536, cap - body_bytes_read))
-                            if not chunk:
-                                break
-                            chunks.append(chunk)
-                            body_bytes_read += len(chunk)
-                        body = b"".join(chunks)
-                        truncated = body_bytes_read == cap
+                    body, wire_bytes, decoded_bytes, truncated, truncation_reason = await _read_budgeted_body(
+                        response,
+                        budget=self._run_budget,
+                        reservation=reservation,
+                        max_response_bytes=self.config.max_response_bytes,
+                        content_type=ct,
+                    )
                     elapsed = time.monotonic() - started
                     return (
                         FetchResponse(
@@ -460,12 +633,16 @@ class AiohttpBackend(FetchBackend):
                             ttfb_seconds=ttfb,
                             elapsed_seconds=elapsed,
                             body_truncated=truncated,
+                            wire_bytes=wire_bytes,
+                            decoded_bytes=decoded_bytes,
+                            accounted_bytes=wire_bytes,
+                            body_truncation_reason=truncation_reason,
                         ),
                         response.headers.get("Location"),
                     )
         finally:
             if reservation is not None:
-                await self._run_budget.settle(reservation, body_bytes_read)
+                await self._run_budget.settle(reservation)
 
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:

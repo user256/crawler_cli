@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Draft Portal runtime-budget release contract (ticket 3685): guarded aiohttp
+  crawls account actual streamed wire bytes separately from decoded bytes,
+  terminate with typed `max_requests`/`max_bytes` reasons, and serialize the
+  terminal counters in `crawler-cli/crawl-artifact/2`. Truncated responses are
+  deliberately not extracted, linked, or content-hashed. The guarded path pins
+  `Accept-Encoding` to what it can decode and keeps robots.txt resolution
+  credential-free. Opaque-body handling is scoped to that path, so ordinary
+  crawls that clip a page at `max_response_bytes` are unchanged. This is
+  crawler-side groundwork only: it neither enables Portal dispatch nor declares
+  the Portal integration/release complete.
+
 ## [0.2.2] - 2026-07-29
 
 ### Added

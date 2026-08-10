@@ -1,49 +1,88 @@
-"""Run-scoped request and response-body budget accounting (ticket 3685).
+"""Run-scoped request and streamed response-body accounting (ticket 3685).
 
-``RunBudget`` deliberately reserves a full per-response cap before allowing a
-request to be emitted.  A response can settle for fewer bytes afterwards, but
-concurrent requests can never collectively exceed the configured aggregate
-response-body budget.  Backends must call :meth:`reserve` immediately before
-their network operation and :meth:`settle` in a ``finally`` block; merely
-counting completed responses is not a pre-emission guard.
+The ledger is deliberately *not* an up-front reservation of
+``max_response_bytes``.  That value is commonly the 25 MB safety ceiling and
+using it for admission makes a modest ``--max-bytes`` run unable to start at
+all.  Instead each connection reserves only the next bounded wire read, then
+settles it with the bytes actually returned by the transport.
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Literal
+
+
+BudgetStopReason = Literal["max_requests", "max_bytes"]
 
 
 class RunBudgetExhausted(RuntimeError):
-    """Raised when dispatching another request would exceed a run budget."""
+    """A run cannot emit/read more work for the supplied budget reason."""
+
+    def __init__(self, reason: BudgetStopReason) -> None:
+        self.reason = reason
+        super().__init__(f"{reason} exhausted")
 
 
 @dataclass(frozen=True, slots=True)
 class BudgetReservation:
-    """One request slot and its conservative response-body reservation."""
+    """One request slot.  Body bytes are leased separately while streaming."""
 
     reservation_id: int
-    reserved_response_bytes: int
+    # Kept for source compatibility with the foundation PR.  It is always
+    # zero: no default response-size reservation is made at request admission.
+    reserved_response_bytes: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ByteReservation:
+    """A bounded wire-read lease belonging to an active request."""
+
+    reservation_id: int
+    reserved_bytes: int
+    # Leases are tracked by their own identity, not by (request, size): two
+    # equal-sized leases on one request must not collapse into one entry.
+    lease_id: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class RunBudgetSnapshot:
-    """Read-only accounting state, suitable for diagnostics and tests."""
+    """Read-only terminal accounting suitable for artifacts and diagnostics.
+
+    ``accounted_bytes`` is the value charged to ``max_bytes``: raw bytes read
+    from the HTTP wire, including compressed bytes.  ``decoded_bytes`` is
+    reported independently because decoded HTML can be much larger than its
+    transfer encoding and is separately capped per response.
+    """
 
     requests_started: int
     requests_in_flight: int
-    response_bytes: int
-    response_bytes_reserved: int
+    wire_bytes: int
+    decoded_bytes: int
+    accounted_bytes: int
+    bytes_reserved: int
+    stop_reason: BudgetStopReason | None
+
+    @property
+    def response_bytes(self) -> int:
+        """Backward-compatible name for the aggregate charged byte count."""
+        return self.accounted_bytes
+
+    @property
+    def response_bytes_reserved(self) -> int:
+        """Backward-compatible name for outstanding streaming leases."""
+        return self.bytes_reserved
 
 
 class RunBudget:
-    """Async-safe, per-run admission control for network requests.
+    """Async-safe admission and streamed wire-byte budget ledger.
 
-    Zero limits mean unlimited.  ``max_response_bytes`` is the maximum a
-    compliant streaming backend can read for one response.  Reserving it up
-    front is intentionally conservative: with a 10-byte remaining aggregate
-    budget and a 20-byte per-response cap, the next request is refused rather
-    than emitted and allowed to overshoot the aggregate cap.
+    Request admission consumes a request slot but reserves no speculative body
+    capacity.  A backend must obtain a :class:`ByteReservation` immediately
+    before every bounded ``read(n)`` and settle it even when that read fails.
+    This is what makes concurrent streamed reads fail closed without treating
+    the per-response ceiling as a reservation.
     """
 
     def __init__(
@@ -64,10 +103,14 @@ class RunBudget:
         self.max_response_bytes = max_response_bytes
         self._requests_started = 0
         self._requests_in_flight = 0
-        self._response_bytes = 0
-        self._response_bytes_reserved = 0
+        self._wire_bytes = 0
+        self._decoded_bytes = 0
+        self._bytes_reserved = 0
         self._active_reservations: set[int] = set()
+        self._active_byte_leases: dict[int, int] = {}
         self._next_reservation_id = 0
+        self._next_lease_id = 0
+        self._stop_reason: BudgetStopReason | None = None
         self._lock = asyncio.Lock()
 
     @property
@@ -75,48 +118,107 @@ class RunBudget:
         return self.max_requests > 0 or self.max_bytes > 0
 
     async def reserve(self) -> BudgetReservation:
-        """Reserve capacity before a network request is emitted.
-
-        The returned reservation must be settled exactly once, including when
-        connection setup fails, because a failed connection attempt still
-        consumes one request from the run budget.
-        """
+        """Consume a request slot before a network connection is emitted."""
         async with self._lock:
             if self.max_requests and self._requests_started >= self.max_requests:
-                raise RunBudgetExhausted("max_requests exhausted before request emission")
-            if (
-                self.max_bytes
-                and self._response_bytes + self._response_bytes_reserved + self.max_response_bytes > self.max_bytes
-            ):
-                raise RunBudgetExhausted("max_bytes exhausted before request emission")
-
+                self._stop_reason = self._stop_reason or "max_requests"
+                raise RunBudgetExhausted("max_requests")
             self._requests_started += 1
             self._requests_in_flight += 1
-            self._response_bytes_reserved += self.max_response_bytes
             reservation_id = self._next_reservation_id
             self._next_reservation_id += 1
             self._active_reservations.add(reservation_id)
-            return BudgetReservation(reservation_id, self.max_response_bytes)
+            return BudgetReservation(reservation_id)
 
-    async def settle(self, reservation: BudgetReservation, response_bytes: int) -> None:
-        """Commit actual bytes read and release unused reserved capacity."""
-        if response_bytes < 0:
-            raise ValueError("response_bytes must be >= 0")
-        if response_bytes > reservation.reserved_response_bytes:
-            raise ValueError("response_bytes exceeds the reservation cap")
+    async def reserve_bytes(self, reservation: BudgetReservation, wanted: int) -> ByteReservation:
+        """Lease up to ``wanted`` bytes for the next wire read.
+
+        A non-zero short lease is valid and tells the caller to perform that
+        final bounded read then stop.  A zero lease raises the typed terminal
+        exhaustion exception before any further body bytes are pulled.
+        """
+        if wanted <= 0:
+            raise ValueError("wanted must be > 0")
         async with self._lock:
             if reservation.reservation_id not in self._active_reservations:
                 raise ValueError("reservation was not active or was already settled")
+            allowed = wanted
+            if self.max_bytes:
+                remaining = self.max_bytes - self._wire_bytes - self._bytes_reserved
+                if remaining <= 0:
+                    self._stop_reason = self._stop_reason or "max_bytes"
+                    raise RunBudgetExhausted("max_bytes")
+                allowed = min(wanted, remaining)
+            lease_id = self._next_lease_id
+            self._next_lease_id += 1
+            lease = ByteReservation(reservation.reservation_id, allowed, lease_id)
+            self._bytes_reserved += allowed
+            self._active_byte_leases[lease_id] = lease.reservation_id
+            return lease
+
+    async def settle_bytes(
+        self,
+        lease: ByteReservation,
+        *,
+        wire_bytes: int,
+        decoded_bytes: int,
+    ) -> None:
+        """Commit one read's actual wire/decoded counts and release its lease."""
+        if wire_bytes < 0 or decoded_bytes < 0:
+            raise ValueError("byte counts must be >= 0")
+        if wire_bytes > lease.reserved_bytes:
+            raise ValueError("wire_bytes exceeds the streaming lease")
+        async with self._lock:
+            if self._active_byte_leases.get(lease.lease_id) != lease.reservation_id:
+                raise ValueError("byte lease was not active or was already settled")
+            del self._active_byte_leases[lease.lease_id]
+            self._bytes_reserved -= lease.reserved_bytes
+            self._wire_bytes += wire_bytes
+            self._decoded_bytes += decoded_bytes
+
+    async def record_decoded_bytes(self, reservation: BudgetReservation, decoded_bytes: int) -> None:
+        """Record decoder-buffer output that has no additional wire read.
+
+        A gzip/deflate stream can emit a final few bytes during ``flush()``
+        after its zero-byte EOF read has already settled.  These bytes do not
+        consume the wire budget, but must remain visible in diagnostics.
+        """
+        if decoded_bytes < 0:
+            raise ValueError("decoded_bytes must be >= 0")
+        async with self._lock:
+            if reservation.reservation_id not in self._active_reservations:
+                raise ValueError("reservation was not active or was already settled")
+            self._decoded_bytes += decoded_bytes
+
+    async def settle(self, reservation: BudgetReservation, response_bytes: int = 0) -> None:
+        """Release a request slot after all of its stream leases are settled.
+
+        ``response_bytes`` remains accepted for callers of the groundwork API;
+        new backends use :meth:`settle_bytes` so accounting reflects every
+        actual stream read.
+        """
+        if response_bytes < 0:
+            raise ValueError("response_bytes must be >= 0")
+        async with self._lock:
+            if reservation.reservation_id not in self._active_reservations:
+                raise ValueError("reservation was not active or was already settled")
+            if reservation.reservation_id in self._active_byte_leases.values():
+                raise ValueError("all byte leases must be settled before the request")
             self._active_reservations.remove(reservation.reservation_id)
             self._requests_in_flight -= 1
-            self._response_bytes_reserved -= reservation.reserved_response_bytes
-            self._response_bytes += response_bytes
+            # Compatibility only: current production callers always account
+            # reads through settle_bytes().
+            self._wire_bytes += response_bytes
+            self._decoded_bytes += response_bytes
 
     async def snapshot(self) -> RunBudgetSnapshot:
         async with self._lock:
             return RunBudgetSnapshot(
                 requests_started=self._requests_started,
                 requests_in_flight=self._requests_in_flight,
-                response_bytes=self._response_bytes,
-                response_bytes_reserved=self._response_bytes_reserved,
+                wire_bytes=self._wire_bytes,
+                decoded_bytes=self._decoded_bytes,
+                accounted_bytes=self._wire_bytes,
+                bytes_reserved=self._bytes_reserved,
+                stop_reason=self._stop_reason,
             )

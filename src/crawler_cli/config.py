@@ -91,8 +91,9 @@ class CrawlConfig:
     max_bytes: int = MAX_BYTES_DEFAULT
     """Aggregate response-body bytes for one run (0 = unlimited).
 
-    Enforced only for the Portal-policy aiohttp path, whose manually followed
-    requests can reserve capacity immediately before every connection attempt.
+    Enforced only for the Portal-policy aiohttp path. It charges actual
+    streamed HTTP wire bytes, rather than reserving the full per-response cap
+    before a request is emitted.
     """
     playwright_network_idle_timeout_seconds: float = 5.0
     playwright_wait_for_selector: str = ""
