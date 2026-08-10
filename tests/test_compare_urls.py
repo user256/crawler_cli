@@ -115,6 +115,106 @@ def test_normalize_bare_host_matches_root():
     assert normalize_url_for_match("https://github.com") == normalize_url_for_match("https://github.com/")
 
 
+# Percent-encoding parity (ticket 3755). Must match the semantics of the PHP
+# MigrationManager_UrlIdentity::normalizeRfc3986Component() (portal ticket 3753):
+# uppercase valid escape hex, decode escapes of unreserved characters only,
+# percent-encode raw non-ASCII, NFC-normalise decoded UTF-8. Reserved escapes
+# and invalid escape sequences stay opaque.
+
+
+def test_normalize_percent_hex_case_insensitive():
+    # RFC 3986 section 6.2.2.1: %HH hex digits are case-insensitive. The
+    # car-booker export writes lowercase escapes; mapping CSVs write uppercase.
+    upper = "https://example.com/kiv-chi%C8%99in%C4%83u-tours"
+    lower = "https://example.com/kiv-chi%c8%99in%c4%83u-tours"
+    assert normalize_url_for_match(upper) == normalize_url_for_match(lower)
+
+
+def test_normalize_raw_unicode_matches_percent_encoded():
+    raw = "https://example.com/kiv-chișinău-tours"
+    encoded = "https://example.com/kiv-chi%C8%99in%C4%83u-tours"
+    assert normalize_url_for_match(raw) == normalize_url_for_match(encoded)
+
+
+def test_normalize_nfc_nfd_spellings_match():
+    nfc = "https://example.com/j%C3%A4rvenp%C3%A4%C3%A4"  # a-umlaut precomposed
+    nfd = "https://example.com/ja%CC%88rvenpa%CC%88a%CC%88"  # a + combining diaeresis
+    assert normalize_url_for_match(nfc) == normalize_url_for_match(nfd)
+
+
+def test_normalize_unreserved_escapes_decode():
+    # RFC 3986 section 6.2.2.2: escapes of unreserved characters equal the literal.
+    assert normalize_url_for_match("https://h/%7Euser") == normalize_url_for_match("https://h/~user")
+    assert normalize_url_for_match("https://h/a%2Db") == normalize_url_for_match("https://h/a-b")
+
+
+def test_normalize_reserved_escapes_stay_opaque():
+    # %2F %3F %23 %25 %20 are semantically load-bearing: never decoded, only
+    # hex-uppercased. Regression guard against a future "just unquote()" change.
+    assert normalize_url_for_match("https://h/a%2Fb") != normalize_url_for_match("https://h/a/b")
+    assert normalize_url_for_match("https://h/a%3Fb") != normalize_url_for_match("https://h/a?b")
+    assert normalize_url_for_match("https://h/a%23b") != normalize_url_for_match("https://h/a#b")
+    assert normalize_url_for_match("https://h/a%25b") != normalize_url_for_match("https://h/a%b")
+    assert normalize_url_for_match("https://h/a%20b") != normalize_url_for_match("https://h/a+b")
+    # ... but their hex case is still folded.
+    assert normalize_url_for_match("https://h/a%2fb") == normalize_url_for_match("https://h/a%2Fb")
+    assert normalize_url_for_match("https://h/a%2Fb") == "https://h/a%2Fb"
+
+
+def test_normalize_query_escape_hex_folded_semantics_kept():
+    assert normalize_url_for_match("https://h/p?q=%c3%a9") == normalize_url_for_match("https://h/p?q=%C3%A9")
+    # Query is still preserved, not stripped or reordered.
+    assert normalize_url_for_match("https://h/p?b=2&a=1") == "https://h/p?b=2&a=1"
+
+
+def test_normalize_invalid_escapes_left_untouched():
+    # Dangling or non-hex sequences are not valid escapes; never repaired.
+    assert normalize_url_for_match("https://h/a%zzb") == "https://h/a%zzb"
+    assert normalize_url_for_match("https://h/a%4") == "https://h/a%4"
+    assert normalize_url_for_match("https://h/a%") == "https://h/a%"
+
+
+def test_normalize_invalid_utf8_escape_kept_opaque():
+    # %FF is not valid UTF-8: hex-folded but never decoded or repaired.
+    assert normalize_url_for_match("https://h/a%ffb") == "https://h/a%FFb"
+
+
+def test_normalize_shared_fixture_table_matches_php_urlidentity_v2():
+    # The shared fixture table from portal ticket 3753 (UrlIdentity v2). The PHP
+    # side asserts the same pairs in test-migration-manager-url-identity.php;
+    # keep the two lists in step so the implementations cannot silently diverge.
+    equal_pairs = [
+        ("%c8%99in%c4%83u", "%C8%99in%C4%83u"),
+        ("%e2%80%93", "%E2%80%93"),  # en dash
+        ("chișinău", "chi%C8%99in%C4%83u"),  # raw vs encoded
+        ("%7E", "~"),  # unreserved
+        ("%2D", "-"),  # unreserved
+        ("%C3%A4", "a%CC%88"),  # NFC vs NFD
+    ]
+    for left, right in equal_pairs:
+        assert normalize_url_for_match(f"https://h/{left}") == normalize_url_for_match(f"https://h/{right}"), (
+            left,
+            right,
+        )
+    # Deliberately non-equal in a path segment, exactly as v1 and v2 both hold.
+    assert normalize_url_for_match("https://h/a%20b") != normalize_url_for_match("https://h/a+b")
+
+
+def test_verdict_ok_when_location_differs_only_in_escape_case():
+    # The false-mismatch this ticket exists for: mapping target uppercase-escaped,
+    # server Location lowercase-escaped. Same resource; must not be wrong_target.
+    pair = UrlPair(
+        "https://old.example/kiv",
+        "https://new.example/kiv-chi%C8%99in%C4%83u-tours",
+    )
+    src = _src(
+        "https://old.example/kiv",
+        "https://new.example/kiv-chi%c8%99in%c4%83u-tours",
+        chain=[{"url": "https://old.example/kiv", "status": 301}],
+    )
+    assert classify_redirect(pair, src) == REDIRECT_OK
+
+
 # --- redirect verdict matrix ------------------------------------------------
 
 

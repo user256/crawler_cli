@@ -14,6 +14,8 @@ wires the resolvers (artifact/store/live) and I/O around it.
 from __future__ import annotations
 
 import csv
+import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,20 +57,89 @@ class PairParseResult:
     skipped_reasons: list[str]
 
 
+_UNRESERVED_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+_VALID_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def _encode_text_run(run: bytes) -> str:
+    """Canonicalise one decoded text run (portal ticket 3755).
+
+    Unreserved and literal ASCII stay literal; non-ASCII is NFC-normalised when
+    it is valid UTF-8 (never repaired when it is not) and re-encoded as
+    uppercase percent escapes. Mirrors the PHP ``encodeTextRun()``."""
+    if not run:
+        return ""
+    if max(run) < 0x80:
+        return run.decode("ascii")
+    try:
+        text = run.decode("utf-8")
+    except UnicodeDecodeError:
+        # Not valid UTF-8: encode the raw bytes opaquely, no repair.
+        return "".join(chr(byte) if byte < 0x80 else f"%{byte:02X}" for byte in run)
+    text = unicodedata.normalize("NFC", text)
+    return "".join(
+        char if ord(char) < 0x80 else "".join(f"%{byte:02X}" for byte in char.encode("utf-8")) for char in text
+    )
+
+
+def _normalize_rfc3986_component(value: str) -> str:
+    """RFC 3986 section 6.2.2 spelling normalisation for one URL component.
+
+    Parity contract (portal tickets 3753/3755): matches the semantics of the
+    PHP ``MigrationManager_UrlIdentity::normalizeRfc3986Component()`` —
+    uppercase valid escape hex, decode escapes of unreserved characters only
+    (section 6.2.2.2), percent-encode raw non-ASCII, and NFC-normalise decoded
+    UTF-8 (section 6.2.2.3-adjacent, per ticket 3753). Escapes of reserved or
+    otherwise-significant ASCII (``%2F`` ``%3F`` ``%23`` ``%25`` ``%20`` …)
+    stay opaque, and invalid or dangling ``%`` sequences are left untouched."""
+    out: list[str] = []
+    run = bytearray()
+    index = 0
+    length = len(value)
+    while index < length:
+        char = value[index]
+        if char == "%" and _VALID_ESCAPE.match(value, index):
+            byte = int(value[index + 1 : index + 3], 16)
+            if byte < 0x80 and chr(byte) not in _UNRESERVED_CHARACTERS:
+                # Reserved or otherwise-significant ASCII: keep the escape
+                # opaque, uppercased. Decoding it would change the URL.
+                out.append(_encode_text_run(bytes(run)))
+                run.clear()
+                out.append(value[index : index + 3].upper())
+            else:
+                run.append(byte)
+            index += 3
+            continue
+        if char == "%":
+            # Invalid or dangling escape: keep it byte-for-byte, no repair.
+            out.append(_encode_text_run(bytes(run)))
+            run.clear()
+            out.append("%")
+        else:
+            run.extend(char.encode("utf-8"))
+        index += 1
+    out.append(_encode_text_run(bytes(run)))
+    return "".join(out)
+
+
 def normalize_url_for_match(url: str | None) -> str:
     """Light normalization for redirect-target equality (ticket 122).
 
     Lowercases scheme+host and drops trailing slashes so ``…/path`` and
     ``…/path/`` match, a bare host matches its ``/`` root, and ``HTTP://Host``
-    matches ``http://host``. Deliberately conservative — query and fragment
-    are preserved."""
+    matches ``http://host``. Percent-encoding spelling is normalised on path
+    and query per RFC 3986 section 6.2.2 (portal ticket 3755), in parity with
+    Migration Manager's ``UrlIdentity`` v2 normaliser, so ``%c8%99`` matches
+    ``%C8%99`` and raw non-ASCII matches its encoded form. Otherwise
+    deliberately conservative — query and fragment are preserved."""
     if not url:
         return ""
     parts = urlsplit(url.strip())
     scheme = parts.scheme.lower()
     netloc = parts.netloc.lower()
-    path = parts.path.rstrip("/")
-    return urlunsplit((scheme, netloc, path, parts.query, parts.fragment))
+    path = _normalize_rfc3986_component(parts.path).rstrip("/")
+    query = _normalize_rfc3986_component(parts.query)
+    return urlunsplit((scheme, netloc, path, query, parts.fragment))
 
 
 def load_url_pairs(
