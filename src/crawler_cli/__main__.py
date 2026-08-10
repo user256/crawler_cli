@@ -1905,6 +1905,10 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         )
 
     if isinstance(payload, dict) and "results" in payload:
+        # The single-document artifact is the one ``serialize_crawl_job``
+        # actually stamps, so it needs the same version gate as the NDJSON
+        # summary rather than only the streaming form.
+        _validate_schema_version(payload)
         job = cast("_SavedJob", payload)
         return CrawlJobResult(
             mode=job.get("mode", "list"),

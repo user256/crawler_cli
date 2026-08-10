@@ -381,10 +381,19 @@ async def _read_budgeted_body(
             # trailers, etc.) while retaining the decoded response cap.
             tail = decoder.flush(cap - decoded_total)
             if tail:
+                if budget is not None and reservation is not None:
+                    try:
+                        # ``record_decoded_bytes`` charges accounted capacity
+                        # and so can hit ``max_bytes``. That is still a partial
+                        # terminal response, never an exception out of the
+                        # read: drop the unaccountable tail and stop.
+                        await budget.record_decoded_bytes(reservation, len(tail))
+                    except RunBudgetExhausted as exc:
+                        truncated = True
+                        stop_reason = exc.reason
+                        break
                 chunks.append(tail)
                 decoded_total += len(tail)
-                if budget is not None and reservation is not None:
-                    await budget.record_decoded_bytes(reservation, len(tail))
             if not decoder.complete:
                 truncated = True
                 stop_reason = "incomplete_content_encoding"

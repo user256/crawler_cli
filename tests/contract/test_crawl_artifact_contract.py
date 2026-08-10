@@ -146,3 +146,31 @@ def test_jsonl_loader_rejects_an_unknown_stamped_summary_schema_version(tmp_path
 
     with pytest.raises(ValueError, match="Unsupported crawl artifact schema version"):
         _load_saved_crawl(path)
+
+
+def test_saved_json_artifact_rejects_an_unknown_schema_version(tmp_path: Path) -> None:
+    """The stamped single-document artifact is gated like the NDJSON summary.
+
+    ``serialize_crawl_job`` is what writes ``schema_version``, so validating
+    only the streaming form would leave the stamped format unchecked.
+    """
+    path = tmp_path / "artifact.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "crawler-cli/crawl-artifact/99",
+                "mode": "list",
+                "seed_urls": [],
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Unsupported crawl artifact schema version"):
+        _load_saved_crawl(path)
+
+
+def test_saved_json_artifact_without_a_schema_version_still_loads(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps({"mode": "list", "seed_urls": [], "results": []}), encoding="utf-8")
+    assert _load_saved_crawl(path).mode == "list"

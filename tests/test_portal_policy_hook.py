@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+from contextlib import contextmanager
 import json
 import sys
 import types
@@ -9,9 +10,8 @@ from urllib.parse import urlparse
 
 import pytest
 from aiohttp import web
-
 from crawler_cli.__main__ import _build_config, _build_parser
-from crawler_cli.backends import AiohttpBackend, _PinnedResolver
+from crawler_cli.backends import AiohttpBackend, _PinnedResolver, _WireBodyDecoder
 from crawler_cli.budget import RunBudget, RunBudgetExhausted
 from crawler_cli.config import CrawlConfig
 from crawler_cli.engine import CrawlEngine
@@ -22,6 +22,17 @@ from crawler_cli.portal_policy import (
     policy_capabilities,
 )
 from crawler_cli.serialization import serialize_crawl_job
+
+
+@contextmanager
+def monkeypatch_attr(target: type, name: str, value: object):
+    """Swap a class attribute for the duration of one guarded fetch."""
+    original = getattr(target, name)
+    setattr(target, name, value)
+    try:
+        yield
+    finally:
+        setattr(target, name, original)
 
 
 async def _start_app(app: web.Application) -> tuple[web.AppRunner, str]:
@@ -749,3 +760,48 @@ async def test_plain_response_cap_truncation_still_extracts_on_legacy_backends()
     assert result.body_truncation_reason is None
     assert result.skip_reason is None
     assert result.extracted is not None
+
+
+@pytest.mark.asyncio
+async def test_flush_tail_over_budget_is_partial_not_an_exception() -> None:
+    """A decoder flush that crosses ``max_bytes`` must not escape the read.
+
+    ``record_decoded_bytes`` charges accounted capacity and therefore raises
+    ``RunBudgetExhausted``; the read has to convert that into the same partial
+    terminal response every other budget hit produces.
+    """
+    payload = b"<html>" + b"z" * 200_000 + b"</html>"
+
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(
+            body=gzip.compress(payload),
+            headers={"Content-Encoding": "gzip", "Content-Type": "text/html"},
+        )
+
+    app = web.Application()
+    app.router.add_get("/p", page)
+    runner, base = await _start_app(app)
+    guarded_base = base.replace("127.0.0.1", "localhost")
+    backend = AiohttpBackend(
+        CrawlConfig(portal_connection_policy=RecordingPolicy(), challenge_escalate_to_browser=False)
+    )
+    budget = RunBudget(max_requests=0, max_bytes=300_000, max_response_bytes=25_000_000)
+    backend.set_run_budget(budget)
+
+    # A gzip trailer flush emits after the zero-byte read has settled. Force a
+    # tail large enough to cross what is left of the run budget.
+    def oversized_flush(_self: object, limit: int) -> bytes:
+        return b"T" * 1_000_000 if limit > 0 else b""
+
+    try:
+        with monkeypatch_attr(_WireBodyDecoder, "flush", oversized_flush):
+            result = await backend.fetch_for_purpose(f"{guarded_base}/p", "initial")
+    finally:
+        await backend.close()
+        await runner.cleanup()
+
+    assert result.body_truncated is True
+    assert result.body_truncation_reason == "max_bytes"
+    snapshot = await budget.snapshot()
+    assert snapshot.stop_reason == "max_bytes"
+    assert snapshot.accounted_bytes <= budget.max_bytes
