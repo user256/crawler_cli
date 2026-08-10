@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from crawler_cli.robots import RobotsPolicyCache, _RobotsRules, _path_with_query
+from crawler_cli.robots import (
+    RobotsPolicyCache,
+    _RobotsRules,
+    _path_with_query,
+    calculate_cache_ttl,
+)
 from crawler_cli.config import CrawlConfig
 
 
@@ -207,6 +212,33 @@ def test_path_with_query_helper():
 # ---------------------------------------------------------------------------
 # RobotsPolicyCache fetch-and-parse: 4xx → allow-all, 5xx → disallow
 # ---------------------------------------------------------------------------
+
+
+def test_calculate_cache_ttl_treats_max_age_zero_as_session_default():
+    """Netlify-style 404 robots fallbacks often ship max-age=0."""
+    ttl = calculate_cache_ttl(
+        {"cache-control": "public,max-age=0,must-revalidate"},
+        default_ttl=3600,
+    )
+    assert ttl == 3600
+
+
+@pytest.mark.asyncio
+async def test_404_robots_fetches_once_per_session(monkeypatch):
+    """max-age=0 on a missing robots.txt must not refetch on every URL check."""
+    config = CrawlConfig(respect_robots_txt=True)
+    cache = RobotsPolicyCache(config)
+    fetch_count = 0
+
+    async def fake_fetch(url):
+        nonlocal fetch_count
+        fetch_count += 1
+        return None, {"cache-control": "public,max-age=0,must-revalidate"}, 404
+
+    monkeypatch.setattr(cache, "_fetch_robots_txt", fake_fetch)
+    for _ in range(25):
+        assert await cache.is_allowed("https://car-booker.com/uk/north-america/us/x/") is True
+    assert fetch_count == 1
 
 
 @pytest.mark.asyncio

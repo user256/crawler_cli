@@ -45,11 +45,17 @@ def calculate_cache_ttl(headers: dict[str, str], default_ttl: int = 3600) -> int
             if "max-age=" in cache_control:
                 max_age_str = cache_control.split("max-age=")[1].split(",")[0].strip()
                 try:
-                    return int(max_age_str)
+                    max_age = int(max_age_str)
+                    # max-age=0 is common on 404 robots.txt fallbacks (e.g. Netlify
+                    # HTML). Treating it as "expire immediately" refetches robots
+                    # on every URL check and can trip RFC unreachable disallow.
+                    if max_age <= 0:
+                        return default_ttl
+                    return max_age
                 except ValueError:
                     pass
             if "no-cache" in cache_control or "no-store" in cache_control:
-                return 0
+                return default_ttl
 
         expires = headers_lower.get("expires")
         if expires:
@@ -451,7 +457,9 @@ class RobotsPolicyCache:
             # 4xx (including 404): allow-all per RFC 9309 §2.3.1.3.
             elif 400 <= status < 500:
                 rules = _RobotsRules(domain, "")
-                self.cache.set_rules(domain, rules, headers)
+                # Do not cache CDN max-age=0 headers on a missing robots.txt —
+                # they are not robots policy and must not force per-URL refetch.
+                self.cache.set_rules(domain, rules, {})
                 return rules
             return None
 
