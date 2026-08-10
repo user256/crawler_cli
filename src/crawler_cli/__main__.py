@@ -22,7 +22,9 @@ from .config import (
     CB_RECOVERY_SECONDS_DEFAULT,
     CB_THRESHOLD_DEFAULT,
     DEFAULT_OPEN_CRAWL_LIMIT,
+    MAX_REQUESTS_DEFAULT,
     MAX_RESPONSE_BYTES_DEFAULT,
+    MAX_BYTES_DEFAULT,
     BackendName,
     CrawlConfig,
     _env_bool,
@@ -587,6 +589,8 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         max_requests_per_context=args.max_requests_per_context,
         default_open_crawl_limit=args.max_pages,
         max_response_bytes=getattr(args, "max_response_bytes", MAX_RESPONSE_BYTES_DEFAULT),
+        max_requests=getattr(args, "max_requests", MAX_REQUESTS_DEFAULT),
+        max_bytes=getattr(args, "max_bytes", MAX_BYTES_DEFAULT),
         timeout_seconds=args.timeout,
         playwright_network_idle_timeout_seconds=(
             args.wait_for_network_idle
@@ -752,6 +756,22 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
             "Max bytes read per response before truncation (default "
             f"{MAX_RESPONSE_BYTES_DEFAULT}). Raise it for sites with very "
             "large sitemaps so they parse intact; lower it to cap downloads."
+        ),
+    )
+    parser.add_argument(
+        "--max-requests",
+        type=non_negative_int,
+        default=MAX_REQUESTS_DEFAULT,
+        help="Maximum network requests for this crawl run (0 = unlimited).",
+    )
+    parser.add_argument(
+        "--max-bytes",
+        type=non_negative_int,
+        default=MAX_BYTES_DEFAULT,
+        help=(
+            "Maximum aggregate response-body bytes for this crawl run (0 = unlimited). "
+            "Requires --portal-url-policy; requests reserve "
+            "--max-response-bytes before dispatch."
         ),
     )
     parser.add_argument(

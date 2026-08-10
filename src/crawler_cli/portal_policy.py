@@ -21,7 +21,7 @@ from typing import Literal, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 
-ConnectionPurpose = Literal["initial", "redirect", "sitemap"]
+ConnectionPurpose = Literal["initial", "redirect", "sitemap", "robots"]
 
 
 class PortalPolicyError(RuntimeError):
