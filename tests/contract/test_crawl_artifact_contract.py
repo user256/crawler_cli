@@ -140,7 +140,9 @@ def test_jsonl_loader_validates_a_present_summary_schema_version(tmp_path) -> No
 def test_jsonl_loader_rejects_an_unknown_stamped_summary_schema_version(tmp_path) -> None:
     path = tmp_path / "crawl.jsonl"
     summary = {"__type": "summary", "schema_version": "crawler-cli/crawl-artifact/999"}
-    path.write_text(json.dumps({"requested_url": "https://example.test/"}) + "\n" + json.dumps(summary) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps({"requested_url": "https://example.test/"}) + "\n" + json.dumps(summary) + "\n", encoding="utf-8"
+    )
 
     with pytest.raises(ValueError, match="Unsupported crawl artifact schema version"):
         _load_saved_crawl(path)

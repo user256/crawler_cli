@@ -339,9 +339,7 @@ async def test_budgeted_policy_fetch_decodes_all_concatenated_gzip_members() -> 
             max_response_bytes=len(encoded) + 1,
         )
     )
-    backend.set_run_budget(
-        RunBudget(max_bytes=budget_cap, max_response_bytes=budget_cap)
-    )
+    backend.set_run_budget(RunBudget(max_bytes=budget_cap, max_response_bytes=budget_cap))
     try:
         result = await backend.fetch_for_purpose(guarded_url, "initial")
     finally:
