@@ -55,9 +55,14 @@ is opaque: there is no extracted payload, link discovery, or full-content hash.
 Unguarded backends, which set `body_truncated` with no reason when a body is
 clipped at `max_response_bytes`, keep their pre-3685 behaviour.
 
-Because `auto_decompress` is off on this path, guarded requests advertise only
-`Accept-Encoding: gzip, deflate` — aiohttp's default varies with whichever
-optional codecs are installed in the deployment environment. Robots.txt
+Because `auto_decompress` is off on this path, guarded requests advertise
+exactly `Accept-Encoding: gzip, deflate, br` — aiohttp's default varies with
+whichever optional codecs are installed in the deployment environment, so the
+header is pinned to what the decoder actually supports. `Brotli` is a declared
+runtime dependency for that reason. Brotli honours its output limit only as a
+floor, so a call can return up to one internal chunk more than the lease
+allows; the overshoot is buffered and served under a later output-only lease,
+which keeps every settlement within the bytes it reserved. Robots.txt
 resolution over the guarded path sends only the effective User-Agent, matching
 the credential-free legacy robots fetch.
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
+import brotli
 from curl_cffi.requests import AsyncSession
 
 from .config import CrawlConfig
@@ -116,9 +117,10 @@ def _request_headers(config: CrawlConfig, url: str) -> dict[str, str]:
 # run ledger can see real transfer bytes.  aiohttp's default Accept-Encoding is
 # built from whatever optional codecs happen to be installed ("br"/"zstd" when
 # brotli/zstandard are importable), so it must be pinned to what
-# ``_WireBodyDecoder`` can actually decode.  Otherwise a server honouring "br"
-# returns a body this path can only mark ``unsupported_content_encoding``.
-_GUARDED_ACCEPT_ENCODING = "gzip, deflate"
+# ``_WireBodyDecoder`` can actually decode rather than inherited.  ``brotli``
+# is a declared dependency precisely so "br" can be both advertised here and
+# decoded under the same bounded leases as gzip/deflate.
+_GUARDED_ACCEPT_ENCODING = "gzip, deflate, br"
 
 
 def _guarded_request_headers(config: CrawlConfig, url: str, *, minimal: bool) -> dict[str, str]:
@@ -197,10 +199,17 @@ class _WireBodyDecoder:
     def __init__(self, content_encoding: str | None) -> None:
         self._encoding = (content_encoding or "").lower().strip()
         self._decoder: zlib.Decompress | None = None
+        self._brotli: brotli.Decompressor | None = None
         self._pending_input = b""
+        # Brotli honours ``output_buffer_limit`` only as a floor to stop
+        # growing at, so one call can return up to an internal chunk more than
+        # asked for.  The overshoot is held here and served under a later
+        # lease, which keeps every settlement inside the bytes it reserved.
+        self._pending_output = b""
         self._member_open = False
+        self._flushed = False
         self._complete = self._encoding in {"", "identity"}
-        self._supported = self._encoding in {"", "identity", "gzip", "deflate"}
+        self._supported = self._encoding in {"", "identity", "gzip", "deflate", "br"}
 
     @property
     def supported(self) -> bool:
@@ -212,8 +221,40 @@ class _WireBodyDecoder:
 
     @property
     def has_unconsumed_tail(self) -> bool:
-        """Whether a bounded decode left already-read wire input buffered."""
-        return bool(self._pending_input)
+        """Whether the decoder still owes output from bytes already read.
+
+        Brotli additionally forbids new input while it is working through what
+        it has, so that state counts as a tail too: the caller must take
+        another output-only lease instead of pulling from the socket.
+        """
+        if self._pending_input or self._pending_output:
+            return True
+        return self._brotli is not None and not self._brotli.can_accept_more_data()
+
+    def _take_pending_output(self, limit: int) -> bytes:
+        """Serve buffered decoder output without exceeding the lease."""
+        out = self._pending_output[:limit]
+        self._pending_output = self._pending_output[limit:]
+        return out
+
+    def _decode_brotli(self, wire: bytes, limit: int) -> bytes:
+        """Decode one bounded brotli step, buffering any overshoot.
+
+        Brotli has no member concatenation: input arriving after the stream
+        finishes is a malformed transfer, which ``process`` reports by raising.
+        """
+        if self._brotli is None:
+            self._brotli = brotli.Decompressor()
+            self._member_open = True
+            self._complete = False
+        produced = self._brotli.process(wire, limit)
+        self._complete = self._brotli.is_finished()
+        if self._complete:
+            self._member_open = False
+        if len(produced) > limit:
+            self._pending_output = produced[limit:]
+            produced = produced[:limit]
+        return produced
 
     def _new_decoder(self) -> zlib.Decompress:
         if self._encoding == "gzip":
@@ -225,6 +266,8 @@ class _WireBodyDecoder:
             raise RuntimeError("decoder input must be drained before reading more wire bytes")
         if self._encoding in {"", "identity"}:
             return wire[:limit]
+        if self._encoding == "br":
+            return self._decode_brotli(wire, limit)
 
         chunks: list[bytes] = []
         remaining = limit
@@ -272,22 +315,46 @@ class _WireBodyDecoder:
         return b"".join(chunks)
 
     def decode_unconsumed_tail(self, limit: int) -> bytes:
-        """Drain bytes zlib retained after a bounded-output decode.
+        """Drain input or output the decoder retained after a bounded decode.
 
         Those bytes were already consumed from the socket, so callers must
         account them as decoded output under a fresh lease with *zero* wire
         bytes.  Reading another socket chunk first would silently discard the
-        tail and truncate otherwise permitted large gzip/deflate bodies.
+        tail and truncate otherwise permitted large compressed bodies.
         """
-        if not self._pending_input:
+        if limit <= 0:
             return b""
-        pending = self._pending_input
-        self._pending_input = b""
-        return self.decode(pending, limit, _draining_tail=True)
+        if self._pending_output:
+            return self._take_pending_output(limit)
+        if self._pending_input:
+            pending = self._pending_input
+            self._pending_input = b""
+            return self.decode(pending, limit, _draining_tail=True)
+        return self.drain_buffered_output(limit)
+
+    def drain_buffered_output(self, limit: int) -> bytes:
+        """Pull decoded output brotli still holds with no further wire input.
+
+        Brotli buffers internally, so a finished transfer can still owe several
+        chunks after its last socket read. ``process`` with empty input is the
+        documented way to collect them, and an empty return is the only
+        reliable signal that nothing is left.
+        """
+        if limit <= 0:
+            return b""
+        if self._pending_output:
+            return self._take_pending_output(limit)
+        if self._encoding != "br" or self._brotli is None:
+            return b""
+        return self._decode_brotli(b"", limit)
 
     def flush(self, limit: int) -> bytes:
-        if self._decoder is None or limit <= 0 or not self._decoder.eof:
+        if self._encoding == "br":
+            return self.drain_buffered_output(limit)
+        if self._decoder is None or limit <= 0 or not self._decoder.eof or self._flushed:
             return b""
+        # zlib's flush finalises the object, so it is called exactly once.
+        self._flushed = True
         return self._decoder.flush(limit)
 
 
@@ -351,7 +418,7 @@ async def _read_budgeted_body(
             truncated = True
             stop_reason = exc.reason
             break
-        except zlib.error:
+        except (zlib.error, brotli.error):
             # Treat a corrupt encoded body exactly like a premature EOF: its
             # prefix is diagnostics only and must never be extracted/hashed.
             truncated = True
@@ -377,10 +444,19 @@ async def _read_budgeted_body(
             # a positive output limit; the next iteration gets a fresh lease.
             continue
         if not wire:
-            # No more transfer bytes: flush the incremental decoder (gzip
-            # trailers, etc.) while retaining the decoded response cap.
-            tail = decoder.flush(cap - decoded_total)
-            if tail:
+            # No more transfer bytes, but the decoder can still owe output: a
+            # gzip trailer is one chunk, while brotli buffers internally and
+            # may owe several. Drain until it stops producing or the response
+            # cap binds.
+            while decoded_total < cap:
+                try:
+                    tail = decoder.flush(cap - decoded_total)
+                except (zlib.error, brotli.error):
+                    truncated = True
+                    stop_reason = "incomplete_content_encoding"
+                    break
+                if not tail:
+                    break
                 if budget is not None and reservation is not None:
                     try:
                         # ``record_decoded_bytes`` charges accounted capacity
@@ -394,9 +470,9 @@ async def _read_budgeted_body(
                         break
                 chunks.append(tail)
                 decoded_total += len(tail)
-            if not decoder.complete:
+            if stop_reason is None and not decoder.complete:
                 truncated = True
-                stop_reason = "incomplete_content_encoding"
+                stop_reason = "max_response_bytes" if decoded_total >= cap else "incomplete_content_encoding"
             break
         if decoded_total >= cap or wire_total >= cap:
             truncated = True

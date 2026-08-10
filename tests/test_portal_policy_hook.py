@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import brotli
 import gzip
 from contextlib import contextmanager
 import json
@@ -399,7 +400,7 @@ async def test_incomplete_gzip_body_is_opaque_to_engine_extraction_and_hashing()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content_encoding", ["br", "gzip, br"])
+@pytest.mark.parametrize("content_encoding", ["zstd", "gzip, br"])
 async def test_unsupported_or_composite_content_encoding_is_opaque_to_engine(content_encoding: str) -> None:
     policy = RecordingPolicy()
 
@@ -667,7 +668,8 @@ async def test_guarded_path_only_advertises_decodable_encodings() -> None:
     """aiohttp's default Accept-Encoding follows installed optional codecs.
 
     With ``auto_decompress=False`` this path must decode whatever it asked
-    for, so it pins the header rather than inheriting "br"/"zstd".
+    for, so it pins the header to its own decoder support rather than
+    inheriting whatever happens to be importable (``zstd``, notably).
     """
     seen: list[str] = []
 
@@ -688,7 +690,7 @@ async def test_guarded_path_only_advertises_decodable_encodings() -> None:
         await backend.close()
         await runner.cleanup()
 
-    assert seen == ["gzip, deflate"]
+    assert seen == ["gzip, deflate, br"]
     assert result.text == "ok"
     assert result.body_truncated is False
 
@@ -805,3 +807,188 @@ async def test_flush_tail_over_budget_is_partial_not_an_exception() -> None:
     snapshot = await budget.snapshot()
     assert snapshot.stop_reason == "max_bytes"
     assert snapshot.accounted_bytes <= budget.max_bytes
+
+
+@pytest.mark.asyncio
+async def test_guarded_path_decodes_a_large_brotli_body_intact() -> None:
+    """Brotli buffers internally and honours its output limit only as a floor.
+
+    A body far larger than one lease therefore has to survive being drained
+    across several output-only leases, exactly like the gzip tail path.
+    """
+    payload = b"<html><body>" + (b"abcdefghij" * 40_000) + b"</body></html>"
+
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(
+            body=brotli.compress(payload),
+            headers={"Content-Encoding": "br", "Content-Type": "text/html"},
+        )
+
+    app = web.Application()
+    app.router.add_get("/p", page)
+    runner, base = await _start_app(app)
+    guarded_base = base.replace("127.0.0.1", "localhost")
+    backend = AiohttpBackend(
+        CrawlConfig(portal_connection_policy=RecordingPolicy(), challenge_escalate_to_browser=False)
+    )
+    budget = RunBudget(max_requests=0, max_bytes=5_000_000, max_response_bytes=25_000_000)
+    backend.set_run_budget(budget)
+    try:
+        result = await backend.fetch_for_purpose(f"{guarded_base}/p", "initial")
+    finally:
+        await backend.close()
+        await runner.cleanup()
+
+    assert result.body == payload
+    assert result.body_truncated is False
+    assert result.body_truncation_reason is None
+    # The compressed transfer is a fraction of what it expands to, and the
+    # ledger charges the larger side.
+    assert result.wire_bytes < len(payload) // 10
+    assert result.decoded_bytes == len(payload)
+    assert result.accounted_bytes == len(payload)
+    snapshot = await budget.snapshot()
+    assert snapshot.accounted_bytes == len(payload)
+    assert snapshot.bytes_reserved == 0
+    assert snapshot.stop_reason is None
+
+
+@pytest.mark.asyncio
+async def test_brotli_expansion_cannot_outrun_the_run_budget() -> None:
+    """A tiny brotli transfer that expands past ``max_bytes`` stops partial."""
+    payload = b"<html>" + b"a" * 4_000_000 + b"</html>"
+    compressed = brotli.compress(payload)
+    assert len(compressed) < 50_000
+
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(
+            body=compressed,
+            headers={"Content-Encoding": "br", "Content-Type": "text/html"},
+        )
+
+    app = web.Application()
+    app.router.add_get("/p", page)
+    runner, base = await _start_app(app)
+    guarded_base = base.replace("127.0.0.1", "localhost")
+    backend = AiohttpBackend(
+        CrawlConfig(portal_connection_policy=RecordingPolicy(), challenge_escalate_to_browser=False)
+    )
+    budget = RunBudget(max_requests=0, max_bytes=200_000, max_response_bytes=25_000_000)
+    backend.set_run_budget(budget)
+    try:
+        result = await backend.fetch_for_purpose(f"{guarded_base}/p", "initial")
+    finally:
+        await backend.close()
+        await runner.cleanup()
+
+    assert result.body_truncated is True
+    assert result.body_truncation_reason == "max_bytes"
+    assert len(result.body) < len(payload)
+    snapshot = await budget.snapshot()
+    assert snapshot.stop_reason == "max_bytes"
+    # The ceiling is the point: decoded output never runs past what was left.
+    assert snapshot.accounted_bytes <= 200_000
+    assert snapshot.bytes_reserved == 0
+
+
+@pytest.mark.asyncio
+async def test_brotli_body_is_capped_by_max_response_bytes() -> None:
+    payload = b"<html>" + b"b" * 500_000 + b"</html>"
+
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(
+            body=brotli.compress(payload),
+            headers={"Content-Encoding": "br", "Content-Type": "text/html"},
+        )
+
+    app = web.Application()
+    app.router.add_get("/p", page)
+    runner, base = await _start_app(app)
+    guarded_base = base.replace("127.0.0.1", "localhost")
+    backend = AiohttpBackend(
+        CrawlConfig(
+            portal_connection_policy=RecordingPolicy(),
+            challenge_escalate_to_browser=False,
+            max_response_bytes=100_000,
+        )
+    )
+    try:
+        result = await backend.fetch_for_purpose(f"{guarded_base}/p", "initial")
+    finally:
+        await backend.close()
+        await runner.cleanup()
+
+    assert result.body_truncated is True
+    assert result.body_truncation_reason == "max_response_bytes"
+    assert len(result.body) <= 100_000
+
+
+@pytest.mark.asyncio
+async def test_truncated_brotli_transfer_is_never_treated_as_a_document() -> None:
+    """A cut-off brotli stream is a prefix, not a short page."""
+    payload = b"<html><title>must not parse</title>" + b"c" * 100_000 + b"</html>"
+    compressed = brotli.compress(payload)
+
+    async def page(_request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(headers={"Content-Encoding": "br", "Content-Type": "text/html"})
+        await response.prepare(_request)
+        await response.write(compressed[: len(compressed) // 2])
+        await response.write_eof()
+        return response
+
+    app = web.Application()
+    app.router.add_get("/page", page)
+    runner, base = await _start_app(app)
+    guarded_url = f"{base.replace('127.0.0.1', 'localhost')}/page"
+    engine = CrawlEngine(
+        CrawlConfig(
+            portal_connection_policy=RecordingPolicy(),
+            challenge_escalate_to_browser=False,
+            respect_robots_txt=False,
+            rate_limit_per_second=0,
+            enable_content_hashing=True,
+        )
+    )
+    try:
+        result = await engine.crawl(guarded_url)
+    finally:
+        await engine.close()
+        await runner.cleanup()
+
+    assert result.body_truncated is True
+    assert result.body_truncation_reason == "incomplete_content_encoding"
+    assert result.skip_reason == "body_truncated"
+    assert result.extracted is None
+    assert result.raw_html is None
+    assert result.content_hash_sha256 is None
+
+
+@pytest.mark.asyncio
+async def test_corrupt_brotli_body_is_opaque() -> None:
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(
+            body=b"this is not a brotli stream at all",
+            headers={"Content-Encoding": "br", "Content-Type": "text/html"},
+        )
+
+    app = web.Application()
+    app.router.add_get("/page", page)
+    runner, base = await _start_app(app)
+    guarded_url = f"{base.replace('127.0.0.1', 'localhost')}/page"
+    engine = CrawlEngine(
+        CrawlConfig(
+            portal_connection_policy=RecordingPolicy(),
+            challenge_escalate_to_browser=False,
+            respect_robots_txt=False,
+            rate_limit_per_second=0,
+        )
+    )
+    try:
+        result = await engine.crawl(guarded_url)
+    finally:
+        await engine.close()
+        await runner.cleanup()
+
+    assert result.body_truncated is True
+    assert result.body_truncation_reason == "incomplete_content_encoding"
+    assert result.skip_reason == "body_truncated"

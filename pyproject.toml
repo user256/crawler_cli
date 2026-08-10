@@ -40,6 +40,9 @@ classifiers = [
 ]
 dependencies = [
   "aiohttp>=3.10",
+  # Declared, not optional: the Portal-guarded path advertises "br" and must
+  # be able to decode what it asks for under its own bounded leases.
+  "Brotli>=1.1",
   "asyncpg>=0.29",
   "beautifulsoup4>=4.12",
   "curl_cffi>=0.7.0",
