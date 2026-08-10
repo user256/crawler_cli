@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Required, TypedDict, cast
 from urllib.parse import quote as _urlquote
@@ -45,6 +46,7 @@ from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .remap import Remap
 from .reports import CrawlReports
+from .serialization import CRAWL_ARTIFACT_SCHEMA_VERSION
 from .validators import (
     non_negative_float,
     non_negative_int,
@@ -1864,6 +1866,15 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             redirect_chain=list(item.get("redirect_chain", []) or []),
         )
 
+    def _validate_schema_version(payload: Mapping[str, object]) -> None:
+        """Accept legacy unstamped JSONL, but reject a stamped unknown schema."""
+        schema_version = payload.get("schema_version")
+        if schema_version is not None and schema_version != CRAWL_ARTIFACT_SCHEMA_VERSION:
+            raise ValueError(
+                f"Unsupported crawl artifact schema version: {schema_version!r} "
+                f"(expected {CRAWL_ARTIFACT_SCHEMA_VERSION})"
+            )
+
     raw_text = path.read_text(encoding="utf-8")
     try:
         payload = json.loads(raw_text)
@@ -1873,6 +1884,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         # the CrawlJobResult fields below are type-checked. Result lines stay Any,
         # which _load_result accepts as a _SavedResult.
         summary = cast("_SavedJob", next((line for line in lines if line.get("__type") == "summary"), {}))
+        _validate_schema_version(summary)
         results = [_load_result(line) for line in lines if line.get("__type") != "summary"]
         return CrawlJobResult(
             mode=summary.get("mode", "open"),
@@ -1893,6 +1905,10 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         )
 
     if isinstance(payload, dict) and "results" in payload:
+        # The single-document artifact is the one ``serialize_crawl_job``
+        # actually stamps, so it needs the same version gate as the NDJSON
+        # summary rather than only the streaming form.
+        _validate_schema_version(payload)
         job = cast("_SavedJob", payload)
         return CrawlJobResult(
             mode=job.get("mode", "list"),

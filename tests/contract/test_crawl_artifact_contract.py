@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from contract_fixtures import assert_matches_golden, compare_urls_source_results
 
 from crawler_cli.__main__ import _load_saved_crawl
@@ -117,3 +119,58 @@ def test_loader_accepts_legacy_artifact_without_schema_version(tmp_path) -> None
     artifact.write_text(json.dumps(payload), encoding="utf-8")
     job = _load_saved_crawl(Path(artifact))
     assert len(job.results) == len(compare_urls_source_results())
+
+
+def test_jsonl_loader_validates_a_present_summary_schema_version(tmp_path) -> None:
+    path = tmp_path / "crawl.jsonl"
+    result = {"requested_url": "https://example.test/", "final_url": "https://example.test/", "status": 200}
+    summary = {
+        "__type": "summary",
+        "schema_version": CRAWL_ARTIFACT_SCHEMA_VERSION,
+        "mode": "open",
+        "seed_urls": ["https://example.test/"],
+    }
+    path.write_text("\n".join(json.dumps(line) for line in (result, summary)) + "\n", encoding="utf-8")
+
+    job = _load_saved_crawl(path)
+    assert job.mode == "open"
+    assert job.results[0].requested_url == "https://example.test/"
+
+
+def test_jsonl_loader_rejects_an_unknown_stamped_summary_schema_version(tmp_path) -> None:
+    path = tmp_path / "crawl.jsonl"
+    summary = {"__type": "summary", "schema_version": "crawler-cli/crawl-artifact/999"}
+    path.write_text(
+        json.dumps({"requested_url": "https://example.test/"}) + "\n" + json.dumps(summary) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="Unsupported crawl artifact schema version"):
+        _load_saved_crawl(path)
+
+
+def test_saved_json_artifact_rejects_an_unknown_schema_version(tmp_path: Path) -> None:
+    """The stamped single-document artifact is gated like the NDJSON summary.
+
+    ``serialize_crawl_job`` is what writes ``schema_version``, so validating
+    only the streaming form would leave the stamped format unchecked.
+    """
+    path = tmp_path / "artifact.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "crawler-cli/crawl-artifact/99",
+                "mode": "list",
+                "seed_urls": [],
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Unsupported crawl artifact schema version"):
+        _load_saved_crawl(path)
+
+
+def test_saved_json_artifact_without_a_schema_version_still_loads(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps({"mode": "list", "seed_urls": [], "results": []}), encoding="utf-8")
+    assert _load_saved_crawl(path).mode == "list"

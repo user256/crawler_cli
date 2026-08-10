@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+from contextlib import contextmanager
 import json
 import sys
 import types
@@ -9,9 +10,8 @@ from urllib.parse import urlparse
 
 import pytest
 from aiohttp import web
-
 from crawler_cli.__main__ import _build_config, _build_parser
-from crawler_cli.backends import AiohttpBackend, _PinnedResolver
+from crawler_cli.backends import AiohttpBackend, _PinnedResolver, _WireBodyDecoder
 from crawler_cli.budget import RunBudget, RunBudgetExhausted
 from crawler_cli.config import CrawlConfig
 from crawler_cli.engine import CrawlEngine
@@ -22,6 +22,17 @@ from crawler_cli.portal_policy import (
     policy_capabilities,
 )
 from crawler_cli.serialization import serialize_crawl_job
+
+
+@contextmanager
+def monkeypatch_attr(target: type, name: str, value: object):
+    """Swap a class attribute for the duration of one guarded fetch."""
+    original = getattr(target, name)
+    setattr(target, name, value)
+    try:
+        yield
+    finally:
+        setattr(target, name, original)
 
 
 async def _start_app(app: web.Application) -> tuple[web.AppRunner, str]:
@@ -207,11 +218,11 @@ async def test_budgeted_policy_fetch_keeps_wire_and_gzip_decoded_counters_distin
             portal_connection_policy=policy,
             challenge_escalate_to_browser=False,
             respect_robots_txt=False,
-            max_bytes=len(encoded) + 1,
+            max_bytes=len(source) + 1,
             max_response_bytes=len(source) + 1,
         )
     )
-    budget = RunBudget(max_bytes=len(encoded) + 1, max_response_bytes=len(source) + 1)
+    budget = RunBudget(max_bytes=len(source) + 1, max_response_bytes=len(source) + 1)
     backend.set_run_budget(budget)
     try:
         result = await backend.fetch_for_purpose(guarded_url, "initial")
@@ -222,11 +233,97 @@ async def test_budgeted_policy_fetch_keeps_wire_and_gzip_decoded_counters_distin
     assert result.body == source
     assert result.wire_bytes == len(encoded)
     assert result.decoded_bytes == len(source)
-    assert result.accounted_bytes == result.wire_bytes
+    assert result.accounted_bytes == result.decoded_bytes
     assert result.body_truncated is False
     snapshot = await budget.snapshot()
     assert snapshot.wire_bytes == len(encoded)
     assert snapshot.decoded_bytes == len(source)
+    assert snapshot.accounted_bytes == len(source)
+
+
+@pytest.mark.asyncio
+async def test_budgeted_policy_fetch_stops_gzip_expansion_at_accounted_byte_cap() -> None:
+    policy = RecordingPolicy()
+    source = b"<html><body>" + (b"expand " * 100) + b"</body></html>"
+    encoded = gzip.compress(source)
+    assert len(encoded) < 100 < len(source)
+
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(body=encoded, headers={"Content-Type": "text/html", "Content-Encoding": "gzip"})
+
+    app = web.Application()
+    app.router.add_get("/page", page)
+    runner, base = await _start_app(app)
+    guarded_url = f"{base.replace('127.0.0.1', 'localhost')}/page"
+    budget = RunBudget(max_bytes=100, max_response_bytes=10_000)
+    backend = AiohttpBackend(
+        CrawlConfig(
+            portal_connection_policy=policy,
+            challenge_escalate_to_browser=False,
+            respect_robots_txt=False,
+            max_bytes=100,
+            max_response_bytes=10_000,
+        )
+    )
+    backend.set_run_budget(budget)
+    try:
+        result = await backend.fetch_for_purpose(guarded_url, "initial")
+    finally:
+        await backend.close()
+        await runner.cleanup()
+
+    assert result.body_truncated is True
+    assert result.body_truncation_reason == "max_bytes"
+    assert result.wire_bytes < result.decoded_bytes == result.accounted_bytes == 100
+    snapshot = await budget.snapshot()
+    assert snapshot.accounted_bytes == 100
+    assert snapshot.accounted_bytes <= budget.max_bytes
+
+
+@pytest.mark.asyncio
+async def test_budgeted_policy_fetch_drains_large_gzip_decoder_tail_under_new_leases() -> None:
+    """A tiny compressed body can require several decoded-output leases.
+
+    zlib retains source bytes in ``unconsumed_tail`` once its output limit is
+    reached. They must be decoded before another socket read, otherwise a
+    permitted body larger than one 64 KiB lease is silently truncated.
+    """
+    policy = RecordingPolicy()
+    source = (b"large gzip body " * 12_500) + b"end"  # > 64 KiB after decode
+    encoded = gzip.compress(source)
+    assert len(source) > 64 * 1024
+    assert len(encoded) < 64 * 1024
+
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(body=encoded, headers={"Content-Type": "text/html", "Content-Encoding": "gzip"})
+
+    app = web.Application()
+    app.router.add_get("/page", page)
+    runner, base = await _start_app(app)
+    guarded_url = f"{base.replace('127.0.0.1', 'localhost')}/page"
+    cap = len(source) + 1
+    budget = RunBudget(max_bytes=cap, max_response_bytes=cap)
+    backend = AiohttpBackend(
+        CrawlConfig(
+            portal_connection_policy=policy,
+            challenge_escalate_to_browser=False,
+            respect_robots_txt=False,
+            max_bytes=cap,
+            max_response_bytes=cap,
+        )
+    )
+    backend.set_run_budget(budget)
+    try:
+        result = await backend.fetch_for_purpose(guarded_url, "initial")
+    finally:
+        await backend.close()
+        await runner.cleanup()
+
+    assert result.body == source
+    assert result.body_truncated is False
+    assert result.wire_bytes == len(encoded)
+    assert result.decoded_bytes == result.accounted_bytes == len(source)
+    assert (await budget.snapshot()).accounted_bytes == len(source)
 
 
 @pytest.mark.asyncio
@@ -235,6 +332,7 @@ async def test_budgeted_policy_fetch_decodes_all_concatenated_gzip_members() -> 
     first = b"<html><body>first "
     second = b"second</body></html>"
     encoded = gzip.compress(first) + gzip.compress(second)
+    budget_cap = max(len(encoded), len(first + second)) + 1
 
     async def page(_request: web.Request) -> web.Response:
         return web.Response(body=encoded, headers={"Content-Type": "text/html", "Content-Encoding": "gzip"})
@@ -248,11 +346,11 @@ async def test_budgeted_policy_fetch_decodes_all_concatenated_gzip_members() -> 
             portal_connection_policy=policy,
             challenge_escalate_to_browser=False,
             respect_robots_txt=False,
-            max_bytes=len(encoded) + 1,
+            max_bytes=budget_cap,
             max_response_bytes=len(encoded) + 1,
         )
     )
-    backend.set_run_budget(RunBudget(max_bytes=len(encoded) + 1, max_response_bytes=len(encoded) + 1))
+    backend.set_run_budget(RunBudget(max_bytes=budget_cap, max_response_bytes=budget_cap))
     try:
         result = await backend.fetch_for_purpose(guarded_url, "initial")
     finally:
@@ -662,3 +760,48 @@ async def test_plain_response_cap_truncation_still_extracts_on_legacy_backends()
     assert result.body_truncation_reason is None
     assert result.skip_reason is None
     assert result.extracted is not None
+
+
+@pytest.mark.asyncio
+async def test_flush_tail_over_budget_is_partial_not_an_exception() -> None:
+    """A decoder flush that crosses ``max_bytes`` must not escape the read.
+
+    ``record_decoded_bytes`` charges accounted capacity and therefore raises
+    ``RunBudgetExhausted``; the read has to convert that into the same partial
+    terminal response every other budget hit produces.
+    """
+    payload = b"<html>" + b"z" * 200_000 + b"</html>"
+
+    async def page(_request: web.Request) -> web.Response:
+        return web.Response(
+            body=gzip.compress(payload),
+            headers={"Content-Encoding": "gzip", "Content-Type": "text/html"},
+        )
+
+    app = web.Application()
+    app.router.add_get("/p", page)
+    runner, base = await _start_app(app)
+    guarded_base = base.replace("127.0.0.1", "localhost")
+    backend = AiohttpBackend(
+        CrawlConfig(portal_connection_policy=RecordingPolicy(), challenge_escalate_to_browser=False)
+    )
+    budget = RunBudget(max_requests=0, max_bytes=300_000, max_response_bytes=25_000_000)
+    backend.set_run_budget(budget)
+
+    # A gzip trailer flush emits after the zero-byte read has settled. Force a
+    # tail large enough to cross what is left of the run budget.
+    def oversized_flush(_self: object, limit: int) -> bytes:
+        return b"T" * 1_000_000 if limit > 0 else b""
+
+    try:
+        with monkeypatch_attr(_WireBodyDecoder, "flush", oversized_flush):
+            result = await backend.fetch_for_purpose(f"{guarded_base}/p", "initial")
+    finally:
+        await backend.close()
+        await runner.cleanup()
+
+    assert result.body_truncated is True
+    assert result.body_truncation_reason == "max_bytes"
+    snapshot = await budget.snapshot()
+    assert snapshot.stop_reason == "max_bytes"
+    assert snapshot.accounted_bytes <= budget.max_bytes

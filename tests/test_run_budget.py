@@ -91,12 +91,63 @@ async def test_short_final_stream_lease_sets_typed_max_bytes_stop_reason() -> No
 
     lease = await budget.reserve_bytes(request, 64)
     assert lease.reserved_bytes == 7
-    await budget.settle_bytes(lease, wire_bytes=7, decoded_bytes=11)
+    await budget.settle_bytes(lease, wire_bytes=7, decoded_bytes=7)
 
     with pytest.raises(RunBudgetExhausted, match="max_bytes") as exc_info:
         await budget.reserve_bytes(request, 1)
     assert exc_info.value.reason == "max_bytes"
     assert (await budget.snapshot()).stop_reason == "max_bytes"
+    await budget.settle(request)
+
+
+@pytest.mark.asyncio
+async def test_accounted_bytes_uses_the_larger_decoded_compressed_dimension() -> None:
+    budget = RunBudget(max_bytes=10, max_response_bytes=1_000)
+    request = await budget.reserve()
+
+    # A compressed read can emit more decoded data than it consumed on the
+    # wire. The read is lease-bounded in both dimensions, so the aggregate
+    # remains within the configured cap.
+    lease = await budget.reserve_bytes(request, 10)
+    await budget.settle_bytes(lease, wire_bytes=3, decoded_bytes=10)
+    snapshot = await budget.snapshot()
+    assert snapshot.wire_bytes == 3
+    assert snapshot.decoded_bytes == snapshot.accounted_bytes == 10
+
+    with pytest.raises(RunBudgetExhausted, match="max_bytes"):
+        await budget.reserve_bytes(request, 1)
+    await budget.settle(request)
+
+
+@pytest.mark.asyncio
+async def test_accounted_bytes_sums_each_response_conservative_dimension() -> None:
+    """A wire-heavy page and decoded-heavy page must not cancel each other."""
+    budget = RunBudget(max_bytes=200, max_response_bytes=1_000)
+    first, second = await asyncio.gather(budget.reserve(), budget.reserve())
+    first_lease = await budget.reserve_bytes(first, 100)
+    await budget.settle_bytes(first_lease, wire_bytes=100, decoded_bytes=1)
+    second_lease = await budget.reserve_bytes(second, 100)
+    await budget.settle_bytes(second_lease, wire_bytes=1, decoded_bytes=100)
+    snapshot = await budget.snapshot()
+
+    assert snapshot.wire_bytes == snapshot.decoded_bytes == 101
+    assert snapshot.accounted_bytes == 200
+    await budget.settle(first)
+    await budget.settle(second)
+
+
+@pytest.mark.asyncio
+async def test_settlement_rejects_unleased_decoder_expansion() -> None:
+    budget = RunBudget(max_bytes=10, max_response_bytes=1_000)
+    request = await budget.reserve()
+    lease = await budget.reserve_bytes(request, 5)
+
+    with pytest.raises(ValueError, match="decoded_bytes exceeds"):
+        await budget.settle_bytes(lease, wire_bytes=1, decoded_bytes=6)
+
+    # The failed settlement intentionally leaves the lease active for its
+    # owner to settle correctly, preserving accounting rather than leaking it.
+    await budget.settle_bytes(lease, wire_bytes=1, decoded_bytes=5)
     await budget.settle(request)
 
 
