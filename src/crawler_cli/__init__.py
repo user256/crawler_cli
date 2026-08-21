@@ -11,7 +11,17 @@ from .extract import extract_links, extract_page_data
 from .monitoring import extract_page, fetch_page
 from .schema import extract_schema_data
 from .hashing import sha256_hash, simhash64
-from .models import CrawlJobResult, CrawlResult, DiscoveredLink, FetchResponse, SitemapDocument
+from .models import (
+    CrawlJobResult,
+    CrawlResult,
+    BrowserRequestObservation,
+    CssUrlCandidate,
+    DiscoveredLink,
+    FetchResponse,
+    JavaScriptUrlCandidate,
+    RenderUrlCandidate,
+    SitemapDocument,
+)
 from .persistence import AsyncpgStore
 from .probes import SoftFourOhFourFingerprint, soft_404_fingerprint
 from .reports import CrawlReports
@@ -30,8 +40,12 @@ __all__ = [
     "CrawlJobResult",
     "CrawlReports",
     "CrawlResult",
+    "BrowserRequestObservation",
+    "CssUrlCandidate",
     "DiscoveredLink",
     "FetchResponse",
+    "JavaScriptUrlCandidate",
+    "RenderUrlCandidate",
     "LegacyIssue",
     "RenderComparison",
     "RobotsDecision",

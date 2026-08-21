@@ -78,6 +78,29 @@ class FakeReports:
         self.calls.append(("cwv", {"limit": limit}))
         return []
 
+    async def javascript_url_candidates(self):
+        self.calls.append(("js-url-candidates", {}))
+        return [
+            {
+                "source_url": "https://example.com/",
+                "candidate_url": "https://example.com/hidden",
+                "classification": "page",
+                "follow_eligible": True,
+            }
+        ]
+
+    async def css_url_candidates(self):
+        self.calls.append(("css-url-candidates", {}))
+        return []
+
+    async def render_url_candidates(self):
+        self.calls.append(("render-url-candidates", {}))
+        return []
+
+    async def render_attempts(self):
+        self.calls.append(("render-attempts", {}))
+        return []
+
     async def analytics_inventory(self):
         self.calls.append(("analytics-inventory", {}))
         return [{"vendor": "ga4", "category": "analytics", "identifier": "G-TEST", "page_count": 3}]
@@ -115,6 +138,7 @@ def test_default_runs_all_flagless_reports(fake_reports, capsys):
     assert "# orphans (1 rows)" in out
     assert "https://example.com/orphan" in out
     assert "# cwv (0 rows)" in out
+    assert "js-url-candidates" not in out
     assert "(no rows)" in out
     # missing-expected-id needs --expected-id, so the default set skips it
     assert "missing-expected-id" not in out
@@ -130,6 +154,20 @@ def test_explicit_selection_runs_only_named_reports(fake_reports, capsys):
 def test_hub_pages_forwards_min_outlinks(fake_reports):
     assert _run(["report", "hub-pages", "--min-outlinks", "9"]) == 0
     assert FakeReports.instances[-1].calls == [("hub-pages", {"min_outlinks": 9})]
+
+
+def test_javascript_candidate_report_is_selectable(fake_reports):
+    assert _run(["report", "js-url-candidates"]) == 0
+    assert FakeReports.instances[-1].calls == [("js-url-candidates", {})]
+
+
+def test_css_and_render_candidate_reports_are_selectable(fake_reports):
+    assert _run(["report", "css-url-candidates", "render-url-candidates", "render-attempts"]) == 0
+    assert FakeReports.instances[-1].calls == [
+        ("css-url-candidates", {}),
+        ("render-url-candidates", {}),
+        ("render-attempts", {}),
+    ]
 
 
 def test_missing_analytics_forwards_vendor(fake_reports):

@@ -14,6 +14,20 @@ BodyTruncationReason = Literal[
     "incomplete_content_encoding",
     "unsupported_content_encoding",
 ]
+JavaScriptSourceKind = Literal["inline_script", "external_script"]
+JavaScriptLiteralKind = Literal[
+    "absolute",
+    "protocol_relative",
+    "root_relative",
+    "path_relative",
+    "query_relative",
+]
+JavaScriptUrlClassification = Literal["page", "api", "asset", "action"]
+CssSourceKind = Literal["inline_style", "style_attribute", "external_stylesheet"]
+CssTokenKind = Literal["url", "import"]
+UrlCandidateConfidence = Literal["high", "medium", "low"]
+BrowserRequestOutcome = Literal["issued", "response", "finished", "failed"]
+RenderSourceKind = Literal["render_network", "render_dom"]
 
 
 @dataclass(slots=True)
@@ -28,6 +42,17 @@ class BrowserRuntime:
     user_data_dir: str | None = None
     profile_directory: str | None = None
     headless: bool | None = None
+
+
+@dataclass(slots=True)
+class BrowserRequestObservation:
+    url: str
+    method: str
+    resource_type: str
+    outcome: BrowserRequestOutcome = "issued"
+    status: int | None = None
+    failure: str | None = None
+    occurrence_count: int = 1
 
 
 @dataclass(slots=True)
@@ -64,6 +89,12 @@ class FetchResponse:
     Playwright request redirect chain; empty when the request was not redirected.
     Enables redirect validation in ``compare-urls`` (301 vs 302, hop count,
     intermediate URLs) instead of only knowing the final URL."""
+    raw_text: str | None = None
+    """Original main-document response text before DOM hydration, Playwright only."""
+    observed_requests: list[BrowserRequestObservation] = field(default_factory=list)
+    """Bounded browser network observations, populated only when explicitly enabled."""
+    render_settled: bool | None = None
+    """Whether configured Playwright settle/selector waits completed."""
 
 
 @dataclass(slots=True)
@@ -113,6 +144,63 @@ class DiscoveredLink:
 
 
 @dataclass(slots=True)
+class JavaScriptUrlCandidate:
+    """A static URL-like JavaScript literal, not a normal crawlable link.
+
+    ``follow_eligible`` is intentionally stricter than URL validity. Assets,
+    API/action-shaped paths, credential-bearing URLs, and dynamic templates
+    remain useful inventory evidence but must not enter the frontier.
+    """
+
+    url: str
+    source_kind: JavaScriptSourceKind
+    script_source: str
+    script_index: int | None
+    literal_kind: JavaScriptLiteralKind
+    classification: JavaScriptUrlClassification
+    follow_eligible: bool
+    occurrence_count: int = 1
+    confidence: UrlCandidateConfidence = "low"
+    confidence_weight: float = 0.15
+    resolution_base: Literal["document", "asset"] = "document"
+
+
+@dataclass(slots=True)
+class CssUrlCandidate:
+    """A URL token published in inline or linked CSS.
+
+    CSS references are strong resource evidence, but only page-shaped values
+    are eligible for the explicitly enabled speculative page frontier.
+    """
+
+    url: str
+    source_kind: CssSourceKind
+    stylesheet_source: str
+    style_index: int | None
+    token_kind: CssTokenKind
+    classification: JavaScriptUrlClassification
+    follow_eligible: bool
+    occurrence_count: int = 1
+    confidence: UrlCandidateConfidence = "high"
+    confidence_weight: float = 0.6
+    resolution_base: Literal["document", "asset"] = "asset"
+
+
+@dataclass(slots=True)
+class RenderUrlCandidate:
+    url: str
+    source_kind: RenderSourceKind
+    classification: JavaScriptUrlClassification
+    follow_eligible: bool
+    resource_type: str | None = None
+    method: str = "GET"
+    outcome: BrowserRequestOutcome | None = None
+    status: int | None = None
+    occurrence_count: int = 1
+    confidence: UrlCandidateConfidence = "high"
+
+
+@dataclass(slots=True)
 class CrawlResult:
     requested_url: str
     final_url: str
@@ -130,6 +218,13 @@ class CrawlResult:
     content_hash_sha256: str | None = None
     content_hash_simhash: int | None = None
     discovered_links: list[DiscoveredLink] = field(default_factory=list)
+    javascript_url_candidates: list[JavaScriptUrlCandidate] = field(default_factory=list)
+    css_url_candidates: list[CssUrlCandidate] = field(default_factory=list)
+    speculative_rejection_counts: dict[str, int] = field(default_factory=dict)
+    render_url_candidates: list[RenderUrlCandidate] = field(default_factory=list)
+    render_discovery_attempted: bool = False
+    render_discovery_complete: bool | None = None
+    render_discovery_skip_reason: str | None = None
     allowed_by_robots: bool | None = None
     skip_reason: str | None = None
     persist_error: str | None = None
@@ -185,6 +280,19 @@ class CrawlJobResult:
     budget_accounted_bytes: int = 0
     budget_stop_reason: Literal["max_requests", "max_bytes"] | None = None
     """Typed terminal cause for a deliberately partial budgeted crawl."""
+    javascript_url_candidate_count: int = 0
+    """Unique static JS URL candidates observed before result compaction."""
+    javascript_url_enqueued_count: int = 0
+    """JS candidates newly inserted into the open-crawl frontier."""
+    css_url_candidate_count: int = 0
+    """Unique CSS URL candidates observed before result compaction."""
+    css_url_enqueued_count: int = 0
+    """CSS candidates newly inserted into the open-crawl frontier."""
+    speculative_capped_count: int = 0
+    """Follow-eligible candidates held out by the per-host outstanding cap."""
+    render_url_candidate_count: int = 0
+    render_dom_enqueued_count: int = 0
+    render_discovery_attempt_count: int = 0
 
     @property
     def crawled_count(self) -> int:

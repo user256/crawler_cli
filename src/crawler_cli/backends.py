@@ -22,7 +22,8 @@ from curl_cffi.requests import AsyncSession
 from .config import CrawlConfig
 from .budget import BudgetReservation, RunBudget, RunBudgetExhausted
 from .cookies import build_cookie_header, build_scoped_cookie_header
-from .models import BodyTruncationReason, FetchResponse
+from .javascript_urls import _normalise_http_url
+from .models import BodyTruncationReason, BrowserRequestObservation, FetchResponse
 from .proxy_pool import ProxyPool
 from .portal_policy import ConnectionPurpose, PortalPolicyError, PinnedConnection, validate_pinned_connection
 
@@ -1330,6 +1331,52 @@ class PlaywrightBackend(FetchBackend):
         page = None
         try:
             page = await context.new_page()
+            observed: dict[tuple[str, str, str], BrowserRequestObservation] = {}
+            request_keys: dict[int, tuple[str, str, str]] = {}
+            if self.config.discover_render_urls:
+
+                def _on_request(request) -> None:
+                    normalized = _normalise_http_url(request.url)
+                    if normalized is None:
+                        return
+                    key = (normalized, str(request.method).upper(), str(request.resource_type))
+                    request_keys[id(request)] = key
+                    prior = observed.get(key)
+                    if prior is not None:
+                        prior.occurrence_count += 1
+                        prior.outcome = "issued"
+                        return
+                    if len(observed) >= self.config.max_render_requests_per_page:
+                        return
+                    observed[key] = BrowserRequestObservation(
+                        url=normalized,
+                        method=key[1],
+                        resource_type=key[2],
+                    )
+
+                def _on_response(browser_response) -> None:
+                    key = request_keys.get(id(browser_response.request))
+                    if key is None or key not in observed:
+                        return
+                    observed[key].status = int(browser_response.status)
+                    observed[key].outcome = "response"
+
+                def _on_request_finished(request) -> None:
+                    key = request_keys.get(id(request))
+                    if key is not None and key in observed:
+                        observed[key].outcome = "finished"
+
+                def _on_request_failed(request) -> None:
+                    key = request_keys.get(id(request))
+                    if key is not None and key in observed:
+                        observed[key].outcome = "failed"
+                        failure = request.failure
+                        observed[key].failure = str(failure) if failure else None
+
+                page.on("request", _on_request)
+                page.on("response", _on_response)
+                page.on("requestfinished", _on_request_finished)
+                page.on("requestfailed", _on_request_failed)
 
             auth = self.config.auth
             if auth and auth.enabled:
@@ -1379,8 +1426,9 @@ class PlaywrightBackend(FetchBackend):
                 timeout=self.config.timeout_seconds + 1.0,
             )
             ttfb = time.monotonic() - started
+            render_settled = True
             if self.config.playwright_network_idle_timeout_seconds > 0:
-                with contextlib.suppress(Exception):
+                try:
                     await asyncio.wait_for(
                         page.wait_for_load_state(
                             "networkidle",
@@ -1388,6 +1436,8 @@ class PlaywrightBackend(FetchBackend):
                         ),
                         timeout=self.config.playwright_network_idle_timeout_seconds + 1.0,
                     )
+                except Exception:
+                    render_settled = False
             # Ticket 031: wait for a specific selector on SPAs that hydrate
             # content asynchronously. Times out gracefully (suppressed) so a
             # missing selector degrades to "snapshot what we have" rather than
@@ -1395,12 +1445,22 @@ class PlaywrightBackend(FetchBackend):
             selector = self.config.playwright_wait_for_selector
             if selector:
                 sel_timeout = self.config.playwright_wait_for_selector_timeout_seconds
-                with contextlib.suppress(Exception):
+                try:
                     await asyncio.wait_for(
                         page.wait_for_selector(selector, timeout=self._timeout_ms(sel_timeout)),
                         timeout=sel_timeout + 1.0,
                     )
+                except Exception:
+                    render_settled = False
             html = await asyncio.wait_for(page.content(), timeout=self.config.timeout_seconds + 1.0)
+            raw_text = None
+            if self.config.discover_render_urls and response is not None:
+                with contextlib.suppress(Exception):
+                    raw_body = await asyncio.wait_for(
+                        response.body(),
+                        timeout=self.config.timeout_seconds + 1.0,
+                    )
+                    raw_text = raw_body[: self.config.max_response_bytes].decode("utf-8", errors="replace")
             lcp_ms = cls = inp_ms = None
             if self.config.collect_web_vitals:
                 lcp_ms, cls, inp_ms = await self._read_web_vitals(page)
@@ -1421,6 +1481,9 @@ class PlaywrightBackend(FetchBackend):
                 cls=cls,
                 inp_ms=inp_ms,
                 redirect_chain=redirect_chain,
+                raw_text=raw_text,
+                observed_requests=list(observed.values()),
+                render_settled=render_settled,
             )
         finally:
             if page is not None:
