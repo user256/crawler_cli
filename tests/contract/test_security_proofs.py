@@ -450,6 +450,8 @@ def test_saved_crawl_artifacts_redact_response_headers_but_keep_them_in_memory(
         headers=raw_headers,
         content_type="text/html",
         fetch_backend="aiohttp",
+        extracted=None,
+        raw_html=None,
     )
     job = CrawlJobResult(mode="open", seed_urls=[result.requested_url], results=[result], run_id="run-proof")
 
