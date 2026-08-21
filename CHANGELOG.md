@@ -25,8 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canonical, secret-free scope snapshot (`crawler-cli/scope-snapshot/1`) and its
   digest; a changed digest blocks `--resume` and is deliberately not waivable by
   `--allow-run-config-mismatch`. Manifest-backed artifacts declare
-  `crawler-cli/crawl-artifact/3`; manifest-free crawls are unchanged and still
-  emit v2. The manifest records operator **attestation** only: it is not proof
+  `crawler-cli/crawl-artifact/5`, and so does every other crawl: the record is
+  present and null when no manifest was used, so the version stamp describes the
+  writer rather than which optional records are populated. The manifest records operator **attestation** only: it is not proof
   of legal permission and does not replace organisational approval.
 
 ### Added

@@ -2,13 +2,14 @@
 
 Freezes ``crawler-cli/scope-snapshot/1`` — the exact, secret-free projection of
 a scope manifest that is written into run metadata and into saved crawl
-artifacts — and the ``crawler-cli/crawl-artifact/3`` envelope that carries it.
+artifacts — and the ``crawler-cli/crawl-artifact/5`` envelope that carries it.
 
 Two properties matter to downstream consumers and are asserted here rather than
-described: a manifest-free crawl still emits a byte-identical v2 artifact, and a
-manifest-backed artifact declares v3 and carries the snapshot, the opaque
-authorisation reference, and the attestation notice, but never the manifest's
-free-text notes.
+described. Every artifact this build writes declares the same version, carrying
+``authorization_scope`` as ``null`` when no manifest was used, so the stamp
+describes the writer rather than which optional records were populated. And a
+manifest-backed artifact carries the snapshot, the opaque authorisation
+reference, and the attestation notice, but never the manifest's free-text notes.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ from crawler_cli.authorisation import (
 from crawler_cli.models import CrawlJobResult
 from crawler_cli.serialization import (
     CRAWL_ARTIFACT_SCHEMA_VERSION,
-    SCOPED_CRAWL_ARTIFACT_SCHEMA_VERSION,
     serialize_crawl_job,
 )
 
@@ -115,13 +115,21 @@ def test_manifest_backed_artifact_declares_the_scoped_schema_version() -> None:
         authorization_scope=_manifest().snapshot(),
     )
     payload = serialize_crawl_job(job)
-    assert payload["schema_version"] == SCOPED_CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/3"
+    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/5"
     scope = payload["authorization_scope"]
     assert scope["authorization_reference"] == "CHANGE-1234"
     assert scope["attestation_notice"] == ATTESTATION_NOTICE
 
 
-def test_manifest_free_artifact_keeps_the_frozen_v2_envelope() -> None:
+def test_manifest_free_artifact_declares_the_same_version_with_a_null_scope() -> None:
+    """One writer produces one version, whether or not a manifest was used.
+
+    The version stamp describes the build that wrote the file, not which
+    optional records happened to be populated. Emitting the key as ``null``
+    keeps "this run had no manifest" distinct from "this artifact predates the
+    field", which a conditional version string could not express.
+    """
     payload = serialize_crawl_job(CrawlJobResult(mode="open", seed_urls=[], results=[], run_id="run-148"))
-    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/2"
-    assert "authorization_scope" not in payload
+    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/5"
+    assert "authorization_scope" in payload
+    assert payload["authorization_scope"] is None

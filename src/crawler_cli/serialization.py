@@ -4,24 +4,40 @@ from typing import Any
 
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, ExtractedContent, FetchResponse
 
-CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/4"
+CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/5"
 """Schema identifier stamped on saved crawl artifacts (ticket 3344).
 
 Downstream consumers (e.g. the portal migration worker) pin on this string;
 v2 added explicit partial-body and run-budget terminal data; v3 added static
-JavaScript URL candidate evidence; v4 adds CSS candidates, confidence/base
-metadata, rejection counts, and speculative admission totals. Loaders keep
-accepting legacy artifacts and missing fields."""
+JavaScript URL candidate evidence; v4 added CSS candidates, confidence/base
+metadata, rejection counts, and speculative admission totals; v5 adds the
+``authorization_scope`` record (ticket 148). Loaders keep accepting legacy
+artifacts and missing fields.
 
-SCOPED_CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/3"
-"""Schema identifier stamped on artifacts that carry an authorisation scope.
+There is deliberately no separate identifier for a manifest-backed artifact.
+One run of the writer produces one version, so the stamp describes the build
+that wrote the file rather than which optional records happened to be
+populated. ``authorization_scope`` is present and ``null`` on a manifest-free
+crawl, which keeps the field's absence and its emptiness from meaning two
+different things."""
 
-Ticket 148 adds an ``authorization_scope`` object to the saved artifact, but
-only for runs that actually had a scope manifest. Rather than silently adding a
-field to the frozen v2 contract, a manifest-backed artifact declares v3 so a
-consumer can tell from the version string alone whether the scope record is
-expected to be present. A manifest-free crawl still emits a byte-identical v2
-artifact, so existing consumers are untouched."""
+KNOWN_CRAWL_ARTIFACT_SCHEMA_VERSIONS = frozenset(
+    {
+        "crawler-cli/crawl-artifact/1",
+        "crawler-cli/crawl-artifact/2",
+        "crawler-cli/crawl-artifact/3",
+        "crawler-cli/crawl-artifact/4",
+        "crawler-cli/crawl-artifact/5",
+    }
+)
+"""Every artifact version this build can read.
+
+Each bump has been additive, so an older artifact still loads: absent fields
+fall back to their documented defaults. Validating against the current version
+alone would make a build unable to read the artifacts it wrote before the last
+bump, which is why the accepted set is explicit. An unrecognised version is
+still rejected, because a newer writer may carry fields this build would
+silently drop."""
 
 
 def serialize_browser_runtime(runtime: BrowserRuntime) -> dict[str, object]:
@@ -283,9 +299,8 @@ def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> 
     }
     if job.max_urls is not None:
         payload["max_urls"] = job.max_urls
-    if job.authorization_scope is not None:
-        # Manifest-backed runs declare the newer artifact version alongside the
-        # scope record so the two never appear apart (ticket 148).
-        payload["schema_version"] = SCOPED_CRAWL_ARTIFACT_SCHEMA_VERSION
-        payload["authorization_scope"] = job.authorization_scope
+    # Always present, and null when the run had no scope manifest (ticket 148).
+    # Emitting the key unconditionally keeps "no manifest was used" distinct
+    # from "this artifact predates the field".
+    payload["authorization_scope"] = job.authorization_scope
     return payload
