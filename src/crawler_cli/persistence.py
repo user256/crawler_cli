@@ -23,6 +23,13 @@ from .models import (
     RobotsDirectives,
 )
 from .schema import create_schema_content_hash, identify_schema_relationships
+from .security_persistence import (
+    SECURITY_SCHEMA_STATEMENTS,
+    SECURITY_TABLES,
+    delete_run_security_data,
+    purge_run_security_evidence,
+    security_run_stats,
+)
 
 
 # --- Query-row schemas (ticket 083) -----------------------------------------
@@ -1013,8 +1020,16 @@ COMPARISON_VIEW_STATEMENTS = [
     """,
 ]
 
+# Ticket 153: the security finding/evidence tables are part of the same schema
+# and the same retention story as the crawl tables. They are appended here (they
+# reference crawl_runs, which is created above) rather than initialised
+# separately, so that a database can never end up with crawl data but no place
+# to record the security evidence retention decisions made for those runs.
+SCHEMA_STATEMENTS.extend(SECURITY_SCHEMA_STATEMENTS)
+
+
 # Tables owned by crawler_cli (used for truncate / row-count summaries).
-CRAWL_TABLES: tuple[str, ...] = (
+CRAWL_TABLES: tuple[str, ...] = SECURITY_TABLES + (
     "run_page_embeddings",
     "run_intent_signatures",
     "run_url_identity",
@@ -4109,6 +4124,34 @@ class AsyncpgStore:
                 else:
                     await conn.execute("UPDATE page_run_snapshots SET html_compressed = NULL WHERE run_id = $1", run_id)
         return {"rows_updated": int(count or 0)}
+
+    async def security_evidence_stats(self, *, run_id: str) -> dict[str, int]:
+        """Row counts for one run's security tables (ticket 153).
+
+        Mirrors ``run_snapshot_html_stats``: the compaction and delete commands
+        print these counts before asking for confirmation so an operator sees
+        exactly what is about to be removed.
+        """
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            return await security_run_stats(conn, run_id=run_id)
+
+    async def purge_run_security_evidence(
+        self, *, run_id: str, drop_findings: bool = False, dry_run: bool = False
+    ) -> dict[str, int]:
+        """Purge one run's raw security evidence; never another run's (ticket 153)."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            return await purge_run_security_evidence(conn, run_id=run_id, drop_findings=drop_findings, dry_run=dry_run)
+
+    async def delete_run_security_data(self, *, run_id: str, dry_run: bool = False) -> dict[str, int]:
+        """Delete every security row belonging to exactly one run (ticket 153)."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            return await delete_run_security_data(conn, run_id=run_id, dry_run=dry_run)
 
     async def truncate_crawl_tables(self) -> None:
         await self.connect()

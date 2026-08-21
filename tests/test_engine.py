@@ -217,7 +217,7 @@ async def test_open_crawl_default_limit_is_safe_bound_and_saves_metadata(tmp_pat
     assert len(job.results) == 200
     lines = [json.loads(ln) for ln in output_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     summary = next(ln for ln in lines if ln.get("__type") == "summary")
-    assert summary["schema_version"] == "crawler-cli/crawl-artifact/5"
+    assert summary["schema_version"] == "crawler-cli/crawl-artifact/6"
     assert summary["max_urls"] == 200
     assert summary["crawled_count"] == 200
     assert store.saved_metadata["crawl_open"]["max_urls"] == 200
@@ -285,7 +285,7 @@ async def test_open_crawl_explicit_finite_limit_saves_output(tmp_path):
     # open crawls now produce JSONL: one result per line, final line is summary
     lines = [json.loads(ln) for ln in output_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     summary = next(ln for ln in lines if ln.get("__type") == "summary")
-    assert summary["schema_version"] == "crawler-cli/crawl-artifact/5"
+    assert summary["schema_version"] == "crawler-cli/crawl-artifact/6"
     assert summary["mode"] == "open"
     assert summary["max_urls"] == 3
     assert summary["crawled_count"] == 3

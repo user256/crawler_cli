@@ -1,6 +1,6 @@
 """Golden contract: the saved crawl artifact schema (tickets 3344, 3685, 155, 156).
 
-Freezes ``crawler-cli/crawl-artifact/5``: the exact field set that
+Freezes ``crawler-cli/crawl-artifact/6``: the exact field set that
 ``serialize_crawl_job`` emits (redirect chains and static URL evidence included)
 and the loader's tolerance for legacy artifacts without ``schema_version``.
 """
@@ -105,7 +105,7 @@ def _job() -> CrawlJobResult:
 
 def test_crawl_artifact_matches_golden() -> None:
     payload = serialize_crawl_job(_job())
-    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/5"
+    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/6"
     assert set(payload.keys()) == EXPECTED_JOB_KEYS
     first_result = payload["results"][0]  # type: ignore[index]
     assert set(first_result.keys()) == EXPECTED_RESULT_KEYS
@@ -137,7 +137,7 @@ def test_loader_accepts_legacy_artifact_without_schema_version(tmp_path) -> None
     assert len(job.results) == len(compare_urls_source_results())
 
 
-@pytest.mark.parametrize("version", range(1, 5))
+@pytest.mark.parametrize("version", range(1, 6))
 def test_loader_accepts_known_historical_schema_versions(tmp_path: Path, version: int) -> None:
     path = tmp_path / f"artifact-v{version}.json"
     path.write_text(
@@ -154,7 +154,7 @@ def test_loader_accepts_known_historical_schema_versions(tmp_path: Path, version
     assert _load_saved_crawl(path).mode == "list"
 
 
-@pytest.mark.parametrize("version", range(1, 6))
+@pytest.mark.parametrize("version", range(1, 7))
 def test_jsonl_loader_accepts_a_known_summary_schema_version(tmp_path: Path, version: int) -> None:
     path = tmp_path / "crawl.jsonl"
     result = {"requested_url": "https://example.test/", "final_url": "https://example.test/", "status": 200}

@@ -27,6 +27,8 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from .redaction import sanitize_proxy_url
+
 logger = logging.getLogger(__name__)
 
 
@@ -150,8 +152,11 @@ class ProxyPool:
                 if state.consecutive_failures >= self.max_failures:
                     state.cooled_until = time.monotonic() + self.cooldown_seconds
                     logger.warning(
+                        # Ticket 153: pool entries may carry embedded credentials
+                        # (``http://user:pass@host``), so the URL is rendered
+                        # without them before it reaches a log handler.
                         "Proxy %s evicted for %.0fs after %d consecutive failures",
-                        proxy_url,
+                        sanitize_proxy_url(proxy_url),
                         self.cooldown_seconds,
                         state.consecutive_failures,
                     )
