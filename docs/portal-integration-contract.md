@@ -28,7 +28,7 @@ Machine-readable outputs are stamped with an explicit schema identifier
 
 | Schema id | Surface | Golden proof |
 |---|---|---|
-| `crawler-cli/crawl-artifact/2` | saved crawl JSON (`serialize_crawl_job`), including body accounting and typed budget terminal state | `tests/contract/golden/crawl_artifact.json` |
+| `crawler-cli/crawl-artifact/4` | saved crawl JSON (`serialize_crawl_job`), including body accounting, typed budget terminal state, static JS/CSS candidates, and render-time URL evidence | `tests/contract/golden/crawl_artifact.json` |
 | `crawler-cli/compare/1` | `compare --output` JSON + stdout summary | `golden/compare_rows.json`, `golden/compare_summary.json` |
 | `crawler-cli/compare-urls/1` | `compare-urls --output` JSON/CSV + stdout summary | `golden/compare_urls_rows.json`, `golden/compare_urls_rows.csv`, `golden/compare_urls_summary.json` |
 
@@ -78,6 +78,9 @@ All paths relative to the repo root.
 | Secrets out of argv | `--auth-password-env/-file`, `--auth-token-env/-file` (`__main__._resolve_secret_sources`, `_build_auth`); store DSNs from env (`_resolve_store_dsn`, ticket 127); `CRAWLER_CLI_POSTGRES_*` env for the persistence DSN (`_build_dsn`) | `tests/test_auth.py::test_auth_password_env_keeps_secret_out_of_argv`; `tests/contract/test_security_proofs.py` (token env/file); `tests/test_store_dsn_env.py` |
 | Secrets out of logs/artifacts | engine/backends never log headers or DSNs; artifacts carry response headers only (`serialization.py`) | `tests/contract/test_security_proofs.py::test_authenticated_crawl_logs_and_artifact_never_contain_secret` |
 | Robots handling | `src/crawler_cli/robots.py` (RFC-9309 matcher), `engine.py` (`respect_robots_txt`, `allowed_by_robots`, `skip_reason="robots_txt_disallow"`) | `tests/test_robots_introspection.py`, `tests/test_path_restrictions.py`, `tests/test_engine.py` |
+| Static JavaScript URL evidence | `javascript_urls.py`; `crawl --discover-js-urls` / `--follow-js-urls`; run-scoped `javascript_url_candidates` table and report | `tests/test_javascript_urls.py`; `tests/contract/test_crawl_artifact_contract.py` |
+| Static CSS URL evidence | `css_urls.py`; `crawl --discover-css-urls` / `--follow-speculative-urls`; run-scoped `css_url_candidates` table and report | `tests/test_css_urls.py`; artifact contract |
+| Render-time URL evidence | `crawl --render-discover` / `--follow-rendered-links`; Playwright request events and raw/rendered anchor delta; run-scoped candidate and render-attempt reports | `tests/test_render_url_discovery.py`; real Playwright smoke; artifact contract |
 | Redirect-hop capture | `backends.py` (`response.history` for aiohttp/curl_cffi, `_playwright_redirect_chain`); `FetchResponse.redirect_chain` → `CrawlResult.redirect_chain` (`models.py`); persisted to artifact JSON (`serialization.py`) | `tests/test_backends.py`; `tests/contract/test_crawl_artifact_contract.py::test_artifact_round_trips_through_loader`; golden `compare_urls_rows.json` (hop chains per pair) |
 | Source→target URL mapping (`compare-urls`) | `src/crawler_cli/compare_urls.py` (CSV parse, `classify_redirect` verdict matrix, `build_pair_rows`, `rows_failing`); CLI wiring `__main__._run_compare_urls` (artifact → store → live resolution; source side matches `requested_url` only) | `tests/test_compare_urls.py`, `tests/test_compare_urls_cli.py`; `tests/contract/test_compare_urls_contract.py` (all 7 verdicts golden-frozen) |
 | Host remapping (`--replace`) | `src/crawler_cli/remap.py` (ordered literal FROM=TO; URL+text+re-hash); remap-aware diffing in `comparison.py` | `tests/test_remap.py`, `tests/test_compare_remap.py`; `tests/contract/test_compare_contract.py` |
@@ -127,6 +130,9 @@ Proven upstream (aiohttp + curl_cffi backends):
 - **Resource limits / timeouts**: process-level wall-clock timeout and
   cancellation are the caller's job (the worker must enforce its own timeout
   and treat 130 as a clean drain).
+- **Guarded linked-JavaScript discovery**: `--portal-url-policy` does not cover
+  subresource requests, so `--discover-js-urls` scans inline JavaScript only in
+  guarded runs. The portal must not assume linked-bundle evidence is complete.
 - **URL-embedded credentials** (`https://user:pass@host/`) are not scrubbed
   from logs/artifacts; the portal must not construct such URLs.
 

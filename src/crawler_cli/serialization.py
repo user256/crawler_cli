@@ -4,12 +4,14 @@ from typing import Any
 
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, ExtractedContent, FetchResponse
 
-CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/2"
+CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/4"
 """Schema identifier stamped on saved crawl artifacts (ticket 3344).
 
 Downstream consumers (e.g. the portal migration worker) pin on this string;
-v2 adds explicit partial-body and run-budget terminal data. Loaders keep
-accepting legacy v1 artifacts and artifacts without the field."""
+v2 added explicit partial-body and run-budget terminal data; v3 added static
+JavaScript URL candidate evidence; v4 adds CSS candidates, confidence/base
+metadata, rejection counts, and speculative admission totals. Loaders keep
+accepting legacy artifacts and missing fields."""
 
 
 def serialize_browser_runtime(runtime: BrowserRuntime) -> dict[str, object]:
@@ -39,6 +41,19 @@ def serialize_fetch_response(response: FetchResponse, *, include_text: bool = Tr
         "decoded_bytes": response.decoded_bytes,
         "accounted_bytes": response.accounted_bytes,
         "body_truncation_reason": response.body_truncation_reason,
+        "observed_requests": [
+            {
+                "url": item.url,
+                "method": item.method,
+                "resource_type": item.resource_type,
+                "outcome": item.outcome,
+                "status": item.status,
+                "failure": item.failure,
+                "occurrence_count": item.occurrence_count,
+            }
+            for item in response.observed_requests
+        ],
+        "render_settled": response.render_settled,
     }
     if include_text:
         payload["text"] = response.text
@@ -93,6 +108,57 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
             }
             for link in result.discovered_links
         ],
+        "javascript_url_candidates": [
+            {
+                "url": candidate.url,
+                "source_kind": candidate.source_kind,
+                "script_source": candidate.script_source,
+                "script_index": candidate.script_index,
+                "literal_kind": candidate.literal_kind,
+                "classification": candidate.classification,
+                "follow_eligible": candidate.follow_eligible,
+                "occurrence_count": candidate.occurrence_count,
+                "confidence": candidate.confidence,
+                "confidence_weight": candidate.confidence_weight,
+                "resolution_base": candidate.resolution_base,
+            }
+            for candidate in result.javascript_url_candidates
+        ],
+        "css_url_candidates": [
+            {
+                "url": candidate.url,
+                "source_kind": candidate.source_kind,
+                "stylesheet_source": candidate.stylesheet_source,
+                "style_index": candidate.style_index,
+                "token_kind": candidate.token_kind,
+                "classification": candidate.classification,
+                "follow_eligible": candidate.follow_eligible,
+                "occurrence_count": candidate.occurrence_count,
+                "confidence": candidate.confidence,
+                "confidence_weight": candidate.confidence_weight,
+                "resolution_base": candidate.resolution_base,
+            }
+            for candidate in result.css_url_candidates
+        ],
+        "speculative_rejection_counts": result.speculative_rejection_counts,
+        "render_url_candidates": [
+            {
+                "url": candidate.url,
+                "source_kind": candidate.source_kind,
+                "classification": candidate.classification,
+                "follow_eligible": candidate.follow_eligible,
+                "resource_type": candidate.resource_type,
+                "method": candidate.method,
+                "outcome": candidate.outcome,
+                "status": candidate.status,
+                "occurrence_count": candidate.occurrence_count,
+                "confidence": candidate.confidence,
+            }
+            for candidate in result.render_url_candidates
+        ],
+        "render_discovery_attempted": result.render_discovery_attempted,
+        "render_discovery_complete": result.render_discovery_complete,
+        "render_discovery_skip_reason": result.render_discovery_skip_reason,
         "allowed_by_robots": result.allowed_by_robots,
         "skip_reason": result.skip_reason,
         "persist_error": result.persist_error,
@@ -152,6 +218,14 @@ def serialize_job_summary_metadata(job: CrawlJobResult, *, saved_to: str | None 
         "budget_decoded_bytes": job.budget_decoded_bytes,
         "budget_accounted_bytes": job.budget_accounted_bytes,
         "budget_stop_reason": job.budget_stop_reason,
+        "javascript_url_candidate_count": job.javascript_url_candidate_count,
+        "javascript_url_enqueued_count": job.javascript_url_enqueued_count,
+        "css_url_candidate_count": job.css_url_candidate_count,
+        "css_url_enqueued_count": job.css_url_enqueued_count,
+        "speculative_capped_count": job.speculative_capped_count,
+        "render_url_candidate_count": job.render_url_candidate_count,
+        "render_dom_enqueued_count": job.render_dom_enqueued_count,
+        "render_discovery_attempt_count": job.render_discovery_attempt_count,
     }
 
 
@@ -180,6 +254,14 @@ def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> 
         "budget_decoded_bytes": job.budget_decoded_bytes,
         "budget_accounted_bytes": job.budget_accounted_bytes,
         "budget_stop_reason": job.budget_stop_reason,
+        "javascript_url_candidate_count": job.javascript_url_candidate_count,
+        "javascript_url_enqueued_count": job.javascript_url_enqueued_count,
+        "css_url_candidate_count": job.css_url_candidate_count,
+        "css_url_enqueued_count": job.css_url_enqueued_count,
+        "speculative_capped_count": job.speculative_capped_count,
+        "render_url_candidate_count": job.render_url_candidate_count,
+        "render_dom_enqueued_count": job.render_dom_enqueued_count,
+        "render_discovery_attempt_count": job.render_discovery_attempt_count,
         "results": [serialize_crawl_result(result) for result in job.results],
     }
     if job.max_urls is not None:

@@ -38,6 +38,22 @@ DEFAULT_OPEN_CRAWL_LIMIT = 200
 MAX_REQUESTS_DEFAULT = 0
 MAX_BYTES_DEFAULT = 0
 
+# Static JavaScript URL discovery is deliberately bounded independently from
+# ordinary page fetches.  The byte default mirrors Googlebot's documented
+# per-resource fetch limit, but this crawler treats it as a scan cap rather
+# than claiming exact Googlebot parity.
+MAX_JAVASCRIPT_BYTES_DEFAULT = 2_000_000
+MAX_JAVASCRIPT_FILES_PER_PAGE_DEFAULT = 20
+MAX_JAVASCRIPT_CANDIDATES_PER_PAGE_DEFAULT = 500
+MAX_CSS_BYTES_DEFAULT = 2_000_000
+MAX_CSS_FILES_PER_PAGE_DEFAULT = 20
+MAX_CSS_CANDIDATES_PER_PAGE_DEFAULT = 500
+MAX_CSS_IMPORT_DEPTH_DEFAULT = 1
+MAX_OUTSTANDING_SPECULATIVE_PER_HOST_DEFAULT = 50
+MAX_RENDER_DISCOVERY_PAGES_DEFAULT = 20
+MAX_RENDER_REQUESTS_PER_PAGE_DEFAULT = 1000
+MAX_RENDER_LINKS_PER_PAGE_DEFAULT = 500
+
 
 def _env_bool(name: str) -> bool | None:
     raw = os.getenv(name)
@@ -185,6 +201,40 @@ class CrawlConfig:
     budget is spent on them (ticket 103).  Default OFF: crawl-and-classify
     remains the default so AMP canonical-hygiene reporting keeps working."""
     analytics_expected_ids: list[str] = field(default_factory=list)
+    discover_javascript_urls: bool = False
+    """Inventory static URL-like string literals in inline and linked JS.
+
+    Discovery is evidence-only by default: candidates are serialized and
+    persisted but never enter the crawl frontier unless
+    ``follow_javascript_urls`` is also enabled.
+    """
+    follow_javascript_urls: bool = False
+    """Enqueue strict, page-like JavaScript URL candidates in open crawls."""
+    max_javascript_files_per_page: int = MAX_JAVASCRIPT_FILES_PER_PAGE_DEFAULT
+    max_javascript_bytes: int = MAX_JAVASCRIPT_BYTES_DEFAULT
+    max_javascript_candidates_per_page: int = MAX_JAVASCRIPT_CANDIDATES_PER_PAGE_DEFAULT
+    javascript_relative_base: Literal["document", "document-and-asset"] = "document"
+    discover_css_urls: bool = False
+    """Inventory URL tokens from inline and bounded linked CSS."""
+    discover_style_attributes: bool = False
+    """Include style attributes in CSS discovery; implies discover_css_urls."""
+    follow_speculative_urls: bool = False
+    """Follow strict page-like JS/CSS candidates in open crawls."""
+    max_css_files_per_page: int = MAX_CSS_FILES_PER_PAGE_DEFAULT
+    max_css_bytes: int = MAX_CSS_BYTES_DEFAULT
+    max_css_candidates_per_page: int = MAX_CSS_CANDIDATES_PER_PAGE_DEFAULT
+    max_css_import_depth: int = MAX_CSS_IMPORT_DEPTH_DEFAULT
+    max_outstanding_speculative_per_host: int = MAX_OUTSTANDING_SPECULATIVE_PER_HOST_DEFAULT
+    discover_render_urls: bool = False
+    """Capture browser network and hydrated-DOM URL evidence."""
+    follow_rendered_links: bool = False
+    """Follow hydrated-only anchor deltas in open crawls."""
+    render_discovery_max_raw_links: int = 4
+    render_discovery_min_scripts: int = 3
+    max_render_discovery_pages: int = MAX_RENDER_DISCOVERY_PAGES_DEFAULT
+    max_render_discovery_concurrency: int = 1
+    max_render_requests_per_page: int = MAX_RENDER_REQUESTS_PER_PAGE_DEFAULT
+    max_render_links_per_page: int = MAX_RENDER_LINKS_PER_PAGE_DEFAULT
     discover_sitemaps: bool = True
     sitemap_max_urls: int = 50_000
     sitemap_max_depth: int = 3
@@ -229,6 +279,15 @@ class CrawlConfig:
     (ticket-059); library callers that read job.results directly can opt in."""
 
     def __post_init__(self) -> None:
+        if self.follow_javascript_urls:
+            self.discover_javascript_urls = True
+        if self.discover_style_attributes:
+            self.discover_css_urls = True
+        if self.follow_speculative_urls:
+            self.discover_javascript_urls = True
+            self.discover_css_urls = True
+        if self.follow_rendered_links:
+            self.discover_render_urls = True
         self.validate()
 
     def validate(self) -> None:
@@ -290,6 +349,40 @@ class CrawlConfig:
         require_non_negative_int(self.challenge_max_escalations, field="challenge_max_escalations")
         require_positive_int(self.sitemap_max_urls, field="sitemap_max_urls")
         require_positive_int(self.sitemap_max_depth, field="sitemap_max_depth")
+        require_non_negative_int(
+            self.max_javascript_files_per_page,
+            field="max_javascript_files_per_page",
+        )
+        require_positive_int(self.max_javascript_bytes, field="max_javascript_bytes")
+        require_positive_int(
+            self.max_javascript_candidates_per_page,
+            field="max_javascript_candidates_per_page",
+        )
+        if self.javascript_relative_base not in {"document", "document-and-asset"}:
+            raise ValueError(
+                "javascript_relative_base must be 'document' or 'document-and-asset', "
+                f"got {self.javascript_relative_base!r}"
+            )
+        require_non_negative_int(self.max_css_files_per_page, field="max_css_files_per_page")
+        require_positive_int(self.max_css_bytes, field="max_css_bytes")
+        require_positive_int(self.max_css_candidates_per_page, field="max_css_candidates_per_page")
+        require_non_negative_int(self.max_css_import_depth, field="max_css_import_depth")
+        require_non_negative_int(
+            self.max_outstanding_speculative_per_host,
+            field="max_outstanding_speculative_per_host",
+        )
+        require_non_negative_int(
+            self.render_discovery_max_raw_links,
+            field="render_discovery_max_raw_links",
+        )
+        require_non_negative_int(self.render_discovery_min_scripts, field="render_discovery_min_scripts")
+        require_non_negative_int(self.max_render_discovery_pages, field="max_render_discovery_pages")
+        require_positive_int(
+            self.max_render_discovery_concurrency,
+            field="max_render_discovery_concurrency",
+        )
+        require_positive_int(self.max_render_requests_per_page, field="max_render_requests_per_page")
+        require_positive_int(self.max_render_links_per_page, field="max_render_links_per_page")
         require_positive_int(self.obscura_workers, field="obscura_workers")
         require_positive_int(self.obscura_port, field="obscura_port")
         if self.obscura_port > 65535:
@@ -303,6 +396,11 @@ class CrawlConfig:
                 raise ValueError(
                     "portal_connection_policy requires challenge_escalate_to_browser=False "
                     "because browser navigation is not guarded"
+                )
+            if self.discover_render_urls:
+                raise ValueError(
+                    "portal_connection_policy cannot be combined with render URL discovery; "
+                    "browser subrequests are not policy-guarded"
                 )
         if self.max_requests or self.max_bytes:
             if self.backend != "aiohttp" or self.portal_connection_policy is None:

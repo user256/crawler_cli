@@ -106,6 +106,82 @@ class CrawlReports:
             limit,
         )
 
+    async def javascript_url_candidates(self) -> list[dict[str, object]]:
+        """Static JavaScript URL evidence for the selected crawl run."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT source.url AS source_url, candidate.candidate_url,
+                   candidate.source_kind, candidate.script_source,
+                   NULLIF(candidate.script_index, -1) AS script_index,
+                   candidate.literal_kind, candidate.classification,
+                   candidate.follow_eligible, candidate.occurrence_count,
+                   candidate.confidence, candidate.confidence_weight,
+                   candidate.resolution_base
+            FROM javascript_url_candidates candidate
+            JOIN urls source ON source.id = candidate.source_url_id
+            WHERE candidate.run_id = $1
+            ORDER BY source.url, candidate.candidate_url, candidate.script_source
+            """,
+            run_id,
+        )
+
+    async def css_url_candidates(self) -> list[dict[str, object]]:
+        """Static CSS URL evidence for the selected crawl run."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT source.url AS source_url, candidate.candidate_url,
+                   candidate.source_kind, candidate.stylesheet_source,
+                   NULLIF(candidate.style_index, -1) AS style_index,
+                   candidate.token_kind, candidate.classification,
+                   candidate.follow_eligible, candidate.occurrence_count,
+                   candidate.confidence, candidate.confidence_weight,
+                   candidate.resolution_base
+            FROM css_url_candidates candidate
+            JOIN urls source ON source.id = candidate.source_url_id
+            WHERE candidate.run_id = $1
+            ORDER BY source.url, candidate.candidate_url, candidate.stylesheet_source
+            """,
+            run_id,
+        )
+
+    async def render_url_candidates(self) -> list[dict[str, object]]:
+        """Browser network and hydrated-DOM URL evidence for the selected run."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT source.url AS source_url, candidate.candidate_url,
+                   candidate.source_kind, candidate.classification,
+                   candidate.follow_eligible, candidate.resource_type,
+                   candidate.method, candidate.outcome, candidate.status,
+                   candidate.occurrence_count, candidate.confidence
+            FROM render_url_candidates candidate
+            JOIN urls source ON source.id = candidate.source_url_id
+            WHERE candidate.run_id = $1
+            ORDER BY source.url, candidate.source_kind, candidate.candidate_url
+            """,
+            run_id,
+        )
+
+    async def render_attempts(self) -> list[dict[str, object]]:
+        """Gate/completeness evidence for render-discovery decisions."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT u.url, snapshot.render_discovery_attempted,
+                   snapshot.render_discovery_complete,
+                   snapshot.render_discovery_skip_reason
+            FROM page_run_snapshots snapshot
+            JOIN urls u ON u.id = snapshot.url_id
+            WHERE snapshot.run_id = $1
+              AND (snapshot.render_discovery_attempted
+                   OR snapshot.render_discovery_skip_reason IS NOT NULL)
+            ORDER BY u.url
+            """,
+            run_id,
+        )
+
     async def as_json(self) -> str:
         payload = {
             "orphans": await self.orphan_pages(),

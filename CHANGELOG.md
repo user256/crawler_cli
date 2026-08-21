@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Speculative URL discovery across static JavaScript, CSS, and render time
+  (tickets 155, 156, and 157). `--discover-js-urls` inventories bounded
+  URL-like literals from executable inline scripts and same-scope linked
+  JavaScript without following them, and `--follow-js-urls` admits only strict
+  page-like candidates to an open crawl frontier. `--discover-css-urls` scans
+  inline, linked, and bounded `@import` CSS with stylesheet-relative
+  resolution, and `--discover-style-attributes` adds style attributes.
+  `--render-discover` reuses Playwright or selectively renders link-poor and
+  script-heavy HTTP pages, recording hydrated-only anchors and typed browser
+  request outcomes under hard cost limits; only `--follow-rendered-links`
+  admits hydrated anchors. API, action, and asset candidates always remain
+  inventory-only, network observations are never replayed, and a persisted
+  per-host cap of 50 outstanding speculative URLs bounds frontier growth.
+  Evidence surfaces through the new `report js-url-candidates`,
+  `report css-url-candidates`, `report render-url-candidates`, and
+  `report render-attempts` outputs and their run-scoped PostgreSQL tables.
+
+### Changed
+
+- **Breaking for artifact consumers:** saved crawl artifacts are stamped
+  `crawler-cli/crawl-artifact/4`, carrying the speculative-discovery evidence
+  arrays. The terminal budget counters introduced in `/2` are retained.
+  Loading stays backward tolerant for earlier stamped artifacts.
+
+### Fixed
+
+- Run-scoped candidate tables no longer violate their `crawl_runs` foreign key
+  when a caller persists without `CrawlEngine`, or after
+  `truncate_crawl_tables`. The compatibility run row is now created at the top
+  of the persist transaction rather than only alongside the page snapshot.
+
 ## [0.3.0] - 2026-08-10
 
 ### Added

@@ -80,6 +80,10 @@ async def playwright_smoke_site(unused_tcp_port: int) -> SmokeSite:
         ready.dataset.cookie = String(payload.cookie_ok);
         ready.textContent = payload.message;
         document.body.appendChild(ready);
+        const link = document.createElement('a');
+        link.href = '/hydrated';
+        link.textContent = 'Hydrated link';
+        document.body.appendChild(link);
         requestAnimationFrame(() => {
           document.body.style.paddingTop = '1px';
         });
@@ -140,6 +144,7 @@ async def test_crawl_engine_real_playwright_smoke(playwright_smoke_site: SmokeSi
         playwright_wait_for_selector_timeout_seconds=2.0,
         max_requests_per_context=1,
         collect_web_vitals=True,
+        discover_render_urls=True,
         auth=AuthConfig(
             auth_type="basic",
             username=_BASIC_USERNAME,
@@ -182,6 +187,17 @@ async def test_crawl_engine_real_playwright_smoke(playwright_smoke_site: SmokeSi
     assert first.lcp_ms is None or first.lcp_ms >= 0
     assert first.cls is None or first.cls >= 0
     assert first.inp_ms is None or first.inp_ms >= 0
+    assert any(
+        candidate.source_kind == "render_dom" and candidate.url == playwright_smoke_site.url("/hydrated")
+        for candidate in first.render_url_candidates
+    )
+    assert any(
+        candidate.source_kind == "render_network"
+        and candidate.url == playwright_smoke_site.url("/api/data")
+        and candidate.outcome == "finished"
+        and candidate.status == 200
+        for candidate in first.render_url_candidates
+    )
 
     assert second.status == 200
     assert recycled_context is not None

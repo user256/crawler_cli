@@ -24,7 +24,13 @@ import pytest_asyncio
 from crawler_cli.detection.analytics import AnalyticsDetectionResult, AnalyticsHit
 from crawler_cli.hashing import sha256_hash, simhash64
 from crawler_cli.models import DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
-from crawler_cli.models import CrawlResult, FetchResponse
+from crawler_cli.models import (
+    CrawlResult,
+    CssUrlCandidate,
+    FetchResponse,
+    JavaScriptUrlCandidate,
+    RenderUrlCandidate,
+)
 from crawler_cli import CrawlConfig, CrawlEngine
 from crawler_cli.intent_overlap import compute_exclusion
 from crawler_cli.persistence import AsyncpgStore, CRAWL_TABLES, SCHEMA_STATEMENTS
@@ -349,6 +355,133 @@ async def test_persist_crawl_result_basic(store: AsyncpgStore) -> None:
         raw_html="<html><title>Test</title></html>",
     )
     await store.persist(result)
+
+
+@pytest.mark.asyncio
+async def test_javascript_url_candidates_persist_and_report_by_run(store: AsyncpgStore) -> None:
+    source_url = "https://example.com/source"
+    result = CrawlResult(
+        requested_url=source_url,
+        final_url=source_url,
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=ExtractedContent(
+            title="Source",
+            meta_description=None,
+            meta_robots=RobotsDirectives(),
+            x_robots_tag=RobotsDirectives(),
+            canonical=None,
+            x_canonical=None,
+            hreflang_links=[],
+            html_lang="en",
+            headings={"h1": ["Source"], "h2": []},
+            text="source",
+            word_count=1,
+            metadata={},
+        ),
+        raw_html="<html><title>Source</title></html>",
+        javascript_url_candidates=[
+            JavaScriptUrlCandidate(
+                url="https://example.com/hidden",
+                source_kind="external_script",
+                script_source="https://example.com/app.js",
+                script_index=None,
+                literal_kind="root_relative",
+                classification="page",
+                follow_eligible=True,
+                occurrence_count=2,
+            )
+        ],
+        css_url_candidates=[
+            CssUrlCandidate(
+                url="https://example.com/image.webp",
+                source_kind="external_stylesheet",
+                stylesheet_source="https://example.com/app.css",
+                style_index=None,
+                token_kind="url",
+                classification="asset",
+                follow_eligible=False,
+            )
+        ],
+        render_url_candidates=[
+            RenderUrlCandidate(
+                url="https://example.com/api/data",
+                source_kind="render_network",
+                classification="api",
+                follow_eligible=False,
+                resource_type="fetch",
+                outcome="finished",
+                status=200,
+            )
+        ],
+        render_discovery_attempted=True,
+        render_discovery_complete=False,
+        render_discovery_skip_reason="render_settle_timeout",
+    )
+    await store.persist(result)
+
+    rows = await CrawlReports(store).javascript_url_candidates()
+    css_rows = await CrawlReports(store).css_url_candidates()
+    render_rows = await CrawlReports(store).render_url_candidates()
+    render_attempt_rows = await CrawlReports(store).render_attempts()
+
+    assert rows == [
+        {
+            "source_url": source_url,
+            "candidate_url": "https://example.com/hidden",
+            "source_kind": "external_script",
+            "script_source": "https://example.com/app.js",
+            "script_index": None,
+            "literal_kind": "root_relative",
+            "classification": "page",
+            "follow_eligible": True,
+            "occurrence_count": 2,
+            "confidence": "low",
+            "confidence_weight": 0.15,
+            "resolution_base": "document",
+        }
+    ]
+    assert css_rows == [
+        {
+            "source_url": source_url,
+            "candidate_url": "https://example.com/image.webp",
+            "source_kind": "external_stylesheet",
+            "stylesheet_source": "https://example.com/app.css",
+            "style_index": None,
+            "token_kind": "url",
+            "classification": "asset",
+            "follow_eligible": False,
+            "occurrence_count": 1,
+            "confidence": "high",
+            "confidence_weight": 0.6,
+            "resolution_base": "asset",
+        }
+    ]
+    assert render_rows == [
+        {
+            "source_url": source_url,
+            "candidate_url": "https://example.com/api/data",
+            "source_kind": "render_network",
+            "classification": "api",
+            "follow_eligible": False,
+            "resource_type": "fetch",
+            "method": "GET",
+            "outcome": "finished",
+            "status": 200,
+            "occurrence_count": 1,
+            "confidence": "high",
+        }
+    ]
+    assert render_attempt_rows == [
+        {
+            "url": source_url,
+            "render_discovery_attempted": True,
+            "render_discovery_complete": False,
+            "render_discovery_skip_reason": "render_settle_timeout",
+        }
+    ]
 
 
 @pytest.mark.asyncio

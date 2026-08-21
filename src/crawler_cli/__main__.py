@@ -23,6 +23,17 @@ from .config import (
     CB_RECOVERY_SECONDS_DEFAULT,
     CB_THRESHOLD_DEFAULT,
     DEFAULT_OPEN_CRAWL_LIMIT,
+    MAX_CSS_BYTES_DEFAULT,
+    MAX_CSS_CANDIDATES_PER_PAGE_DEFAULT,
+    MAX_CSS_FILES_PER_PAGE_DEFAULT,
+    MAX_CSS_IMPORT_DEPTH_DEFAULT,
+    MAX_JAVASCRIPT_BYTES_DEFAULT,
+    MAX_JAVASCRIPT_CANDIDATES_PER_PAGE_DEFAULT,
+    MAX_JAVASCRIPT_FILES_PER_PAGE_DEFAULT,
+    MAX_OUTSTANDING_SPECULATIVE_PER_HOST_DEFAULT,
+    MAX_RENDER_DISCOVERY_PAGES_DEFAULT,
+    MAX_RENDER_LINKS_PER_PAGE_DEFAULT,
+    MAX_RENDER_REQUESTS_PER_PAGE_DEFAULT,
     MAX_REQUESTS_DEFAULT,
     MAX_RESPONSE_BYTES_DEFAULT,
     MAX_BYTES_DEFAULT,
@@ -643,6 +654,72 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         analytics_detection=getattr(args, "analytics_detection", False),
         skip_amp_variants=getattr(args, "skip_amp_variants", False),
         analytics_expected_ids=getattr(args, "analytics_expected_id", []) or [],
+        discover_javascript_urls=(getattr(args, "discover_js_urls", False) or getattr(args, "follow_js_urls", False)),
+        follow_javascript_urls=getattr(args, "follow_js_urls", False),
+        max_javascript_files_per_page=getattr(
+            args,
+            "max_js_files_per_page",
+            MAX_JAVASCRIPT_FILES_PER_PAGE_DEFAULT,
+        ),
+        max_javascript_bytes=getattr(
+            args,
+            "max_js_bytes",
+            MAX_JAVASCRIPT_BYTES_DEFAULT,
+        ),
+        max_javascript_candidates_per_page=getattr(
+            args,
+            "max_js_candidates_per_page",
+            MAX_JAVASCRIPT_CANDIDATES_PER_PAGE_DEFAULT,
+        ),
+        javascript_relative_base=getattr(args, "js_relative_base", "document"),
+        discover_css_urls=(
+            getattr(args, "discover_css_urls", False)
+            or getattr(args, "discover_style_attributes", False)
+            or getattr(args, "follow_speculative_urls", False)
+        ),
+        discover_style_attributes=getattr(args, "discover_style_attributes", False),
+        follow_speculative_urls=getattr(args, "follow_speculative_urls", False),
+        max_css_files_per_page=getattr(
+            args,
+            "max_css_files_per_page",
+            MAX_CSS_FILES_PER_PAGE_DEFAULT,
+        ),
+        max_css_bytes=getattr(args, "max_css_bytes", MAX_CSS_BYTES_DEFAULT),
+        max_css_candidates_per_page=getattr(
+            args,
+            "max_css_candidates_per_page",
+            MAX_CSS_CANDIDATES_PER_PAGE_DEFAULT,
+        ),
+        max_css_import_depth=getattr(
+            args,
+            "max_css_import_depth",
+            MAX_CSS_IMPORT_DEPTH_DEFAULT,
+        ),
+        max_outstanding_speculative_per_host=getattr(
+            args,
+            "max_outstanding_speculative_per_host",
+            MAX_OUTSTANDING_SPECULATIVE_PER_HOST_DEFAULT,
+        ),
+        discover_render_urls=(getattr(args, "render_discover", False) or getattr(args, "follow_rendered_links", False)),
+        follow_rendered_links=getattr(args, "follow_rendered_links", False),
+        render_discovery_max_raw_links=getattr(args, "render_discover_max_raw_links", 4),
+        render_discovery_min_scripts=getattr(args, "render_discover_min_scripts", 3),
+        max_render_discovery_pages=getattr(
+            args,
+            "max_render_discovery_pages",
+            MAX_RENDER_DISCOVERY_PAGES_DEFAULT,
+        ),
+        max_render_discovery_concurrency=getattr(args, "max_render_discovery_concurrency", 1),
+        max_render_requests_per_page=getattr(
+            args,
+            "max_render_requests_per_page",
+            MAX_RENDER_REQUESTS_PER_PAGE_DEFAULT,
+        ),
+        max_render_links_per_page=getattr(
+            args,
+            "max_render_links_per_page",
+            MAX_RENDER_LINKS_PER_PAGE_DEFAULT,
+        ),
         circuit_breaker_enabled=cb_enabled,
         circuit_breaker_failure_threshold=cb_threshold,
         circuit_breaker_recovery_seconds=cb_recovery,
@@ -949,6 +1026,158 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--archive-org-check", action="store_true", help="Seed from archive.org + run audit")
     parser.add_argument("--skip-sitemaps", action="store_true", help="Skip sitemap discovery")
+    js_discovery = parser.add_argument_group("Static JavaScript URL discovery")
+    js_discovery.add_argument(
+        "--discover-js-urls",
+        action="store_true",
+        help=(
+            "Inventory static URL-like string literals from inline and linked JavaScript. "
+            "Candidates are evidence only and are not crawled."
+        ),
+    )
+    js_discovery.add_argument(
+        "--follow-js-urls",
+        action="store_true",
+        help=(
+            "Also enqueue strict page-like JavaScript URL candidates in open crawls; "
+            "implies --discover-js-urls. API, action and asset candidates remain inventory only."
+        ),
+    )
+    js_discovery.add_argument(
+        "--max-js-files-per-page",
+        type=non_negative_int,
+        default=MAX_JAVASCRIPT_FILES_PER_PAGE_DEFAULT,
+        help=(
+            "Maximum linked JavaScript files fetched per HTML page "
+            f"(default {MAX_JAVASCRIPT_FILES_PER_PAGE_DEFAULT}; 0 = inline only)."
+        ),
+    )
+    js_discovery.add_argument(
+        "--max-js-bytes",
+        type=positive_int,
+        default=MAX_JAVASCRIPT_BYTES_DEFAULT,
+        help=(f"Maximum bytes scanned from each linked JavaScript response (default {MAX_JAVASCRIPT_BYTES_DEFAULT})."),
+    )
+    js_discovery.add_argument(
+        "--max-js-candidates-per-page",
+        type=positive_int,
+        default=MAX_JAVASCRIPT_CANDIDATES_PER_PAGE_DEFAULT,
+        help=(
+            "Maximum JavaScript URL evidence records retained per page "
+            f"(default {MAX_JAVASCRIPT_CANDIDATES_PER_PAGE_DEFAULT})."
+        ),
+    )
+    js_discovery.add_argument(
+        "--js-relative-base",
+        choices=("document", "document-and-asset"),
+        default="document",
+        help=(
+            "Resolve relative JS candidates against the document (default), or against both "
+            "document and linked asset for maximum recall and more likely phantom paths."
+        ),
+    )
+    static_discovery = parser.add_argument_group("Static CSS and speculative URL discovery")
+    static_discovery.add_argument(
+        "--discover-css-urls",
+        action="store_true",
+        help="Inventory URL tokens from inline, linked and bounded imported CSS; do not crawl them.",
+    )
+    static_discovery.add_argument(
+        "--discover-style-attributes",
+        action="store_true",
+        help="Also scan style attributes; implies --discover-css-urls.",
+    )
+    static_discovery.add_argument(
+        "--follow-speculative-urls",
+        action="store_true",
+        help=(
+            "Enqueue strict page-like JS/CSS candidates in open crawls; implies both discovery modes. "
+            "API, action and asset candidates remain inventory only."
+        ),
+    )
+    static_discovery.add_argument(
+        "--max-css-files-per-page",
+        type=non_negative_int,
+        default=MAX_CSS_FILES_PER_PAGE_DEFAULT,
+        help=f"Maximum linked/imported stylesheets fetched per page (default {MAX_CSS_FILES_PER_PAGE_DEFAULT}).",
+    )
+    static_discovery.add_argument(
+        "--max-css-bytes",
+        type=positive_int,
+        default=MAX_CSS_BYTES_DEFAULT,
+        help=f"Maximum bytes scanned from each linked stylesheet (default {MAX_CSS_BYTES_DEFAULT}).",
+    )
+    static_discovery.add_argument(
+        "--max-css-candidates-per-page",
+        type=positive_int,
+        default=MAX_CSS_CANDIDATES_PER_PAGE_DEFAULT,
+        help=f"Maximum CSS URL evidence records retained per page (default {MAX_CSS_CANDIDATES_PER_PAGE_DEFAULT}).",
+    )
+    static_discovery.add_argument(
+        "--max-css-import-depth",
+        type=non_negative_int,
+        default=MAX_CSS_IMPORT_DEPTH_DEFAULT,
+        help=f"Maximum linked @import traversal depth (default {MAX_CSS_IMPORT_DEPTH_DEFAULT}).",
+    )
+    static_discovery.add_argument(
+        "--max-outstanding-speculative-per-host",
+        type=non_negative_int,
+        default=MAX_OUTSTANDING_SPECULATIVE_PER_HOST_DEFAULT,
+        help=(
+            "Maximum queued/pending speculative page candidates per host "
+            f"(default {MAX_OUTSTANDING_SPECULATIVE_PER_HOST_DEFAULT}; 0 disables admission)."
+        ),
+    )
+    render_discovery = parser.add_argument_group("Render-time URL discovery")
+    render_discovery.add_argument(
+        "--render-discover",
+        action="store_true",
+        help=(
+            "Inventory browser network requests and hydrated-only anchors. HTTP backends render only "
+            "link-poor/script-heavy pages; network observations are never crawled."
+        ),
+    )
+    render_discovery.add_argument(
+        "--follow-rendered-links",
+        action="store_true",
+        help="Enqueue hydrated-only <a href> deltas in open crawls; implies --render-discover.",
+    )
+    render_discovery.add_argument(
+        "--render-discover-max-raw-links",
+        type=non_negative_int,
+        default=4,
+        help="Maximum raw crawlable links for selective HTTP rendering (default 4).",
+    )
+    render_discovery.add_argument(
+        "--render-discover-min-scripts",
+        type=non_negative_int,
+        default=3,
+        help="Minimum raw script elements for selective HTTP rendering (default 3).",
+    )
+    render_discovery.add_argument(
+        "--max-render-discovery-pages",
+        type=non_negative_int,
+        default=MAX_RENDER_DISCOVERY_PAGES_DEFAULT,
+        help=f"Maximum auxiliary render passes per run (default {MAX_RENDER_DISCOVERY_PAGES_DEFAULT}).",
+    )
+    render_discovery.add_argument(
+        "--max-render-discovery-concurrency",
+        type=positive_int,
+        default=1,
+        help="Maximum simultaneous auxiliary render passes (default 1).",
+    )
+    render_discovery.add_argument(
+        "--max-render-requests-per-page",
+        type=positive_int,
+        default=MAX_RENDER_REQUESTS_PER_PAGE_DEFAULT,
+        help=f"Maximum browser request evidence records per page (default {MAX_RENDER_REQUESTS_PER_PAGE_DEFAULT}).",
+    )
+    render_discovery.add_argument(
+        "--max-render-links-per-page",
+        type=positive_int,
+        default=MAX_RENDER_LINKS_PER_PAGE_DEFAULT,
+        help=f"Maximum hydrated-only link evidence records per page (default {MAX_RENDER_LINKS_PER_PAGE_DEFAULT}).",
+    )
     parser.add_argument(
         "--extraction-rules",
         help="Path to a JSON file of custom extraction rules (CSS/XPath/regex). "
@@ -1232,6 +1461,20 @@ async def _run_crawl(args: argparse.Namespace) -> int:
             summary += f", {job.retry_attempts} transient retries"
         if job.challenge_blocked_count:
             summary += f", {job.challenge_blocked_count} blocked by bot-challenge"
+        if job.javascript_url_candidate_count:
+            summary += f", {job.javascript_url_candidate_count} JS URL candidates"
+        if job.javascript_url_enqueued_count:
+            summary += f", {job.javascript_url_enqueued_count} JS candidates enqueued"
+        if job.css_url_candidate_count:
+            summary += f", {job.css_url_candidate_count} CSS URL candidates"
+        if job.css_url_enqueued_count:
+            summary += f", {job.css_url_enqueued_count} CSS candidates enqueued"
+        if job.speculative_capped_count:
+            summary += f", {job.speculative_capped_count} speculative candidates host-capped"
+        if job.render_url_candidate_count:
+            summary += f", {job.render_url_candidate_count} render URL candidates"
+        if job.render_dom_enqueued_count:
+            summary += f", {job.render_dom_enqueued_count} rendered links enqueued"
         if persist_errors:
             summary += f", {persist_errors} persist failures"
             if job.persist_failed_urls:
@@ -1610,6 +1853,53 @@ class _SavedDiscoveredLink(TypedDict, total=False):
     original_href: str | None
 
 
+class _SavedJavaScriptUrlCandidate(TypedDict, total=False):
+    url: str
+    source_kind: Literal["inline_script", "external_script"]
+    script_source: str
+    script_index: int | None
+    literal_kind: Literal[
+        "absolute",
+        "protocol_relative",
+        "root_relative",
+        "path_relative",
+        "query_relative",
+    ]
+    classification: Literal["page", "api", "asset", "action"]
+    follow_eligible: bool
+    occurrence_count: int
+    confidence: Literal["high", "medium", "low"]
+    confidence_weight: float
+    resolution_base: Literal["document", "asset"]
+
+
+class _SavedCssUrlCandidate(TypedDict, total=False):
+    url: str
+    source_kind: Literal["inline_style", "style_attribute", "external_stylesheet"]
+    stylesheet_source: str
+    style_index: int | None
+    token_kind: Literal["url", "import"]
+    classification: Literal["page", "api", "asset", "action"]
+    follow_eligible: bool
+    occurrence_count: int
+    confidence: Literal["high", "medium", "low"]
+    confidence_weight: float
+    resolution_base: Literal["document", "asset"]
+
+
+class _SavedRenderUrlCandidate(TypedDict, total=False):
+    url: str
+    source_kind: Literal["render_network", "render_dom"]
+    classification: Literal["page", "api", "asset", "action"]
+    follow_eligible: bool
+    resource_type: str | None
+    method: str
+    outcome: Literal["issued", "response", "finished", "failed"] | None
+    status: int | None
+    occurrence_count: int
+    confidence: Literal["high", "medium", "low"]
+
+
 class _SavedResult(TypedDict, total=False):
     requested_url: Required[str]
     final_url: Required[str]
@@ -1629,6 +1919,13 @@ class _SavedResult(TypedDict, total=False):
     content_hash_sha256: str | None
     content_hash_simhash: int | None
     discovered_links: list[_SavedDiscoveredLink]
+    javascript_url_candidates: list[_SavedJavaScriptUrlCandidate]
+    css_url_candidates: list[_SavedCssUrlCandidate]
+    speculative_rejection_counts: dict[str, int]
+    render_url_candidates: list[_SavedRenderUrlCandidate]
+    render_discovery_attempted: bool
+    render_discovery_complete: bool | None
+    render_discovery_skip_reason: str | None
     allowed_by_robots: bool | None
     skip_reason: str | None
     persist_error: str | None
@@ -1658,6 +1955,14 @@ class _SavedJob(TypedDict, total=False):
     budget_decoded_bytes: int
     budget_accounted_bytes: int
     budget_stop_reason: Literal["max_requests", "max_bytes"] | None
+    javascript_url_candidate_count: int
+    javascript_url_enqueued_count: int
+    css_url_candidate_count: int
+    css_url_enqueued_count: int
+    speculative_capped_count: int
+    render_url_candidate_count: int
+    render_dom_enqueued_count: int
+    render_discovery_attempt_count: int
     results: list[_SavedResult]
 
 
@@ -1668,6 +1973,10 @@ _REPORT_NAMES = (
     "hub-pages",
     "slowest",
     "cwv",
+    "js-url-candidates",
+    "css-url-candidates",
+    "render-url-candidates",
+    "render-attempts",
     "analytics-inventory",
     "missing-analytics",
     "missing-expected-id",
@@ -1687,6 +1996,14 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.slowest_pages(limit=args.limit)
     if name == "cwv":
         return await reports.worst_cwv_pages(limit=args.limit)
+    if name == "js-url-candidates":
+        return await reports.javascript_url_candidates()
+    if name == "css-url-candidates":
+        return await reports.css_url_candidates()
+    if name == "render-url-candidates":
+        return await reports.render_url_candidates()
+    if name == "render-attempts":
+        return await reports.render_attempts()
     if name == "analytics-inventory":
         return await reports.analytics_inventory()
     if name == "missing-analytics":
@@ -1755,8 +2072,20 @@ async def _run_report(args: argparse.Namespace) -> int:
         return EXIT_VALIDATION
     if not requested:
         # missing-expected-id needs an identifier, so it only joins the default
-        # set when --expected-id makes it answerable.
-        requested = [name for name in _REPORT_NAMES if name != "missing-expected-id" or args.expected_id]
+        # set when --expected-id makes it answerable. JS candidates are an
+        # opt-in, potentially high-volume inventory and stay explicitly named.
+        requested = [
+            name
+            for name in _REPORT_NAMES
+            if (name != "missing-expected-id" or args.expected_id)
+            and name
+            not in {
+                "js-url-candidates",
+                "css-url-candidates",
+                "render-url-candidates",
+                "render-attempts",
+            }
+        ]
     if "missing-expected-id" in requested and not args.expected_id:
         print("Error: report 'missing-expected-id' requires --expected-id", file=sys.stderr)
         return EXIT_VALIDATION
@@ -1793,6 +2122,9 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         DiscoveredLink,
         ExtractedContent,
         HreflangLink,
+        JavaScriptUrlCandidate,
+        CssUrlCandidate,
+        RenderUrlCandidate,
         RobotsDirectives,
     )
 
@@ -1858,6 +2190,75 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             )
         return links
 
+    def _load_javascript_candidates(
+        payload: list[_SavedJavaScriptUrlCandidate] | None,
+    ) -> list[JavaScriptUrlCandidate]:
+        candidates: list[JavaScriptUrlCandidate] = []
+        for item in payload or []:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            candidates.append(
+                JavaScriptUrlCandidate(
+                    url=str(item["url"]),
+                    source_kind=item.get("source_kind", "inline_script"),
+                    script_source=str(item.get("script_source", "")),
+                    script_index=item.get("script_index"),
+                    literal_kind=item.get("literal_kind", "absolute"),
+                    classification=item.get("classification", "page"),
+                    follow_eligible=bool(item.get("follow_eligible", False)),
+                    occurrence_count=int(item.get("occurrence_count", 1) or 1),
+                    confidence=item.get("confidence", "low"),
+                    confidence_weight=float(item.get("confidence_weight", 0.15) or 0.15),
+                    resolution_base=item.get("resolution_base", "document"),
+                )
+            )
+        return candidates
+
+    def _load_css_candidates(payload: list[_SavedCssUrlCandidate] | None) -> list[CssUrlCandidate]:
+        candidates: list[CssUrlCandidate] = []
+        for item in payload or []:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            candidates.append(
+                CssUrlCandidate(
+                    url=str(item["url"]),
+                    source_kind=item.get("source_kind", "inline_style"),
+                    stylesheet_source=str(item.get("stylesheet_source", "")),
+                    style_index=item.get("style_index"),
+                    token_kind=item.get("token_kind", "url"),
+                    classification=item.get("classification", "asset"),
+                    follow_eligible=bool(item.get("follow_eligible", False)),
+                    occurrence_count=int(item.get("occurrence_count", 1) or 1),
+                    confidence=item.get("confidence", "high"),
+                    confidence_weight=float(item.get("confidence_weight", 0.6) or 0.6),
+                    resolution_base=item.get("resolution_base", "asset"),
+                )
+            )
+        return candidates
+
+    def _load_render_candidates(
+        payload: list[_SavedRenderUrlCandidate] | None,
+    ) -> list[RenderUrlCandidate]:
+        candidates: list[RenderUrlCandidate] = []
+        for item in payload or []:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            candidates.append(
+                RenderUrlCandidate(
+                    url=str(item["url"]),
+                    source_kind=item.get("source_kind", "render_network"),
+                    classification=item.get("classification", "page"),
+                    follow_eligible=bool(item.get("follow_eligible", False)),
+                    resource_type=item.get("resource_type"),
+                    method=str(item.get("method", "GET")),
+                    outcome=item.get("outcome"),
+                    status=item.get("status"),
+                    occurrence_count=int(item.get("occurrence_count", 1) or 1),
+                    confidence=item.get("confidence", "high"),
+                )
+            )
+        return candidates
+
     def _load_result(item: _SavedResult) -> CrawlResult:
         return CrawlResult(
             requested_url=str(item["requested_url"]),
@@ -1876,6 +2277,13 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             content_hash_sha256=item.get("content_hash_sha256"),
             content_hash_simhash=item.get("content_hash_simhash"),
             discovered_links=_load_discovered_links(item.get("discovered_links")),
+            javascript_url_candidates=_load_javascript_candidates(item.get("javascript_url_candidates")),
+            css_url_candidates=_load_css_candidates(item.get("css_url_candidates")),
+            speculative_rejection_counts=dict(item.get("speculative_rejection_counts", {}) or {}),
+            render_url_candidates=_load_render_candidates(item.get("render_url_candidates")),
+            render_discovery_attempted=bool(item.get("render_discovery_attempted", False)),
+            render_discovery_complete=item.get("render_discovery_complete"),
+            render_discovery_skip_reason=item.get("render_discovery_skip_reason"),
             allowed_by_robots=item.get("allowed_by_robots"),
             skip_reason=item.get("skip_reason"),
             persist_error=item.get("persist_error"),
@@ -1926,6 +2334,14 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             budget_decoded_bytes=int(summary.get("budget_decoded_bytes", 0) or 0),
             budget_accounted_bytes=int(summary.get("budget_accounted_bytes", 0) or 0),
             budget_stop_reason=summary.get("budget_stop_reason"),
+            javascript_url_candidate_count=int(summary.get("javascript_url_candidate_count", 0) or 0),
+            javascript_url_enqueued_count=int(summary.get("javascript_url_enqueued_count", 0) or 0),
+            css_url_candidate_count=int(summary.get("css_url_candidate_count", 0) or 0),
+            css_url_enqueued_count=int(summary.get("css_url_enqueued_count", 0) or 0),
+            speculative_capped_count=int(summary.get("speculative_capped_count", 0) or 0),
+            render_url_candidate_count=int(summary.get("render_url_candidate_count", 0) or 0),
+            render_dom_enqueued_count=int(summary.get("render_dom_enqueued_count", 0) or 0),
+            render_discovery_attempt_count=int(summary.get("render_discovery_attempt_count", 0) or 0),
         )
 
     if isinstance(payload, dict) and "results" in payload:
@@ -1950,6 +2366,14 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             budget_decoded_bytes=int(job.get("budget_decoded_bytes", 0) or 0),
             budget_accounted_bytes=int(job.get("budget_accounted_bytes", 0) or 0),
             budget_stop_reason=job.get("budget_stop_reason"),
+            javascript_url_candidate_count=int(job.get("javascript_url_candidate_count", 0) or 0),
+            javascript_url_enqueued_count=int(job.get("javascript_url_enqueued_count", 0) or 0),
+            css_url_candidate_count=int(job.get("css_url_candidate_count", 0) or 0),
+            css_url_enqueued_count=int(job.get("css_url_enqueued_count", 0) or 0),
+            speculative_capped_count=int(job.get("speculative_capped_count", 0) or 0),
+            render_url_candidate_count=int(job.get("render_url_candidate_count", 0) or 0),
+            render_dom_enqueued_count=int(job.get("render_dom_enqueued_count", 0) or 0),
+            render_discovery_attempt_count=int(job.get("render_discovery_attempt_count", 0) or 0),
         )
 
     raise ValueError(f"Unsupported crawl artifact format: {path}")

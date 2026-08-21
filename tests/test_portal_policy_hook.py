@@ -438,7 +438,7 @@ async def test_unsupported_or_composite_content_encoding_is_opaque_to_engine(con
 
 
 @pytest.mark.asyncio
-async def test_crawl_many_save_includes_budget_summary_in_v2_artifact(tmp_path) -> None:
+async def test_crawl_many_save_includes_budget_summary_in_v4_artifact(tmp_path) -> None:
     policy = RecordingPolicy()
 
     async def page(_request: web.Request) -> web.Response:
@@ -468,7 +468,7 @@ async def test_crawl_many_save_includes_budget_summary_in_v2_artifact(tmp_path) 
 
     assert len(results) == 1
     artifact = json.loads(output.read_text(encoding="utf-8"))
-    assert artifact["schema_version"] == "crawler-cli/crawl-artifact/2"
+    assert artifact["schema_version"] == "crawler-cli/crawl-artifact/4"
     assert artifact["budget_requests_started"] == 1
     assert artifact["budget_accounted_bytes"] == 20
     assert artifact["budget_stop_reason"] == "max_bytes"

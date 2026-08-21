@@ -1,8 +1,8 @@
-"""Golden contract: the saved crawl artifact schema (tickets 3344, 3685).
+"""Golden contract: the saved crawl artifact schema (tickets 3344, 3685, 155, 156).
 
-Freezes ``crawler-cli/crawl-artifact/2``: the exact field set that
-``serialize_crawl_job`` emits (redirect chains included) and the loader's
-tolerance for legacy artifacts without ``schema_version``.
+Freezes ``crawler-cli/crawl-artifact/4``: the exact field set that
+``serialize_crawl_job`` emits (redirect chains and static URL evidence included)
+and the loader's tolerance for legacy artifacts without ``schema_version``.
 """
 
 from __future__ import annotations
@@ -34,6 +34,13 @@ EXPECTED_RESULT_KEYS = {
     "content_hash_sha256",
     "content_hash_simhash",
     "discovered_links",
+    "javascript_url_candidates",
+    "css_url_candidates",
+    "speculative_rejection_counts",
+    "render_url_candidates",
+    "render_discovery_attempted",
+    "render_discovery_complete",
+    "render_discovery_skip_reason",
     "allowed_by_robots",
     "skip_reason",
     "persist_error",
@@ -73,6 +80,14 @@ EXPECTED_JOB_KEYS = {
     "budget_decoded_bytes",
     "budget_accounted_bytes",
     "budget_stop_reason",
+    "javascript_url_candidate_count",
+    "javascript_url_enqueued_count",
+    "css_url_candidate_count",
+    "css_url_enqueued_count",
+    "speculative_capped_count",
+    "render_url_candidate_count",
+    "render_dom_enqueued_count",
+    "render_discovery_attempt_count",
     "results",
 }
 
@@ -89,7 +104,7 @@ def _job() -> CrawlJobResult:
 
 def test_crawl_artifact_matches_golden() -> None:
     payload = serialize_crawl_job(_job())
-    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/2"
+    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/4"
     assert set(payload.keys()) == EXPECTED_JOB_KEYS
     first_result = payload["results"][0]  # type: ignore[index]
     assert set(first_result.keys()) == EXPECTED_RESULT_KEYS
