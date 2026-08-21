@@ -7,6 +7,66 @@ description: Use this skill when you need to run a bounded resumable robots-awar
 
 Use this skill for tasks in this repo that need fetching, extraction, sitemap parsing, or asyncpg persistence.
 
+## What This Is / What This Is Not
+
+"Adversarial crawler" is used for three different things, and only the third
+describes this repository.
+
+1. **An evasion crawler** rotates identities to defeat bot management and keeps
+   scraping against the site's rules. This is not that.
+2. **A security-testing or pentest scanner** injects payloads, forces its way to
+   hidden endpoints, or manipulates identifiers to reach other users' data. This
+   is not that either.
+3. **An evidence crawler for technical SEO** — what `crawler_cli` is. It does
+   not trust the CMS. It observes what a site actually serves and compares
+   independent sources of evidence: HTML against HTTP headers, both against the
+   sitemaps, one client against a second client, and the raw response against a
+   rendered one. Disagreements are recorded as candidates for manual review. It
+   honours `robots.txt` and crawl-delay by default and is meant to be run on
+   sites the operator is authorised to fetch.
+
+### This product is
+
+- An authorised technical-SEO evidence crawler.
+- A client that distrusts CMS claims and compares independent evidence sources.
+- A passive and bounded exposure and configuration inventory tool.
+- A safe differential measurement tool over exact operator-supplied inputs.
+- A crawler that is expected to protect both the target site and its own
+  execution host.
+
+### This product is not
+
+- A bot that changes identity or egress until a blocked request returns 200.
+- A CAPTCHA solver or a WAF-specific bypass toolkit.
+- A scanner that injects SQL, XSS, SSTI, command, path-traversal, or SSRF
+  payloads.
+- A forced-browsing, credential-stuffing, IDOR/BOLA mutation, or
+  privilege-escalation tool.
+- A system that treats a spoofed search-engine User-Agent as evidence of how
+  the real search engine treats the site.
+
+### Out of scope
+
+Never build, and never document as a feature:
+
+- Rotating user agents or IP addresses *in order to*
+  evade rate limits or bot management.
+- WAF or CAPTCHA solving as a goal.
+- Crawling in spite of `Disallow` as the happy path.
+- Injection, XSS, IDOR, credential stuffing, or hidden-admin fuzzing.
+
+The dual-use flags (`--impersonate`, `--obscura-stealth`, `--custom-ua`,
+`--ignore-robots`, the proxy flags, and challenge escalation) exist for
+authorised measurement of how a CDN or origin treats a browser-like client. They
+are not a bypass kit, and a spoofed search-engine User-Agent is not evidence of
+how that search engine actually treats the site. Challenge escalation may make
+one alternate-egress attempt from a proxy pool the authorised crawl had already
+selected; it is never a loop that keeps trying identities until a 200.
+
+Use "observe", "inventory", "compare", "candidate", and "manual review" in code
+comments, docs, and reports. Avoid "bypass", "beat", "exploit", and "prove
+vulnerable".
+
 ## When To Use
 
 Use this skill when the task involves any of the following:
