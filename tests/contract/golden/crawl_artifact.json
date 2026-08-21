@@ -1,5 +1,5 @@
 {
-  "schema_version": "crawler-cli/crawl-artifact/4",
+  "schema_version": "crawler-cli/crawl-artifact/5",
   "mode": "list",
   "run_id": "run-3344",
   "seed_urls": [
@@ -31,6 +31,7 @@
   "render_url_candidate_count": 0,
   "render_dom_enqueued_count": 0,
   "render_discovery_attempt_count": 0,
+  "authorization_scope": null,
   "results": [
     {
       "requested_url": "https://old.example/a",

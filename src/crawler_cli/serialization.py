@@ -4,14 +4,14 @@ from typing import Any
 
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, ExtractedContent, FetchResponse
 
-CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/4"
+CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/5"
 """Schema identifier stamped on saved crawl artifacts (ticket 3344).
 
 Downstream consumers (e.g. the portal migration worker) pin on this string;
-v2 added explicit partial-body and run-budget terminal data; v3 added static
-JavaScript URL candidate evidence; v4 adds CSS candidates, confidence/base
-metadata, rejection counts, and speculative admission totals. Loaders keep
-accepting legacy artifacts and missing fields."""
+v2 added explicit partial-body and run-budget terminal data; v3 and v4 added
+the speculative URL-discovery evidence; v5 adds an always-present nullable
+``authorization_scope`` projection. Loaders accept unstamped legacy artifacts
+and explicitly known historical versions."""
 
 
 def serialize_browser_runtime(runtime: BrowserRuntime) -> dict[str, object]:
@@ -199,7 +199,7 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
 
 def serialize_job_summary_metadata(job: CrawlJobResult, *, saved_to: str | None = None) -> dict[str, object]:
     """Aggregate fields for JSONL summary lines and crawl metadata (tickets 092, 115)."""
-    return {
+    payload: dict[str, object] = {
         "crawled_count": job.crawled_count,
         "blocked_count": job.blocked_count,
         "persist_error_count": job.persist_error_count,
@@ -226,7 +226,9 @@ def serialize_job_summary_metadata(job: CrawlJobResult, *, saved_to: str | None 
         "render_url_candidate_count": job.render_url_candidate_count,
         "render_dom_enqueued_count": job.render_dom_enqueued_count,
         "render_discovery_attempt_count": job.render_discovery_attempt_count,
+        "authorization_scope": job.authorization_scope,
     }
+    return payload
 
 
 def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> dict[str, object]:
@@ -262,6 +264,7 @@ def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> 
         "render_url_candidate_count": job.render_url_candidate_count,
         "render_dom_enqueued_count": job.render_dom_enqueued_count,
         "render_discovery_attempt_count": job.render_discovery_attempt_count,
+        "authorization_scope": job.authorization_scope,
         "results": [serialize_crawl_result(result) for result in job.results],
     }
     if job.max_urls is not None:

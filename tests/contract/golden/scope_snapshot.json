@@ -1,0 +1,26 @@
+{
+  "schema_version": "crawler-cli/scope-snapshot/1",
+  "manifest_schema_version": "crawler-cli/scope-manifest/1",
+  "authorization_reference": "CHANGE-1234",
+  "operator": "team-evidence",
+  "valid_from": "2026-08-21T09:00:00Z",
+  "valid_until": "2026-08-21T17:00:00Z",
+  "allowed_origins": [
+    "https://www.example.com:443",
+    "http://staging.example.com:8080"
+  ],
+  "allowed_path_prefixes": [
+    "/shop",
+    "/help"
+  ],
+  "excluded_path_prefixes": [
+    "/customer/export"
+  ],
+  "allowed_methods": [
+    "GET",
+    "HEAD"
+  ],
+  "allow_private_network": false,
+  "allow_ignore_robots": false,
+  "attestation_notice": "This scope manifest records the operator's own attestation of authorisation. It is not proof of legal permission and does not replace organisational approval."
+}

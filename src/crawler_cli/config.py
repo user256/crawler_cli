@@ -14,6 +14,7 @@ from .validators import (
 )
 
 if TYPE_CHECKING:
+    from .authorisation import ScopePredicate, ScopePurpose
     from .portal_policy import PortalConnectionPolicy
 
 
@@ -277,6 +278,14 @@ class CrawlConfig:
     """Retain raw_html/extracted/discovered_links on results after persist
     during open crawls.  Off by default so long crawls stay memory-bounded
     (ticket-059); library callers that read job.results directly can opt in."""
+    scope_predicate: ScopePredicate | None = None
+    """The one compiled authorisation-scope predicate for this run (ticket 148).
+
+    ``None`` means no scope manifest is active, which is the ordinary
+    technical-SEO crawl: behaviour is exactly as it was before ticket 148. When
+    a manifest is active, every URL admission decision in this class consults
+    this single predicate, and the engine calls it again at the redirect
+    boundary. Nothing else re-derives origin or path scope."""
 
     def __post_init__(self) -> None:
         if self.follow_javascript_urls:
@@ -428,13 +437,46 @@ class CrawlConfig:
             return False
         return self.path_restriction not in self._url_path(url)
 
+    def scope_denial_reason(
+        self,
+        url: str,
+        *,
+        purpose: ScopePurpose = "discovered",
+        method: str = "GET",
+    ) -> str | None:
+        """Return the scope skip reason for *url*, or None when it is in scope.
+
+        This is the only place in the configuration layer that consults the
+        compiled authorisation predicate (ticket 148). When no scope manifest is
+        active it returns None immediately and ordinary crawling is unaffected.
+        """
+        if self.scope_predicate is None:
+            return None
+        return self.scope_predicate.decide(url, purpose=purpose, method=method).skip_reason
+
+    def url_admission_reason(
+        self,
+        url: str,
+        *,
+        purpose: ScopePurpose = "discovered",
+    ) -> str | None:
+        """Return why *url* must not be fetched, or None when it is admissible.
+
+        This is the shared admission decision for every URL class the engine
+        handles. Local path flags are evaluated first because they are the
+        cheaper and more specific answer, then the authorisation-scope predicate
+        is consulted. Both are narrowing-only, so their order does not change
+        which URLs are admitted, only which reason is reported.
+        """
+        if self.is_path_excluded(url):
+            return "path_exclude"
+        if self.is_path_restricted_out(url):
+            return "path_restriction"
+        return self.scope_denial_reason(url, purpose=purpose)
+
     def should_crawl_url(self, url: str) -> bool:
         """Return False when the URL is discovered but must not be fetched."""
-        if self.is_path_excluded(url):
-            return False
-        if self.is_path_restricted_out(url):
-            return False
-        return True
+        return self.url_admission_reason(url) is None
 
     def user_agent_for(self, url: str) -> str:
         """Resolve the User-Agent for *url* (ticket 080). A host matches a
@@ -452,11 +494,12 @@ class CrawlConfig:
         return self.user_agent
 
     def path_skip_detail(self, url: str) -> str:
-        if self.is_path_excluded(url):
-            return "path_exclude"
-        if self.is_path_restricted_out(url):
-            return "path_restriction"
-        return ""
+        """Return the provenance detail for a URL that was not admitted.
+
+        The empty string means the URL was admissible, which keeps the existing
+        ``path_skip_detail(url) or fallback`` call pattern working unchanged.
+        """
+        return self.url_admission_reason(url) or ""
 
     def is_host_allowed(self, url: str, seeds: list[str]) -> bool:
         """Check if a URL's host is allowed given the crawl constraints."""

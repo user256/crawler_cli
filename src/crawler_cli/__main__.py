@@ -584,12 +584,28 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     headed = getattr(args, "headed", False)
     playwright_headless = False if using_real_profile and not headed else not headed
 
+    from .authorisation import assert_cli_narrows_scope, compile_scope_predicate, load_scope_manifest
     from .config import parse_ua_map
     from .portal_policy import load_connection_policy
 
     ua_map = parse_ua_map(getattr(args, "ua", None) or [])
     policy_spec = getattr(args, "portal_url_policy", "") or ""
     portal_connection_policy = load_connection_policy(policy_spec) if policy_spec else None
+
+    # Ticket 148: load and time-validate the authorisation manifest, then
+    # compile the one predicate this run will use. Both happen here, well
+    # before a backend or a store exists, so an invalid or expired manifest
+    # cannot have produced any DNS or HTTP activity.
+    manifest_path = getattr(args, "scope_manifest", "") or ""
+    scope_predicate = compile_scope_predicate(load_scope_manifest(manifest_path)) if manifest_path else None
+    assert_cli_narrows_scope(
+        scope_predicate,
+        allowed_hosts=allowed_hosts,
+        offsite=bool(getattr(args, "offsite", False)),
+        ignore_robots=bool(getattr(args, "ignore_robots", False)),
+        ignore_robots_confirmed=bool(getattr(args, "confirm_ignore_robots", False)),
+        seed_from_archive=bool(getattr(args, "archive_org_check", False)),
+    )
 
     return CrawlConfig(
         # backend is built from the --http-backend choices plus the "playwright"
@@ -737,6 +753,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         obscura_fetch_subprocess=getattr(args, "obscura_fetch", False),
         curl_impersonate=curl_impersonate,
         per_host_concurrency=getattr(args, "per_host_concurrency", 4),
+        scope_predicate=scope_predicate,
     )
 
 
@@ -983,11 +1000,36 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "client. A spoofed search-engine User-Agent is NOT evidence of how that search "
         "engine actually treats the site.",
     )
+    authorisation = parser.add_argument_group("Authorisation and scope manifest")
+    authorisation.add_argument(
+        "--scope-manifest",
+        metavar="PATH",
+        help=(
+            "Path to a crawler-cli/scope-manifest/1 JSON document declaring the operator's asserted "
+            "authorisation: exact origins, path prefixes, methods, and a mandatory UTC validity window. "
+            "The manifest is read and validated before any network activity, and every URL class "
+            "(seed, discovered link, sitemap, robots.txt, redirect hop, probe) is checked against it. "
+            "Existing scope flags may narrow it and can never widen it. This records operator "
+            "ATTESTATION only: it is not proof of legal permission and does not replace organisational "
+            "approval. Ordinary technical-SEO crawling does not require it."
+        ),
+    )
+    authorisation.add_argument(
+        "--confirm-ignore-robots",
+        action="store_true",
+        help=(
+            "Explicit confirmation for --ignore-robots. A scope manifest must also permit the "
+            "override when one is active; the default remains to honour robots.txt and crawl-delay."
+        ),
+    )
     parser.add_argument(
         "--ignore-robots",
         action="store_true",
-        help="Explicit robots.txt override for an authorised job. The default is to honour "
-        "robots.txt and crawl-delay; crawling in spite of Disallow is not the happy path.",
+        help=(
+            "Explicit robots.txt override for an authorised job. The default remains to honour robots "
+            "and crawl-delay. This must be accompanied by --confirm-ignore-robots; with "
+            "--scope-manifest, the manifest must also set allow_ignore_robots."
+        ),
     )
     parser.add_argument("--offsite", action="store_true", help="Follow off-site links")
     parser.add_argument(
@@ -1385,6 +1427,21 @@ async def _run_crawl(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
     config.default_open_crawl_limit = args.max_pages
+
+    # Ticket 148: operator-supplied inputs are validated as a whole before a
+    # backend or a store exists. A mixed valid/invalid set is refused entirely
+    # rather than silently reduced, so a run never reports success while quietly
+    # omitting part of what was asked for.
+    if config.scope_predicate is not None:
+        from .authorisation import assert_inputs_in_scope, describe_manifest
+
+        try:
+            assert_inputs_in_scope(config.scope_predicate, seeds, label="seed")
+            assert_inputs_in_scope(config.scope_predicate, config.csv_urls, label="CSV input")
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return EXIT_VALIDATION
+        print(describe_manifest(config.scope_predicate.manifest))
 
     if config.circuit_breaker_enabled:
         logger.info(
@@ -1963,6 +2020,7 @@ class _SavedJob(TypedDict, total=False):
     render_url_candidate_count: int
     render_dom_enqueued_count: int
     render_discovery_attempt_count: int
+    authorization_scope: dict[str, Any] | None
     results: list[_SavedResult]
 
 
@@ -2298,13 +2356,17 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             redirect_chain=list(item.get("redirect_chain", []) or []),
         )
 
+    known_artifact_versions = frozenset(
+        f"crawler-cli/crawl-artifact/{version}" for version in range(1, 6)
+    )
+
     def _validate_schema_version(payload: Mapping[str, object]) -> None:
-        """Accept legacy unstamped JSONL, but reject a stamped unknown schema."""
+        """Accept unstamped or known historical artifacts, reject unknown stamps."""
         schema_version = payload.get("schema_version")
-        if schema_version is not None and schema_version != CRAWL_ARTIFACT_SCHEMA_VERSION:
+        if schema_version is not None and schema_version not in known_artifact_versions:
             raise ValueError(
                 f"Unsupported crawl artifact schema version: {schema_version!r} "
-                f"(expected {CRAWL_ARTIFACT_SCHEMA_VERSION})"
+                f"(known versions: {', '.join(sorted(known_artifact_versions))})"
             )
 
     raw_text = path.read_text(encoding="utf-8")
@@ -2342,6 +2404,11 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             render_url_candidate_count=int(summary.get("render_url_candidate_count", 0) or 0),
             render_dom_enqueued_count=int(summary.get("render_dom_enqueued_count", 0) or 0),
             render_discovery_attempt_count=int(summary.get("render_discovery_attempt_count", 0) or 0),
+            authorization_scope=(
+                dict(summary["authorization_scope"])
+                if isinstance(summary.get("authorization_scope"), dict)
+                else None
+            ),
         )
 
     if isinstance(payload, dict) and "results" in payload:
@@ -2374,6 +2441,11 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             render_url_candidate_count=int(job.get("render_url_candidate_count", 0) or 0),
             render_dom_enqueued_count=int(job.get("render_dom_enqueued_count", 0) or 0),
             render_discovery_attempt_count=int(job.get("render_discovery_attempt_count", 0) or 0),
+            authorization_scope=(
+                dict(job["authorization_scope"])
+                if isinstance(job.get("authorization_scope"), dict)
+                else None
+            ),
         )
 
     raise ValueError(f"Unsupported crawl artifact format: {path}")

@@ -293,6 +293,14 @@ class CrawlJobResult:
     render_url_candidate_count: int = 0
     render_dom_enqueued_count: int = 0
     render_discovery_attempt_count: int = 0
+    authorization_scope: dict[str, Any] | None = None
+    """Canonical, secret-free scope snapshot when a scope manifest was active.
+
+    ``None`` for an ordinary technical-SEO crawl, which stays manifest-optional
+    (ticket 148). When populated it carries the authorisation reference, the
+    validity window, the exact allowed origins, the path policy, and the
+    attestation notice — never the manifest's free-text notes or its filesystem
+    path."""
 
     @property
     def crawled_count(self) -> int:
