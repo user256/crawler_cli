@@ -1017,8 +1017,9 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "--confirm-ignore-robots",
         action="store_true",
         help=(
-            "Explicit confirmation for --ignore-robots. A scope manifest must also permit the "
-            "override when one is active; the default remains to honour robots.txt and crawl-delay."
+            "Explicit confirmation that accompanies --ignore-robots when a scope manifest is active. "
+            "The manifest's allow_ignore_robots permits the choice; this flag makes it. Both are "
+            "required, and the default remains to honour robots.txt and its crawl-delay."
         ),
     )
     parser.add_argument(
@@ -1026,8 +1027,8 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help=(
             "Explicit robots.txt override for an authorised job. The default remains to honour robots "
-            "and crawl-delay. This must be accompanied by --confirm-ignore-robots; with "
-            "--scope-manifest, the manifest must also set allow_ignore_robots."
+            "and crawl-delay. With --scope-manifest, this is accepted only when the manifest sets "
+            "allow_ignore_robots and --confirm-ignore-robots are also supplied."
         ),
     )
     parser.add_argument("--offsite", action="store_true", help="Follow off-site links")

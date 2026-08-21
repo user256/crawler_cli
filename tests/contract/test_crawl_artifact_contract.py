@@ -154,12 +154,13 @@ def test_loader_accepts_known_historical_schema_versions(tmp_path: Path, version
     assert _load_saved_crawl(path).mode == "list"
 
 
-def test_jsonl_loader_validates_a_present_summary_schema_version(tmp_path) -> None:
+@pytest.mark.parametrize("version", range(1, 6))
+def test_jsonl_loader_accepts_a_known_summary_schema_version(tmp_path: Path, version: int) -> None:
     path = tmp_path / "crawl.jsonl"
     result = {"requested_url": "https://example.test/", "final_url": "https://example.test/", "status": 200}
     summary = {
         "__type": "summary",
-        "schema_version": CRAWL_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": f"crawler-cli/crawl-artifact/{version}",
         "mode": "open",
         "seed_urls": ["https://example.test/"],
     }
