@@ -18,6 +18,7 @@ from crawler_cli.compare_urls import (
     normalize_url_for_match,
     rows_failing,
 )
+from crawler_cli.compare_urls import _normalize_rfc3986_component  # parity fixtures, ticket 3784
 from crawler_cli.hashing import sha256_hash, simhash64
 from crawler_cli.models import CrawlResult, ExtractedContent, RobotsDirectives
 
@@ -198,6 +199,36 @@ def test_normalize_shared_fixture_table_matches_php_urlidentity_v2():
         )
     # Deliberately non-equal in a path segment, exactly as v1 and v2 both hold.
     assert normalize_url_for_match("https://h/a%20b") != normalize_url_for_match("https://h/a+b")
+
+
+def test_normalize_invalid_escape_parity_fixture_table_matches_php():
+    # Portal ticket 3784. The PHP normaliser used to uppercase the two
+    # characters after any "%", so "a%zzb" became "a%ZZb" while this side left
+    # it alone — one identity in the crawler, two in Portal, and the parity
+    # engine compares the two. RFC 3986 section 6.2.2.1 normalises the case of
+    # *valid* %HH escapes only; anything else is literal text.
+    #
+    # These rows are the same table asserted by Portal's
+    # api/bin/test-url-canonical.php ("invalid-escape parity fixtures"). Keep
+    # the two in step: a change to either normaliser must change both files.
+    parity_fixtures = [
+        ("/a%zzb", "/a%zzb"),
+        ("/a%ZZb", "/a%ZZb"),
+        ("/a%z", "/a%z"),
+        ("/a%", "/a%"),
+        ("/%", "/%"),
+        ("/a%2Gb", "/a%2Gb"),
+        ("/a%%20b", "/a%%20b"),
+        ("/a%ffb", "/a%FFb"),
+        ("/a%2fb", "/a%2Fb"),
+        ("/a%7eb", "/a~b"),
+    ]
+    for component, expected in parity_fixtures:
+        assert _normalize_rfc3986_component(component) == expected, component
+    # An invalid escape whose letters differ only in case stays two identities.
+    assert _normalize_rfc3986_component("/a%zzb") != _normalize_rfc3986_component("/a%ZZb")
+    # And the same holds through the full URL entry point the matcher uses.
+    assert normalize_url_for_match("https://h/a%zzb") != normalize_url_for_match("https://h/a%ZZb")
 
 
 def test_verdict_ok_when_location_differs_only_in_escape_case():
