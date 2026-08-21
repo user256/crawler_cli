@@ -5,14 +5,15 @@ from typing import Any
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, ExtractedContent, FetchResponse
 from .redaction import redact_headers
 
-CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/6"
+CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/7"
 """Schema identifier stamped on saved crawl artifacts (ticket 3344).
 
 Downstream consumers (e.g. the portal migration worker) pin on this string;
 v2 added explicit partial-body and run-budget terminal data; v3 and v4 added
 the speculative URL-discovery evidence; v5 adds an always-present nullable
 ``authorization_scope`` projection; v6 redacts response headers in exported
-artifacts. Raw headers stay on the in-memory result for crawler analysis.
+artifacts; v7 adds JSON-LD parser provenance and compatibility diagnostics.
+Raw headers stay on the in-memory result for crawler analysis.
 Loaders accept unstamped legacy artifacts and explicitly known historical
 versions."""
 
@@ -63,6 +64,16 @@ def serialize_fetch_response(response: FetchResponse, *, include_text: bool = Tr
     return payload
 
 
+def _serialize_schema_item(item: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(item)
+    payload.setdefault(
+        "parser_mode",
+        "legacy-unspecified" if payload.get("format") == "json-ld" else None,
+    )
+    payload.setdefault("compatibility_diagnostics", [])
+    return payload
+
+
 def serialize_extracted_content(extracted: ExtractedContent) -> dict[str, object]:
     return {
         "title": extracted.title,
@@ -79,7 +90,7 @@ def serialize_extracted_content(extracted: ExtractedContent) -> dict[str, object
         "text": extracted.text,
         "word_count": extracted.word_count,
         "metadata": extracted.metadata,
-        "schema_data": extracted.schema_data,
+        "schema_data": [_serialize_schema_item(item) for item in extracted.schema_data],
     }
 
 

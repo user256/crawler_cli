@@ -182,6 +182,37 @@ class CrawlReports:
             run_id,
         )
 
+    async def schema_compatibility(self) -> list[dict[str, object]]:
+        """Run-scoped JSON-LD single-unescape compatibility findings."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT
+                u.url,
+                COALESCE(schema_item ->> 'type', 'Unknown') AS schema_type,
+                COALESCE(schema_item ->> 'parser_mode', 'legacy-unspecified') AS parser_mode,
+                COALESCE((schema_item ->> 'is_valid')::BOOLEAN, FALSE) AS is_valid,
+                diagnostic ->> 'code' AS diagnostic_code,
+                diagnostic ->> 'severity' AS severity,
+                COALESCE((diagnostic ->> 'script_position')::INTEGER, schema_ordinal - 1) AS script_position,
+                diagnostic ->> 'json_pointer' AS json_pointer,
+                diagnostic ->> 'location_kind' AS location_kind,
+                diagnostic ->> 'evidence' AS evidence,
+                diagnostic ->> 'source_evidence' AS source_evidence,
+                diagnostic ->> 'remediation' AS remediation
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.schema_json, '[]'::jsonb))
+                WITH ORDINALITY AS schema_rows(schema_item, schema_ordinal)
+            CROSS JOIN LATERAL jsonb_array_elements(
+                COALESCE(schema_item -> 'compatibility_diagnostics', '[]'::jsonb)
+            ) AS diagnostics(diagnostic)
+            WHERE s.run_id = $1
+            ORDER BY u.url, script_position, diagnostic_code, json_pointer
+            """,
+            run_id,
+        )
+
     async def as_json(self) -> str:
         payload = {
             "orphans": await self.orphan_pages(),

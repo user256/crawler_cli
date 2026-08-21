@@ -589,6 +589,9 @@ crawler-cli report hub-pages --min-outlinks 10 --postgres-dsn ...
 crawler-cli report missing-analytics --vendor ga4 --postgres-dsn ...
 crawler-cli report missing-expected-id --expected-id G-XXXX --postgres-dsn ...
 
+# JSON-LD values affected by Google's single HTML-unescape parsing behavior
+crawler-cli report schema-compatibility --postgres-dsn ... --crawl-run-id crawl-20260716-a
+
 # Machine-readable output
 crawler-cli report --format json --out report.json --postgres-dsn ...
 crawler-cli report --format csv --out ./reports/ --postgres-dsn ...   # one CSV per report
@@ -598,7 +601,11 @@ Available reports: `orphans` (snapshot pages with no inlink), `indexability`
 (meta/header/overall indexability per URL), `redirect-chains`, `hub-pages`
 (pages with `--min-outlinks`+ outlinks), `slowest` (TTFB/duration),
 `cwv` (lab LCP/CLS/INP — needs a crawl with `--web-vitals`),
-`analytics-inventory`, `missing-analytics`, and `missing-expected-id`.
+`analytics-inventory`, `missing-analytics`, `missing-expected-id`, and
+`schema-compatibility`. The schema report separates possible residual
+double-escape warnings from JSON made invalid by the single unescape pass; it
+does not claim that either observation alone determines rich-result
+eligibility.
 Passing no report names runs everything except `missing-expected-id`, which
 joins the default set only when `--expected-id` is supplied. Like the other
 snapshot readers, `report` requires `--crawl-run-id` when the database holds
@@ -687,7 +694,7 @@ crawler-cli compare-urls --pairs mapping.csv \
 
 Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any` and exits **3** (findings) when tripped — distinct from `2` (usage error). Replacements are literal strings applied in order (no regex in v1).
 
-JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/6`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
+JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/7`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
 
 ### 4. Storage lifecycle
 

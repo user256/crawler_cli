@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Breaking for artifact consumers:** saved crawl artifacts are stamped
-  `crawler-cli/crawl-artifact/6`, carrying the speculative-discovery evidence
+  `crawler-cli/crawl-artifact/7`, carrying the speculative-discovery evidence
   arrays, a nullable `authorization_scope`, and redacted response-header
   values. The terminal budget counters introduced in `/2` are retained.
   Loading accepts known historical versions.
@@ -60,8 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canonical, secret-free scope snapshot (`crawler-cli/scope-snapshot/1`) and its
   digest; a changed digest blocks `--resume` and is deliberately not waivable by
   `--allow-run-config-mismatch`. Every saved artifact now carries the nullable
-  `authorization_scope` field and uses `crawler-cli/crawl-artifact/6`; the
-  loader accepts known historic versions `/1` through `/6` and unstamped legacy
+  `authorization_scope` field and uses `crawler-cli/crawl-artifact/7`; the
+  loader accepts known historic versions `/1` through `/7` and unstamped legacy
   artifacts. The manifest records operator **attestation** only: it is not proof
   of legal permission and does not replace organisational approval.
 
@@ -80,7 +80,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `security_evidence_raw` and `security_run_retention` tables are covered by
   `compact-crawl` and `delete-crawl` by exact run id. See
   `docs/security-evidence-contract.md`, including what remains sensitive after
-   automated redaction.
+
+- Google-compatible JSON-LD parsing (ticket 159): embedded JSON-LD receives
+  exactly one HTML-unescape pass before RFC 8259 parsing, retains raw source,
+  and records occurrence-level diagnostics for residual double escapes or
+  JSON made invalid by that pass. PostgreSQL snapshots and the new
+  `schema-compatibility` report preserve the evidence without treating a
+  parser warning as proof of rich-result ineligibility. Saved crawl artifacts
+   advance additively to `crawler-cli/crawl-artifact/7`.
 
 ## [0.3.0] - 2026-08-10
 

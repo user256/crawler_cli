@@ -22,6 +22,7 @@ import pytest
 import pytest_asyncio
 
 from crawler_cli.detection.analytics import AnalyticsDetectionResult, AnalyticsHit
+from crawler_cli.extract import extract_page_data
 from crawler_cli.hashing import sha256_hash, simhash64
 from crawler_cli.models import DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
 from crawler_cli.models import (
@@ -523,6 +524,50 @@ async def test_web_vitals_round_trip(store: AsyncpgStore) -> None:
     assert by_url["https://example.com/slow"]["lcp_ms"] == 2500.0
     assert by_url["https://example.com/slow"]["cls"] == 0.12
     assert by_url["https://example.com/slow"]["inp_ms"] == 190.0
+
+
+@pytest.mark.asyncio
+async def test_json_ld_compatibility_persistence_and_run_scoped_report(store: AsyncpgStore) -> None:
+    url = "https://example.com/schema"
+    html = """
+    <script type="application/ld+json">
+    {"@context":"https://schema.org","@type":"Thing","name":"A &amp;amp; B"}
+    </script>
+    """
+    await store.persist(
+        CrawlResult(
+            requested_url=url,
+            final_url=url,
+            status=200,
+            headers={"content-type": "text/html"},
+            content_type="text/html",
+            fetch_backend="aiohttp",
+            extracted=extract_page_data(html, url, {}),
+            raw_html=html,
+        )
+    )
+
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT sd.parser_mode, sd.compatibility_diagnostics
+            FROM schema_data sd
+            JOIN urls u ON u.id = sd.url_id
+            WHERE u.url = $1
+            """,
+            url,
+        )
+    assert row is not None
+    assert row["parser_mode"] == "google-single-html-unescape-v1"
+    assert json.loads(row["compatibility_diagnostics"])[0]["code"] == "jsonld_possible_double_escape"
+
+    report_rows = await CrawlReports(store).schema_compatibility()
+    assert len(report_rows) == 1
+    assert report_rows[0]["url"] == url
+    assert report_rows[0]["diagnostic_code"] == "jsonld_possible_double_escape"
+    assert report_rows[0]["json_pointer"] == "/name"
+    assert report_rows[0]["is_valid"] is True
 
 
 @pytest.mark.asyncio
