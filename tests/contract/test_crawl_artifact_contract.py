@@ -16,7 +16,11 @@ from contract_fixtures import assert_matches_golden, compare_urls_source_results
 
 from crawler_cli.__main__ import _load_saved_crawl
 from crawler_cli.models import CrawlJobResult
-from crawler_cli.serialization import CRAWL_ARTIFACT_SCHEMA_VERSION, serialize_crawl_job
+from crawler_cli.serialization import (
+    CRAWL_ARTIFACT_SCHEMA_VERSION,
+    KNOWN_CRAWL_ARTIFACT_SCHEMA_VERSIONS,
+    serialize_crawl_job,
+)
 
 EXPECTED_RESULT_KEYS = {
     "requested_url",
@@ -189,3 +193,31 @@ def test_saved_json_artifact_without_a_schema_version_still_loads(tmp_path: Path
     path = tmp_path / "legacy.json"
     path.write_text(json.dumps({"mode": "list", "seed_urls": [], "results": []}), encoding="utf-8")
     assert _load_saved_crawl(path).mode == "list"
+
+
+@pytest.mark.parametrize("version", sorted(KNOWN_CRAWL_ARTIFACT_SCHEMA_VERSIONS))
+def test_jsonl_loader_accepts_every_known_schema_version(tmp_path, version: str) -> None:
+    """A build must still read the artifacts it wrote before the last bump.
+
+    Every bump so far has been additive, so an older stamped artifact loads with
+    its absent fields falling back to documented defaults. Validating against
+    the current version alone would strand artifacts this project itself wrote.
+    """
+    path = tmp_path / "crawl.jsonl"
+    result = {"requested_url": "https://example.test/", "final_url": "https://example.test/", "status": 200}
+    summary = {
+        "__type": "summary",
+        "schema_version": version,
+        "mode": "open",
+        "seed_urls": ["https://example.test/"],
+    }
+    path.write_text("\n".join(json.dumps(line) for line in (result, summary)) + "\n", encoding="utf-8")
+
+    job = _load_saved_crawl(path)
+    assert job.mode == "open"
+    assert job.results[0].requested_url == "https://example.test/"
+
+
+def test_current_schema_version_is_a_known_schema_version() -> None:
+    """The writer must never stamp a version its own loader would reject."""
+    assert CRAWL_ARTIFACT_SCHEMA_VERSION in KNOWN_CRAWL_ARTIFACT_SCHEMA_VERSIONS

@@ -57,7 +57,7 @@ from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .remap import Remap
 from .reports import CrawlReports
-from .serialization import CRAWL_ARTIFACT_SCHEMA_VERSION
+from .serialization import KNOWN_CRAWL_ARTIFACT_SCHEMA_VERSIONS
 from .validators import (
     non_negative_float,
     non_negative_int,
@@ -2299,13 +2299,13 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         )
 
     def _validate_schema_version(payload: Mapping[str, object]) -> None:
-        """Accept legacy unstamped JSONL, but reject a stamped unknown schema."""
+        """Accept legacy unstamped JSONL and every known schema, reject the rest."""
         schema_version = payload.get("schema_version")
-        if schema_version is not None and schema_version != CRAWL_ARTIFACT_SCHEMA_VERSION:
-            raise ValueError(
-                f"Unsupported crawl artifact schema version: {schema_version!r} "
-                f"(expected {CRAWL_ARTIFACT_SCHEMA_VERSION})"
-            )
+        if schema_version is None:
+            return
+        if schema_version not in KNOWN_CRAWL_ARTIFACT_SCHEMA_VERSIONS:
+            known = ", ".join(sorted(KNOWN_CRAWL_ARTIFACT_SCHEMA_VERSIONS))
+            raise ValueError(f"Unsupported crawl artifact schema version: {schema_version!r} (known: {known})")
 
     raw_text = path.read_text(encoding="utf-8")
     try:

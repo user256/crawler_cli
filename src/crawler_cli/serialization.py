@@ -13,6 +13,23 @@ JavaScript URL candidate evidence; v4 adds CSS candidates, confidence/base
 metadata, rejection counts, and speculative admission totals. Loaders keep
 accepting legacy artifacts and missing fields."""
 
+KNOWN_CRAWL_ARTIFACT_SCHEMA_VERSIONS = frozenset(
+    {
+        "crawler-cli/crawl-artifact/1",
+        "crawler-cli/crawl-artifact/2",
+        "crawler-cli/crawl-artifact/3",
+        "crawler-cli/crawl-artifact/4",
+    }
+)
+"""Every artifact version this build can read.
+
+Each bump has been additive, so an older artifact still loads: absent fields
+fall back to their documented defaults. Validating against the current version
+alone would make a build unable to read the artifacts it wrote before the last
+bump, which is why the accepted set is explicit. An unrecognised version is
+still rejected, because a newer writer may carry fields this build would
+silently drop."""
+
 
 def serialize_browser_runtime(runtime: BrowserRuntime) -> dict[str, object]:
     return {
