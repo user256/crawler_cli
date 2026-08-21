@@ -687,7 +687,7 @@ crawler-cli compare-urls --pairs mapping.csv \
 
 Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any` and exits **3** (findings) when tripped — distinct from `2` (usage error). Replacements are literal strings applied in order (no regex in v1).
 
-JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/4`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
+JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/5`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
 
 ### 4. Storage lifecycle
 
@@ -775,6 +775,50 @@ To bypass robots explicitly:
 ```python
 config = CrawlConfig(respect_robots_txt=False)
 ```
+
+### Authorisation and scope manifest
+
+Ordinary technical-SEO crawling does not require a manifest and is unchanged.
+For work where the declared scope needs to be recorded and enforced, pass
+`--scope-manifest PATH` with a `crawler-cli/scope-manifest/1` JSON document:
+
+```json
+{
+  "schema_version": "crawler-cli/scope-manifest/1",
+  "authorization_reference": "CHANGE-1234",
+  "operator": "team-or-service-name",
+  "valid_from": "2026-08-21T09:00:00Z",
+  "valid_until": "2026-08-21T17:00:00Z",
+  "allowed_origins": ["https://www.example.com:443"],
+  "allowed_path_prefixes": ["/"],
+  "excluded_path_prefixes": ["/customer/export"],
+  "allowed_methods": ["GET", "HEAD"],
+  "allow_private_network": false,
+  "allow_ignore_robots": false,
+  "notes": "Authorised pre-release exposure review"
+}
+```
+
+- Origins are exact `scheme://host:port` entries. A parent domain does not
+  authorise a subdomain, and version 1 has no wildcards.
+- The UTC validity window is mandatory and is checked before any DNS or HTTP
+  activity, so an expired or not-yet-valid manifest stops the run at startup.
+- One compiled predicate governs every URL class: seeds, discovered anchors,
+  hreflang targets, sitemap documents, sitemap locs, robots.txt, redirect hops,
+  and generated probes. A refusal is reported as
+  `scope_manifest_denied:<reason>`, never as an HTTP failure, because no request
+  was made.
+- `--allowed-hosts`, `--offsite`, `--path-restriction`, and `--path-exclude` may
+  narrow the manifest; an option that would widen it fails at startup.
+- `--ignore-robots` needs both `allow_ignore_robots` in the manifest and the
+  explicit `--confirm-ignore-robots` flag. The default remains to honour robots
+  and crawl-delay.
+- Runs record a secret-free scope snapshot and its SHA-256 digest. A changed
+  digest blocks `--resume` and is not waivable by `--allow-run-config-mismatch`.
+
+**The manifest records the operator's own attestation of authorisation. It is
+not proof of legal permission, it does not verify ownership of the target, and
+it does not replace whatever approval your organisation requires.**
 
 ## Basic Crawl Example
 

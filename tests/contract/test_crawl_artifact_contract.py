@@ -1,6 +1,6 @@
 """Golden contract: the saved crawl artifact schema (tickets 3344, 3685, 155, 156).
 
-Freezes ``crawler-cli/crawl-artifact/4``: the exact field set that
+Freezes ``crawler-cli/crawl-artifact/5``: the exact field set that
 ``serialize_crawl_job`` emits (redirect chains and static URL evidence included)
 and the loader's tolerance for legacy artifacts without ``schema_version``.
 """
@@ -88,6 +88,7 @@ EXPECTED_JOB_KEYS = {
     "render_url_candidate_count",
     "render_dom_enqueued_count",
     "render_discovery_attempt_count",
+    "authorization_scope",
     "results",
 }
 
@@ -104,7 +105,7 @@ def _job() -> CrawlJobResult:
 
 def test_crawl_artifact_matches_golden() -> None:
     payload = serialize_crawl_job(_job())
-    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/4"
+    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/5"
     assert set(payload.keys()) == EXPECTED_JOB_KEYS
     first_result = payload["results"][0]  # type: ignore[index]
     assert set(first_result.keys()) == EXPECTED_RESULT_KEYS
@@ -136,12 +137,30 @@ def test_loader_accepts_legacy_artifact_without_schema_version(tmp_path) -> None
     assert len(job.results) == len(compare_urls_source_results())
 
 
-def test_jsonl_loader_validates_a_present_summary_schema_version(tmp_path) -> None:
+@pytest.mark.parametrize("version", range(1, 5))
+def test_loader_accepts_known_historical_schema_versions(tmp_path: Path, version: int) -> None:
+    path = tmp_path / f"artifact-v{version}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": f"crawler-cli/crawl-artifact/{version}",
+                "mode": "list",
+                "seed_urls": [],
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _load_saved_crawl(path).mode == "list"
+
+
+@pytest.mark.parametrize("version", range(1, 6))
+def test_jsonl_loader_accepts_a_known_summary_schema_version(tmp_path: Path, version: int) -> None:
     path = tmp_path / "crawl.jsonl"
     result = {"requested_url": "https://example.test/", "final_url": "https://example.test/", "status": 200}
     summary = {
         "__type": "summary",
-        "schema_version": CRAWL_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": f"crawler-cli/crawl-artifact/{version}",
         "mode": "open",
         "seed_urls": ["https://example.test/"],
     }

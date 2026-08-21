@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ from .config import CrawlConfig
 from .models import FetchResponse
 from .portal_policy import ConnectionPurpose
 from .proxy_pool import ProxyPool
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=2048)
@@ -414,6 +417,20 @@ class RobotsPolicyCache:
         """
         parsed = urlparse(url)
         robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+        # The robots.txt document is an auxiliary URL class and takes the same
+        # compiled authorisation decision as every other URL (ticket 148). A
+        # denial here means no request is made; status 0 is reported so the
+        # caller's RFC 9309 unreachable handling applies and the origin stays
+        # fully disallowed rather than silently allow-all.
+        scope_reason = self.config.scope_denial_reason(robots_url, purpose="robots")
+        if scope_reason is not None:
+            logger.warning(
+                "Scope manifest denied robots.txt for %s (%s) — no request was made",
+                robots_url,
+                scope_reason,
+                extra={"event": "scope_manifest_denied", "url": robots_url, "reason": scope_reason},
+            )
+            return None, {}, 0
         req_headers = {"User-Agent": self._user_agent_for(robots_url)}
         if self._fetch_response is not None:
             try:

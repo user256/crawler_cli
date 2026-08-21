@@ -29,9 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Breaking for artifact consumers:** saved crawl artifacts are stamped
-  `crawler-cli/crawl-artifact/4`, carrying the speculative-discovery evidence
-  arrays. The terminal budget counters introduced in `/2` are retained.
-  Loading stays backward tolerant for earlier stamped artifacts.
+  `crawler-cli/crawl-artifact/5`, carrying the speculative-discovery evidence
+  arrays and a nullable `authorization_scope`. The terminal budget counters
+  introduced in `/2` are retained. Loading accepts known historical versions.
 
 ### Fixed
 
@@ -39,6 +39,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when a caller persists without `CrawlEngine`, or after
   `truncate_crawl_tables`. The compatibility run row is now created at the top
   of the persist transaction rather than only alongside the page snapshot.
+- Authorisation and scope manifest (ticket 148): the new `--scope-manifest PATH`
+  option loads a `crawler-cli/scope-manifest/1` JSON document declaring the
+  operator's asserted authorisation — exact origins (no wildcards), normalized
+  path prefixes, the methods the crawler implements, and a mandatory UTC
+  validity window. The document is read and validated before a backend exists,
+  so an invalid, expired, or not-yet-valid manifest stops the run with zero
+  network activity. One predicate is compiled per run and applied at the shared
+  URL admission boundary and the redirect boundary, so seeds, discovered
+  anchors, hreflang targets, sitemap documents, sitemap locs, robots.txt, and
+  redirect hops all take the same decision; a refusal is recorded as
+  `scope_manifest_denied:<origin|path|method|time_window|…>` rather than as an
+  HTTP failure. Existing `--allowed-hosts`, `--offsite`, and path flags may
+  narrow the manifest and are refused when they would widen it. Runs store a
+  canonical, secret-free scope snapshot (`crawler-cli/scope-snapshot/1`) and its
+  digest; a changed digest blocks `--resume` and is deliberately not waivable by
+  `--allow-run-config-mismatch`. Every saved artifact now carries the nullable
+  `authorization_scope` field and uses `crawler-cli/crawl-artifact/5`; the
+  loader accepts known historic versions `/1` through `/5` and unstamped legacy
+  artifacts. The manifest records operator **attestation** only: it is not proof
+  of legal permission and does not replace organisational approval.
 
 ## [0.3.0] - 2026-08-10
 
