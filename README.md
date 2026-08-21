@@ -308,6 +308,79 @@ crawler-cli https://example.com --js --wait-for-network-idle 8
 crawler-cli https://example.com --extraction-rules rules.json
 ```
 
+#### Speculative static and render-time URL discovery
+
+Google documents link discovery from both the initial HTML and the rendered
+HTML after JavaScript execution. It also fetches referenced JavaScript
+resources, but does not document arbitrary bundle string literals as equivalent
+to crawlable `<a href>` links. `crawler_cli` therefore exposes this as a
+Googlebot-inspired heuristic, not an exact Googlebot emulator:
+
+```bash
+# Inventory only: scan executable inline/linked JavaScript plus inline/linked
+# CSS. Nothing found this way is crawled.
+crawler-cli crawl https://example.com \
+  --discover-js-urls --discover-css-urls --save-to crawl.jsonl
+
+# Explicitly allow strict page-like candidates into an open-crawl frontier.
+# API/action paths and static assets remain inventory-only.
+crawler-cli crawl https://example.com \
+  --follow-speculative-urls --max-pages 500
+
+# Selectively render link-poor/script-heavy pages. Browser requests and
+# hydrated-only anchors are evidence; add --follow-rendered-links if the
+# hydrated anchor deltas should enter an open frontier.
+crawler-cli crawl https://example.com \
+  --render-discover --save-to render-evidence.jsonl
+
+# Read persisted evidence for one PostgreSQL crawl run.
+crawler-cli report js-url-candidates \
+  --postgres-dsn "$CRAWLER_CLI_POSTGRES_DSN" --crawl-run-id RUN_ID
+crawler-cli report css-url-candidates \
+  --postgres-dsn "$CRAWLER_CLI_POSTGRES_DSN" --crawl-run-id RUN_ID
+crawler-cli report render-url-candidates \
+  --postgres-dsn "$CRAWLER_CLI_POSTGRES_DSN" --crawl-run-id RUN_ID
+crawler-cli report render-attempts \
+  --postgres-dsn "$CRAWLER_CLI_POSTGRES_DSN" --crawl-run-id RUN_ID
+```
+
+`--discover-js-urls` uses a bounded lexer plus a raw absolute-URL scan; it does
+not execute code, evaluate concatenation, or expand dynamic templates. MIME
+types, unresolved placeholders, regex sources, date/version/module shapes,
+unsafe schemes, credentials, sensitive query keys, and malformed values are
+rejected with aggregate reason counts. Relative strings resolve against the
+document by default. `--js-relative-base document-and-asset` deliberately adds
+the linked asset as a second base for higher recall and more likely phantom
+paths.
+
+`--discover-css-urls` scans `<style>`, linked stylesheets, and bounded
+`@import` chains. `--discover-style-attributes` adds style attributes. CSS
+references resolve against their stylesheet (inline CSS uses the document),
+and known asset/API/action candidates remain inventory-only. Evidence lives in
+the per-result `javascript_url_candidates` and `css_url_candidates` arrays and
+their run-scoped PostgreSQL tables.
+
+The independent bounds are `--max-js-files-per-page` (default 20; `0` means
+inline only), `--max-js-bytes` (default 2,000,000 scanned bytes per linked
+script), and `--max-js-candidates-per-page` (default 500). Linked scripts obey
+robots.txt, crawl delay, rate limits, per-host concurrency, circuit breakers,
+host scope, and the ordinary response cap. Under `--portal-url-policy`, linked
+script fetching is disabled because that policy contract does not cover
+subresources; linked CSS and auxiliary rendering are also disabled. Normal
+HTML links always outrank speculative candidates, and
+`--max-outstanding-speculative-per-host` defaults to 50 queued/pending
+candidates per host; evidence is retained when admission is capped.
+
+`--render-discover` reuses the existing Playwright render under `--js`.
+Otherwise it selectively renders successful HTML pages with at most four raw
+links and at least three scripts, under a default 20-page and concurrency-one
+budget. It records the raw-versus-hydrated `<a href>` delta and bounded browser
+request events (`issued`, `response`, `finished`, or `failed`). Network
+observations are never replayed or put on the frontier—even if they are GETs.
+`--follow-rendered-links` admits only hydrated anchor deltas. An observed
+request proves browser traffic was attempted, not that it succeeded, is
+indexable, or would be fetched by Googlebot.
+
 Per-page timing (TTFB + total duration) is recorded automatically in `page_metadata`
 for the aiohttp and Playwright backends. `extraction_rules.json` looks like:
 
@@ -614,7 +687,7 @@ crawler-cli compare-urls --pairs mapping.csv \
 
 Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any` and exits **3** (findings) when tripped — distinct from `2` (usage error). Replacements are literal strings applied in order (no regex in v1).
 
-JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/2`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
+JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/4`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
 
 ### 4. Storage lifecycle
 

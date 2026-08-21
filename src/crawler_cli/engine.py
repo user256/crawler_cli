@@ -19,11 +19,37 @@ from .budget import RunBudget, RunBudgetExhausted
 from .challenge import detect_challenge
 from .circuit_breaker import CircuitBreaker, CircuitBreakerRegistry, CircuitState
 from .config import CrawlConfig
+from .css_urls import (
+    CssToken,
+    InlineCss,
+    css_content_type_supported,
+    extract_css_sources,
+    resolve_css_tokens,
+    scan_css_tokens,
+)
 from .custom_extract import CustomExtractor
 from .detection import CMSDetector, AnalyticsDetector
 from .extract import extract_links, extract_page_data, parse_html
 from .hashing import sha256_hash, simhash64
-from .models import BrowserRuntime, CrawlJobResult, CrawlResult, DiscoveredLink, ExtractedContent
+from .javascript_urls import (
+    InlineJavaScript,
+    JavaScriptLiteral,
+    extract_javascript_sources,
+    javascript_content_type_supported,
+    resolve_javascript_literals,
+    scan_javascript_literals,
+    _classify,
+)
+from .models import (
+    BrowserRuntime,
+    CrawlJobResult,
+    CrawlResult,
+    CssUrlCandidate,
+    DiscoveredLink,
+    ExtractedContent,
+    JavaScriptUrlCandidate,
+    RenderUrlCandidate,
+)
 from .persistence import AsyncpgStore, MemoryStore
 from .portal_policy import ConnectionPurpose
 from .robots import RobotsPolicyCache
@@ -99,6 +125,30 @@ def _crawl_run_config_snapshot(config: CrawlConfig, seeds: list[str]) -> dict[st
         "seed_from_archive": config.seed_from_archive,
         "csv_seed_mode": config.csv_seed_mode,
         "csv_urls": list(dict.fromkeys(config.csv_urls)),
+        # Discovery/follow changes the contents and provenance of the saved
+        # frontier, so a resume must use the same semantics.
+        "discover_javascript_urls": config.discover_javascript_urls,
+        "follow_javascript_urls": config.follow_javascript_urls,
+        "max_javascript_files_per_page": config.max_javascript_files_per_page,
+        "max_javascript_bytes": config.max_javascript_bytes,
+        "max_javascript_candidates_per_page": config.max_javascript_candidates_per_page,
+        "javascript_relative_base": config.javascript_relative_base,
+        "discover_css_urls": config.discover_css_urls,
+        "discover_style_attributes": config.discover_style_attributes,
+        "follow_speculative_urls": config.follow_speculative_urls,
+        "max_css_files_per_page": config.max_css_files_per_page,
+        "max_css_bytes": config.max_css_bytes,
+        "max_css_candidates_per_page": config.max_css_candidates_per_page,
+        "max_css_import_depth": config.max_css_import_depth,
+        "max_outstanding_speculative_per_host": config.max_outstanding_speculative_per_host,
+        "discover_render_urls": config.discover_render_urls,
+        "follow_rendered_links": config.follow_rendered_links,
+        "render_discovery_max_raw_links": config.render_discovery_max_raw_links,
+        "render_discovery_min_scripts": config.render_discovery_min_scripts,
+        "max_render_discovery_pages": config.max_render_discovery_pages,
+        "max_render_discovery_concurrency": config.max_render_discovery_concurrency,
+        "max_render_requests_per_page": config.max_render_requests_per_page,
+        "max_render_links_per_page": config.max_render_links_per_page,
         # A guarded job must not be resumed by an unguarded worker.
         "portal_connection_policy": config.portal_connection_policy is not None,
     }
@@ -158,6 +208,17 @@ class CrawlEngine:
         # Lazily-built browser backend used to escalate challenged HTTP fetches
         # (ticket 074). Only created when an escalation actually happens.
         self._challenge_backend: PlaywrightBackend | None = None
+        # Linked bundles are commonly shared by every page. Cache their raw
+        # literals (not document-resolved URLs) so relative values can still
+        # resolve correctly for each page without re-fetching the bundle.
+        self._javascript_literal_tasks: dict[str, asyncio.Task[tuple[list[JavaScriptLiteral], dict[str, int]]]] = {}
+        self._css_token_tasks: dict[str, asyncio.Task[tuple[list[CssToken], dict[str, int]]]] = {}
+        self._portal_javascript_skip_logged = False
+        self._portal_css_skip_logged = False
+        self._render_discovery_backend: PlaywrightBackend | None = None
+        self._render_discovery_semaphore = asyncio.Semaphore(config.max_render_discovery_concurrency)
+        self._render_discovery_lock = asyncio.Lock()
+        self._render_discovery_attempts = 0
         if 0 < config.per_host_concurrency < config.max_concurrency:
             logger.info(
                 "Per-host cap %d is below max workers %d — single-host crawls are limited to "
@@ -186,6 +247,99 @@ class CrawlEngine:
             browser_config = dataclasses.replace(self.config, backend="playwright")
             self._challenge_backend = PlaywrightBackend(browser_config)
         return self._challenge_backend
+
+    async def _get_render_discovery_backend(self) -> PlaywrightBackend:
+        if self._render_discovery_backend is None:
+            import dataclasses
+
+            browser_config = dataclasses.replace(
+                self.config,
+                backend="playwright",
+                discover_render_urls=True,
+                follow_rendered_links=False,
+            )
+            self._render_discovery_backend = PlaywrightBackend(browser_config)
+        return self._render_discovery_backend
+
+    def _render_candidates(
+        self,
+        *,
+        page_url: str,
+        raw_links: list[DiscoveredLink],
+        rendered_links: list[DiscoveredLink],
+        response,
+    ) -> list[RenderUrlCandidate]:
+        candidates: list[RenderUrlCandidate] = []
+        raw_urls = {link.href for link in raw_links}
+        for link in rendered_links:
+            if link.href in raw_urls:
+                continue
+            candidates.append(
+                RenderUrlCandidate(
+                    url=link.href,
+                    source_kind="render_dom",
+                    classification=_classify(link.href),
+                    follow_eligible=True,
+                    resource_type="document",
+                    method="GET",
+                    outcome="finished",
+                )
+            )
+            if len(candidates) >= self.config.max_render_links_per_page:
+                break
+        for observation in response.observed_requests:
+            if observation.url == page_url:
+                continue
+            candidates.append(
+                RenderUrlCandidate(
+                    url=observation.url,
+                    source_kind="render_network",
+                    classification=_classify(observation.url),
+                    follow_eligible=False,
+                    resource_type=observation.resource_type,
+                    method=observation.method,
+                    outcome=observation.outcome,
+                    status=observation.status,
+                    occurrence_count=observation.occurrence_count,
+                )
+            )
+        return candidates
+
+    async def _run_auxiliary_render_discovery(
+        self,
+        *,
+        page_url: str,
+        raw_links: list[DiscoveredLink],
+    ) -> tuple[list[RenderUrlCandidate], bool, str | None]:
+        async with self._render_discovery_lock:
+            if self._render_discovery_attempts >= self.config.max_render_discovery_pages:
+                return [], False, "render_budget_exhausted"
+            self._render_discovery_attempts += 1
+        try:
+            async with self._render_discovery_semaphore:
+                backend = await self._get_render_discovery_backend()
+                response = await backend.fetch(page_url)
+            if response.status < 200 or response.status >= 300:
+                return [], False, f"render_http_{response.status}"
+            rendered_links = extract_links(
+                response.text,
+                response.url,
+                same_host_only=self.config.same_host_only,
+                allowed_hosts=set(self.config.allowed_hosts) if self.config.allowed_hosts else None,
+            )
+            return (
+                self._render_candidates(
+                    page_url=response.url,
+                    raw_links=raw_links,
+                    rendered_links=rendered_links,
+                    response=response,
+                ),
+                response.render_settled is not False,
+                "render_settle_timeout" if response.render_settled is False else None,
+            )
+        except Exception as exc:  # noqa: BLE001 - render discovery is optional evidence
+            logger.warning("Render URL discovery failed for %s: %s", page_url, type(exc).__name__)
+            return [], False, f"render_error:{type(exc).__name__}"
 
     async def _handle_challenge(self, url: str, response):
         """Detect a bot-challenge interstitial and, if configured, escalate the
@@ -240,7 +394,14 @@ class CrawlEngine:
 
     def _parse_and_extract(
         self, html: str, url: str, headers: dict[str, str]
-    ) -> tuple[ExtractedContent, list[DiscoveredLink]]:
+    ) -> tuple[
+        ExtractedContent,
+        list[DiscoveredLink],
+        list[InlineJavaScript],
+        list[str],
+        list[InlineCss],
+        list[str],
+    ]:
         """Parse once and run both extraction passes on the shared soup.
 
         Synchronous on purpose: called inline for small pages and via
@@ -254,7 +415,338 @@ class CrawlEngine:
             allowed_hosts=set(self.config.allowed_hosts) if self.config.allowed_hosts else None,
             soup=soup,
         )
-        return extracted, discovered_links
+        inline_scripts: list[InlineJavaScript] = []
+        external_scripts: list[str] = []
+        if self.config.discover_javascript_urls:
+            inline_scripts, external_scripts = extract_javascript_sources(
+                soup,
+                url,
+                max_external_scripts=self.config.max_javascript_files_per_page,
+            )
+        inline_css: list[InlineCss] = []
+        external_stylesheets: list[str] = []
+        if self.config.discover_css_urls:
+            inline_css, external_stylesheets = extract_css_sources(
+                soup,
+                url,
+                max_external_stylesheets=self.config.max_css_files_per_page,
+                include_style_attributes=self.config.discover_style_attributes,
+            )
+        return extracted, discovered_links, inline_scripts, external_scripts, inline_css, external_stylesheets
+
+    def _javascript_resource_in_scope(self, script_url: str, document_url: str) -> bool:
+        if not self.config.same_host_only:
+            return True
+        script_host = urlparse(script_url).netloc.lower()
+        page_host = urlparse(document_url).netloc.lower()
+        allowed_hosts = {host.lower() for host in self.config.allowed_hosts}
+        return script_host == page_host or script_host in allowed_hosts
+
+    async def _fetch_and_scan_javascript(self, script_url: str) -> tuple[list[JavaScriptLiteral], dict[str, int]]:
+        """Fetch one linked script under crawler politeness controls and scan it.
+
+        The Portal connection-policy contract does not currently cover
+        subresource requests, so guarded crawls inventory inline JS only rather
+        than silently making an unguarded network request.
+        """
+        if self.config.portal_connection_policy is not None:
+            if not self._portal_javascript_skip_logged:
+                logger.warning(
+                    "Linked JavaScript URL discovery is disabled under --portal-url-policy; "
+                    "the policy contract does not cover subresource fetches"
+                )
+                self._portal_javascript_skip_logged = True
+            return [], {}
+        host = urlparse(script_url).netloc.lower()
+        try:
+            if self.config.respect_robots_txt:
+                if not await self._robots.is_allowed(script_url):
+                    logger.info("Skipping linked JavaScript blocked by robots.txt: %s", script_url)
+                    return [], {}
+                if self.config.honor_robots_crawl_delay:
+                    await self._wait_for_host_delay(script_url)
+            await self._rate_limiter.wait()
+            if self.config.circuit_breaker_enabled:
+                circuit = self._circuit_breakers.for_host(host)
+                if not circuit.should_allow():
+                    logger.info("Skipping linked JavaScript for %s: circuit_breaker_open", script_url)
+                    return [], {}
+            host_sem = self._host_semaphore(host)
+            if host_sem is not None:
+                await host_sem.acquire()
+            try:
+                response = await self._fetch_for_purpose(script_url, "initial")
+            finally:
+                if host_sem is not None:
+                    host_sem.release()
+            if response.status < 200 or response.status >= 300:
+                if self.config.circuit_breaker_enabled and (response.status >= 500 or response.status == 429):
+                    self._record_breaker_failure(
+                        self._circuit_breakers.for_host(host),
+                        host,
+                        f"javascript_http_{response.status}",
+                    )
+                return [], {}
+            if response.body_truncated:
+                return [], {}
+            headers_lower = {key.lower(): value for key, value in response.headers.items()}
+            if not javascript_content_type_supported(headers_lower.get("content-type"), response.url):
+                logger.info("Skipping non-JavaScript script resource: %s", script_url)
+                return [], {}
+            if self.config.detect_challenges:
+                challenge_kind = detect_challenge(
+                    response.status,
+                    response.headers,
+                    # A real JavaScript bundle may contain challenge-vendor
+                    # marker strings as application code. At this point the
+                    # content type is already JS, so use header-only evidence;
+                    # HTML interstitials were rejected above.
+                    "",
+                )
+                if challenge_kind is not None:
+                    if self.config.circuit_breaker_enabled:
+                        self._record_breaker_failure(
+                            self._circuit_breakers.for_host(host),
+                            host,
+                            f"javascript_challenge:{challenge_kind}",
+                        )
+                    return [], {}
+            body = response.body[: self.config.max_javascript_bytes]
+            source = body.decode("utf-8", errors="replace")
+            if self.config.circuit_breaker_enabled:
+                self._circuit_breakers.for_host(host).record_success()
+            rejection_counts: dict[str, int] = {}
+            literals = await asyncio.to_thread(
+                scan_javascript_literals,
+                source,
+                max_literals=self.config.max_javascript_candidates_per_page,
+                rejection_counts=rejection_counts,
+            )
+            return literals, rejection_counts
+        except RunBudgetExhausted:
+            return [], {}
+        except Exception as exc:  # noqa: BLE001 - linked JS discovery is best-effort
+            if self.config.circuit_breaker_enabled:
+                self._record_breaker_failure(
+                    self._circuit_breakers.for_host(host),
+                    host,
+                    f"javascript_fetch_error:{type(exc).__name__}",
+                )
+            logger.warning(
+                "Linked JavaScript discovery failed for %s: %s",
+                script_url,
+                type(exc).__name__,
+            )
+            return [], {}
+
+    async def _javascript_literals_for_resource(
+        self, script_url: str
+    ) -> tuple[list[JavaScriptLiteral], dict[str, int]]:
+        task = self._javascript_literal_tasks.get(script_url)
+        if task is None:
+            task = asyncio.create_task(self._fetch_and_scan_javascript(script_url))
+            self._javascript_literal_tasks[script_url] = task
+        return await task
+
+    async def _discover_javascript_urls(
+        self,
+        *,
+        document_url: str,
+        inline_scripts: list[InlineJavaScript],
+        external_scripts: list[str],
+    ) -> tuple[list[JavaScriptUrlCandidate], dict[str, int]]:
+        limit = self.config.max_javascript_candidates_per_page
+        candidates: list[JavaScriptUrlCandidate] = []
+        rejection_counts: dict[str, int] = {}
+        for inline in inline_scripts:
+            literals = await asyncio.to_thread(
+                scan_javascript_literals,
+                inline.source,
+                max_literals=limit,
+                rejection_counts=rejection_counts,
+            )
+            candidates.extend(
+                resolve_javascript_literals(
+                    literals,
+                    document_url,
+                    source_kind="inline_script",
+                    script_source=f"{document_url}#inline-script-{inline.index}",
+                    script_index=inline.index,
+                    relative_base_mode=self.config.javascript_relative_base,
+                )
+            )
+            if len(candidates) >= limit:
+                return candidates[:limit], rejection_counts
+        for script_url in external_scripts:
+            if not self._javascript_resource_in_scope(script_url, document_url):
+                continue
+            literals, resource_rejections = await self._javascript_literals_for_resource(script_url)
+            for reason, count in resource_rejections.items():
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + count
+            candidates.extend(
+                resolve_javascript_literals(
+                    literals,
+                    document_url,
+                    source_kind="external_script",
+                    script_source=script_url,
+                    script_index=None,
+                    asset_url=script_url,
+                    relative_base_mode=self.config.javascript_relative_base,
+                )
+            )
+            if len(candidates) >= limit:
+                break
+        # Preserve separate provenance records but merge repeats within the
+        # same script source so one literal cannot consume the page cap many
+        # times merely because it occurs repeatedly.
+        merged: dict[tuple[str, str, str, int | None, str, str, bool], JavaScriptUrlCandidate] = {}
+        for candidate in candidates[:limit]:
+            key = (
+                candidate.url,
+                candidate.source_kind,
+                candidate.script_source,
+                candidate.script_index,
+                candidate.literal_kind,
+                candidate.classification,
+                candidate.follow_eligible,
+            )
+            prior = merged.get(key)
+            if prior is None:
+                merged[key] = candidate
+            else:
+                prior.occurrence_count += candidate.occurrence_count
+        return list(merged.values())[:limit], rejection_counts
+
+    async def _fetch_and_scan_css(self, stylesheet_url: str) -> tuple[list[CssToken], dict[str, int]]:
+        if self.config.portal_connection_policy is not None:
+            if not self._portal_css_skip_logged:
+                logger.warning(
+                    "Linked CSS URL discovery is disabled under --portal-url-policy; "
+                    "the policy contract does not cover subresource fetches"
+                )
+                self._portal_css_skip_logged = True
+            return [], {}
+        host = urlparse(stylesheet_url).netloc.lower()
+        try:
+            if self.config.respect_robots_txt:
+                if not await self._robots.is_allowed(stylesheet_url):
+                    logger.info("Skipping linked CSS blocked by robots.txt: %s", stylesheet_url)
+                    return [], {}
+                if self.config.honor_robots_crawl_delay:
+                    await self._wait_for_host_delay(stylesheet_url)
+            await self._rate_limiter.wait()
+            if self.config.circuit_breaker_enabled and not self._circuit_breakers.for_host(host).should_allow():
+                logger.info("Skipping linked CSS for %s: circuit_breaker_open", stylesheet_url)
+                return [], {}
+            host_sem = self._host_semaphore(host)
+            if host_sem is not None:
+                await host_sem.acquire()
+            try:
+                response = await self._fetch_for_purpose(stylesheet_url, "initial")
+            finally:
+                if host_sem is not None:
+                    host_sem.release()
+            if response.status < 200 or response.status >= 300 or response.body_truncated:
+                return [], {}
+            headers_lower = {key.lower(): value for key, value in response.headers.items()}
+            if not css_content_type_supported(headers_lower.get("content-type"), response.url):
+                logger.info("Skipping non-CSS stylesheet resource: %s", stylesheet_url)
+                return [], {}
+            source = response.body[: self.config.max_css_bytes].decode("utf-8", errors="replace")
+            rejection_counts: dict[str, int] = {}
+            tokens = await asyncio.to_thread(
+                scan_css_tokens,
+                source,
+                max_tokens=self.config.max_css_candidates_per_page,
+                rejection_counts=rejection_counts,
+            )
+            if self.config.circuit_breaker_enabled:
+                self._circuit_breakers.for_host(host).record_success()
+            return tokens, rejection_counts
+        except RunBudgetExhausted:
+            return [], {}
+        except Exception as exc:  # noqa: BLE001 - linked CSS discovery is best-effort
+            logger.warning("Linked CSS discovery failed for %s: %s", stylesheet_url, type(exc).__name__)
+            return [], {}
+
+    async def _css_tokens_for_resource(self, stylesheet_url: str) -> tuple[list[CssToken], dict[str, int]]:
+        task = self._css_token_tasks.get(stylesheet_url)
+        if task is None:
+            task = asyncio.create_task(self._fetch_and_scan_css(stylesheet_url))
+            self._css_token_tasks[stylesheet_url] = task
+        return await task
+
+    async def _discover_css_urls(
+        self,
+        *,
+        document_url: str,
+        inline_css: list[InlineCss],
+        external_stylesheets: list[str],
+    ) -> tuple[list[CssUrlCandidate], dict[str, int]]:
+        limit = self.config.max_css_candidates_per_page
+        candidates: list[CssUrlCandidate] = []
+        rejection_counts: dict[str, int] = {}
+        for inline in inline_css:
+            tokens = await asyncio.to_thread(
+                scan_css_tokens,
+                inline.source,
+                max_tokens=limit,
+                rejection_counts=rejection_counts,
+            )
+            candidates.extend(
+                resolve_css_tokens(
+                    tokens,
+                    document_url,
+                    source_kind=inline.source_kind,
+                    stylesheet_source=f"{document_url}#{inline.source_kind}-{inline.index}",
+                    style_index=inline.index,
+                )
+            )
+            if len(candidates) >= limit:
+                return candidates[:limit], rejection_counts
+
+        queue: list[tuple[str, int]] = [(url, 0) for url in external_stylesheets]
+        seen_stylesheets: set[str] = set()
+        fetched = 0
+        while queue and fetched < self.config.max_css_files_per_page and len(candidates) < limit:
+            stylesheet_url, depth = queue.pop(0)
+            if stylesheet_url in seen_stylesheets or not self._javascript_resource_in_scope(
+                stylesheet_url, document_url
+            ):
+                continue
+            seen_stylesheets.add(stylesheet_url)
+            fetched += 1
+            tokens, resource_rejections = await self._css_tokens_for_resource(stylesheet_url)
+            for reason, count in resource_rejections.items():
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + count
+            resolved = resolve_css_tokens(
+                tokens,
+                stylesheet_url,
+                source_kind="external_stylesheet",
+                stylesheet_source=stylesheet_url,
+                style_index=None,
+            )
+            candidates.extend(resolved)
+            if depth < self.config.max_css_import_depth:
+                for candidate in resolved:
+                    if candidate.token_kind == "import" and candidate.url not in seen_stylesheets:
+                        queue.append((candidate.url, depth + 1))
+
+        merged: dict[tuple[str, str, str, int | None, str], CssUrlCandidate] = {}
+        for candidate in candidates[:limit]:
+            key = (
+                candidate.url,
+                candidate.source_kind,
+                candidate.stylesheet_source,
+                candidate.style_index,
+                candidate.token_kind,
+            )
+            prior = merged.get(key)
+            if prior is None:
+                merged[key] = candidate
+            else:
+                prior.occurrence_count += candidate.occurrence_count
+        return list(merged.values())[:limit], rejection_counts
 
     def _host_semaphore(self, host: str) -> asyncio.Semaphore | None:
         """Return a per-host concurrency semaphore, or None when unlimited."""
@@ -344,6 +836,17 @@ class CrawlEngine:
                 content_hash_sha256 = None
                 content_hash_simhash = None
                 discovered_links: list[DiscoveredLink] = []
+                javascript_url_candidates: list[JavaScriptUrlCandidate] = []
+                css_url_candidates: list[CssUrlCandidate] = []
+                speculative_rejection_counts: dict[str, int] = {}
+                render_url_candidates: list[RenderUrlCandidate] = []
+                render_discovery_attempted = False
+                render_discovery_complete: bool | None = None
+                render_discovery_skip_reason: str | None = None
+                inline_scripts: list[InlineJavaScript] = []
+                external_scripts: list[str] = []
+                inline_css: list[InlineCss] = []
+                external_stylesheets: list[str] = []
                 detected_cms = None
                 detected_analytics = None
                 custom_data = None
@@ -362,13 +865,87 @@ class CrawlEngine:
                     # multi-MB page can't stall every in-flight fetch on the
                     # event loop (tickets 060/069).
                     if len(response.text) > _PARSE_OFFLOAD_CHARS:
-                        extracted, discovered_links = await asyncio.to_thread(
+                        (
+                            extracted,
+                            discovered_links,
+                            inline_scripts,
+                            external_scripts,
+                            inline_css,
+                            external_stylesheets,
+                        ) = await asyncio.to_thread(
                             self._parse_and_extract, response.text, response.url, response.headers
                         )
                     else:
-                        extracted, discovered_links = self._parse_and_extract(
-                            response.text, response.url, response.headers
+                        (
+                            extracted,
+                            discovered_links,
+                            inline_scripts,
+                            external_scripts,
+                            inline_css,
+                            external_stylesheets,
+                        ) = self._parse_and_extract(response.text, response.url, response.headers)
+                    if self.config.discover_javascript_urls:
+                        javascript_url_candidates, js_rejections = await self._discover_javascript_urls(
+                            document_url=response.url,
+                            inline_scripts=inline_scripts,
+                            external_scripts=external_scripts,
                         )
+                        for reason, count in js_rejections.items():
+                            speculative_rejection_counts[reason] = speculative_rejection_counts.get(reason, 0) + count
+                    if self.config.discover_css_urls:
+                        css_url_candidates, css_rejections = await self._discover_css_urls(
+                            document_url=response.url,
+                            inline_css=inline_css,
+                            external_stylesheets=external_stylesheets,
+                        )
+                        for reason, count in css_rejections.items():
+                            speculative_rejection_counts[reason] = speculative_rejection_counts.get(reason, 0) + count
+                    if self.config.discover_render_urls:
+                        if (
+                            self.config.backend == "playwright"
+                            or response.raw_text is not None
+                            or response.observed_requests
+                        ):
+                            render_discovery_attempted = True
+                            if response.raw_text is None:
+                                raw_links: list[DiscoveredLink] = []
+                                render_discovery_skip_reason = "raw_baseline_unavailable"
+                            else:
+                                raw_links = extract_links(
+                                    response.raw_text,
+                                    response.url,
+                                    same_host_only=self.config.same_host_only,
+                                    allowed_hosts=(
+                                        set(self.config.allowed_hosts) if self.config.allowed_hosts else None
+                                    ),
+                                )
+                            render_url_candidates = self._render_candidates(
+                                page_url=response.url,
+                                raw_links=raw_links,
+                                rendered_links=discovered_links,
+                                response=response,
+                            )
+                            render_discovery_complete = (
+                                response.raw_text is not None and response.render_settled is not False
+                            )
+                            if response.render_settled is False:
+                                render_discovery_skip_reason = "render_settle_timeout"
+                        elif len(discovered_links) > self.config.render_discovery_max_raw_links:
+                            render_discovery_skip_reason = "render_gate_too_many_raw_links"
+                        elif response.text.lower().count("<script") < self.config.render_discovery_min_scripts:
+                            render_discovery_skip_reason = "render_gate_too_few_scripts"
+                        elif self.config.max_render_discovery_pages <= 0:
+                            render_discovery_skip_reason = "render_budget_disabled"
+                        else:
+                            (
+                                render_url_candidates,
+                                render_discovery_complete,
+                                render_discovery_skip_reason,
+                            ) = await self._run_auxiliary_render_discovery(
+                                page_url=response.url,
+                                raw_links=discovered_links,
+                            )
+                            render_discovery_attempted = render_discovery_skip_reason != "render_budget_exhausted"
                     if self.config.enable_content_hashing:
                         content_hash_sha256 = sha256_hash(response.text)
                         content_hash_simhash = simhash64(response.text)
@@ -403,6 +980,13 @@ class CrawlEngine:
                     content_hash_sha256=content_hash_sha256,
                     content_hash_simhash=content_hash_simhash,
                     discovered_links=discovered_links,
+                    javascript_url_candidates=javascript_url_candidates,
+                    css_url_candidates=css_url_candidates,
+                    speculative_rejection_counts=speculative_rejection_counts,
+                    render_url_candidates=render_url_candidates,
+                    render_discovery_attempted=render_discovery_attempted,
+                    render_discovery_complete=render_discovery_complete,
+                    render_discovery_skip_reason=render_discovery_skip_reason,
                     allowed_by_robots=True if self.config.respect_robots_txt else None,
                     skip_reason=skip_reason,
                     challenge=challenge_kind,
@@ -523,7 +1107,16 @@ class CrawlEngine:
 
         results = [r for r in ordered if r is not None]
         if save_to:
-            job = CrawlJobResult(mode="list", seed_urls=url_list, results=results, interrupted=self._stop_requested)
+            job = CrawlJobResult(
+                mode="list",
+                seed_urls=url_list,
+                results=results,
+                interrupted=self._stop_requested,
+                javascript_url_candidate_count=sum(len(result.javascript_url_candidates) for result in results),
+                css_url_candidate_count=sum(len(result.css_url_candidates) for result in results),
+                render_url_candidate_count=sum(len(result.render_url_candidates) for result in results),
+                render_discovery_attempt_count=sum(result.render_discovery_attempted for result in results),
+            )
             await self._apply_budget_summary(job)
             await self._save_results(job, save_to)
         return results
@@ -562,6 +1155,10 @@ class CrawlEngine:
             results=results,
             saved_to=save_to,
             interrupted=self._stop_requested,
+            javascript_url_candidate_count=sum(len(result.javascript_url_candidates) for result in results),
+            css_url_candidate_count=sum(len(result.css_url_candidates) for result in results),
+            render_url_candidate_count=sum(len(result.render_url_candidates) for result in results),
+            render_discovery_attempt_count=sum(result.render_discovery_attempted for result in results),
         )
         await self._apply_budget_summary(job)
         if job.persist_error_count:
@@ -1045,6 +1642,14 @@ class CrawlEngine:
 
         session_crawled = 0
         session_retry_attempts = 0
+        session_javascript_candidates = 0
+        session_javascript_enqueued = 0
+        session_css_candidates = 0
+        session_css_enqueued = 0
+        session_speculative_capped = 0
+        session_render_candidates = 0
+        session_render_dom_enqueued = 0
+        session_render_attempts = 0
         frontier_mark_done_failed_urls: list[str] = []
         # in_flight maps task → (url, depth, parent_url, retry_count)
         in_flight: dict[asyncio.Task, tuple[str, int, str | None, int]] = {}
@@ -1054,10 +1659,23 @@ class CrawlEngine:
         ) -> None:
             nonlocal session_crawled
             nonlocal session_retry_attempts
+            nonlocal session_javascript_candidates
+            nonlocal session_javascript_enqueued
+            nonlocal session_css_candidates
+            nonlocal session_css_enqueued
+            nonlocal session_speculative_capped
+            nonlocal session_render_candidates
+            nonlocal session_render_dom_enqueued
+            nonlocal session_render_attempts
             nonlocal _jsonl_fh
             nonlocal frontier_mark_done_failed_urls
             discovered_to_enqueue: list[tuple[str, int, str | None, float]] = []
+            javascript_to_enqueue: list[tuple[str, int, str | None, float]] = []
+            css_to_enqueue: list[tuple[str, int, str | None, float]] = []
+            render_dom_to_enqueue: list[tuple[str, int, str | None, float]] = []
             out_of_scope_discovered: list[str] = []
+            out_of_scope_javascript: list[str] = []
+            out_of_scope_css: list[str] = []
             done_urls: list[str] = []
             # Persist failures stay pending so resume can retry the write
             # (ticket 092). Do not mark them done.
@@ -1094,6 +1712,10 @@ class CrawlEngine:
                     _jsonl_fh.write(json.dumps(serialize_crawl_result(result), ensure_ascii=False) + "\n")
                 if result.skip_reason is not None:
                     continue
+                session_javascript_candidates += len(result.javascript_url_candidates)
+                session_css_candidates += len(result.css_url_candidates)
+                session_render_candidates += len(result.render_url_candidates)
+                session_render_attempts += int(result.render_discovery_attempted)
                 for link in result.discovered_links:
                     if self.config.same_host_only and not self.config.is_host_allowed(link.href, seeds):
                         continue
@@ -1109,6 +1731,68 @@ class CrawlEngine:
                         )
                     else:
                         out_of_scope_discovered.append(link.href)
+                if self.config.follow_javascript_urls or self.config.follow_speculative_urls:
+                    for candidate in result.javascript_url_candidates:
+                        if not candidate.follow_eligible:
+                            continue
+                        href = candidate.url
+                        if self.config.same_host_only and not self.config.is_host_allowed(href, seeds):
+                            continue
+                        if self.config.skip_amp_variants and is_amp_url_shape(href):
+                            out_of_scope_javascript.append(href)
+                            continue
+                        if self.config.should_crawl_url(href):
+                            javascript_to_enqueue.append(
+                                (
+                                    href,
+                                    depth + 1,
+                                    url,
+                                    self._priority_score(href, depth + 1) - 30.0 + candidate.confidence_weight * 5.0,
+                                )
+                            )
+                        else:
+                            out_of_scope_javascript.append(href)
+                if self.config.follow_speculative_urls:
+                    for css_candidate in result.css_url_candidates:
+                        if not css_candidate.follow_eligible:
+                            continue
+                        href = css_candidate.url
+                        if self.config.same_host_only and not self.config.is_host_allowed(href, seeds):
+                            continue
+                        if self.config.skip_amp_variants and is_amp_url_shape(href):
+                            out_of_scope_css.append(href)
+                            continue
+                        if self.config.should_crawl_url(href):
+                            css_to_enqueue.append(
+                                (
+                                    href,
+                                    depth + 1,
+                                    url,
+                                    self._priority_score(href, depth + 1)
+                                    - 30.0
+                                    + css_candidate.confidence_weight * 5.0,
+                                )
+                            )
+                        else:
+                            out_of_scope_css.append(href)
+                if self.config.follow_rendered_links:
+                    for render_candidate in result.render_url_candidates:
+                        if render_candidate.source_kind != "render_dom" or not render_candidate.follow_eligible:
+                            continue
+                        href = render_candidate.url
+                        if self.config.same_host_only and not self.config.is_host_allowed(href, seeds):
+                            continue
+                        if self.config.should_crawl_url(href):
+                            render_dom_to_enqueue.append(
+                                (
+                                    href,
+                                    depth + 1,
+                                    url,
+                                    self._priority_score(href, depth + 1) - 5.0,
+                                )
+                            )
+                        else:
+                            out_of_scope_discovered.append(href)
                 if result.extracted is not None:
                     for hl in result.extracted.hreflang_links:
                         href = hl.href
@@ -1126,12 +1810,27 @@ class CrawlEngine:
                     result.raw_html = None
                     result.extracted = None
                     result.discovered_links = []
+                    result.javascript_url_candidates = []
+                    result.css_url_candidates = []
+                    result.render_url_candidates = []
 
             if out_of_scope_discovered:
                 await self._record_out_of_scope_urls(
                     list(dict.fromkeys(out_of_scope_discovered)),
                     source="link",
                     detail="path_out_of_scope",
+                )
+            if out_of_scope_javascript:
+                await self._record_out_of_scope_urls(
+                    list(dict.fromkeys(out_of_scope_javascript)),
+                    source="link",
+                    detail="javascript_candidate_out_of_scope",
+                )
+            if out_of_scope_css:
+                await self._record_out_of_scope_urls(
+                    list(dict.fromkeys(out_of_scope_css)),
+                    source="link",
+                    detail="css_candidate_out_of_scope",
                 )
             if discovered_to_enqueue:
                 # Enqueuing discovered links must never crash the crawl. Under heavy
@@ -1153,6 +1852,100 @@ class CrawlEngine:
                     logger.warning(
                         "Failed to enqueue %d discovered links (%s) — they will be rediscovered from sibling pages",
                         len(discovered_to_enqueue),
+                        type(exc).__name__,
+                    )
+            if render_dom_to_enqueue:
+                try:
+                    render_dom_to_enqueue = list({item[0]: item for item in render_dom_to_enqueue}.values())
+                    if limit > 0:
+                        queued_count, pending_count, done_count = await self.store.frontier_stats()
+                        remaining_frontier_budget = max(
+                            0,
+                            limit - (queued_count + pending_count + done_count),
+                        )
+                        render_dom_to_enqueue = render_dom_to_enqueue[:remaining_frontier_budget]
+                    if render_dom_to_enqueue:
+                        session_render_dom_enqueued += await self._enqueue_frontier(
+                            render_dom_to_enqueue,
+                            source="link",
+                            source_detail="render_dom_candidate",
+                        )
+                except Exception as exc:  # noqa: BLE001 - render link enqueue is best-effort
+                    logger.warning(
+                        "Failed to enqueue %d rendered DOM links (%s)",
+                        len(render_dom_to_enqueue),
+                        type(exc).__name__,
+                    )
+
+            async def _within_speculative_host_cap(
+                items: list[tuple[str, int, str | None, float]],
+            ) -> list[tuple[str, int, str | None, float]]:
+                nonlocal session_speculative_capped
+                cap = self.config.max_outstanding_speculative_per_host
+                unique = list({item[0]: item for item in items}.values())
+                if cap <= 0:
+                    session_speculative_capped += len(unique)
+                    return []
+                counts = await self.store.frontier_speculative_outstanding_counts()
+                admitted: list[tuple[str, int, str | None, float]] = []
+                for item in unique:
+                    host = urlparse(item[0]).netloc.lower()
+                    if counts.get(host, 0) >= cap:
+                        session_speculative_capped += 1
+                        continue
+                    admitted.append(item)
+                    counts[host] = counts.get(host, 0) + 1
+                return admitted
+
+            if javascript_to_enqueue:
+                # Standard links get first claim on a finite crawl budget;
+                # heuristic candidates may consume only what remains.
+                try:
+                    javascript_to_enqueue = await _within_speculative_host_cap(javascript_to_enqueue)
+                    if limit <= 0:
+                        session_javascript_enqueued += await self._enqueue_frontier(
+                            javascript_to_enqueue,
+                            source="link",
+                            source_detail="javascript_candidate",
+                        )
+                    else:
+                        queued_count, pending_count, done_count = await self.store.frontier_stats()
+                        remaining_frontier_budget = max(
+                            0,
+                            limit - (queued_count + pending_count + done_count),
+                        )
+                        if remaining_frontier_budget > 0:
+                            session_javascript_enqueued += await self._enqueue_frontier(
+                                javascript_to_enqueue[:remaining_frontier_budget],
+                                source="link",
+                                source_detail="javascript_candidate",
+                            )
+                except Exception as exc:  # noqa: BLE001 - heuristic enqueue is best-effort
+                    logger.warning(
+                        "Failed to enqueue %d JavaScript URL candidates (%s)",
+                        len(javascript_to_enqueue),
+                        type(exc).__name__,
+                    )
+            if css_to_enqueue:
+                try:
+                    css_to_enqueue = await _within_speculative_host_cap(css_to_enqueue)
+                    if limit > 0:
+                        queued_count, pending_count, done_count = await self.store.frontier_stats()
+                        remaining_frontier_budget = max(
+                            0,
+                            limit - (queued_count + pending_count + done_count),
+                        )
+                        css_to_enqueue = css_to_enqueue[:remaining_frontier_budget]
+                    if css_to_enqueue:
+                        session_css_enqueued += await self._enqueue_frontier(
+                            css_to_enqueue,
+                            source="link",
+                            source_detail="css_candidate",
+                        )
+                except Exception as exc:  # noqa: BLE001 - heuristic enqueue is best-effort
+                    logger.warning(
+                        "Failed to enqueue %d CSS URL candidates (%s)",
+                        len(css_to_enqueue),
                         type(exc).__name__,
                     )
             if persist_failed_urls:
@@ -1254,6 +2047,14 @@ class CrawlEngine:
                 interrupted=interrupted,
                 refresh_skipped_count=self._refresh_skipped,
                 frontier_mark_done_failed_urls=frontier_mark_done_failed_urls,
+                javascript_url_candidate_count=session_javascript_candidates,
+                javascript_url_enqueued_count=session_javascript_enqueued,
+                css_url_candidate_count=session_css_candidates,
+                css_url_enqueued_count=session_css_enqueued,
+                speculative_capped_count=session_speculative_capped,
+                render_url_candidate_count=session_render_candidates,
+                render_dom_enqueued_count=session_render_dom_enqueued,
+                render_discovery_attempt_count=session_render_attempts,
             )
             await self._apply_budget_summary(job)
             if interrupted:
@@ -1337,6 +2138,10 @@ class CrawlEngine:
             with contextlib.suppress(Exception):
                 await self._challenge_backend.close()
             self._challenge_backend = None
+        if self._render_discovery_backend is not None:
+            with contextlib.suppress(Exception):
+                await self._render_discovery_backend.close()
+            self._render_discovery_backend = None
         close = getattr(self.backend, "close", None)
         if close is None:
             return

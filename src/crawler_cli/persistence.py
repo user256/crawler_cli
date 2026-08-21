@@ -12,7 +12,16 @@ from .amp import VARIANT_KIND_AMP, classify_amp_variants, urls_match
 from .compression import compress_html, decompress_html, is_compressed
 from .detection.analytics import AnalyticsDetectionResult
 from .hashing import sha256_hash, simhash64, simhash_to_signed, simhash_to_unsigned
-from .models import CrawlResult, DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
+from .models import (
+    CrawlResult,
+    CssUrlCandidate,
+    DiscoveredLink,
+    ExtractedContent,
+    HreflangLink,
+    JavaScriptUrlCandidate,
+    RenderUrlCandidate,
+    RobotsDirectives,
+)
 from .schema import create_schema_content_hash, identify_schema_relationships
 
 
@@ -336,6 +345,9 @@ SCHEMA_STATEMENTS = [
         lcp_ms DOUBLE PRECISION,
         cls DOUBLE PRECISION,
         inp_ms DOUBLE PRECISION,
+        render_discovery_attempted BOOLEAN NOT NULL DEFAULT FALSE,
+        render_discovery_complete BOOLEAN,
+        render_discovery_skip_reason TEXT,
         canonical_urls_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         hreflang_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         robots_json JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -351,12 +363,85 @@ SCHEMA_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_page_run_snapshots_run_status
     ON page_run_snapshots(run_id, final_status_code)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS javascript_url_candidates (
+        id BIGSERIAL PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+        source_url_id INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+        candidate_url TEXT NOT NULL,
+        source_kind TEXT NOT NULL CHECK (source_kind IN ('inline_script', 'external_script')),
+        script_source TEXT NOT NULL,
+        script_index INTEGER NOT NULL DEFAULT -1,
+        literal_kind TEXT NOT NULL CHECK (
+            literal_kind IN ('absolute', 'protocol_relative', 'root_relative', 'path_relative', 'query_relative')
+        ),
+        classification TEXT NOT NULL CHECK (classification IN ('page', 'api', 'asset', 'action')),
+        follow_eligible BOOLEAN NOT NULL,
+        occurrence_count INTEGER NOT NULL DEFAULT 1,
+        confidence TEXT NOT NULL DEFAULT 'low',
+        confidence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.15,
+        resolution_base TEXT NOT NULL DEFAULT 'document'
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_javascript_url_candidates_run_source
+    ON javascript_url_candidates(run_id, source_url_id)
+    """,
+    """ALTER TABLE javascript_url_candidates ADD COLUMN IF NOT EXISTS confidence TEXT NOT NULL DEFAULT 'low'""",
+    """ALTER TABLE javascript_url_candidates ADD COLUMN IF NOT EXISTS confidence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.15""",
+    """ALTER TABLE javascript_url_candidates ADD COLUMN IF NOT EXISTS resolution_base TEXT NOT NULL DEFAULT 'document'""",
+    """
+    CREATE TABLE IF NOT EXISTS css_url_candidates (
+        id BIGSERIAL PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+        source_url_id INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+        candidate_url TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        stylesheet_source TEXT NOT NULL,
+        style_index INTEGER NOT NULL DEFAULT -1,
+        token_kind TEXT NOT NULL,
+        classification TEXT NOT NULL,
+        follow_eligible BOOLEAN NOT NULL,
+        occurrence_count INTEGER NOT NULL DEFAULT 1,
+        confidence TEXT NOT NULL DEFAULT 'high',
+        confidence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.6,
+        resolution_base TEXT NOT NULL DEFAULT 'asset'
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_css_url_candidates_run_source
+    ON css_url_candidates(run_id, source_url_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS render_url_candidates (
+        id BIGSERIAL PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+        source_url_id INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+        candidate_url TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        classification TEXT NOT NULL,
+        follow_eligible BOOLEAN NOT NULL,
+        resource_type TEXT,
+        method TEXT NOT NULL,
+        outcome TEXT,
+        status INTEGER,
+        occurrence_count INTEGER NOT NULL DEFAULT 1,
+        confidence TEXT NOT NULL DEFAULT 'high'
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_render_url_candidates_run_source
+    ON render_url_candidates(run_id, source_url_id)
+    """,
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS amphtml_url TEXT""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS ttfb_seconds DOUBLE PRECISION""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS total_duration_seconds DOUBLE PRECISION""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS lcp_ms DOUBLE PRECISION""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS cls DOUBLE PRECISION""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS inp_ms DOUBLE PRECISION""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS render_discovery_attempted BOOLEAN NOT NULL DEFAULT FALSE""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS render_discovery_complete BOOLEAN""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS render_discovery_skip_reason TEXT""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS canonical_urls_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS hreflang_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS robots_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
@@ -414,6 +499,7 @@ SCHEMA_STATEMENTS = [
         depth INTEGER NOT NULL,
         parent_id INTEGER,
         status TEXT NOT NULL CHECK (status IN ('queued','pending','done')),
+        discovery_kind TEXT NOT NULL DEFAULT 'standard',
         enqueued_at INTEGER,
         updated_at INTEGER,
         priority_score DOUBLE PRECISION DEFAULT 0.0,
@@ -428,6 +514,7 @@ SCHEMA_STATEMENTS = [
         UNIQUE (run_id, url_id)
     )
     """,
+    """ALTER TABLE frontier ADD COLUMN IF NOT EXISTS discovery_kind TEXT NOT NULL DEFAULT 'standard'""",
     """
     ALTER TABLE content ADD COLUMN IF NOT EXISTS content_hash_sha256 TEXT
     """,
@@ -932,6 +1019,9 @@ CRAWL_TABLES: tuple[str, ...] = (
     "run_intent_signatures",
     "run_url_identity",
     "page_run_snapshots",
+    "render_url_candidates",
+    "css_url_candidates",
+    "javascript_url_candidates",
     "page_analytics_hits",
     "page_schema_references",
     "internal_links",
@@ -1006,6 +1096,9 @@ class MemoryStore:
             }
         }
         self.sources: dict[str, set[tuple[str, str | None]]] = {}
+        self.javascript_url_candidates: dict[tuple[str, str], list[JavaScriptUrlCandidate]] = {}
+        self.css_url_candidates: dict[tuple[str, str], list[CssUrlCandidate]] = {}
+        self.render_url_candidates: dict[tuple[str, str], list[RenderUrlCandidate]] = {}
 
     def _resolve_run_id(self, run_id: str | None = None) -> str:
         return run_id or self.active_run_id
@@ -1069,6 +1162,9 @@ class MemoryStore:
         self.run_metadata[(self.active_run_id, key)] = value
 
     async def persist(self, result: CrawlResult) -> None:
+        self.javascript_url_candidates[(self.active_run_id, result.final_url)] = list(result.javascript_url_candidates)
+        self.css_url_candidates[(self.active_run_id, result.final_url)] = list(result.css_url_candidates)
+        self.render_url_candidates[(self.active_run_id, result.final_url)] = list(result.render_url_candidates)
         return None
 
     async def enqueue_frontier(
@@ -1091,6 +1187,9 @@ class MemoryStore:
                 "depth": depth,
                 "parent_url": parent_url,
                 "status": "queued",
+                "discovery_kind": (
+                    "speculative" if source_detail in {"javascript_candidate", "css_candidate"} else "standard"
+                ),
                 "enqueued_at": current_time,
                 "updated_at": current_time,
                 "priority_score": priority_score,
@@ -1102,6 +1201,17 @@ class MemoryStore:
                 await self.record_source_by_url(url, source, source_detail)
             inserted += 1
         return inserted
+
+    async def frontier_speculative_outstanding_counts(self, *, run_id: str | None = None) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for url, state in self._frontier_for(run_id).items():
+            if state.get("status") not in {"queued", "pending"}:
+                continue
+            if state.get("discovery_kind") != "speculative":
+                continue
+            host = urlparse(url).netloc.lower()
+            counts[host] = counts.get(host, 0) + 1
+        return counts
 
     async def frontier_next_batch(
         self, batch_size: int, *, run_id: str | None = None
@@ -1685,6 +1795,9 @@ class AsyncpgStore:
 
                 current_time = int(time.time())
                 batch_data = []
+                discovery_kind = (
+                    "speculative" if source_detail in {"javascript_candidate", "css_candidate"} else "standard"
+                )
                 for item in filtered:
                     child_url, depth, parent_url = item[0], item[1], item[2]
                     priority_score = float(item[3]) if len(item) > 3 and item[3] is not None else 0.0
@@ -1695,6 +1808,7 @@ class AsyncpgStore:
                             depth,
                             url_to_id[parent_url] if parent_url else None,
                             "queued",
+                            discovery_kind,
                             current_time,
                             current_time,
                             priority_score,
@@ -1710,11 +1824,11 @@ class AsyncpgStore:
                 await conn.executemany(
                     """
                     INSERT INTO frontier (
-                        run_id, url_id, depth, parent_id, status, enqueued_at, updated_at,
+                        run_id, url_id, depth, parent_id, status, discovery_kind, enqueued_at, updated_at,
                         priority_score, sitemap_priority, inlinks_count, content_type_score, reset_count,
                         retry_count, retry_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                     ON CONFLICT (run_id, url_id) DO NOTHING
                     """,
                     batch_data,
@@ -1730,6 +1844,27 @@ class AsyncpgStore:
                         source_batch,
                     )
                 return len(batch_data)
+
+    async def frontier_speculative_outstanding_counts(self, *, run_id: str | None = None) -> dict[str, int]:
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT u.url
+                FROM frontier f
+                JOIN urls u ON u.id = f.url_id
+                WHERE f.run_id = $1
+                  AND f.status IN ('queued', 'pending')
+                  AND f.discovery_kind = 'speculative'
+                """,
+                self._resolve_run_id(run_id),
+            )
+        counts: dict[str, int] = {}
+        for row in rows:
+            host = urlparse(str(row["url"])).netloc.lower()
+            counts[host] = counts.get(host, 0) + 1
+        return counts
 
     async def frontier_next_batch(
         self, batch_size: int, *, run_id: str | None = None
@@ -2111,6 +2246,24 @@ class AsyncpgStore:
         assert self.pool is not None
         await self._retry_on_deadlock(self._persist_once, result)
 
+    async def _ensure_active_run_row(self, conn: asyncpg.Connection) -> None:
+        """Guarantee ``crawl_runs`` holds a row for the active run id.
+
+        Every run-scoped table carries a foreign key to ``crawl_runs``, so a row
+        must exist before the first of them is written. Two situations reach
+        persistence without one: ``truncate_crawl_tables`` intentionally clears
+        ``crawl_runs`` as well, and a library caller may persist directly
+        instead of going through ``CrawlEngine``. In both cases this recreates
+        the compatibility run. When the engine already registered the real run,
+        the conflict clause leaves that row untouched.
+        """
+        await conn.execute(
+            """INSERT INTO crawl_runs (run_id, mode, status, seed_urls_json, config_hash, config_json, created_at, updated_at)
+            VALUES ($1, 'open', 'legacy', '[]', '', '{}', EXTRACT(EPOCH FROM NOW())::INTEGER, EXTRACT(EPOCH FROM NOW())::INTEGER)
+            ON CONFLICT (run_id) DO NOTHING""",
+            self.active_run_id,
+        )
+
     async def _clear_page_snapshot(
         self,
         conn: asyncpg.Connection,
@@ -2186,16 +2339,7 @@ class AsyncpgStore:
             and not extracted.meta_robots.noindex
             and not extracted.x_robots_tag.noindex
         )
-        # ``truncate_crawl_tables`` intentionally clears crawl_runs too.  A
-        # library caller may then persist without going through CrawlEngine,
-        # so recreate the compatibility legacy run before its FK-backed
-        # snapshot is written.
-        await conn.execute(
-            """INSERT INTO crawl_runs (run_id, mode, status, seed_urls_json, config_hash, config_json, created_at, updated_at)
-            VALUES ($1, 'open', 'legacy', '[]', '', '{}', EXTRACT(EPOCH FROM NOW())::INTEGER, EXTRACT(EPOCH FROM NOW())::INTEGER)
-            ON CONFLICT (run_id) DO NOTHING""",
-            self.active_run_id,
-        )
+        await self._ensure_active_run_row(conn)
         await conn.execute(
             """
             INSERT INTO page_run_snapshots (
@@ -2204,12 +2348,13 @@ class AsyncpgStore:
                 word_count, html_lang, content_length, content_hash_sha256, content_hash_simhash,
                 custom_data, html_meta_allows, http_header_allows, overall_indexable, challenge,
                 skip_reason, ttfb_seconds, total_duration_seconds, lcp_ms, cls, inp_ms, canonical_urls_json, hreflang_json, robots_json, schema_json,
-                links_json, analytics_json, amphtml_url
+                links_json, analytics_json, amphtml_url, render_discovery_attempted,
+                render_discovery_complete, render_discovery_skip_reason
             ) VALUES (
                 $1, $2, $3, $4, $5, EXTRACT(EPOCH FROM NOW())::INTEGER,
                 $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
                 $17::jsonb, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb, $29::jsonb,
-                $30::jsonb, $31::jsonb, $32::jsonb, $33::jsonb, $34
+                $30::jsonb, $31::jsonb, $32::jsonb, $33::jsonb, $34, $35, $36, $37
             )
             ON CONFLICT (run_id, url_id) DO UPDATE SET
                 final_url_id = EXCLUDED.final_url_id,
@@ -2245,6 +2390,9 @@ class AsyncpgStore:
                 links_json = EXCLUDED.links_json,
                 analytics_json = EXCLUDED.analytics_json
                 , amphtml_url = EXCLUDED.amphtml_url
+                , render_discovery_attempted = EXCLUDED.render_discovery_attempted
+                , render_discovery_complete = EXCLUDED.render_discovery_complete
+                , render_discovery_skip_reason = EXCLUDED.render_discovery_skip_reason
             """,
             self.active_run_id,
             url_id,
@@ -2280,12 +2428,20 @@ class AsyncpgStore:
             json.dumps(links),
             json.dumps(analytics),
             extracted.amphtml if extracted else None,
+            result.render_discovery_attempted,
+            result.render_discovery_complete,
+            result.render_discovery_skip_reason,
         )
 
     async def _persist_once(self, result: CrawlResult) -> None:
         assert self.pool is not None
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # The run-scoped evidence tables written later in this
+                # transaction all reference crawl_runs, and the candidate
+                # tables are written before the page snapshot is, so the run
+                # row has to exist first.
+                await self._ensure_active_run_row(conn)
                 # Pre-touch every `urls` row this transaction will create/update,
                 # in sorted order, BEFORE doing per-URL work. This makes concurrent
                 # persist() transactions acquire the shared `urls` row locks in the
@@ -2489,6 +2645,21 @@ class AsyncpgStore:
                         content_url_id,
                         result.discovered_links,
                     )
+                await self._persist_javascript_url_candidates(
+                    conn,
+                    content_url_id,
+                    result.javascript_url_candidates,
+                )
+                await self._persist_css_url_candidates(
+                    conn,
+                    content_url_id,
+                    result.css_url_candidates,
+                )
+                await self._persist_render_url_candidates(
+                    conn,
+                    content_url_id,
+                    result.render_url_candidates,
+                )
                 if result.detected_analytics is not None and page_id is not None:
                     await self._persist_analytics(conn, int(page_id), result.detected_analytics)
 
@@ -2941,6 +3112,135 @@ class AsyncpgStore:
                 """,
                 batch,
             )
+
+    async def _persist_javascript_url_candidates(
+        self,
+        conn: asyncpg.Connection,
+        source_url_id: int,
+        candidates: list[JavaScriptUrlCandidate],
+    ) -> None:
+        """Replace this run/page's bounded static-JS evidence snapshot."""
+        await conn.execute(
+            "DELETE FROM javascript_url_candidates WHERE run_id = $1 AND source_url_id = $2",
+            self.active_run_id,
+            source_url_id,
+        )
+        if not candidates:
+            return
+        rows = [
+            (
+                self.active_run_id,
+                source_url_id,
+                candidate.url,
+                candidate.source_kind,
+                candidate.script_source,
+                candidate.script_index if candidate.script_index is not None else -1,
+                candidate.literal_kind,
+                candidate.classification,
+                candidate.follow_eligible,
+                candidate.occurrence_count,
+                candidate.confidence,
+                candidate.confidence_weight,
+                candidate.resolution_base,
+            )
+            for candidate in candidates
+        ]
+        await conn.executemany(
+            """
+            INSERT INTO javascript_url_candidates (
+                run_id, source_url_id, candidate_url, source_kind, script_source,
+                script_index, literal_kind, classification, follow_eligible,
+                occurrence_count, confidence, confidence_weight, resolution_base
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            """,
+            rows,
+        )
+
+    async def _persist_css_url_candidates(
+        self,
+        conn: asyncpg.Connection,
+        source_url_id: int,
+        candidates: list[CssUrlCandidate],
+    ) -> None:
+        await conn.execute(
+            "DELETE FROM css_url_candidates WHERE run_id = $1 AND source_url_id = $2",
+            self.active_run_id,
+            source_url_id,
+        )
+        if not candidates:
+            return
+        rows = [
+            (
+                self.active_run_id,
+                source_url_id,
+                candidate.url,
+                candidate.source_kind,
+                candidate.stylesheet_source,
+                candidate.style_index if candidate.style_index is not None else -1,
+                candidate.token_kind,
+                candidate.classification,
+                candidate.follow_eligible,
+                candidate.occurrence_count,
+                candidate.confidence,
+                candidate.confidence_weight,
+                candidate.resolution_base,
+            )
+            for candidate in candidates
+        ]
+        await conn.executemany(
+            """
+            INSERT INTO css_url_candidates (
+                run_id, source_url_id, candidate_url, source_kind, stylesheet_source,
+                style_index, token_kind, classification, follow_eligible,
+                occurrence_count, confidence, confidence_weight, resolution_base
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            """,
+            rows,
+        )
+
+    async def _persist_render_url_candidates(
+        self,
+        conn: asyncpg.Connection,
+        source_url_id: int,
+        candidates: list[RenderUrlCandidate],
+    ) -> None:
+        await conn.execute(
+            "DELETE FROM render_url_candidates WHERE run_id = $1 AND source_url_id = $2",
+            self.active_run_id,
+            source_url_id,
+        )
+        if not candidates:
+            return
+        rows = [
+            (
+                self.active_run_id,
+                source_url_id,
+                candidate.url,
+                candidate.source_kind,
+                candidate.classification,
+                candidate.follow_eligible,
+                candidate.resource_type,
+                candidate.method,
+                candidate.outcome,
+                candidate.status,
+                candidate.occurrence_count,
+                candidate.confidence,
+            )
+            for candidate in candidates
+        ]
+        await conn.executemany(
+            """
+            INSERT INTO render_url_candidates (
+                run_id, source_url_id, candidate_url, source_kind, classification,
+                follow_eligible, resource_type, method, outcome, status,
+                occurrence_count, confidence
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            """,
+            rows,
+        )
 
     async def fetch_pages_for_embeddings(
         self,

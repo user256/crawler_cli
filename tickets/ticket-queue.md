@@ -52,7 +52,42 @@ Ticket files remain the source of truth for scope and DoD.
 - The pre-existing remote **v0.2.1** annotated tag points to closed, unmerged
   PR #50 and is not an ancestor of `master`; it has no GitHub Release or
   artifacts. It is permanently excluded from the release sequence. The next
-  safe release candidate is v0.2.2; next unreserved ticket number is **131**.
+  safe release candidate is v0.2.2.
+
+### Current position (2026-08-21)
+
+- **Adversarial-crawler scope and authorised-evidence pass 144–154** filed
+  after the sapiens.com audit. Detailed review brief:
+  `adversarial-crawler-ticket-review-brief-2026-08-21.md`.
+
+  `crawler_cli` is an evidence crawler (do not trust the CMS). It is
+  **not** an evasion bot (rotate identities / bypass bot management / ignore
+  robots as the happy path) and **not** a pentest scanner (injection, IDOR,
+  forced browsing). Foundation order: **144 → 148 + 153 → 149**; ticket 147's
+  ordinary-crawler safety can proceed after 144 but integrates 148 for strict
+  modes. Evidence features **145–146 / 150–152 / 154** land only after their
+  recorded foundations. Do not implement definition-(1) evasion loops; ticket
+  137 stays “alternate proxy for an authorised fetch”, not “try identities
+  until 200”.
+- Magento hygiene **131–134** remains proposed (Timber Living). Disk already
+  holds later wiring tickets **135–143** that this register had not yet
+  listed; do not reuse those numbers.
+- Ticket **155** is done: bounded static JavaScript URL candidate
+  inventory plus explicit page-only following. It is a technical-SEO feature,
+  not exact Googlebot emulation, and narrows the generic script-route slice of
+  proposed ticket 151.
+- Tickets **156–158** extend the URL-discovery lane. Ticket **159** specifies
+  Google's single-pass JSON-LD entity compatibility; next unreserved ticket
+  number is **160**. Do not reuse **110**.
+
+### Current position (2026-08-12)
+
+- Magento hygiene pass **131–134** filed from the Timber Living Yoma audit
+  (`runs/yoma-20260810/timber-living-tech-audit.md`). Ticket 102 currently
+  folds indexable-but-canonicalised filter URLs out of pairing — that hid the
+  118k layered-nav finding. Order: 131 → 132 → 133; 134 after 131+132.
+- Next unreserved ticket number is **135**. *(superseded 2026-08-21: 135–159
+  were taken on disk; next is 160.)*
 
 ### Ordering rules
 
@@ -60,7 +95,7 @@ Ticket files remain the source of truth for scope and DoD.
   the affected fields.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**131**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**160**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -342,6 +377,59 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 - `128` `done` (2026-07-18) [ticket-128-crawler-gui-chrome-profile-picker.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-128-crawler-gui-chrome-profile-picker.md) — **P2:** live GUI Chrome/Chromium profile discovery, lock preflight, dedicated-user-data guidance, persistent Playwright argv mapping, and Obscura/profile exclusion.
 - `129` `done` (2026-07-21) [ticket-129-playwright-auth-origin-scoping.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-129-playwright-auth-origin-scoping.md) — **P2 (security):** Playwright backend sets `http_credentials` without an `origin` restriction. Scoped credentials/headers per-origin natively using `route.fetch` to ensure cross-origin redirects strip credentials while same-origin redirects retain them. Playwright now passes all security proof tests and is fully supported in the portal-integration contract.
 - `130` `in review` (2026-07-29) [ticket-130-v022-release-prep.md](./ticket-130-v022-release-prep.md) — **P0 release safety:** prepare, but do not publish, crawler-cli v0.2.2 for the reviewed PR #51 HTTP-only Portal policy hook. The remote v0.2.1 tag is unusable (closed/unmerged PR #50, off-master) and must never be reused or moved. Immutable release evidence, not a mutable branch/tag, is required before Portal can pin it.
+
+### Magento hygiene pass (Timber Living / Yoma, 2026-08-12)
+
+Layered-nav crawl explosion on timberlivingcompany.co.uk (119k URLs, 29 GB
+JSONL, 0 noindex on 118k filter URLs). CMS detector has no Magento; ticket 102
+treats canonical-elsewhere as handled. Do not bake “noindex all filters” into
+the crawler — report and optionally refuse to follow.
+
+- `131` `proposed` [ticket-131-magento-cms-detection.md](./ticket-131-magento-cms-detection.md) — **P1:** Magento/Adobe Commerce fingerprint in `CMSDetector` (blocks 134)
+- `132` `proposed` [ticket-132-ecommerce-url-taxonomy.md](./ticket-132-ecommerce-url-taxonomy.md) — **P1:** URL taxonomy `faceted`/`toolbar`/`session`/`unrewritten`/`search`/`clean` at crawl time
+- `133` `proposed` [ticket-133-indexable-despite-canonical.md](./ticket-133-indexable-despite-canonical.md) — **P1:** count INDEX+canonical-elsewhere; do not fold Magento filters out of hygiene reports
+- `134` `proposed` [ticket-134-magento-facet-crawl-guard.md](./ticket-134-magento-facet-crawl-guard.md) — **P1, depends on 131+132:** skip enqueue of faceted/toolbar/session links unless `--follow-facets`
+
+### Adversarial-crawler scope (sapiens.com wording, 2026-08-21)
+
+`crawler_cli` does not meet either popular “adversarial crawler” definition.
+144 writes that down. 145–154 add only bounded authorised measurement, passive
+inventory, shared scope/evidence controls, and crawler self-safety. Evasion and
+exploit payloads stay un-ticketed. Review the lane as a dependency graph, not
+ticket-number order: 153 deliberately lands before the detectors that consume
+its evidence contract.
+
+- `144` `proposed` [ticket-144-adversarial-crawler-scope.md](./ticket-144-adversarial-crawler-scope.md) — **P1:** README/SKILL/CLI help: evidence crawler, not evasion, not pentest; out-of-scope list; constrain 137
+- `145` `proposed` [ticket-145-client-split-measurement.md](./ticket-145-client-split-measurement.md) — **P2, depends on 144+148+149+153:** bounded plain vs impersonate vs spoofed-bot UA matrix; no retry-on-403; spoofed Googlebot is not Googlebot
+- `146` `proposed` [ticket-146-authorised-exposure-inventory.md](./ticket-146-authorised-exposure-inventory.md) — **P2, depends on 144+148+149+153:** declared non-prod hosts, CLI soft-404 fingerprint, sitemap leftovers, and published error/test URLs; no payloads
+- `147` `proposed` [ticket-147-crawler-self-safety.md](./ticket-147-crawler-self-safety.md) — **P1/safety, depends on 144:** regression-lock existing GET-only HTTP(S); add session-mutating URL policy, robots confirmation, typed skip evidence; strict-mode integration uses 148
+- `148` `proposed` [ticket-148-authorisation-scope-manifest.md](./ticket-148-authorisation-scope-manifest.md) — **P1, depends on 144:** versioned operator attestation and exact origin/path/time/method scope; one fail-closed predicate for every URL source; blocks security-adjacent fetch modes
+- `149` `proposed` [ticket-149-default-network-ssrf-safety.md](./ticket-149-default-network-ssrf-safety.md) — **P1/security, depends on 148:** block special/private destinations and rebinding across redirects/auxiliary fetches; honest per-backend capabilities; double-confirmed private-network exception
+- `150` `proposed` [ticket-150-passive-security-posture.md](./ticket-150-passive-security-posture.md) — **P2, depends on 144+149+153:** passive security headers, redacted cookie attributes, TLS capability/facts, observed CORS response posture, and mixed content
+- `151` `proposed` [ticket-151-passive-form-api-inventory.md](./ticket-151-passive-form-api-inventory.md) — **P2, depends on 144+148+153+155:** passive forms/controls, linked API descriptions, router/GraphQL/source-map semantics; reuses 155 and never widens page-only following
+- `152` `proposed` [ticket-152-supplied-session-differential.md](./ticket-152-supplied-session-differential.md) — **P2, depends on 129+148+149+153:** isolated anonymous/operator-supplied profiles over one fixed URL set; triage comparisons, no identifier or role mutation
+- `153` `proposed` [ticket-153-security-evidence-redaction.md](./ticket-153-security-evidence-redaction.md) — **P1/security, depends on 144:** shared versioned finding contract; central header/cookie/query/config/body redaction; retention and secret-absence proofs; blocks 145, 146, 150, 151, 152, 154
+- `154` `proposed` [ticket-154-safe-error-disclosure-detection.md](./ticket-154-safe-error-disclosure-detection.md) — **P2, depends on 146+153:** passive multi-signal debug/error/directory-index/internal-disclosure findings over already-fetched responses; zero extra requests
+
+### Static JavaScript URL discovery (2026-08-21)
+
+- `155` `done` (2026-08-21) [ticket-155-static-javascript-url-discovery.md](./ticket-155-static-javascript-url-discovery.md) — **P1, blocks 156+157:** opt-in inline/linked-JS URL candidate inventory; explicit `--follow-js-urls` admits only strict page-like candidates; bounded/polite requests, provenance, artifact v3, run-scoped persistence/report; 846 non-integration tests passed; PostgreSQL test added but DSN unavailable; [review brief](./ticket-155-review-brief-2026-08-21.md)
+
+### Speculative and render-time URL discovery follow-ups (2026-08-21)
+
+The prototype's static and browser mechanisms deliberately split here. 156
+owns false-positive filters, CSS semantics, priority, and the hard host cap.
+157 owns observed browser traffic and raw-versus-hydrated DOM evidence. 158 is
+an optional outcome-feedback layer and does not block either discovery path.
+
+- `156` `done` (2026-08-21) [ticket-156-speculative-url-discovery-hardening-and-css.md](./ticket-156-speculative-url-discovery-hardening-and-css.md) — **P1, depends on 155; blocks 158:** unquoted absolute URLs, durable junk-filter reasons, inline/linked/imported CSS, explicit JS base policy, typed sibling provenance, href-first priority, and a persisted 50-outstanding-per-host speculative cap; artifact v4 and reports wired
+- `157` `done` (2026-08-21) [ticket-157-selective-render-time-url-discovery.md](./ticket-157-selective-render-time-url-discovery.md) — **P1, depends on 155:** Playwright request outcomes and raw-versus-hydrated anchors, selective link-poor/script-heavy HTTP rendering, hard cost limits, inventory-only network observations, explicit rendered-link following, run-scoped evidence/reports, and real-Chromium smoke
+- `158` `proposed` [ticket-158-adaptive-speculative-discovery-feedback.md](./ticket-158-adaptive-speculative-discovery-feedback.md) — **P3, depends on 156:** optional deterministic per-asset/host hit-rate throttle using only conclusive hard/soft misses; preserves all evidence and never treats operational failures as junk
+- [Tickets 156–158 review brief](./ticket-156-158-url-discovery-review-brief-2026-08-21.md) — dependency graph, prototype deltas, safety decisions, risks, and required acceptance evidence
+
+### Google-compatible JSON-LD parsing (2026-08-21)
+
+- `159` `proposed` [ticket-159-google-compatible-json-ld-single-unescape.md](./ticket-159-google-compatible-json-ld-single-unescape.md) — **P1, builds on completed 020:** exactly one HTML-unescape pass before RFC 8259 parsing; preserve raw source, retain residual double escapes, add occurrence-level compatibility diagnostics and reporting, and never imply that syntax alone determines rich-result eligibility
 
 Deferred lanes remain below.
 
