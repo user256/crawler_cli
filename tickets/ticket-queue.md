@@ -76,8 +76,9 @@ Ticket files remain the source of truth for scope and DoD.
   inventory plus explicit page-only following. It is a technical-SEO feature,
   not exact Googlebot emulation, and narrows the generic script-route slice of
   proposed ticket 151.
-- Tickets **156–158** extend the URL-discovery lane; next unreserved ticket
-  number is **159**. Do not reuse **110**.
+- Tickets **156–158** extend the URL-discovery lane. Ticket **159** specifies
+  Google's single-pass JSON-LD entity compatibility; next unreserved ticket
+  number is **160**. Do not reuse **110**.
 
 ### Current position (2026-08-12)
 
@@ -85,8 +86,8 @@ Ticket files remain the source of truth for scope and DoD.
   (`runs/yoma-20260810/timber-living-tech-audit.md`). Ticket 102 currently
   folds indexable-but-canonicalised filter URLs out of pairing — that hid the
   118k layered-nav finding. Order: 131 → 132 → 133; 134 after 131+132.
-- Next unreserved ticket number is **135**. *(superseded 2026-08-21: 135–158
-  were taken on disk; next is 159.)*
+- Next unreserved ticket number is **135**. *(superseded 2026-08-21: 135–159
+  were taken on disk; next is 160.)*
 
 ### Ordering rules
 
@@ -94,7 +95,7 @@ Ticket files remain the source of truth for scope and DoD.
   the affected fields.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**159**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**160**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -425,6 +426,10 @@ an optional outcome-feedback layer and does not block either discovery path.
 - `157` `done` (2026-08-21) [ticket-157-selective-render-time-url-discovery.md](./ticket-157-selective-render-time-url-discovery.md) — **P1, depends on 155:** Playwright request outcomes and raw-versus-hydrated anchors, selective link-poor/script-heavy HTTP rendering, hard cost limits, inventory-only network observations, explicit rendered-link following, run-scoped evidence/reports, and real-Chromium smoke
 - `158` `proposed` [ticket-158-adaptive-speculative-discovery-feedback.md](./ticket-158-adaptive-speculative-discovery-feedback.md) — **P3, depends on 156:** optional deterministic per-asset/host hit-rate throttle using only conclusive hard/soft misses; preserves all evidence and never treats operational failures as junk
 - [Tickets 156–158 review brief](./ticket-156-158-url-discovery-review-brief-2026-08-21.md) — dependency graph, prototype deltas, safety decisions, risks, and required acceptance evidence
+
+### Google-compatible JSON-LD parsing (2026-08-21)
+
+- `159` `proposed` [ticket-159-google-compatible-json-ld-single-unescape.md](./ticket-159-google-compatible-json-ld-single-unescape.md) — **P1, builds on completed 020:** exactly one HTML-unescape pass before RFC 8259 parsing; preserve raw source, retain residual double escapes, add occurrence-level compatibility diagnostics and reporting, and never imply that syntax alone determines rich-result eligibility
 
 Deferred lanes remain below.
 
