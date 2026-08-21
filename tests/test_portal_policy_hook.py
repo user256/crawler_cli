@@ -468,7 +468,7 @@ async def test_crawl_many_save_includes_budget_summary_in_v4_artifact(tmp_path) 
 
     assert len(results) == 1
     artifact = json.loads(output.read_text(encoding="utf-8"))
-    assert artifact["schema_version"] == "crawler-cli/crawl-artifact/4"
+    assert artifact["schema_version"] == "crawler-cli/crawl-artifact/5"
     assert artifact["budget_requests_started"] == 1
     assert artifact["budget_accounted_bytes"] == 20
     assert artifact["budget_stop_reason"] == "max_bytes"

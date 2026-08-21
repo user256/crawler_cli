@@ -57,7 +57,6 @@ from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .remap import Remap
 from .reports import CrawlReports
-from .serialization import CRAWL_ARTIFACT_SCHEMA_VERSION
 from .validators import (
     non_negative_float,
     non_negative_int,
@@ -2356,9 +2355,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             redirect_chain=list(item.get("redirect_chain", []) or []),
         )
 
-    known_artifact_versions = frozenset(
-        f"crawler-cli/crawl-artifact/{version}" for version in range(1, 6)
-    )
+    known_artifact_versions = frozenset(f"crawler-cli/crawl-artifact/{version}" for version in range(1, 6))
 
     def _validate_schema_version(payload: Mapping[str, object]) -> None:
         """Accept unstamped or known historical artifacts, reject unknown stamps."""
@@ -2405,9 +2402,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             render_dom_enqueued_count=int(summary.get("render_dom_enqueued_count", 0) or 0),
             render_discovery_attempt_count=int(summary.get("render_discovery_attempt_count", 0) or 0),
             authorization_scope=(
-                dict(summary["authorization_scope"])
-                if isinstance(summary.get("authorization_scope"), dict)
-                else None
+                dict(summary["authorization_scope"]) if isinstance(summary.get("authorization_scope"), dict) else None
             ),
         )
 
@@ -2442,9 +2437,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             render_dom_enqueued_count=int(job.get("render_dom_enqueued_count", 0) or 0),
             render_discovery_attempt_count=int(job.get("render_discovery_attempt_count", 0) or 0),
             authorization_scope=(
-                dict(job["authorization_scope"])
-                if isinstance(job.get("authorization_scope"), dict)
-                else None
+                dict(job["authorization_scope"]) if isinstance(job.get("authorization_scope"), dict) else None
             ),
         )
 

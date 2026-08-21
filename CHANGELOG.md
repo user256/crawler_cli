@@ -29,9 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Breaking for artifact consumers:** saved crawl artifacts are stamped
-  `crawler-cli/crawl-artifact/4`, carrying the speculative-discovery evidence
-  arrays. The terminal budget counters introduced in `/2` are retained.
-  Loading stays backward tolerant for earlier stamped artifacts.
+  `crawler-cli/crawl-artifact/5`, carrying the speculative-discovery evidence
+  arrays and a nullable `authorization_scope`. The terminal budget counters
+  introduced in `/2` are retained. Loading accepts known historical versions.
 
 ### Fixed
 

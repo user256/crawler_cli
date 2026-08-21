@@ -29,11 +29,7 @@ from crawler_cli.authorisation import (
 )
 from crawler_cli.engine import CrawlRunSelectionError
 from crawler_cli.models import FetchResponse
-from crawler_cli.serialization import (
-    CRAWL_ARTIFACT_SCHEMA_VERSION,
-    SCOPED_CRAWL_ARTIFACT_SCHEMA_VERSION,
-    serialize_crawl_job,
-)
+from crawler_cli.serialization import CRAWL_ARTIFACT_SCHEMA_VERSION, serialize_crawl_job
 
 from test_sitemap_scope import FakeRobots, TrackingStore, _sitemap_index, _urlset
 
@@ -457,16 +453,16 @@ async def test_run_metadata_and_artifact_carry_the_scope_snapshot(tmp_path) -> N
     assert metadata_scope == scope
 
     payload = serialize_crawl_job(job)
-    assert payload["schema_version"] == SCOPED_CRAWL_ARTIFACT_SCHEMA_VERSION
+    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION
     assert payload["authorization_scope"] == scope
 
 
-def test_artifact_without_a_manifest_keeps_the_frozen_v2_shape() -> None:
+def test_artifact_without_a_manifest_has_a_null_scope_projection() -> None:
     from crawler_cli.models import CrawlJobResult
 
     payload = serialize_crawl_job(CrawlJobResult(mode="list", seed_urls=[], results=[]))
     assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION
-    assert "authorization_scope" not in payload
+    assert payload["authorization_scope"] is None
 
 
 @pytest.mark.asyncio

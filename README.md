@@ -687,7 +687,7 @@ crawler-cli compare-urls --pairs mapping.csv \
 
 Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any` and exits **3** (findings) when tripped — distinct from `2` (usage error). Replacements are literal strings applied in order (no regex in v1).
 
-JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/4`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
+JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/5`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
 
 ### 4. Storage lifecycle
 
