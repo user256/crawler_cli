@@ -4144,9 +4144,7 @@ class AsyncpgStore:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
-            return await purge_run_security_evidence(
-                conn, run_id=run_id, drop_findings=drop_findings, dry_run=dry_run
-            )
+            return await purge_run_security_evidence(conn, run_id=run_id, drop_findings=drop_findings, dry_run=dry_run)
 
     async def delete_run_security_data(self, *, run_id: str, dry_run: bool = False) -> dict[str, int]:
         """Delete every security row belonging to exactly one run (ticket 153)."""
