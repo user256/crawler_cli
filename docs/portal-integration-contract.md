@@ -28,7 +28,7 @@ Machine-readable outputs are stamped with an explicit schema identifier
 
 | Schema id | Surface | Golden proof |
 |---|---|---|
-| `crawler-cli/crawl-artifact/5` | saved crawl JSON (`serialize_crawl_job`), including body accounting, static JS/CSS/render evidence, and an always-present nullable `authorization_scope` object | `tests/contract/golden/crawl_artifact.json`, `tests/contract/test_scope_manifest_contract.py` |
+| `crawler-cli/crawl-artifact/6` | saved crawl JSON (`serialize_crawl_job`), including body accounting, static JS/CSS/render evidence, an always-present nullable `authorization_scope`, and centrally redacted response headers | `tests/contract/golden/crawl_artifact.json`, `tests/contract/test_scope_manifest_contract.py`, `tests/contract/test_security_proofs.py` |
 | `crawler-cli/scope-manifest/1` | the operator-authored `--scope-manifest` input document (ticket 148) | `tests/test_authorisation.py` |
 | `crawler-cli/scope-snapshot/1` | the canonical, secret-free scope projection stored in run metadata and inside a crawl artifact | `tests/contract/golden/scope_snapshot.json` |
 | `crawler-cli/compare/1` | `compare --output` JSON + stdout summary | `golden/compare_rows.json`, `golden/compare_summary.json` |

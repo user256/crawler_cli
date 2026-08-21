@@ -1,5 +1,5 @@
 {
-  "schema_version": "crawler-cli/crawl-artifact/5",
+  "schema_version": "crawler-cli/crawl-artifact/6",
   "mode": "list",
   "run_id": "run-3344",
   "seed_urls": [

@@ -55,6 +55,7 @@ from .engine import CrawlEngine, CrawlRunSelectionError
 from .exit_codes import EXIT_FINDINGS, EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
+from .redaction import SECRETS
 from .remap import Remap
 from .reports import CrawlReports
 from .validators import (
@@ -88,11 +89,17 @@ def _env_or_default(prefix: str, key: str, default: str | None = None) -> str | 
 
 
 def _build_dsn(args: argparse.Namespace) -> str:
+    # Ticket 153: whichever source supplies the DSN, register its embedded
+    # password as a literal secret so it cannot survive into a log line, an
+    # exception message, or a saved artifact. Use ``sanitize_dsn`` whenever a
+    # DSN has to be displayed.
     if getattr(args, "postgres_dsn", None):
+        _register_dsn_secret(args.postgres_dsn)
         return args.postgres_dsn
     for prefix in ("CRAWLER_CLI", "PostgreSQLCrawler"):
         dsn = os.environ.get(f"{prefix}_POSTGRES_DSN")
         if dsn:
+            _register_dsn_secret(dsn)
             return dsn
     host = args.postgres_host or _env_or_default("CRAWLER_CLI", "POSTGRES_HOST", "localhost")
     port = args.postgres_port or _env_or_default("CRAWLER_CLI", "POSTGRES_PORT", "5432")
@@ -102,7 +109,25 @@ def _build_dsn(args: argparse.Namespace) -> str:
     # Percent-encode credentials so special chars (@, :, /, #) don't break the DSN.
     safe_user = _urlquote(user, safe="")
     safe_password = _urlquote(password, safe="")
+    SECRETS.register(password, label="postgres-password")
     return f"postgresql://{safe_user}:{safe_password}@{host}:{port}/{dbname}"
+
+
+def _register_dsn_secret(dsn: str) -> None:
+    """Register the password embedded in a DSN as a literal secret (ticket 153)."""
+    from urllib.parse import unquote, urlsplit
+
+    try:
+        netloc = urlsplit(dsn).netloc
+    except ValueError:
+        return
+    if "@" not in netloc:
+        return
+    userinfo = netloc.rsplit("@", 1)[0]
+    _user, separator, password = userinfo.partition(":")
+    if separator and password:
+        SECRETS.register(unquote(password), label="postgres-password")
+        SECRETS.register(password, label="postgres-password")
 
 
 _STORE_ENV_PREFIXES = ("CRAWLER_CLI", "PostgreSQLCrawler")
@@ -199,6 +224,13 @@ def _build_auth(args: argparse.Namespace) -> AuthConfig | None:
         return None
     if not auth_type:
         auth_type = "basic" if username else "bearer"
+    # Ticket 153: register the literal credential values so every scrubber can
+    # remove them verbatim from logs, exceptions and artifacts. The registry is
+    # in-memory only and never renders the values it holds.
+    SECRETS.register(token, label="auth-token")
+    SECRETS.register(password, label="auth-password")
+    if username and password:
+        SECRETS.register_basic_credentials(username, password)
     return AuthConfig(
         # argparse --auth-type choices constrain this to the AuthType literal set.
         auth_type=cast("AuthType", auth_type),
@@ -2356,7 +2388,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             redirect_chain=list(item.get("redirect_chain", []) or []),
         )
 
-    known_artifact_versions = frozenset(f"crawler-cli/crawl-artifact/{version}" for version in range(1, 6))
+    known_artifact_versions = frozenset(f"crawler-cli/crawl-artifact/{version}" for version in range(1, 7))
 
     def _validate_schema_version(payload: Mapping[str, object]) -> None:
         """Accept unstamped or known historical artifacts, reject unknown stamps."""
@@ -2875,7 +2907,18 @@ async def _run_delete_crawl(args: argparse.Namespace) -> int:
         queued, pending, done = await store.frontier_stats_all_runs()
         print(f"Database: {db_name}")
         print(f"Mode: {args.mode}")
-        for table in ("pages", "urls", "frontier", "content", "page_analytics_hits"):
+        for table in (
+            "pages",
+            "urls",
+            "frontier",
+            "content",
+            "page_analytics_hits",
+            # Ticket 153: the security tables are crawler_cli tables too, so a
+            # delete must show them rather than removing them invisibly.
+            "security_findings",
+            "security_evidence_raw",
+            "security_run_retention",
+        ):
             if table in counts:
                 print(f"  {table}: {counts[table]:,}")
         print(f"  frontier: {done:,} done, {pending:,} pending, {queued:,} queued")
@@ -2907,6 +2950,7 @@ async def _run_compact_crawl(args: argparse.Namespace) -> int:
         run_id = await store.resolve_reporting_run_id(args.crawl_run_id)
         stats = await store.run_snapshot_html_stats(run_id=run_id)
         print(json.dumps(stats, indent=2))
+        print(json.dumps({"security_evidence": await store.security_evidence_stats(run_id=run_id)}, indent=2))
         missing = stats["pages_with_html_missing_hash"]
         if args.require_hashes and missing > 0 and not args.backfill_hashes:
             print(
@@ -2924,6 +2968,14 @@ async def _run_compact_crawl(args: argparse.Namespace) -> int:
             run_id=run_id, drop_headers=args.drop_headers, dry_run=args.dry_run
         )
         print(json.dumps(result, indent=2))
+        # Ticket 153: the same exact run id governs the security tables.
+        if getattr(args, "drop_security_evidence", False) or getattr(args, "drop_security_findings", False):
+            security = await store.purge_run_security_evidence(
+                run_id=run_id,
+                drop_findings=getattr(args, "drop_security_findings", False),
+                dry_run=args.dry_run,
+            )
+            print(json.dumps({"security_evidence": security}, indent=2))
         if args.dry_run:
             print("Dry run — HTML not purged.")
     except ValueError as exc:
@@ -3396,6 +3448,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--vacuum",
         action="store_true",
         help="Run VACUUM ANALYZE pages after purge (can be slow)",
+    )
+    # Ticket 153: security evidence follows the same run-scoped retention rules
+    # as stored HTML. Raw evidence is purged on request; the redacted findings
+    # survive so a report stays reproducible without the sensitive material.
+    compact_parser.add_argument(
+        "--drop-security-evidence",
+        action="store_true",
+        help="Also purge this run's raw security evidence, keeping redacted findings",
+    )
+    compact_parser.add_argument(
+        "--drop-security-findings",
+        action="store_true",
+        help="Also delete this run's redacted security findings (separate, stronger choice)",
     )
     _add_confirm_args(compact_parser)
     _add_postgres_args(compact_parser)

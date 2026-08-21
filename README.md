@@ -687,7 +687,7 @@ crawler-cli compare-urls --pairs mapping.csv \
 
 Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any` and exits **3** (findings) when tripped — distinct from `2` (usage error). Replacements are literal strings applied in order (no regex in v1).
 
-JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/5`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
+JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/6`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
 
 ### 4. Storage lifecycle
 
@@ -741,11 +741,27 @@ src/crawler_cli/
   hreflang_groups.py / amp.py / challenge.py
   obscura_install.py / auth.py / cookies.py / csv_urls.py
   circuit_breaker.py / proxy_pool.py / exit_codes.py
+  redaction.py / security_evidence.py / security_persistence.py
   detection/
     cms.py
     analytics.py
 tests/                 # shipped in the sdist for install verification
 ```
+
+## Security Evidence And Redaction
+
+Security-adjacent reports share one versioned finding schema
+(`crawler-cli/security-finding/1`) and one redaction policy. Detectors emit
+structured facts, a policy turns them into findings, and a single serializer
+applies redaction, evidence budgets and CSV formula-injection hygiene to every
+output format. Sensitive headers, cookies, query values, proxy credentials and
+database DSNs are removed from artifacts, logs, exception messages and
+tracebacks; raw sensitive evidence is off by default and needs separate
+explicit file and database choices.
+
+Read `docs/security-evidence-contract.md` before building a report on top of
+it — in particular the section on what remains sensitive even after automated
+redaction.
 
 ## Default Behavior
 

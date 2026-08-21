@@ -1,0 +1,110 @@
+{
+  "detector_versions": {
+    "cookie-hygiene": "1.0.0",
+    "url-hygiene": "2.1.0"
+  },
+  "finding_count": 2,
+  "findings": [
+    {
+      "category": "cookies",
+      "confidence": "high",
+      "description": "A cookie that looks like a session identifier was set without the Secure attribute.",
+      "detector": "cookie-hygiene",
+      "detector_version": "1.0.0",
+      "evidence": {
+        "cookie_name": "SESSIONID",
+        "http_only": true,
+        "same_site": "Lax",
+        "secure": false,
+        "value_digest": "hmac-sha256:ce0f0d1f0db7e204295f88c9136539df"
+      },
+      "evidence_dropped_keys": [],
+      "evidence_truncated": false,
+      "had_fragment": false,
+      "had_userinfo": false,
+      "host": "example.com",
+      "limitations": "Passive observation of response headers only. No session handling was exercised.",
+      "non_claims": [
+        "No attempt was made to hijack, replay, or fixate a session.",
+        "The absence of a finding is not evidence that a cookie is safe."
+      ],
+      "observed_at": "2026-08-21T09:30:00Z",
+      "path": "/account",
+      "redacted_query_keys": [
+        "session"
+      ],
+      "references": [
+        "https://developer.mozilla.org/docs/Web/HTTP/Headers/Set-Cookie"
+      ],
+      "remediation": "Set the Secure attribute on session cookies and serve the site over HTTPS only.",
+      "rule_id": "crawler-cli.cookie.missing-secure",
+      "run_id": "run-golden",
+      "schema_version": "crawler-cli/security-finding/1",
+      "severity": "medium",
+      "snippets": [
+        {
+          "reason": "",
+          "source_bytes": 60,
+          "source_sha256": "a1e78838ca48cee74c585e58bf2ccdf3b7e07040b8e4d187b315958122591c4b",
+          "text": "Set-Cookie: SESSIONID=[REDACTED]; Path=/; HttpOnly",
+          "truncated": false
+        }
+      ],
+      "source": "response_header",
+      "status": "observed",
+      "title": "Session cookie served without Secure",
+      "url": "https://example.com/account?session=[REDACTED]",
+      "url_digest": "hmac-sha256:b94d4e148642c2d5f791004b71ecc1b7"
+    },
+    {
+      "category": "urls",
+      "confidence": "medium",
+      "description": "A crawled URL carried a parameter whose name indicates a credential or session value.",
+      "detector": "url-hygiene",
+      "detector_version": "2.1.0",
+      "evidence": {
+        "in_sitemap": true,
+        "parameter_names": [
+          "token",
+          "next"
+        ]
+      },
+      "evidence_dropped_keys": [],
+      "evidence_truncated": false,
+      "had_fragment": true,
+      "had_userinfo": true,
+      "host": "example.com",
+      "limitations": "Parameter names are matched by policy; the value was never inspected or validated.",
+      "non_claims": [
+        "No claim is made that the parameter value is currently valid."
+      ],
+      "observed_at": "2026-08-21T09:30:00Z",
+      "path": "/reset",
+      "redacted_query_keys": [
+        "token"
+      ],
+      "references": [],
+      "remediation": "Move credentials out of query strings; they are logged by proxies, CDNs and browsers.",
+      "rule_id": "crawler-cli.header.sensitive-value-in-url",
+      "run_id": "run-golden",
+      "schema_version": "crawler-cli/security-finding/1",
+      "severity": "low",
+      "snippets": [],
+      "source": "url",
+      "status": "unknown",
+      "title": "Sensitive parameter present in a crawled URL",
+      "url": "https://example.com/reset?token=[REDACTED]&next=/account#[REDACTED]",
+      "url_digest": "hmac-sha256:2c0aecd89c139e097bff9c7cbbf4cff0"
+    }
+  ],
+  "generated_at": "2026-08-21T09:30:05Z",
+  "run_id": "run-golden",
+  "schema_version": "crawler-cli/security-finding/1",
+  "severity_counts": {
+    "critical": 0,
+    "high": 0,
+    "info": 0,
+    "low": 1,
+    "medium": 1
+  }
+}

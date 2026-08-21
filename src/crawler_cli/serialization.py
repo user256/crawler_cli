@@ -3,15 +3,18 @@ from __future__ import annotations
 from typing import Any
 
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, ExtractedContent, FetchResponse
+from .redaction import redact_headers
 
-CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/5"
+CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/6"
 """Schema identifier stamped on saved crawl artifacts (ticket 3344).
 
 Downstream consumers (e.g. the portal migration worker) pin on this string;
 v2 added explicit partial-body and run-budget terminal data; v3 and v4 added
 the speculative URL-discovery evidence; v5 adds an always-present nullable
-``authorization_scope`` projection. Loaders accept unstamped legacy artifacts
-and explicitly known historical versions."""
+``authorization_scope`` projection; v6 redacts response headers in exported
+artifacts. Raw headers stay on the in-memory result for crawler analysis.
+Loaders accept unstamped legacy artifacts and explicitly known historical
+versions."""
 
 
 def serialize_browser_runtime(runtime: BrowserRuntime) -> dict[str, object]:
@@ -34,7 +37,7 @@ def serialize_fetch_response(response: FetchResponse, *, include_text: bool = Tr
         "url": response.url,
         "requested_url": response.requested_url,
         "status": response.status,
-        "headers": response.headers,
+        "headers": redact_headers(response.headers),
         "body_length": len(response.body),
         "body_truncated": response.body_truncated,
         "wire_bytes": response.wire_bytes,
@@ -85,7 +88,9 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
         "requested_url": result.requested_url,
         "final_url": result.final_url,
         "status": result.status,
-        "headers": result.headers,
+        # Raw response headers remain on ``result`` for crawl-time analysis.
+        # Artifact consumers receive the centrally scrubbed projection only.
+        "headers": redact_headers(result.headers),
         "content_type": result.content_type,
         "fetch_backend": result.fetch_backend,
         "raw_html": result.raw_html,

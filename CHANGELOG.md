@@ -29,9 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Breaking for artifact consumers:** saved crawl artifacts are stamped
-  `crawler-cli/crawl-artifact/5`, carrying the speculative-discovery evidence
-  arrays and a nullable `authorization_scope`. The terminal budget counters
-  introduced in `/2` are retained. Loading accepts known historical versions.
+  `crawler-cli/crawl-artifact/6`, carrying the speculative-discovery evidence
+  arrays, a nullable `authorization_scope`, and redacted response-header
+  values. The terminal budget counters introduced in `/2` are retained.
+  Loading accepts known historical versions.
 
 ### Fixed
 
@@ -39,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when a caller persists without `CrawlEngine`, or after
   `truncate_crawl_tables`. The compatibility run row is now created at the top
   of the persist transaction rather than only alongside the page snapshot.
+- Crawl artifacts and streaming JSONL now retain raw response headers only in
+  memory. Their exported headers hard-redact sensitive names (including
+  `Set-Cookie`) and centrally scrub all remaining values, including redirect
+  locations and custom headers.
 - Authorisation and scope manifest (ticket 148): the new `--scope-manifest PATH`
   option loads a `crawler-cli/scope-manifest/1` JSON document declaring the
   operator's asserted authorisation — exact origins (no wildcards), normalized
@@ -55,10 +60,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canonical, secret-free scope snapshot (`crawler-cli/scope-snapshot/1`) and its
   digest; a changed digest blocks `--resume` and is deliberately not waivable by
   `--allow-run-config-mismatch`. Every saved artifact now carries the nullable
-  `authorization_scope` field and uses `crawler-cli/crawl-artifact/5`; the
-  loader accepts known historic versions `/1` through `/5` and unstamped legacy
+  `authorization_scope` field and uses `crawler-cli/crawl-artifact/6`; the
+  loader accepts known historic versions `/1` through `/6` and unstamped legacy
   artifacts. The manifest records operator **attestation** only: it is not proof
   of legal permission and does not replace organisational approval.
+
+- Security evidence contract and secret hygiene (ticket 153): a shared,
+  versioned `crawler-cli/security-finding/1` finding schema with one central
+  serializer for JSON, JSONL, CSV and HTML. Detectors emit structured facts, a
+  finding policy turns facts into findings, and the serializer is the only
+  place that applies redaction, evidence budgets, schema versions and CSV
+  formula-injection hygiene. Sensitive headers, cookies, query values, proxy
+  credentials and database DSNs are redacted centrally across artifacts, logs,
+  exception messages and tracebacks. Raw URLs remain the crawler's internal
+  identity; redacted URL projections and per-run HMAC correlation digests are
+  additive, so distinct frontier, redirect and canonical records stay distinct.
+  Raw sensitive evidence is off by default and requires separate explicit file
+  and database choices. New run-scoped `security_findings`,
+  `security_evidence_raw` and `security_run_retention` tables are covered by
+  `compact-crawl` and `delete-crawl` by exact run id. See
+  `docs/security-evidence-contract.md`, including what remains sensitive after
+   automated redaction.
 
 ## [0.3.0] - 2026-08-10
 

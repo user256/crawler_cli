@@ -2,7 +2,7 @@
 
 Freezes ``crawler-cli/scope-snapshot/1`` — the exact, secret-free projection of
 a scope manifest that is written into run metadata and into saved crawl
-artifacts — and the ``crawler-cli/crawl-artifact/5`` envelope that carries it.
+artifacts — and the ``crawler-cli/crawl-artifact/6`` envelope that carries it.
 
 Two properties matter to downstream consumers and are asserted here rather than
 described: every artifact declares v5 and has an ``authorization_scope`` field;
@@ -111,7 +111,7 @@ def test_manifest_backed_artifact_declares_the_current_schema_version() -> None:
         authorization_scope=_manifest().snapshot(),
     )
     payload = serialize_crawl_job(job)
-    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/5"
+    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/6"
     scope = payload["authorization_scope"]
     assert scope["authorization_reference"] == "CHANGE-1234"
     assert scope["attestation_notice"] == ATTESTATION_NOTICE
@@ -119,5 +119,5 @@ def test_manifest_backed_artifact_declares_the_current_schema_version() -> None:
 
 def test_manifest_free_artifact_has_a_null_scope_projection() -> None:
     payload = serialize_crawl_job(CrawlJobResult(mode="open", seed_urls=[], results=[], run_id="run-148"))
-    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/5"
+    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/6"
     assert payload["authorization_scope"] is None

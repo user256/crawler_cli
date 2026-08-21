@@ -97,3 +97,20 @@ def _disable_asyncpg_ssl_for_test_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(asyncpg, "create_pool", create_pool)
     monkeypatch.setattr(asyncpg, "connect", connect)
+
+
+@pytest.fixture(autouse=True)
+def _clear_registered_secrets() -> None:
+    """Empty the process-wide secret registry between tests (ticket 153).
+
+    ``crawler_cli.redaction.SECRETS`` is deliberately process-global: the CLI
+    registers each credential once, at load time, and every scrubber then
+    removes it verbatim. In a test session that would make one test's fixture
+    credential redact another test's ordinary text, so the registry is cleared
+    around every test.
+    """
+    from crawler_cli.redaction import SECRETS
+
+    SECRETS.clear()
+    yield
+    SECRETS.clear()
