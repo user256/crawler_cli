@@ -2246,6 +2246,24 @@ class AsyncpgStore:
         assert self.pool is not None
         await self._retry_on_deadlock(self._persist_once, result)
 
+    async def _ensure_active_run_row(self, conn: asyncpg.Connection) -> None:
+        """Guarantee ``crawl_runs`` holds a row for the active run id.
+
+        Every run-scoped table carries a foreign key to ``crawl_runs``, so a row
+        must exist before the first of them is written. Two situations reach
+        persistence without one: ``truncate_crawl_tables`` intentionally clears
+        ``crawl_runs`` as well, and a library caller may persist directly
+        instead of going through ``CrawlEngine``. In both cases this recreates
+        the compatibility run. When the engine already registered the real run,
+        the conflict clause leaves that row untouched.
+        """
+        await conn.execute(
+            """INSERT INTO crawl_runs (run_id, mode, status, seed_urls_json, config_hash, config_json, created_at, updated_at)
+            VALUES ($1, 'open', 'legacy', '[]', '', '{}', EXTRACT(EPOCH FROM NOW())::INTEGER, EXTRACT(EPOCH FROM NOW())::INTEGER)
+            ON CONFLICT (run_id) DO NOTHING""",
+            self.active_run_id,
+        )
+
     async def _clear_page_snapshot(
         self,
         conn: asyncpg.Connection,
@@ -2321,16 +2339,7 @@ class AsyncpgStore:
             and not extracted.meta_robots.noindex
             and not extracted.x_robots_tag.noindex
         )
-        # ``truncate_crawl_tables`` intentionally clears crawl_runs too.  A
-        # library caller may then persist without going through CrawlEngine,
-        # so recreate the compatibility legacy run before its FK-backed
-        # snapshot is written.
-        await conn.execute(
-            """INSERT INTO crawl_runs (run_id, mode, status, seed_urls_json, config_hash, config_json, created_at, updated_at)
-            VALUES ($1, 'open', 'legacy', '[]', '', '{}', EXTRACT(EPOCH FROM NOW())::INTEGER, EXTRACT(EPOCH FROM NOW())::INTEGER)
-            ON CONFLICT (run_id) DO NOTHING""",
-            self.active_run_id,
-        )
+        await self._ensure_active_run_row(conn)
         await conn.execute(
             """
             INSERT INTO page_run_snapshots (
@@ -2428,6 +2437,11 @@ class AsyncpgStore:
         assert self.pool is not None
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # The run-scoped evidence tables written later in this
+                # transaction all reference crawl_runs, and the candidate
+                # tables are written before the page snapshot is, so the run
+                # row has to exist first.
+                await self._ensure_active_run_row(conn)
                 # Pre-touch every `urls` row this transaction will create/update,
                 # in sorted order, BEFORE doing per-URL work. This makes concurrent
                 # persist() transactions acquire the shared `urls` row locks in the
