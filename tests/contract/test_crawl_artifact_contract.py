@@ -138,7 +138,7 @@ def test_loader_accepts_legacy_artifact_without_schema_version(tmp_path) -> None
     assert len(job.results) == len(compare_urls_source_results())
 
 
-@pytest.mark.parametrize("version", range(1, 7))
+@pytest.mark.parametrize("version", range(1, 8))
 def test_loader_accepts_known_historical_schema_versions(tmp_path: Path, version: int) -> None:
     path = tmp_path / f"artifact-v{version}.json"
     path.write_text(
@@ -249,3 +249,28 @@ def test_loader_defaults_legacy_json_ld_parser_fields(tmp_path) -> None:
     item = loaded.results[0].extracted.schema_data[0]
     assert item["parser_mode"] == "legacy-unspecified"
     assert item["compatibility_diagnostics"] == []
+
+
+def test_writer_never_stamps_a_version_its_own_loader_rejects(tmp_path: Path) -> None:
+    """Guards the bump itself, not any particular version number.
+
+    The accepted set is derived from a numeric bound that is maintained by hand,
+    so raising ``CRAWL_ARTIFACT_SCHEMA_VERSION`` without widening that bound
+    would make the writer emit artifacts the loader refuses. Round-tripping a
+    freshly written artifact catches that regardless of how the bound is spelled,
+    and it is checked for both the single-document and the NDJSON form.
+    """
+    document = tmp_path / "artifact.json"
+    document.write_text(json.dumps(serialize_crawl_job(_job())), encoding="utf-8")
+    assert _load_saved_crawl(document).mode == _job().mode
+
+    ndjson = tmp_path / "crawl.jsonl"
+    summary = {
+        "__type": "summary",
+        "schema_version": CRAWL_ARTIFACT_SCHEMA_VERSION,
+        "mode": "open",
+        "seed_urls": ["https://example.test/"],
+    }
+    result = {"requested_url": "https://example.test/", "final_url": "https://example.test/", "status": 200}
+    ndjson.write_text("\n".join(json.dumps(line) for line in (result, summary)) + "\n", encoding="utf-8")
+    assert _load_saved_crawl(ndjson).mode == "open"
