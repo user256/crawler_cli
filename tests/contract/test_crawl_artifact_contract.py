@@ -1,6 +1,6 @@
 """Golden contract: the saved crawl artifact schema (tickets 3344, 3685, 155, 156).
 
-Freezes ``crawler-cli/crawl-artifact/6``: the exact field set that
+Freezes ``crawler-cli/crawl-artifact/7``: the exact field set that
 ``serialize_crawl_job`` emits (redirect chains and static URL evidence included)
 and the loader's tolerance for legacy artifacts without ``schema_version``.
 """
@@ -16,6 +16,7 @@ from contract_fixtures import assert_matches_golden, compare_urls_source_results
 
 from crawler_cli.__main__ import _load_saved_crawl
 from crawler_cli.models import CrawlJobResult
+from crawler_cli.schema import JSON_LD_PARSER_MODE, extract_schema_data
 from crawler_cli.serialization import CRAWL_ARTIFACT_SCHEMA_VERSION, serialize_crawl_job
 
 EXPECTED_RESULT_KEYS = {
@@ -105,7 +106,7 @@ def _job() -> CrawlJobResult:
 
 def test_crawl_artifact_matches_golden() -> None:
     payload = serialize_crawl_job(_job())
-    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/6"
+    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/7"
     assert set(payload.keys()) == EXPECTED_JOB_KEYS
     first_result = payload["results"][0]  # type: ignore[index]
     assert set(first_result.keys()) == EXPECTED_RESULT_KEYS
@@ -137,7 +138,7 @@ def test_loader_accepts_legacy_artifact_without_schema_version(tmp_path) -> None
     assert len(job.results) == len(compare_urls_source_results())
 
 
-@pytest.mark.parametrize("version", range(1, 6))
+@pytest.mark.parametrize("version", range(1, 7))
 def test_loader_accepts_known_historical_schema_versions(tmp_path: Path, version: int) -> None:
     path = tmp_path / f"artifact-v{version}.json"
     path.write_text(
@@ -154,7 +155,7 @@ def test_loader_accepts_known_historical_schema_versions(tmp_path: Path, version
     assert _load_saved_crawl(path).mode == "list"
 
 
-@pytest.mark.parametrize("version", range(1, 7))
+@pytest.mark.parametrize("version", range(1, 8))
 def test_jsonl_loader_accepts_a_known_summary_schema_version(tmp_path: Path, version: int) -> None:
     path = tmp_path / "crawl.jsonl"
     result = {"requested_url": "https://example.test/", "final_url": "https://example.test/", "status": 200}
@@ -208,3 +209,43 @@ def test_saved_json_artifact_without_a_schema_version_still_loads(tmp_path: Path
     path = tmp_path / "legacy.json"
     path.write_text(json.dumps({"mode": "list", "seed_urls": [], "results": []}), encoding="utf-8")
     assert _load_saved_crawl(path).mode == "list"
+
+
+def test_v3_preserves_json_ld_parser_provenance_and_diagnostics(tmp_path) -> None:
+    job = _job()
+    assert job.results[0].extracted is not None
+    job.results[0].extracted.schema_data = extract_schema_data(
+        """
+        <script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"Thing","name":"A &amp;amp; B"}
+        </script>
+        """,
+        "https://old.example/a",
+    )
+    payload = serialize_crawl_job(job)
+    item = payload["results"][0]["extracted"]["schema_data"][0]  # type: ignore[index]
+    assert item["parser_mode"] == JSON_LD_PARSER_MODE
+    assert item["compatibility_diagnostics"][0]["code"] == "jsonld_possible_double_escape"
+
+    artifact = tmp_path / "v3.json"
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = _load_saved_crawl(artifact)
+    assert loaded.results[0].extracted is not None
+    loaded_item = loaded.results[0].extracted.schema_data[0]
+    assert loaded_item["parser_mode"] == JSON_LD_PARSER_MODE
+    assert loaded_item["compatibility_diagnostics"][0]["json_pointer"] == "/name"
+
+
+def test_loader_defaults_legacy_json_ld_parser_fields(tmp_path) -> None:
+    payload = serialize_crawl_job(_job())
+    extracted = payload["results"][0]["extracted"]  # type: ignore[index]
+    extracted["schema_data"] = [{"format": "json-ld", "type": "Thing", "is_valid": True}]
+    del payload["schema_version"]
+    artifact = tmp_path / "legacy-schema.json"
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = _load_saved_crawl(artifact)
+    assert loaded.results[0].extracted is not None
+    item = loaded.results[0].extracted.schema_data[0]
+    assert item["parser_mode"] == "legacy-unspecified"
+    assert item["compatibility_diagnostics"] == []

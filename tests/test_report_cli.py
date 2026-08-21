@@ -113,6 +113,25 @@ class FakeReports:
         self.calls.append(("missing-expected-id", {"expected_id": expected_id}))
         return [{"url": "https://example.com/wrong-id"}]
 
+    async def schema_compatibility(self):
+        self.calls.append(("schema-compatibility", {}))
+        return [
+            {
+                "url": "https://example.com/schema",
+                "schema_type": "Thing",
+                "parser_mode": "google-single-html-unescape-v1",
+                "is_valid": True,
+                "diagnostic_code": "jsonld_possible_double_escape",
+                "severity": "warning",
+                "script_position": 0,
+                "json_pointer": "/name",
+                "location_kind": "value",
+                "evidence": "&amp;",
+                "source_evidence": "&amp;amp;",
+                "remediation": "Use JSON escapes.",
+            }
+        ]
+
 
 @pytest.fixture
 def fake_reports(monkeypatch):
@@ -173,6 +192,14 @@ def test_css_and_render_candidate_reports_are_selectable(fake_reports):
 def test_missing_analytics_forwards_vendor(fake_reports):
     assert _run(["report", "missing-analytics", "--vendor", "ga4"]) == 0
     assert FakeReports.instances[-1].calls == [("missing-analytics", {"vendor": "ga4"})]
+
+
+def test_schema_compatibility_report_is_selectable(fake_reports, capsys):
+    assert _run(["report", "schema-compatibility"]) == 0
+    assert FakeReports.instances[-1].calls == [("schema-compatibility", {})]
+    out = capsys.readouterr().out
+    assert "jsonld_possible_double_escape" in out
+    assert "https://example.com/schema" in out
 
 
 def test_expected_id_joins_default_set(fake_reports):

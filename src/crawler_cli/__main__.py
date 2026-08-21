@@ -1437,6 +1437,34 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     _add_postgres_args(parser)
 
 
+def _json_ld_compatibility_counts(job: "CrawlJobResult") -> tuple[int, int, int]:
+    """Return warning blocks, parse-error blocks, and affected page count."""
+    warning_blocks: set[tuple[str, str]] = set()
+    error_blocks: set[tuple[str, str]] = set()
+    affected_pages: set[str] = set()
+    for result in job.results:
+        if result.extracted is None:
+            continue
+        for item in result.extracted.schema_data:
+            if item.get("format") != "json-ld":
+                continue
+            fallback_position = str(item.get("position", "0")).split("-", 1)[0]
+            for diagnostic in item.get("compatibility_diagnostics", []) or []:
+                if not isinstance(diagnostic, dict):
+                    continue
+                code = diagnostic.get("code")
+                position = str(diagnostic.get("script_position", fallback_position))
+                identity = (result.final_url, position)
+                if code == "jsonld_possible_double_escape":
+                    warning_blocks.add(identity)
+                elif code == "jsonld_invalid_after_html_unescape":
+                    error_blocks.add(identity)
+                else:
+                    continue
+                affected_pages.add(result.final_url)
+    return len(warning_blocks), len(error_blocks), len(affected_pages)
+
+
 async def _run_crawl(args: argparse.Namespace) -> int:
     seeds = _collect_seed_urls(args)
     if not seeds and not args.csv_file:
@@ -1564,6 +1592,12 @@ async def _run_crawl(args: argparse.Namespace) -> int:
             summary += f", {job.render_url_candidate_count} render URL candidates"
         if job.render_dom_enqueued_count:
             summary += f", {job.render_dom_enqueued_count} rendered links enqueued"
+        json_ld_warnings, json_ld_errors, json_ld_pages = _json_ld_compatibility_counts(job)
+        if json_ld_warnings or json_ld_errors:
+            summary += (
+                f", JSON-LD compatibility: {json_ld_warnings} possible-double-escape blocks, "
+                f"{json_ld_errors} invalid-after-unescape blocks on {json_ld_pages} pages"
+            )
         if persist_errors:
             summary += f", {persist_errors} persist failures"
             if job.persist_failed_urls:
@@ -2070,6 +2104,7 @@ _REPORT_NAMES = (
     "analytics-inventory",
     "missing-analytics",
     "missing-expected-id",
+    "schema-compatibility",
 )
 
 
@@ -2100,6 +2135,8 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.pages_missing_analytics(vendor=args.vendor)
     if name == "missing-expected-id":
         return await reports.pages_missing_expected_id(args.expected_id)
+    if name == "schema-compatibility":
+        return await reports.schema_compatibility()
     raise ValueError(f"unknown report: {name}")
 
 
@@ -2246,6 +2283,17 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             for link in payload.get("hreflang_links", []) or []
             if isinstance(link, dict)
         ]
+        schema_data: list[dict[str, Any]] = []
+        for schema_item in payload.get("schema_data", []) or []:
+            if not isinstance(schema_item, dict):
+                continue
+            normalized_item = dict(schema_item)
+            normalized_item.setdefault(
+                "parser_mode",
+                "legacy-unspecified" if normalized_item.get("format") == "json-ld" else None,
+            )
+            normalized_item.setdefault("compatibility_diagnostics", [])
+            schema_data.append(normalized_item)
         return ExtractedContent(
             title=payload.get("title"),
             meta_description=payload.get("meta_description"),
@@ -2259,7 +2307,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             text=str(payload.get("text", "")),
             word_count=int(payload.get("word_count", 0) or 0),
             metadata=dict(payload.get("metadata", {}) or {}),
-            schema_data=list(payload.get("schema_data", []) or []),
+            schema_data=schema_data,
         )
 
     def _load_discovered_links(payload: list[_SavedDiscoveredLink] | None) -> list[DiscoveredLink]:
@@ -2388,7 +2436,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             redirect_chain=list(item.get("redirect_chain", []) or []),
         )
 
-    known_artifact_versions = frozenset(f"crawler-cli/crawl-artifact/{version}" for version in range(1, 7))
+    known_artifact_versions = frozenset(f"crawler-cli/crawl-artifact/{version}" for version in range(1, 8))
 
     def _validate_schema_version(payload: Mapping[str, object]) -> None:
         """Accept unstamped or known historical artifacts, reject unknown stamps."""
@@ -2440,9 +2488,6 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         )
 
     if isinstance(payload, dict) and "results" in payload:
-        # The single-document artifact is the one ``serialize_crawl_job``
-        # actually stamps, so it needs the same version gate as the NDJSON
-        # summary rather than only the streaming form.
         _validate_schema_version(payload)
         job = cast("_SavedJob", payload)
         return CrawlJobResult(

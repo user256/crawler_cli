@@ -9,6 +9,7 @@ rollback, compaction/purge safety, and report queries.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from urllib.parse import urlparse
 
@@ -166,6 +167,48 @@ async def test_initialize_migrates_pre_challenge_page_metadata(dsn: str) -> None
     finally:
         await store.truncate_crawl_tables()
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_initialize_migrates_legacy_schema_data_diagnostics(store: AsyncpgStore) -> None:
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        await conn.execute("ALTER TABLE schema_data DROP COLUMN compatibility_diagnostics")
+        await conn.execute("ALTER TABLE schema_data DROP COLUMN parser_mode")
+        url_id = await conn.fetchval(
+            """
+            INSERT INTO urls (url, kind, classification, first_seen, last_seen)
+            VALUES ('https://legacy-schema.example/', 'html', 'internal', 1, 1)
+            RETURNING id
+            """
+        )
+        type_id = await conn.fetchval("INSERT INTO schema_types (type_name) VALUES ('Thing') RETURNING id")
+        await conn.execute(
+            """
+            INSERT INTO schema_data (
+                url_id, schema_type_id, format, raw_data, parsed_data,
+                position, is_valid, validation_errors, severity
+            ) VALUES ($1, $2, 'json-ld', '{}', '{}'::jsonb, 0, TRUE, '[]'::jsonb, 'info')
+            """,
+            int(url_id),
+            int(type_id),
+        )
+
+    await store.initialize()
+    async with store.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT parser_mode, compatibility_diagnostics
+            FROM schema_data
+            WHERE url_id = $1
+            """,
+            int(url_id),
+        )
+    assert row is not None
+    assert row["parser_mode"] is None
+    # asyncpg returns JSONB values as text unless a JSON codec is registered;
+    # assert the migrated JSON value, rather than its driver representation.
+    assert json.loads(row["compatibility_diagnostics"]) == []
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
+from html import unescape as html_unescape
 from typing import Any
 from urllib.parse import urljoin
 
@@ -16,6 +18,130 @@ try:
     _PARSER = "lxml"
 except ImportError:
     _PARSER = "html.parser"
+
+
+JSON_LD_PARSER_MODE = "google-single-html-unescape-v1"
+"""Versioned JSON-LD extraction mode introduced by ticket 159."""
+
+_HTML_ENTITY_RE = re.compile(r"&(?:#[xX][0-9A-Fa-f]+|#\d+|[A-Za-z][A-Za-z0-9]+);")
+_NESTED_HTML_ENTITY_RE = re.compile(
+    r"(?:&amp;|&AMP;|&#0*38;|&#[xX]0*26;)(?:#[xX][0-9A-Fa-f]+|#\d+|[A-Za-z][A-Za-z0-9]+);"
+)
+_JSON_LD_EVIDENCE_LIMIT = 120
+
+
+@dataclass(frozen=True)
+class JsonLdParseResult:
+    """One script block after exactly one HTML-unescape and one JSON parse."""
+
+    raw_data: str
+    parsed_data: object | None
+    compatibility_diagnostics: list[dict[str, Any]]
+    json_error: str | None = None
+
+
+def _json_pointer_token(value: object) -> str:
+    return str(value).replace("~", "~0").replace("/", "~1")
+
+
+def _iter_json_strings(value: object, pointer: str = ""):
+    """Yield JSON Pointer, location kind, and every member-name/string value."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_pointer = f"{pointer}/{_json_pointer_token(key)}"
+            yield child_pointer, "member_name", str(key)
+            yield from _iter_json_strings(child, child_pointer)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from _iter_json_strings(child, f"{pointer}/{index}")
+    elif isinstance(value, str):
+        yield pointer, "value", value
+
+
+def _nested_entity_sources(raw_data: str) -> dict[str, str]:
+    """Map one-pass residual entities to bounded nested source spellings."""
+    sources: dict[str, str] = {}
+    for match in _NESTED_HTML_ENTITY_RE.finditer(raw_data):
+        source = match.group(0)
+        residual = html_unescape(source)
+        entity_match = _HTML_ENTITY_RE.fullmatch(residual)
+        if entity_match and html_unescape(residual) != residual:
+            sources.setdefault(residual, source[:_JSON_LD_EVIDENCE_LIMIT])
+    return sources
+
+
+def _residual_entity_diagnostics(raw_data: str, parsed_data: object, script_position: int) -> list[dict[str, Any]]:
+    sources = _nested_entity_sources(raw_data)
+    if not sources:
+        return []
+
+    diagnostics: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for pointer, location_kind, value in _iter_json_strings(parsed_data):
+        for match in _HTML_ENTITY_RE.finditer(value):
+            entity = match.group(0)
+            source = sources.get(entity)
+            identity = (pointer, location_kind, entity)
+            if source is None or identity in seen:
+                continue
+            seen.add(identity)
+            diagnostics.append(
+                {
+                    "code": "jsonld_possible_double_escape",
+                    "severity": "warning",
+                    "script_position": script_position,
+                    "json_pointer": pointer,
+                    "location_kind": location_kind,
+                    "evidence": entity[:_JSON_LD_EVIDENCE_LIMIT],
+                    "source_evidence": source,
+                    "remediation": (
+                        "Emit the intended Unicode character directly or use a JSON Unicode escape such as \\u0026."
+                    ),
+                }
+            )
+    return diagnostics
+
+
+def _json_error_evidence(text: str, position: int) -> str:
+    start = max(0, position - (_JSON_LD_EVIDENCE_LIMIT // 2))
+    end = min(len(text), start + _JSON_LD_EVIDENCE_LIMIT)
+    return text[start:end].replace("\n", "\\n").replace("\r", "\\r")
+
+
+def parse_json_ld_block(raw_data: str, *, script_position: int = 0) -> JsonLdParseResult:
+    """Apply exactly one HTML-unescape pass, then parse RFC 8259 JSON.
+
+    There is intentionally no raw-text retry and no recursive unescaping.
+    """
+    single_pass_text = html_unescape(raw_data)
+    try:
+        parsed_data = json.loads(single_pass_text)
+    except json.JSONDecodeError as exc:
+        diagnostic = {
+            "code": "jsonld_invalid_after_html_unescape",
+            "severity": "error",
+            "script_position": script_position,
+            "json_pointer": "",
+            "location_kind": "document",
+            "evidence": _json_error_evidence(single_pass_text, exc.pos),
+            "line": exc.lineno,
+            "column": exc.colno,
+            "remediation": (
+                "Emit valid JSON string escapes or Unicode escapes; do not rely on HTML entities for JSON delimiters."
+            ),
+        }
+        return JsonLdParseResult(
+            raw_data=raw_data,
+            parsed_data=None,
+            compatibility_diagnostics=[diagnostic],
+            json_error=f"JSON decode error after one HTML-unescape pass: {exc}",
+        )
+
+    return JsonLdParseResult(
+        raw_data=raw_data,
+        parsed_data=parsed_data,
+        compatibility_diagnostics=_residual_entity_diagnostics(raw_data, parsed_data, script_position),
+    )
 
 
 def create_schema_content_hash(schema_data: dict[str, Any]) -> str:
@@ -75,53 +201,96 @@ def extract_schema_data(
     """
     if soup is None:
         soup = BeautifulSoup(html, _PARSER)
+    parse_results = _parse_json_ld_scripts(soup)
     schema_data = []
-    schema_data.extend(extract_json_ld(soup, base_url))
+    schema_data.extend(extract_json_ld(soup, base_url, parse_results=parse_results))
     schema_data.extend(extract_microdata(soup, base_url))
     schema_data.extend(extract_rdfa(soup, base_url))
-    schema_data.extend(detect_broken_schema(soup, base_url))
+    schema_data.extend(detect_broken_schema(soup, base_url, json_ld_results=parse_results))
+    for item in schema_data:
+        item.setdefault("parser_mode", None)
+        item.setdefault("compatibility_diagnostics", [])
     return schema_data
 
 
-def extract_json_ld(soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]]:
+def _parse_json_ld_scripts(soup: BeautifulSoup) -> list[JsonLdParseResult]:
+    results: list[JsonLdParseResult] = []
+    for position, script in enumerate(soup.find_all("script", type="application/ld+json")):
+        raw_data = str(script.string).strip() if script.string else ""
+        if raw_data:
+            results.append(parse_json_ld_block(raw_data, script_position=position))
+        else:
+            results.append(JsonLdParseResult(raw_data="", parsed_data=None, compatibility_diagnostics=[]))
+    return results
+
+
+def _diagnostics_for_pointer(
+    diagnostics: list[dict[str, Any]],
+    pointer_prefix: str,
+    schema_type: object,
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for diagnostic in diagnostics:
+        pointer = str(diagnostic.get("json_pointer", ""))
+        if pointer_prefix and pointer != pointer_prefix and not pointer.startswith(f"{pointer_prefix}/"):
+            continue
+        selected.append({**diagnostic, "schema_type": str(schema_type)})
+    return selected
+
+
+def extract_json_ld(
+    soup: BeautifulSoup,
+    base_url: str,
+    *,
+    parse_results: list[JsonLdParseResult] | None = None,
+) -> list[dict[str, Any]]:
     """Extract JSON-LD structured data from script tags."""
     schema_data = []
+    results = parse_results if parse_results is not None else _parse_json_ld_scripts(soup)
 
-    # Find all script tags with type="application/ld+json"
-    script_tags = soup.find_all("script", type="application/ld+json")
-
-    for i, script in enumerate(script_tags):
+    for i, parse_result in enumerate(results):
         try:
-            # Parse JSON content
-            json_content = script.string.strip() if script.string else ""
-            if not json_content:
+            if not parse_result.raw_data:
                 continue
-
-            # Handle both single objects and arrays
-            try:
-                data = json.loads(json_content)
-            except json.JSONDecodeError as e:
+            if parse_result.json_error:
                 schema_data.append(
                     {
                         "format": "json-ld",
                         "type": "InvalidJSON",
-                        "raw_data": json_content,
+                        "raw_data": parse_result.raw_data,
                         "parsed_data": None,
                         "position": i,
                         "is_valid": False,
-                        "validation_errors": [f"JSON decode error: {str(e)}"],
+                        "validation_errors": [parse_result.json_error],
+                        "severity": "error",
+                        "parser_mode": JSON_LD_PARSER_MODE,
+                        "compatibility_diagnostics": parse_result.compatibility_diagnostics,
                     }
                 )
                 continue
 
-            # Handle arrays of schema objects
+            data = parse_result.parsed_data
             if isinstance(data, list):
                 for j, item in enumerate(data):
-                    schema_items = process_json_ld_item(item, json_content, i * 100 + j, base_url)
+                    schema_items = process_json_ld_item(
+                        item,
+                        parse_result.raw_data,
+                        i * 100 + j,
+                        base_url,
+                        parser_mode=JSON_LD_PARSER_MODE,
+                        compatibility_diagnostics=parse_result.compatibility_diagnostics,
+                        pointer_prefix=f"/{j}",
+                    )
                     schema_data.extend(schema_items)
-            else:
-                # Single schema object
-                schema_items = process_json_ld_item(data, json_content, i, base_url)
+            elif isinstance(data, dict):
+                schema_items = process_json_ld_item(
+                    data,
+                    parse_result.raw_data,
+                    i,
+                    base_url,
+                    parser_mode=JSON_LD_PARSER_MODE,
+                    compatibility_diagnostics=parse_result.compatibility_diagnostics,
+                )
                 schema_data.extend(schema_items)
 
         except Exception as e:
@@ -129,18 +298,30 @@ def extract_json_ld(soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]]:
                 {
                     "format": "json-ld",
                     "type": "ParseError",
-                    "raw_data": str(script),
+                    "raw_data": parse_result.raw_data,
                     "parsed_data": None,
                     "position": i,
                     "is_valid": False,
                     "validation_errors": [f"Parse error: {str(e)}"],
+                    "severity": "error",
+                    "parser_mode": JSON_LD_PARSER_MODE,
+                    "compatibility_diagnostics": parse_result.compatibility_diagnostics,
                 }
             )
 
     return schema_data
 
 
-def process_json_ld_item(data: dict[str, Any], raw_json: str, position: int, base_url: str) -> list[dict[str, Any]]:
+def process_json_ld_item(
+    data: dict[str, Any],
+    raw_json: str,
+    position: int,
+    base_url: str,
+    *,
+    parser_mode: str = JSON_LD_PARSER_MODE,
+    compatibility_diagnostics: list[dict[str, Any]] | None = None,
+    pointer_prefix: str = "",
+) -> list[dict[str, Any]]:
     """Process a single JSON-LD item and extract schema types. Returns a list of schema items."""
     if not isinstance(data, dict):
         return []
@@ -151,13 +332,32 @@ def process_json_ld_item(data: dict[str, Any], raw_json: str, position: int, bas
     if "@graph" in data and isinstance(data["@graph"], list):
         for i, graph_item in enumerate(data["@graph"]):
             if isinstance(graph_item, dict):
-                item_result = process_single_schema_item(graph_item, raw_json, f"{position}-{i}", base_url)
+                graph_prefix = f"{pointer_prefix}/@graph/{i}"
+                item_result = process_single_schema_item(
+                    graph_item,
+                    raw_json,
+                    f"{position}-{i}",
+                    base_url,
+                    parser_mode=parser_mode,
+                    compatibility_diagnostics=_diagnostics_for_pointer(
+                        compatibility_diagnostics or [], graph_prefix, graph_item.get("@type", "Unknown")
+                    ),
+                )
                 if item_result:
                     schema_items.append(item_result)
         return schema_items
 
     # Handle single schema object
-    item_result = process_single_schema_item(data, raw_json, position, base_url)
+    item_result = process_single_schema_item(
+        data,
+        raw_json,
+        position,
+        base_url,
+        parser_mode=parser_mode,
+        compatibility_diagnostics=_diagnostics_for_pointer(
+            compatibility_diagnostics or [], pointer_prefix, data.get("@type", "Unknown")
+        ),
+    )
     if item_result:
         schema_items.append(item_result)
 
@@ -165,7 +365,13 @@ def process_json_ld_item(data: dict[str, Any], raw_json: str, position: int, bas
 
 
 def process_single_schema_item(
-    data: dict[str, Any], raw_json: str, position: str, base_url: str
+    data: dict[str, Any],
+    raw_json: str,
+    position: str,
+    base_url: str,
+    *,
+    parser_mode: str = JSON_LD_PARSER_MODE,
+    compatibility_diagnostics: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Process a single schema item and extract schema type."""
     if not isinstance(data, dict):
@@ -198,6 +404,8 @@ def process_single_schema_item(
         "validation_errors": validation_errors,
         "severity": severity,
         "content_hash": content_hash,
+        "parser_mode": parser_mode,
+        "compatibility_diagnostics": compatibility_diagnostics or [],
     }
 
 
@@ -601,49 +809,32 @@ def get_schema_statistics(schema_data: list[dict[str, Any]]) -> dict[str, Any]:
     return stats
 
 
-def detect_broken_schema(soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]]:
+def detect_broken_schema(
+    soup: BeautifulSoup,
+    base_url: str,
+    *,
+    json_ld_results: list[JsonLdParseResult] | None = None,
+) -> list[dict[str, Any]]:
     """
     Detect broken or malformed schema.org markup that our extraction missed.
 
     This function looks for:
-    1. JSON-LD with @context and @type but malformed structure
-    2. Microdata with itemscope but missing itemtype or malformed
-    3. RDFa with vocab/typeof but malformed structure
-    4. Schema.org URLs in content that aren't properly structured
+    1. Microdata with itemscope but missing itemtype or malformed
+    2. RDFa with vocab/typeof but malformed structure
+    3. Schema.org URLs in content that aren't properly structured
+
+    Application JSON-LD blocks are already classified by ``extract_json_ld``
+    from the shared ``JsonLdParseResult`` and are not emitted twice here.
     """
     broken_schema = []
 
-    # 1. Check for malformed JSON-LD
-    script_tags = soup.find_all("script", type="application/ld+json")
-    for i, script in enumerate(script_tags):
-        try:
-            content = script.get_text(strip=True)
-            if not content:
-                continue
+    # JSON-LD application blocks are classified once by extract_json_ld.
+    # Consume the same parse results here so this detector can never disagree
+    # by retrying the untouched source or using different unescape semantics.
+    # No second BrokenJSON-LD record is emitted for the same script block.
+    _ = json_ld_results if json_ld_results is not None else _parse_json_ld_scripts(soup)
 
-            # Check if it looks like JSON-LD but failed to parse
-            if "@context" in content and "@type" in content and ("schema.org" in content or "Schema.org" in content):
-                try:
-                    json.loads(content)
-                    # If it parses successfully, it's not broken
-                    continue
-                except json.JSONDecodeError:
-                    # This is broken JSON-LD
-                    broken_schema.append(
-                        {
-                            "format": "json-ld",
-                            "type": "BrokenJSON-LD",
-                            "raw_data": content,
-                            "parsed_data": None,
-                            "position": i,
-                            "is_valid": False,
-                            "validation_errors": ["Malformed JSON-LD: Invalid JSON syntax"],
-                        }
-                    )
-        except Exception:
-            continue
-
-    # 2. Check for malformed microdata
+    # 1. Check for malformed microdata
     # Look for itemscope without proper itemtype
     items_with_scope = soup.find_all(attrs={"itemscope": True})
     for i, item in enumerate(items_with_scope):
@@ -662,7 +853,7 @@ def detect_broken_schema(soup: BeautifulSoup, base_url: str) -> list[dict[str, A
                 }
             )
 
-    # 3. Check for malformed RDFa
+    # 2. Check for malformed RDFa
     # Look for typeof without proper vocab or malformed structure
     items_with_typeof = soup.find_all(attrs={"typeof": True})
     for i, item in enumerate(items_with_typeof):
@@ -683,7 +874,7 @@ def detect_broken_schema(soup: BeautifulSoup, base_url: str) -> list[dict[str, A
                 }
             )
 
-    # 4. Check for schema.org references in content that aren't structured
+    # 3. Check for schema.org references in content that aren't structured
     # Look for schema.org URLs in text content, meta tags, or comments
     schema_url_pattern = re.compile(r"https?://schema\.org/[A-Za-z]+", re.IGNORECASE)
 
@@ -721,7 +912,7 @@ def detect_broken_schema(soup: BeautifulSoup, base_url: str) -> list[dict[str, A
                 }
             )
 
-    # 5. Check for incomplete JSON-LD blocks
+    # 4. Check for incomplete JSON-LD blocks
     # Look for script tags that contain partial JSON-LD
     all_scripts = soup.find_all("script")
     for i, script in enumerate(all_scripts):

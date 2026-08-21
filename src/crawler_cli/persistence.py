@@ -665,6 +665,8 @@ SCHEMA_STATEMENTS = [
         format TEXT CHECK (format IN ('json-ld', 'microdata', 'rdfa')) NOT NULL,
         raw_data TEXT NOT NULL,
         parsed_data JSONB,
+        parser_mode TEXT,
+        compatibility_diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb,
         position INTEGER,
         is_valid BOOLEAN NOT NULL DEFAULT TRUE,
         validation_errors JSONB,
@@ -674,6 +676,11 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY (url_id) REFERENCES urls (id),
         FOREIGN KEY (schema_type_id) REFERENCES schema_types (id)
     )
+    """,
+    """ALTER TABLE schema_data ADD COLUMN IF NOT EXISTS parser_mode TEXT""",
+    """
+    ALTER TABLE schema_data
+    ADD COLUMN IF NOT EXISTS compatibility_diagnostics JSONB NOT NULL DEFAULT '[]'::jsonb
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_schema_instances_content_hash ON schema_instances(content_hash)
@@ -3036,13 +3043,15 @@ class AsyncpgStore:
             await conn.execute(
                 """
                 INSERT INTO schema_data (
-                    url_id, schema_type_id, format, raw_data, parsed_data,
-                    position, is_valid, validation_errors, severity
+                    url_id, schema_type_id, format, raw_data, parsed_data, parser_mode,
+                    compatibility_diagnostics, position, is_valid, validation_errors, severity
                 )
-                VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10::jsonb, $11)
                 ON CONFLICT (url_id, schema_type_id, position) DO UPDATE
                 SET raw_data = EXCLUDED.raw_data,
                     parsed_data = EXCLUDED.parsed_data,
+                    parser_mode = EXCLUDED.parser_mode,
+                    compatibility_diagnostics = EXCLUDED.compatibility_diagnostics,
                     is_valid = EXCLUDED.is_valid,
                     validation_errors = EXCLUDED.validation_errors,
                     severity = EXCLUDED.severity
@@ -3052,6 +3061,8 @@ class AsyncpgStore:
                 format_type,
                 item.get("raw_data", ""),
                 parsed_json,
+                item.get("parser_mode"),
+                json.dumps(item.get("compatibility_diagnostics", [])),
                 self._parse_schema_position(item.get("position", 0)),
                 item.get("is_valid", True),
                 json.dumps(item.get("validation_errors", [])),
