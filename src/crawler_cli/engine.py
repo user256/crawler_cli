@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from .amp import is_amp_url_shape
 from .archive import discover_historical_urls
+from .authorisation import ScopeManifestDenied, ScopePurpose, describe_manifest
 from .backends import ObscuraFetchBackend, PlaywrightBackend, RateLimiter, build_backend
 from .budget import RunBudget, RunBudgetExhausted
 from .challenge import detect_challenge
@@ -113,7 +114,7 @@ def _crawl_run_config_snapshot(config: CrawlConfig, seeds: list[str]) -> dict[st
     safely across resumes. Seed and scope choices cannot: changing them would
     make a resumed frontier represent a different crawl.
     """
-    return {
+    snapshot: dict[str, Any] = {
         "seed_urls": list(dict.fromkeys(seeds)),
         "same_host_only": config.same_host_only,
         "allowed_hosts": sorted({host.lower() for host in config.allowed_hosts}),
@@ -152,6 +153,12 @@ def _crawl_run_config_snapshot(config: CrawlConfig, seeds: list[str]) -> dict[st
         # A guarded job must not be resumed by an unguarded worker.
         "portal_connection_policy": config.portal_connection_policy is not None,
     }
+    if config.scope_predicate is not None:
+        # Only present when a scope manifest is active, so a manifest-free
+        # crawl keeps exactly the fingerprint it had before ticket 148 and
+        # existing runs stay resumable.
+        snapshot["authorization_scope"] = config.scope_predicate.snapshot()
+    return snapshot
 
 
 def _crawl_run_config_hash(snapshot: dict[str, Any]) -> str:
@@ -161,6 +168,48 @@ def _crawl_run_config_hash(snapshot: dict[str, Any]) -> str:
 
 class CrawlRunSelectionError(RuntimeError):
     """Invalid run selection or resume state for crawl_open()."""
+
+
+def _authorization_scope_digest(snapshot: dict[str, Any] | None) -> str | None:
+    """Return the SHA-256 digest of a run snapshot's authorisation scope.
+
+    ``None`` means the run had no scope manifest at all, which is distinct from
+    a run whose manifest changed and must stay distinguishable.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    scope = snapshot.get("authorization_scope")
+    if not isinstance(scope, dict):
+        return None
+    payload = json.dumps(scope, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _assert_authorization_scope_unchanged(
+    existing_run: Any,
+    snapshot: dict[str, Any],
+    run_id: str,
+) -> None:
+    """Refuse a resume whose authorisation scope differs from the stored run.
+
+    This check runs ahead of, and independently of, the ordinary configuration
+    fingerprint comparison. ``--allow-run-config-mismatch`` cannot waive it: a
+    resumed run must keep the authorisation scope it was created under, or it is
+    a different piece of work wearing an older run's identity.
+    """
+    stored_config = existing_run.get("config") if isinstance(existing_run, dict) else None
+    stored_digest = _authorization_scope_digest(stored_config if isinstance(stored_config, dict) else None)
+    current_digest = _authorization_scope_digest(snapshot)
+    if stored_digest == current_digest:
+        return
+    stored_label = stored_digest[:16] if stored_digest else "none"
+    current_label = current_digest[:16] if current_digest else "none"
+    raise CrawlRunSelectionError(
+        f"authorization scope changed for crawl run {run_id} "
+        f"(stored digest {stored_label}, supplied digest {current_label}). "
+        "A scope-manifest change is not waivable by --allow-run-config-mismatch; "
+        "start a new crawl run instead."
+    )
 
 
 class CrawlEngine:
@@ -775,8 +824,18 @@ class CrawlEngine:
             skip_reason=reason,
         )
 
+    def _scope_snapshot(self) -> dict[str, Any] | None:
+        """Return the run's canonical scope snapshot, or None without a manifest."""
+        predicate = self.config.scope_predicate
+        return None if predicate is None else predicate.snapshot()
+
     async def _apply_budget_summary(self, job: CrawlJobResult) -> None:
-        """Copy the engine-owned terminal ledger into a portable job result."""
+        """Copy the engine-owned run records into a portable job result.
+
+        This carries both the terminal budget ledger and the authorisation-scope
+        snapshot, so every job that reaches an artifact writer already has them.
+        """
+        job.authorization_scope = self._scope_snapshot()
         if self._run_budget is None:
             return
         snapshot = await self._run_budget.snapshot()
@@ -789,8 +848,14 @@ class CrawlEngine:
     async def crawl(self, url: str) -> CrawlResult:
         async with self._semaphore:
             try:
-                if not self.config.should_crawl_url(url):
-                    return self._skip_result(url, f"path_out_of_scope:{self.config.path_skip_detail(url)}")
+                admission_reason = self.config.url_admission_reason(url)
+                if admission_reason is not None:
+                    # Authorisation-scope refusals keep their own structured
+                    # reason (ticket 148); the local path flags keep the
+                    # historical ``path_out_of_scope:`` prefix.
+                    if admission_reason.startswith("scope_manifest_denied:"):
+                        return self._skip_result(url, admission_reason)
+                    return self._skip_result(url, f"path_out_of_scope:{admission_reason}")
                 if self.config.respect_robots_txt:
                     allowed = await self._robots.is_allowed(url)
                     if not allowed:
@@ -1007,6 +1072,17 @@ class CrawlEngine:
                         self._record_breaker_failure(circuit, host, f"http_{response.status}")
                     else:
                         circuit.record_success()
+            except ScopeManifestDenied as exc:
+                # No request was made, so this is neither an HTTP failure nor a
+                # circuit-breaker event (ticket 148). Record the structured
+                # scope reason instead.
+                logger.warning(
+                    "Scope manifest denied %s (%s) — no request was made",
+                    exc.url,
+                    exc.reason,
+                    extra={"event": "scope_manifest_denied", "url": exc.url, "reason": exc.reason},
+                )
+                return self._skip_result(url, f"scope_manifest_denied:{exc.reason}")
             except RunBudgetExhausted as exc:
                 # Admission exhaustion is an expected partial terminal result,
                 # not a failed fetch or a circuit-breaker event.
@@ -1200,9 +1276,14 @@ class CrawlEngine:
             return "credential_url"
         if self.config.same_host_only and not self.config.is_host_allowed(url, seeds):
             return "host_out_of_scope"
-        if check_path and not self.config.should_crawl_url(url):
-            return self.config.path_skip_detail(url) or "path_out_of_scope"
-        return None
+        if check_path:
+            # Sitemap locs and their hreflang alternates are ordinary page
+            # candidates: they take the shared admission decision, which
+            # includes the authorisation-scope predicate.
+            return self.config.url_admission_reason(url, purpose="discovered")
+        # Sitemap documents and sitemap indexes are not page candidates, so the
+        # local path flags do not apply to them — but the scope manifest does.
+        return self.config.scope_denial_reason(url, purpose="sitemap")
 
     async def _bounded_fetch_response(self, url: str):
         """Fetch *url* under the same politeness controls as page crawls.
@@ -1263,6 +1344,17 @@ class CrawlEngine:
                     else:
                         circuit.record_success()
                 return response if isinstance(response, FetchResponse) else None
+            except ScopeManifestDenied as exc:
+                # A sitemap document or one of its redirect hops left the
+                # manifest. No request reached the network for the denied URL,
+                # so the circuit breaker must not see it as a host failure.
+                logger.warning(
+                    "Scope manifest denied auxiliary fetch %s (%s) — no request was made",
+                    exc.url,
+                    exc.reason,
+                    extra={"event": "scope_manifest_denied", "url": exc.url, "reason": exc.reason},
+                )
+                return None
             except Exception as exc:
                 host = urlparse(url).netloc.lower()
                 logger.warning("sitemap fetch_error for %s: %s: %s", url, type(exc).__name__, exc)
@@ -1271,8 +1363,63 @@ class CrawlEngine:
                     self._record_breaker_failure(circuit, host, f"fetch_error:{type(exc).__name__}")
                 return None
 
+    def _scope_purpose(self, purpose: ConnectionPurpose) -> ScopePurpose:
+        """Translate a connection purpose into the authorisation URL class."""
+        if purpose == "initial":
+            return "discovered"
+        if purpose == "redirect":
+            return "redirect"
+        if purpose == "robots":
+            return "robots"
+        return "sitemap"
+
+    def _assert_in_scope(self, url: str, purpose: ScopePurpose) -> None:
+        """Apply the compiled scope predicate before any network activity."""
+        predicate = self.config.scope_predicate
+        if predicate is not None:
+            predicate.require(url, purpose=purpose)
+
+    def _assert_response_in_scope(self, response, purpose: ScopePurpose) -> None:
+        """Apply the same predicate to a response's redirect chain and final URL.
+
+        Backends that let their HTTP client follow redirects internally cannot
+        be stopped mid-chain, so the chain is re-checked as soon as it becomes
+        visible. A hop outside the manifest still fails the fetch: the result is
+        discarded rather than recorded as page content, and the operator sees a
+        scope denial rather than a successful crawl of an unattested origin.
+
+        The guarded Portal path follows redirects manually and therefore refuses
+        an out-of-scope hop before its connection is opened; this check is the
+        safety net for every other backend.
+        """
+        predicate = self.config.scope_predicate
+        if predicate is None or response is None:
+            return
+        for hop in getattr(response, "redirect_chain", None) or []:
+            hop_url = hop.get("url") if isinstance(hop, dict) else None
+            if isinstance(hop_url, str) and hop_url:
+                predicate.require(hop_url, purpose="redirect")
+        final_url = getattr(response, "url", None)
+        if isinstance(final_url, str) and final_url:
+            requested = getattr(response, "requested_url", None)
+            predicate.require(final_url, purpose=purpose if final_url == requested else "redirect")
+
     async def _fetch_for_purpose(self, url: str, purpose: ConnectionPurpose):
-        """Route guarded call sites through the Portal-aware backend API."""
+        """Route guarded call sites through the Portal-aware backend API.
+
+        This is the engine's single outbound-fetch boundary: page fetches,
+        sitemap documents, and guarded robots.txt resolutions all pass through
+        it. The compiled scope predicate is therefore applied here once, before
+        the backend is reached, rather than at each individual call site.
+        """
+        scope_purpose = self._scope_purpose(purpose)
+        self._assert_in_scope(url, scope_purpose)
+        response = await self._fetch_unscoped(url, purpose)
+        self._assert_response_in_scope(response, scope_purpose)
+        return response
+
+    async def _fetch_unscoped(self, url: str, purpose: ConnectionPurpose):
+        """Perform the backend fetch itself, after admission has been decided."""
         if self.config.portal_connection_policy is not None:
             fetch_for_purpose = getattr(self.backend, "fetch_for_purpose", None)
             if fetch_for_purpose is None:
@@ -1453,7 +1600,23 @@ class CrawlEngine:
 
         return frontier_data
 
+    def _log_scope_manifest(self) -> None:
+        """Log the active manifest by reference and digest, never by contents."""
+        predicate = self.config.scope_predicate
+        if predicate is None:
+            return
+        logger.info(
+            "%s",
+            describe_manifest(predicate.manifest),
+            extra={
+                "event": "scope_manifest_active",
+                "authorization_reference": predicate.manifest.authorization_reference,
+                "scope_manifest_digest": predicate.digest,
+            },
+        )
+
     def _log_browser_runtime(self) -> None:
+        self._log_scope_manifest()
         runtime = self._build_browser_runtime()
         if runtime is None:
             logger.info("JS backend: none (HTTP backend)")
@@ -1491,6 +1654,12 @@ class CrawlEngine:
         if resume:
             if existing_run is None and get_run is not None:
                 raise CrawlRunSelectionError(f"crawl run not found: {selected_run_id}")
+            # An authorisation-scope change is checked first and is deliberately
+            # not waivable by --allow-run-config-mismatch (ticket 148). That
+            # flag exists to let an operator resume with different seeds or
+            # crawl tuning; it must never be the mechanism by which a run
+            # quietly acquires a different attested scope.
+            _assert_authorization_scope_unchanged(existing_run, snapshot, selected_run_id)
             stored_hash = str(existing_run.get("config_hash", "")) if isinstance(existing_run, dict) else ""
             if stored_hash and stored_hash != config_hash and not allow_run_config_mismatch:
                 raise CrawlRunSelectionError(
@@ -1573,12 +1742,23 @@ class CrawlEngine:
                 "path_restriction": self.config.path_restriction,
                 "path_exclude": self.config.path_exclude,
             }
+            scope_snapshot = self._scope_snapshot()
+            if scope_snapshot is not None:
+                payload["authorization_scope"] = scope_snapshot
             if job is not None:
                 payload.update(serialize_job_summary_metadata(job, saved_to=save_to))
             return payload
 
         if not seeds:
-            job = CrawlJobResult(mode="open", seed_urls=[], results=[], saved_to=save_to, max_urls=limit, run_id=run_id)
+            job = CrawlJobResult(
+                mode="open",
+                seed_urls=[],
+                results=[],
+                saved_to=save_to,
+                max_urls=limit,
+                run_id=run_id,
+                authorization_scope=self._scope_snapshot(),
+            )
             await self.store.save_metadata("crawl_open", _open_crawl_metadata(job))
             if save_to:
                 await self._save_results(job, save_to)
@@ -1611,6 +1791,7 @@ class CrawlEngine:
                 "path_exclude": self.config.path_exclude,
                 "config_hash": run_config_hash,
                 "compatibility_config": run_snapshot,
+                **({} if self._scope_snapshot() is None else {"authorization_scope": self._scope_snapshot()}),
             },
         )
         queued_count, pending_count, done_count = await self.store.frontier_stats()

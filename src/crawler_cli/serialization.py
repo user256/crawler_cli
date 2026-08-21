@@ -13,6 +13,16 @@ JavaScript URL candidate evidence; v4 adds CSS candidates, confidence/base
 metadata, rejection counts, and speculative admission totals. Loaders keep
 accepting legacy artifacts and missing fields."""
 
+SCOPED_CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/3"
+"""Schema identifier stamped on artifacts that carry an authorisation scope.
+
+Ticket 148 adds an ``authorization_scope`` object to the saved artifact, but
+only for runs that actually had a scope manifest. Rather than silently adding a
+field to the frozen v2 contract, a manifest-backed artifact declares v3 so a
+consumer can tell from the version string alone whether the scope record is
+expected to be present. A manifest-free crawl still emits a byte-identical v2
+artifact, so existing consumers are untouched."""
+
 
 def serialize_browser_runtime(runtime: BrowserRuntime) -> dict[str, object]:
     return {
@@ -198,8 +208,12 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
 
 
 def serialize_job_summary_metadata(job: CrawlJobResult, *, saved_to: str | None = None) -> dict[str, object]:
-    """Aggregate fields for JSONL summary lines and crawl metadata (tickets 092, 115)."""
-    return {
+    """Aggregate fields for JSONL summary lines and crawl metadata (tickets 092, 115).
+
+    ``authorization_scope`` is added only when the run had a scope manifest, so
+    ordinary crawl summaries keep exactly the key set they had before ticket 148.
+    """
+    payload: dict[str, object] = {
         "crawled_count": job.crawled_count,
         "blocked_count": job.blocked_count,
         "persist_error_count": job.persist_error_count,
@@ -227,6 +241,9 @@ def serialize_job_summary_metadata(job: CrawlJobResult, *, saved_to: str | None 
         "render_dom_enqueued_count": job.render_dom_enqueued_count,
         "render_discovery_attempt_count": job.render_discovery_attempt_count,
     }
+    if job.authorization_scope is not None:
+        payload["authorization_scope"] = job.authorization_scope
+    return payload
 
 
 def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> dict[str, object]:
@@ -266,4 +283,9 @@ def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> 
     }
     if job.max_urls is not None:
         payload["max_urls"] = job.max_urls
+    if job.authorization_scope is not None:
+        # Manifest-backed runs declare the newer artifact version alongside the
+        # scope record so the two never appear apart (ticket 148).
+        payload["schema_version"] = SCOPED_CRAWL_ARTIFACT_SCHEMA_VERSION
+        payload["authorization_scope"] = job.authorization_scope
     return payload

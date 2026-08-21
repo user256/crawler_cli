@@ -724,6 +724,11 @@ class AiohttpBackend(FetchBackend):
             redirect_chain.append({"url": current_url, "status": result.status})
             current_url = urljoin(current_url, location)
             current_purpose = "redirect"
+            # This path follows redirects by hand, so an out-of-scope hop can be
+            # refused before its connection is opened rather than discovered
+            # afterwards (ticket 148).
+            if self.config.scope_predicate is not None:
+                self.config.scope_predicate.require(current_url, purpose="redirect")
         raise PortalPolicyError(f"Too many redirects while fetching {requested_url!r}")
 
     async def _fetch_pinned(
