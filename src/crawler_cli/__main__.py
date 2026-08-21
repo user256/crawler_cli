@@ -893,11 +893,25 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         dest="curl_impersonate",
         default="",
         metavar="TARGET",
-        help="curl_cffi only: browser fingerprint to impersonate (e.g. chrome, safari, firefox). "
-        "Pass 'none' to disable. When set, the User-Agent is not overridden unless --custom-ua is also given.",
+        help="curl_cffi only: browser TLS/HTTP fingerprint to present (e.g. chrome, safari, "
+        "firefox). Pass 'none' to disable. For authorised measurement of how a CDN or origin "
+        "treats a browser-like client; not a bypass kit. When set, the User-Agent is not "
+        "overridden unless --custom-ua is also given.",
     )
-    parser.add_argument("--custom-ua", "--user-agent", dest="custom_ua", help="Custom User-Agent")
-    parser.add_argument("--ignore-robots", action="store_true", help="Ignore robots.txt")
+    parser.add_argument(
+        "--custom-ua",
+        "--user-agent",
+        dest="custom_ua",
+        help="User-Agent to send, for authorised measurement of how a site treats a given "
+        "client. A spoofed search-engine User-Agent is NOT evidence of how that search "
+        "engine actually treats the site.",
+    )
+    parser.add_argument(
+        "--ignore-robots",
+        action="store_true",
+        help="Explicit robots.txt override for an authorised job. The default is to honour "
+        "robots.txt and crawl-delay; crawling in spite of Disallow is not the happy path.",
+    )
     parser.add_argument("--offsite", action="store_true", help="Follow off-site links")
     parser.add_argument(
         "--allowed-hosts",
@@ -968,7 +982,9 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "--obscura-stealth",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="Explicitly enable Obscura stealth",
+        help="Explicitly enable Obscura stealth, so the browser presents as an ordinary "
+        "browser client. For authorised measurement of how a CDN or origin treats such a "
+        "client; not a bypass kit.",
     )
     obscura.add_argument(
         "--no-obscura-stealth",
@@ -1024,11 +1040,18 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Skip persisting raw HTML (structured extraction + hashes still stored)",
     )
-    proxy = parser.add_argument_group("Proxy")
+    proxy = parser.add_argument_group(
+        "Proxy",
+        description="Egress selection for authorised crawls: choose where requests come "
+        "from, and observe how a CDN or origin treats a browser-like client from that "
+        "egress. Not a bypass kit; egress is never changed in a loop until a blocked "
+        "request returns 200.",
+    )
     proxy.add_argument(
         "--proxy",
         help="Proxy URL routed through all backends (e.g. http://host:8080, "
-        "socks5://host:1080). Credentials may be embedded or passed via --proxy-auth.",
+        "socks5://host:1080), selecting the egress for an authorised crawl. "
+        "Credentials may be embedded or passed via --proxy-auth.",
     )
     proxy.add_argument(
         "--proxy-auth",
@@ -1038,7 +1061,8 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     proxy.add_argument(
         "--proxy-file",
         help="File with one proxy URL per line; rotated across requests in list "
-        "mode (ticket 045). Takes precedence over --proxy.",
+        "mode (ticket 045) to spread load across the operator's own egress. Not for "
+        "evading rate limits or bot management. Takes precedence over --proxy.",
     )
     proxy.add_argument(
         "--proxy-mode",
@@ -2807,7 +2831,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default="aiohttp",
         help="Backend for --fetch-missing live fetches (default: aiohttp)",
     )
-    urls_parser.add_argument("--ignore-robots", action="store_true", help="Ignore robots.txt on live fetches")
+    urls_parser.add_argument(
+        "--ignore-robots",
+        action="store_true",
+        help="Explicit robots.txt override on live fetches for an authorised job. The "
+        "default is to honour robots.txt and crawl-delay.",
+    )
     urls_parser.add_argument(
         "--replace",
         action="append",

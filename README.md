@@ -2,6 +2,89 @@
 
 `crawler_cli` is a reusable async crawler module extracted from `PostgreSQLCrawler` and narrowed into a smaller package for resumable bounded crawling, extraction, sitemap parsing, robots-aware fetch control, and asyncpg persistence.
 
+## What This Is / What This Is Not
+
+The phrase "adversarial crawler" is used for at least three different things,
+and only one of them describes this project. It is worth being precise, because
+the difference decides which features belong here and which are permanently out
+of scope.
+
+1. **An evasion crawler.** Rotates user agents and IP addresses in order to
+   defeat bot management, solve or side-step challenges, and keep scraping a
+   site against that site's stated rules. `crawler_cli` is not this.
+2. **A security-testing or pentest scanner.** Actively probes an application
+   for weaknesses by injecting payloads, forcing its way to hidden endpoints,
+   or manipulating identifiers to reach another user's data. `crawler_cli` is
+   not this either.
+3. **An evidence crawler for technical SEO — which is what `crawler_cli`
+   actually is.** It does not trust the CMS. It observes what a site really
+   serves and compares independent sources of evidence against each other:
+   HTML against HTTP headers, both against the sitemaps, one client against a
+   second client, and the raw response against a rendered one. Where those
+   sources disagree, it records the disagreement as a candidate for manual
+   review rather than asserting a verdict. It honours `robots.txt` and
+   crawl-delay by default, and it is meant to be run on sites the operator is
+   authorised to fetch.
+
+### This product is
+
+- An authorised technical-SEO evidence crawler.
+- A client that distrusts CMS claims and compares independent evidence sources.
+- A passive and bounded exposure and configuration inventory tool.
+- A safe differential measurement tool over exact operator-supplied inputs.
+- A crawler that is expected to protect both the target site and its own
+  execution host.
+
+### This product is not
+
+- A bot that changes identity or egress until a blocked request returns 200.
+- A CAPTCHA solver or a WAF-specific bypass toolkit.
+- A scanner that injects SQL, XSS, SSTI, command, path-traversal, or SSRF
+  payloads.
+- A forced-browsing, credential-stuffing, IDOR/BOLA mutation, or
+  privilege-escalation tool.
+- A system that treats a spoofed search-engine User-Agent as evidence of how
+  the real search engine treats the site.
+
+### Out of scope
+
+The following are out of product scope under the current product decision. They
+are never tickets and never documented as features:
+
+- Rotating user agents or IP addresses *in order to*
+  evade rate limits or bot management.
+- WAF or CAPTCHA solving as a goal.
+- Crawling in spite of `Disallow` as the happy path.
+- Injection, XSS, IDOR, credential stuffing, or hidden-admin fuzzing.
+
+### The dual-use flags, and how they are meant to be used
+
+`--impersonate`, `--obscura-stealth`, `--custom-ua`, `--ignore-robots`, the
+proxy flags, and challenge escalation all exist for authorised measurement: they
+let an operator observe how a CDN or origin treats a browser-like client, and
+compare that with how it treats a plain HTTP client. They are not a bypass kit.
+A spoofed search-engine User-Agent tells you how the site responded to *your*
+request carrying that string; it is not evidence of how that search engine
+actually treats the site, and results derived from one must never be reported as
+if it were.
+
+Challenge escalation, including the work described in ticket 137, is bounded in
+the same way. When an authorised crawl has already selected a proxy pool and a
+fetch meets a challenge, escalation may make **one** alternate-egress attempt
+using a different entry from that already-configured pool, so that a single
+transient block does not silently truncate an authorised crawl. If the pool
+cannot supply a different entry, the crawler logs that and proceeds. It is never
+a loop that keeps trying identities until something returns 200, and the
+existence of the escalation path is not a licence to add one.
+
+### Language discipline
+
+Documentation, reports, and commit messages in this repository use "observe",
+"inventory", "compare", "candidate", and "manual review". They avoid "bypass",
+"beat", "exploit", and "prove vulnerable" unless the evidence genuinely supports
+the claim and the product boundary has been changed in a separately reviewed
+decision.
+
 ## What It Does
 
 - Fetch pages with:
