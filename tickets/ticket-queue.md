@@ -77,8 +77,9 @@ Ticket files remain the source of truth for scope and DoD.
   not exact Googlebot emulation, and narrows the generic script-route slice of
   proposed ticket 151.
 - Tickets **156–158** extend the URL-discovery lane. Ticket **159** specifies
-  Google's single-pass JSON-LD entity compatibility; next unreserved ticket
-  number is **160**. Do not reuse **110**.
+  Google's single-pass JSON-LD entity compatibility. Ticket **160** turns the
+  raw-versus-rendered primitives into a first-class parity audit; next
+  unreserved ticket number is **161**. Do not reuse **110**.
 
 ### Current position (2026-08-12)
 
@@ -429,7 +430,11 @@ an optional outcome-feedback layer and does not block either discovery path.
 
 ### Google-compatible JSON-LD parsing (2026-08-21)
 
-- `159` `proposed` [ticket-159-google-compatible-json-ld-single-unescape.md](./ticket-159-google-compatible-json-ld-single-unescape.md) — **P1, builds on completed 020:** exactly one HTML-unescape pass before RFC 8259 parsing; preserve raw source, retain residual double escapes, add occurrence-level compatibility diagnostics and reporting, and never imply that syntax alone determines rich-result eligibility
+- `159` `done` (2026-08-21, PR #67) [ticket-159-google-compatible-json-ld-single-unescape.md](./ticket-159-google-compatible-json-ld-single-unescape.md) — **P1, builds on completed 020:** exactly one HTML-unescape pass before RFC 8259 parsing; preserves raw source and residual double escapes, adds occurrence-level compatibility diagnostics/reporting and parser provenance, and never implies that syntax alone determines rich-result eligibility
+
+### Raw-versus-rendered SEO parity audit (2026-08-24)
+
+- `160` `in progress` [ticket-160-first-class-render-parity-audit.md](./ticket-160-first-class-render-parity-audit.md) — **P1, builds on completed 019+031+097+153+157+159:** same-navigation raw response versus hydrated DOM; typed completeness and multi-finding SEO signal/content/link/schema comparison; deterministic bounded sampling; versioned JSON/CSV and safe visual HTML report; no Googlebot-emulation claim
 
 Deferred lanes remain below.
 

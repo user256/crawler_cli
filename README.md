@@ -1217,6 +1217,38 @@ for v in variants:
 
 ## Render Parity (JS vs No-JS)
 
+For an analyst-facing raw-versus-rendered audit, use one Playwright navigation:
+the baseline is the main-document response that browser received and the other
+side is its hydrated DOM. This avoids treating a separate HTTP request's cache,
+experiment, cookie, or timing variation as a JavaScript difference.
+
+```bash
+# One URL; JSON/CSV and a self-contained, redacted HTML summary are optional.
+crawler-cli compare-renders https://example.com/product/widget \
+  --wait-for-selector "main" \
+  --output render-parity.json \
+  --html-report render-parity.html
+
+# A bounded exact URL set. --max-pages defaults to 20 and browser concurrency
+# is deliberately capped at 2.
+crawler-cli compare-renders https://example.com/ \
+  --seed-url https://example.com/products/ \
+  --csv-file representative-pages.csv \
+  --max-pages 20 --render-concurrency 1
+```
+
+The output separates complete, partial, and inconclusive comparisons. It
+reports indexing directives, canonical, title, description, hreflang, language,
+H1, structured data, main-content and internal-link differences independently;
+a partial browser settle is never presented as an equivalent page. A rendered
+DOM difference is crawler evidence, not proof of Googlebot behavior—use Search
+Console URL Inspection, Rich Results Test, or verified Googlebot logs for that
+specific conclusion.
+
+The older library helper remains available when deliberately comparing two
+independent clients. Its result is labelled `independent_http`, because it is
+not the same-navigation evidence used by the CLI command.
+
 ```python
 from crawler_cli import compare_renders, CrawlConfig
 

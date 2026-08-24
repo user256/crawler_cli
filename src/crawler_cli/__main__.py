@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
+import html
 import json
 import logging
 import os
 import sys
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Required, TypedDict, cast
-from urllib.parse import quote as _urlquote
+from urllib.parse import quote as _urlquote, urlsplit
 
 if TYPE_CHECKING:
     from .models import CrawlJobResult, CrawlResult
@@ -17,6 +20,7 @@ if TYPE_CHECKING:
 from .archive import audit_archive_urls
 from .auth import AuthConfig, AuthType
 from .compare_urls import build_pair_rows, load_url_pairs, rows_failing
+from .compare_renders import RENDER_COMPARISON_RULESET_VERSION, RenderParityComparison, compare_rendered_sample
 from .comparison import DEFAULT_SIMHASH_THRESHOLD, compare_deep, comparison_rows
 from .config import (
     CB_ENABLED_DEFAULT,
@@ -52,10 +56,10 @@ from .cookies import (
 from .csv_urls import load_urls_from_csv
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
-from .exit_codes import EXIT_FINDINGS, EXIT_VALIDATION, resolve_crawl_exit_code
+from .exit_codes import EXIT_FAILURE, EXIT_FINDINGS, EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
-from .redaction import SECRETS
+from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
 from .reports import CrawlReports
 from .validators import (
@@ -78,6 +82,9 @@ COMPARE_SCHEMA_VERSION = "crawler-cli/compare/1"
 
 COMPARE_URLS_SCHEMA_VERSION = "crawler-cli/compare-urls/1"
 """Schema identifier for ``compare-urls --output`` JSON/CSV and its stdout summary (ticket 3344)."""
+
+RENDER_COMPARISON_SCHEMA_VERSION = "crawler-cli/render-comparison/1"
+"""Schema identifier for same-navigation raw-versus-rendered audit output."""
 
 
 def _env_or_default(prefix: str, key: str, default: str | None = None) -> str | None:
@@ -244,7 +251,7 @@ def _collect_seed_urls(args: argparse.Namespace) -> list[str]:
     seeds: list[str] = []
     primary = getattr(args, "url", None)
     if primary:
-        seeds.append(primary)
+        seeds.extend(primary if isinstance(primary, list) else [primary])
     extra = getattr(args, "seed_urls", None) or []
     seeds.extend(extra)
     return list(dict.fromkeys(seeds))
@@ -2922,6 +2929,187 @@ def _write_compare_urls_output(rows: list[dict[str, object]], output: str) -> No
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _render_comparison_safe_value(value: object, digest: CorrelationDigest) -> object:
+    """Project URL/text evidence before it enters a user-facing artifact."""
+    if isinstance(value, str):
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return scrub_text(value)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return project_url(value, digest=digest).redacted
+        return scrub_text(value)
+    if isinstance(value, list):
+        return [_render_comparison_safe_value(item, digest) for item in value]
+    if isinstance(value, tuple):
+        return [_render_comparison_safe_value(item, digest) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _render_comparison_safe_value(item, digest) for key, item in value.items()}
+    return value
+
+
+def _render_comparison_payload(
+    comparisons: list[RenderParityComparison], *, selected_urls: list[str], capped: bool
+) -> dict[str, object]:
+    digest = CorrelationDigest.for_run()
+    rows = [_render_comparison_safe_value(item.as_dict(), digest) for item in comparisons]
+    state_counts: dict[str, int] = {}
+    finding_counts: dict[str, int] = {}
+    severity_counts: dict[str, int] = {}
+    for comparison in comparisons:
+        state_counts[comparison.state] = state_counts.get(comparison.state, 0) + 1
+        for finding in comparison.findings:
+            finding_counts[finding.code] = finding_counts.get(finding.code, 0) + 1
+            severity_counts[finding.severity] = severity_counts.get(finding.severity, 0) + 1
+    return {
+        "schema_version": RENDER_COMPARISON_SCHEMA_VERSION,
+        "ruleset_version": RENDER_COMPARISON_RULESET_VERSION,
+        "observed_at": datetime.now(UTC).isoformat(),
+        "input": {
+            "selected_urls": [_render_comparison_safe_value(url, digest) for url in selected_urls],
+            "selected_count": len(selected_urls),
+            "input_capped": capped,
+            "sampling_basis": "exact_operator_supplied_urls",
+        },
+        "summary": {
+            "states": state_counts,
+            "findings": finding_counts,
+            "severities": severity_counts,
+        },
+        "caveat": (
+            "This compares the response HTML and hydrated DOM observed by one browser navigation. "
+            "It is not proof of Googlebot rendering or indexing; use Search Console URL Inspection "
+            "or verified Googlebot evidence for Google-specific conclusions."
+        ),
+        "results": rows,
+    }
+
+
+def _write_render_comparison_output(payload: dict[str, object], output: str) -> None:
+    path = Path(output)
+    if path.suffix.lower() != ".csv":
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        return
+    columns = [
+        "url",
+        "final_url",
+        "status",
+        "state",
+        "state_reason",
+        "primary_summary",
+        "finding_code",
+        "severity",
+        "field",
+        "explanation",
+        "remediation",
+        "raw_value",
+        "rendered_value",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for item in cast("list[dict[str, object]]", payload["results"]):
+            findings = cast("list[dict[str, object]]", item["findings"])
+            base = {key: item.get(key) for key in columns[:6]}
+            for finding in findings or [{}]:
+                writer.writerow(
+                    {
+                        **base,
+                        "finding_code": finding.get("code", ""),
+                        "severity": finding.get("severity", ""),
+                        "field": finding.get("field", ""),
+                        "explanation": finding.get("explanation", ""),
+                        "remediation": finding.get("remediation", ""),
+                        "raw_value": json.dumps(finding.get("raw_value"), ensure_ascii=False),
+                        "rendered_value": json.dumps(finding.get("rendered_value"), ensure_ascii=False),
+                    }
+                )
+
+
+def _write_render_comparison_html(payload: dict[str, object], output: str) -> None:
+    """Write a bounded, self-contained analyst view without embedding HTML bodies."""
+    results = cast("list[dict[str, object]]", payload["results"])
+    rows: list[str] = []
+    for result in results:
+        findings = cast("list[dict[str, object]]", result["findings"])
+        detail = (
+            "<br>".join(html.escape(f"{item['severity']}: {item['code']} — {item['explanation']}") for item in findings)
+            or "Equivalent"
+        )
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(result['url']))}</td>"
+            f"<td>{html.escape(str(result['state']))}</td>"
+            f"<td>{html.escape(str(result['primary_summary']))}</td>"
+            f"<td>{detail}</td>"
+            "</tr>"
+        )
+    summary = cast("dict[str, object]", payload["summary"])
+    document = f"""<!doctype html>
+<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Render parity audit</title>
+<style>body{{font-family:system-ui,sans-serif;margin:2rem;color:#1f2933}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #cbd5e1;padding:.6rem;vertical-align:top;text-align:left}}th{{background:#0f6b5c;color:white}}code{{white-space:pre-wrap}}</style>
+</head><body><h1>Raw versus rendered SEO parity</h1><p>{html.escape(str(payload["caveat"]))}</p>
+<p><code>{html.escape(json.dumps(summary, ensure_ascii=False))}</code></p>
+<table><thead><tr><th>URL</th><th>Evidence state</th><th>Primary summary</th><th>Findings</th></tr></thead><tbody>{"".join(rows)}</tbody></table>
+</body></html>"""
+    Path(output).write_text(document, encoding="utf-8")
+
+
+async def _run_compare_renders(args: argparse.Namespace) -> int:
+    if args.crawl_run_id:
+        print(
+            "Error: --crawl-run-id selection is not available for compare-renders yet; supply exact URLs or --csv-file",
+            file=sys.stderr,
+        )
+        return EXIT_VALIDATION
+    if args.max_pages < 1:
+        print("Error: --max-pages must be at least 1 for compare-renders", file=sys.stderr)
+        return EXIT_VALIDATION
+    if args.render_concurrency > 2:
+        print("Error: --render-concurrency must be at most 2", file=sys.stderr)
+        return EXIT_VALIDATION
+    try:
+        args.js = True
+        config = _build_config(args)
+        config.backend = "playwright"
+        config.capture_render_baseline = True
+        config.max_concurrency = args.render_concurrency
+        config.validate()
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    urls = list(dict.fromkeys([*_collect_seed_urls(args), *config.csv_urls]))
+    if not urls:
+        print("Error: provide a URL, one or more --seed-url values, or --csv-file", file=sys.stderr)
+        return EXIT_VALIDATION
+    selected = urls[: args.max_pages]
+    capped = len(selected) < len(urls)
+    engine = CrawlEngine(config)
+    try:
+        comparisons = await compare_rendered_sample(engine, selected, max_concurrent=args.render_concurrency)
+    finally:
+        await engine.close()
+    payload = _render_comparison_payload(comparisons, selected_urls=selected, capped=capped)
+    if args.output:
+        _write_render_comparison_output(payload, args.output)
+        print(f"Wrote {len(comparisons)} render-comparison rows to {args.output}")
+    if args.html_report:
+        _write_render_comparison_html(payload, args.html_report)
+        print(f"Wrote render-comparison HTML report to {args.html_report}")
+    summary = cast("dict[str, object]", payload["summary"])
+    print(json.dumps({"schema_version": RENDER_COMPARISON_SCHEMA_VERSION, **summary}, indent=2))
+    if all(item.state in {"inconclusive", "failed"} for item in comparisons):
+        return EXIT_FAILURE
+    if args.fail_on_incomplete and any(item.state != "complete" for item in comparisons):
+        return EXIT_FAILURE
+    severity_order = {"high": 3, "medium": 2, "low": 1, "any": 0}
+    if args.fail_on:
+        threshold = severity_order[args.fail_on]
+        if any(severity_order[finding.severity] >= threshold for item in comparisons for finding in item.findings):
+            return EXIT_FINDINGS
+    return 0
+
+
 async def _run_compact_html(args: argparse.Namespace) -> int:
     dsn = _build_dsn(args)
     store = _store_from_args(args)
@@ -3443,6 +3631,40 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_postgres_args(urls_parser)
 
+    render_compare_parser = subparsers.add_parser(
+        "compare-renders",
+        help="Compare initial response HTML with the hydrated DOM from one Playwright navigation",
+    )
+    _add_crawl_args(render_compare_parser)
+    render_compare_parser.set_defaults(max_pages=20)
+    for action in render_compare_parser._actions:
+        if action.dest == "url":
+            action.nargs = "*"
+            action.help = "One or more exact URLs to compare (input order is retained)."
+        if action.dest == "max_pages":
+            action.help = "Maximum exact URLs to compare (default 20; must be at least 1)."
+    render_compare_parser.add_argument(
+        "--render-concurrency",
+        type=positive_int,
+        default=1,
+        help="Simultaneous browser comparisons (1-2; default 1)",
+    )
+    render_compare_parser.add_argument(
+        "--output",
+        help="Write versioned comparison JSON (or CSV when the filename ends in .csv)",
+    )
+    render_compare_parser.add_argument("--html-report", help="Write a self-contained HTML summary report")
+    render_compare_parser.add_argument(
+        "--fail-on",
+        choices=("high", "medium", "low", "any"),
+        help="Return findings exit code 3 when a matching severity is observed",
+    )
+    render_compare_parser.add_argument(
+        "--fail-on-incomplete",
+        action="store_true",
+        help="Return failure exit code 1 when any URL lacks complete render evidence",
+    )
+
     compact_html_parser = subparsers.add_parser(
         "compact-html",
         help="Gzip-compress legacy uncompressed HTML in pages.html_compressed",
@@ -3579,6 +3801,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "report",
         "compare",
         "compare-urls",
+        "compare-renders",
         "compact-html",
         "delete-crawl",
         "compact-crawl",
@@ -3632,6 +3855,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_compare(args)
     if command == "compare-urls":
         return await _run_compare_urls(args)
+    if command == "compare-renders":
+        return await _run_compare_renders(args)
     if command == "compact-html":
         return await _run_compact_html(args)
     if command == "delete-crawl":
