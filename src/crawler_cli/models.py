@@ -91,6 +91,8 @@ class FetchResponse:
     intermediate URLs) instead of only knowing the final URL."""
     raw_text: str | None = None
     """Original main-document response text before DOM hydration, Playwright only."""
+    raw_text_truncated: bool = False
+    """Whether the captured pre-hydration body exceeded its configured cap."""
     observed_requests: list[BrowserRequestObservation] = field(default_factory=list)
     """Bounded browser network observations, populated only when explicitly enabled."""
     render_settled: bool | None = None
@@ -210,6 +212,16 @@ class CrawlResult:
     fetch_backend: str
     extracted: ExtractedContent | None
     raw_html: str | None
+    render_raw_html: str | None = None
+    """Original main-document response HTML before browser hydration.
+
+    In-memory only evidence for a same-navigation raw-versus-rendered parity
+    comparison. It is never persisted as a second page body by default.
+    """
+    render_settled: bool | None = None
+    """Whether configured browser settle conditions completed for this result."""
+    render_baseline_truncated: bool = False
+    """Whether the in-memory pre-hydration baseline is only a bounded prefix."""
     body_truncated: bool = False
     wire_bytes: int = 0
     decoded_bytes: int = 0

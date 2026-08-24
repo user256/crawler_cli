@@ -1,5 +1,14 @@
 from .archive import ArchiveAuditResult, LegacyIssue, audit_archive_urls, discover_historical_urls
-from .compare_renders import RenderComparison, compare_renders, compare_renders_sampled
+from .compare_renders import (
+    RenderComparison,
+    RenderFinding,
+    RenderParityComparison,
+    compare_rendered_page,
+    compare_rendered_result,
+    compare_rendered_sample,
+    compare_renders,
+    compare_renders_sampled,
+)
 from .comparison import compare, compare_deep, comparison_rows
 from .embeddings import generate_embeddings_for_store
 from .csv_urls import load_urls_from_csv
@@ -48,6 +57,8 @@ __all__ = [
     "RenderUrlCandidate",
     "LegacyIssue",
     "RenderComparison",
+    "RenderFinding",
+    "RenderParityComparison",
     "RobotsDecision",
     "RobotsPolicyCache",
     "SitemapDocument",
@@ -65,6 +76,9 @@ __all__ = [
     "load_urls_from_csv",
     "compare_renders",
     "compare_renders_sampled",
+    "compare_rendered_page",
+    "compare_rendered_result",
+    "compare_rendered_sample",
     "discover_historical_urls",
     "discover_sitemap_paths",
     "extract_links",

@@ -228,6 +228,10 @@ class CrawlConfig:
     max_outstanding_speculative_per_host: int = MAX_OUTSTANDING_SPECULATIVE_PER_HOST_DEFAULT
     discover_render_urls: bool = False
     """Capture browser network and hydrated-DOM URL evidence."""
+    capture_render_baseline: bool = False
+    """Retain the bounded pre-hydration main-document HTML on an in-memory
+    result. Used by the render-parity audit; ordinary crawl artifacts do not
+    serialize this second document body."""
     follow_rendered_links: bool = False
     """Follow hydrated-only anchor deltas in open crawls."""
     render_discovery_max_raw_links: int = 4

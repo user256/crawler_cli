@@ -11,6 +11,7 @@ from aiohttp import web
 from crawler_cli.auth import AuthConfig
 from crawler_cli.backends import PlaywrightBackend
 from crawler_cli.config import CrawlConfig
+from crawler_cli.compare_renders import compare_rendered_result
 from crawler_cli.cookies import Cookie
 from crawler_cli.engine import CrawlEngine
 
@@ -145,6 +146,7 @@ async def test_crawl_engine_real_playwright_smoke(playwright_smoke_site: SmokeSi
         max_requests_per_context=1,
         collect_web_vitals=True,
         discover_render_urls=True,
+        capture_render_baseline=True,
         auth=AuthConfig(
             auth_type="basic",
             username=_BASIC_USERNAME,
@@ -179,6 +181,7 @@ async def test_crawl_engine_real_playwright_smoke(playwright_smoke_site: SmokeSi
     # route, so the crawl result must record that actual browser URL.
     assert first.final_url == playwright_smoke_site.url("/redirect-auth")
     assert first.raw_html is not None and "Rendered smoke path" in first.raw_html
+    assert first.render_raw_html is not None and "loading" in first.render_raw_html
     assert first.extracted is not None and "Rendered smoke path" in first.extracted.text
     assert first.browser_runtime is not None
     assert first.browser_runtime.provider == "chromium"
@@ -191,6 +194,12 @@ async def test_crawl_engine_real_playwright_smoke(playwright_smoke_site: SmokeSi
         candidate.source_kind == "render_dom" and candidate.url == playwright_smoke_site.url("/hydrated")
         for candidate in first.render_url_candidates
     )
+    parity = compare_rendered_result(first)
+    assert parity.state == "complete"
+    assert parity.raw is not None and parity.raw.title == "Ticket 097 smoke"
+    assert parity.rendered is not None and parity.rendered.title == "Ticket 097 ready"
+    assert any(finding.code == "metadata_render_dependency" for finding in parity.findings)
+    assert any(finding.code == "internal_links_added_after_render" for finding in parity.findings)
     assert any(
         candidate.source_kind == "render_network"
         and candidate.url == playwright_smoke_site.url("/api/data")

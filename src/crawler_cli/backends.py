@@ -1459,13 +1459,18 @@ class PlaywrightBackend(FetchBackend):
                     render_settled = False
             html = await asyncio.wait_for(page.content(), timeout=self.config.timeout_seconds + 1.0)
             raw_text = None
-            if self.config.discover_render_urls and response is not None:
+            raw_text_truncated = False
+            if (self.config.discover_render_urls or self.config.capture_render_baseline) and response is not None:
                 with contextlib.suppress(Exception):
                     raw_body = await asyncio.wait_for(
                         response.body(),
                         timeout=self.config.timeout_seconds + 1.0,
                     )
-                    raw_text = raw_body[: self.config.max_response_bytes].decode("utf-8", errors="replace")
+                    raw_text_truncated = len(raw_body) > self.config.max_response_bytes
+                    raw_text = _decode_body(
+                        raw_body[: self.config.max_response_bytes],
+                        response.headers.get("content-type"),
+                    )
             lcp_ms = cls = inp_ms = None
             if self.config.collect_web_vitals:
                 lcp_ms, cls, inp_ms = await self._read_web_vitals(page)
@@ -1487,6 +1492,7 @@ class PlaywrightBackend(FetchBackend):
                 inp_ms=inp_ms,
                 redirect_chain=redirect_chain,
                 raw_text=raw_text,
+                raw_text_truncated=raw_text_truncated,
                 observed_requests=list(observed.values()),
                 render_settled=render_settled,
             )

@@ -143,6 +143,7 @@ def _crawl_run_config_snapshot(config: CrawlConfig, seeds: list[str]) -> dict[st
         "max_css_import_depth": config.max_css_import_depth,
         "max_outstanding_speculative_per_host": config.max_outstanding_speculative_per_host,
         "discover_render_urls": config.discover_render_urls,
+        "capture_render_baseline": config.capture_render_baseline,
         "follow_rendered_links": config.follow_rendered_links,
         "render_discovery_max_raw_links": config.render_discovery_max_raw_links,
         "render_discovery_min_scripts": config.render_discovery_min_scripts,
@@ -1037,6 +1038,17 @@ class CrawlEngine:
                     fetch_backend=self.config.backend,
                     extracted=extracted,
                     raw_html=raw_html,
+                    render_raw_html=(
+                        response.raw_text
+                        if self.config.capture_render_baseline and self.config.backend == "playwright"
+                        else None
+                    ),
+                    render_settled=(response.render_settled if self.config.backend == "playwright" else None),
+                    render_baseline_truncated=(
+                        response.raw_text_truncated
+                        if self.config.capture_render_baseline and self.config.backend == "playwright"
+                        else False
+                    ),
                     body_truncated=response.body_truncated,
                     wire_bytes=response.wire_bytes,
                     decoded_bytes=response.decoded_bytes,
