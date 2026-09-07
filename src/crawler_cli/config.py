@@ -190,15 +190,21 @@ class CrawlConfig:
     """Optional Portal-owned, per-connection URL policy.  It is supported only
     by the aiohttp backend and covers initial HTTP requests, redirects and
     sitemap fetches; browser navigation and live comparison remain unsupported."""
-    destination_guard: Literal["off", "resolver", "pinned"] = "resolver"
+    destination_guard: Literal["off", "resolver", "pinned"] = "off"
     """Built-in destination-address guard for crawls with no Portal policy
     (ticket 149).
 
-    ``resolver`` is the default: addresses are classified as the connection is
-    made, which protects the crawler host and the networks it can reach without
-    the per-request connector cost that pinning imposes.  ``pinned`` is the
-    strict mode, re-resolving and pinning every hop.  ``off`` is for callers
-    that supply their own guard, and it must be chosen deliberately."""
+    ``resolver`` classifies addresses as the connection is made, protecting the
+    crawler host and the networks it can reach without the per-request
+    connector cost that pinning imposes.  ``pinned`` is the strict mode,
+    re-resolving and pinning every hop.
+
+    The default is deliberately ``off`` for now.  Ticket 149 wants deny-by-
+    default, but switching the default denies loopback and private addresses,
+    which stops an ordinary ``crawler-cli http://localhost:3000/`` and breaks
+    every test in this repository that drives a loopback fixture server.  That
+    posture change is a deliberate, separately reviewable step; it is not
+    something to slip in alongside the mechanism.  See ticket 149."""
     allow_private_network: bool = False
     """Permit RFC1918 and IPv6 ULA destinations (ticket 149).
 

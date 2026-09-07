@@ -275,11 +275,23 @@ async def test_resolution_returns_the_complete_deduplicated_answer_set(monkeypat
 # ---------------------------------------------------------------------------
 
 
-def test_guard_defaults_to_the_resolver_tier_for_ordinary_crawls():
+def test_guard_is_opt_in_until_the_posture_change_lands():
+    """Ticket 149 wants deny-by-default; that switch is a separate step.
+
+    Enabling it here would deny loopback for every caller, stopping an ordinary
+    crawl of a local server and breaking every fixture-server test in this
+    repository. The mechanism lands first; the posture change follows on its
+    own, with the repo-wide fixture sweep it requires.
+    """
     config = CrawlConfig()
-    assert config.destination_guard == "resolver"
+    assert config.destination_guard == "off"
     assert config.allow_private_network is False
     assert config.allow_network_cidrs == ()
+
+
+def test_enabling_the_resolver_tier_activates_the_policy():
+    backend = AiohttpBackend(CrawlConfig(destination_guard="resolver"))
+    assert backend._destination_policy() is not None
 
 
 def test_unknown_guard_tier_is_rejected():
@@ -387,20 +399,26 @@ def test_literal_ip_urls_are_rejected_before_the_request(url):
     Without this pre-request check the resolver guard never sees these, so the
     metadata endpoint would be reachable despite the guard being active.
     """
-    backend = AiohttpBackend(CrawlConfig())
+    backend = AiohttpBackend(CrawlConfig(destination_guard="resolver"))
     with pytest.raises(DestinationRejection):
         backend._guard_request_url(url)
 
 
 def test_public_literal_ip_url_is_allowed():
-    AiohttpBackend(CrawlConfig())._guard_request_url("http://93.184.216.34/")
+    AiohttpBackend(CrawlConfig(destination_guard="resolver"))._guard_request_url("http://93.184.216.34/")
 
 
 def test_guard_stands_down_when_an_external_portal_policy_owns_the_decision():
     class _Policy:
         async def authorize(self, url: str, purpose: str) -> None: ...
 
-    backend = AiohttpBackend(CrawlConfig(portal_connection_policy=_Policy(), challenge_escalate_to_browser=False))
+    backend = AiohttpBackend(
+        CrawlConfig(
+            destination_guard="resolver",
+            portal_connection_policy=_Policy(),
+            challenge_escalate_to_browser=False,
+        )
+    )
     assert backend._destination_policy() is None
     # The portal policy, not this guard, decides -- so no rejection here.
     backend._guard_request_url("http://127.0.0.1/")
@@ -413,7 +431,13 @@ def test_guard_is_absent_when_explicitly_turned_off():
 
 
 def test_guard_carries_the_operator_allowlist_into_the_policy():
-    backend = AiohttpBackend(CrawlConfig(allow_network_cidrs=("10.1.0.0/16",), allow_private_network=True))
+    backend = AiohttpBackend(
+        CrawlConfig(
+            destination_guard="resolver",
+            allow_network_cidrs=("10.1.0.0/16",),
+            allow_private_network=True,
+        )
+    )
     policy = backend._destination_policy()
     assert policy is not None
     assert policy.allow_private_network is True
