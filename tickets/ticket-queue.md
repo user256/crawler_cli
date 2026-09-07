@@ -98,12 +98,10 @@ Ticket files remain the source of truth for scope and DoD.
   **144** (PR #64), **148** (PR #65) and **153** (PR #66) had all landed while
   still recorded as `proposed`; and **160** (PR #68) was recorded as
   `in progress` after merging. Ticket **159** was already recorded correctly.
-- Ticket **160** is `partially done`, not `done`: PR #68 shipped the exact-URL
-  and CSV same-navigation comparison, reports, and exit contract, but
-  `--crawl-run-id` selection is still refused at runtime and the optional
-  run-scoped persistence seam is unbuilt. Those remainders, plus the missing
-  template/path-strata coverage, are now filed as ticket **161**; 160 closes
-  when 161 lands.
+- Ticket **160** is now `done` (2026-09-07): PR #68 shipped the exact-URL and CSV
+  same-navigation comparison, reports, and exit contract, and ticket **161**
+  delivered the remainders — run-backed `--crawl-run-id` selection, template and
+  path-strata coverage, and the opt-in run-scoped persistence session.
 - Shipped releases: `v0.2.0`, `v0.2.2`, `v0.3.0`. `v0.2.1` stays permanently
   excluded (closed, unmerged PR #50, not an ancestor of `master`).
 - Foundation chain **144 -> 148 + 153** is complete, so the security-evidence
@@ -115,8 +113,9 @@ Ticket files remain the source of truth for scope and DoD.
   **134**; and **158** (P3 adaptive speculative feedback, depends on completed
   156).
 - No open pull requests and no open issues at the time of this audit. Ticket
-  **161** was filed on 2026-08-25 for the ticket 160 remainders, so the next
-  unreserved ticket number is **162**; do not reuse **110**.
+  **161** was filed on 2026-08-25 for the ticket 160 remainders and landed on
+  2026-09-07, so the next unreserved ticket number is **162**; do not reuse
+  **110**.
 
 
 ### Ordering rules
@@ -463,8 +462,8 @@ an optional outcome-feedback layer and does not block either discovery path.
 
 ### Raw-versus-rendered SEO parity audit (2026-08-24)
 
-- `160` `partially done` (2026-08-24, PR #68) [ticket-160-first-class-render-parity-audit.md](./ticket-160-first-class-render-parity-audit.md) — **P1, builds on completed 019+031+097+153+157+159:** first delivery landed — `crawler-cli compare-renders` over exact URLs and `--csv-file`, same-navigation raw-versus-hydrated comparison, typed completeness, multiple typed findings, `crawler-cli/render-comparison/1` JSON plus CSV and self-contained HTML report, and the `--fail-on`/`--fail-on-incomplete` exit contract. **Still open (now ticket 161):** run-backed URL selection (`--crawl-run-id` is parsed but rejected at `__main__.py:3061`) and the optional run-scoped persistence seam. No Googlebot-emulation claim.
-- `161` `proposed` [ticket-161-render-parity-run-selection-and-persistence.md](./ticket-161-render-parity-run-selection-and-persistence.md) — **P1, depends on 153+157+159 and the first delivery of 160:** run-backed `--crawl-run-id` selection with deterministic sampling and honest run/partial provenance, operator template labels plus computed path strata and stratum coverage/filtering in JSON/CSV/HTML, and the optional run-scoped render-comparison persistence session. Closes ticket 160.
+- `160` `done` (2026-08-24 PR #68, completed 2026-09-07 by ticket 161) [ticket-160-first-class-render-parity-audit.md](./ticket-160-first-class-render-parity-audit.md) — **P1, builds on completed 019+031+097+153+157+159:** `crawler-cli compare-renders` over exact URLs, `--csv-file`, and `--crawl-run-id`, same-navigation raw-versus-hydrated comparison, typed completeness, multiple typed findings, `crawler-cli/render-comparison/1` JSON plus CSV and self-contained HTML report with strata coverage and filter, and the `--fail-on`/`--fail-on-incomplete` exit contract. No Googlebot-emulation claim.
+- `161` `done` (2026-09-07) [ticket-161-render-parity-run-selection-and-persistence.md](./ticket-161-render-parity-run-selection-and-persistence.md) — **P1, depends on 153+157+159 and the first delivery of 160:** run-backed `--crawl-run-id` selection with deterministic sampling and honest run/partial provenance, operator template labels plus computed path strata and stratum coverage/filtering in JSON/CSV/HTML, and the optional run-scoped render-comparison persistence session. Closes ticket 160.
 
 Deferred lanes remain below.
 

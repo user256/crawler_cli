@@ -163,5 +163,11 @@ database configured.
 
 ## Status
 
-proposed (Priority: **P1**; depends on completed tickets 153, 157, 159, and the
-first delivery of 160)
+done (2026-09-07, Priority: **P1**; depends on completed tickets 153, 157, 159,
+and the first delivery of 160. Delivered run-backed `--crawl-run-id` selection
+with deterministic host/locale/path/depth strata and honest source-run
+completeness, operator template labels via the optional CSV `template` column,
+per-URL `stratum`/`stratum_source` plus stratum coverage in JSON, CSV, and the
+HTML report with a stratum filter, and the opt-in `--persist`
+render-comparison session that stores redacted bounded evidence and no HTML
+document. Closes ticket 160)

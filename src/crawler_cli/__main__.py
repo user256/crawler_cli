@@ -8,7 +8,8 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Mapping
+import asyncpg
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Required, TypedDict, cast
@@ -53,7 +54,7 @@ from .cookies import (
     parse_cookie_pairs,
     scoped_cookies_from_pairs,
 )
-from .csv_urls import load_urls_from_csv
+from .csv_urls import load_labelled_urls_from_csv, load_urls_from_csv
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
 from .exit_codes import EXIT_FAILURE, EXIT_FINDINGS, EXIT_VALIDATION, resolve_crawl_exit_code
@@ -2948,11 +2949,128 @@ def _render_comparison_safe_value(value: object, digest: CorrelationDigest) -> o
     return value
 
 
+def _render_candidate_stratum(candidate: Mapping[str, object]) -> str:
+    """Return a deterministic, explicitly non-template path stratum label."""
+    url = str(candidate["url"])
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname or "unknown-host"
+        segments = [segment for segment in parsed.path.split("/") if segment]
+    except ValueError:
+        host, segments = "invalid-host", []
+    locale = str(candidate.get("html_lang") or "unknown").lower()
+    section = segments[0].lower() if segments else "root"
+    return f"host={host};locale={locale};path={section};depth={len(segments)}"
+
+
+def _render_url_strata(
+    candidates: Sequence[Mapping[str, object]],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Map each candidate URL to its stratum and to how that stratum was set.
+
+    An operator-supplied template label always wins; every other URL falls back
+    to a computed path stratum, which is never described as a template.
+    """
+    strata: dict[str, str] = {}
+    sources: dict[str, str] = {}
+    for candidate in candidates:
+        url = str(candidate["url"])
+        if url in strata:
+            continue
+        label = candidate.get("template")
+        if label:
+            strata[url] = f"template={str(label).strip()}"
+            sources[url] = "operator_template_label"
+            continue
+        strata[url] = _render_candidate_stratum(candidate)
+        sources[url] = "computed_path_stratum"
+    return strata, sources
+
+
+def _render_stratum_coverage(url_strata: Mapping[str, str], selected: Sequence[str]) -> list[dict[str, object]]:
+    """Reconcile per-stratum candidate counts with the URLs actually selected."""
+    candidate_counts: dict[str, int] = {}
+    for stratum in url_strata.values():
+        candidate_counts[stratum] = candidate_counts.get(stratum, 0) + 1
+    selected_counts: dict[str, int] = {}
+    for url in selected:
+        stratum = url_strata.get(url, "unknown")
+        selected_counts[stratum] = selected_counts.get(stratum, 0) + 1
+    return [
+        {
+            "stratum": stratum,
+            "candidate_count": candidate_counts.get(stratum, 0),
+            "selected_count": selected_counts.get(stratum, 0),
+        }
+        for stratum in sorted(candidate_counts)
+    ]
+
+
+def _select_run_render_candidates(
+    candidates: Sequence[Mapping[str, object]], *, max_pages: int
+) -> tuple[list[str], list[dict[str, object]], dict[str, str]]:
+    """Stratify one immutable run deterministically without reading its HTML.
+
+    One URL from every material stratum is taken before a second URL from any
+    stratum. This favors representative coverage while retaining a stable order
+    and a hard rendering cap.
+    """
+    url_strata, _sources = _render_url_strata(candidates)
+    buckets: dict[str, list[str]] = {}
+    for url, stratum in url_strata.items():
+        buckets.setdefault(stratum, []).append(url)
+    for urls in buckets.values():
+        urls.sort()
+    selected: list[str] = []
+    positions = dict.fromkeys(buckets, 0)
+    ordered_strata = sorted(buckets)
+    while len(selected) < max_pages:
+        added = False
+        for stratum in ordered_strata:
+            position = positions[stratum]
+            urls = buckets[stratum]
+            if position >= len(urls):
+                continue
+            selected.append(urls[position])
+            positions[stratum] += 1
+            added = True
+            if len(selected) == max_pages:
+                break
+        if not added:
+            break
+    return selected, _render_stratum_coverage(url_strata, selected), url_strata
+
+
+def _render_template_labels(args: argparse.Namespace) -> dict[str, str]:
+    """Read optional operator-supplied template labels from the CSV input."""
+    csv_file = getattr(args, "csv_file", None)
+    if not csv_file:
+        return {}
+    labelled = load_labelled_urls_from_csv(
+        csv_file,
+        column=args.csv_column,
+        label_column=getattr(args, "csv_template_column", "template"),
+    )
+    return {url: label for url, label in labelled if label}
+
+
 def _render_comparison_payload(
-    comparisons: list[RenderParityComparison], *, selected_urls: list[str], capped: bool
+    comparisons: list[RenderParityComparison],
+    *,
+    selected_urls: list[str],
+    capped: bool,
+    input_metadata: Mapping[str, object] | None = None,
+    url_strata: Mapping[str, str] | None = None,
+    stratum_sources: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     digest = CorrelationDigest.for_run()
-    rows = [_render_comparison_safe_value(item.as_dict(), digest) for item in comparisons]
+    rows: list[object] = []
+    for item in comparisons:
+        row = item.as_dict()
+        if url_strata is not None:
+            row["stratum"] = url_strata.get(item.url, "unknown")
+            row["stratum_source"] = (stratum_sources or {}).get(item.url, "computed_path_stratum")
+        rows.append(_render_comparison_safe_value(row, digest))
     state_counts: dict[str, int] = {}
     finding_counts: dict[str, int] = {}
     severity_counts: dict[str, int] = {}
@@ -2961,16 +3079,21 @@ def _render_comparison_payload(
         for finding in comparison.findings:
             finding_counts[finding.code] = finding_counts.get(finding.code, 0) + 1
             severity_counts[finding.severity] = severity_counts.get(finding.severity, 0) + 1
+    input_payload: dict[str, object] = {
+        "selected_urls": [_render_comparison_safe_value(url, digest) for url in selected_urls],
+        "selected_count": len(selected_urls),
+        "input_capped": capped,
+        "sampling_basis": "exact_operator_supplied_urls",
+    }
+    if input_metadata:
+        safe_metadata = _render_comparison_safe_value(dict(input_metadata), digest)
+        assert isinstance(safe_metadata, dict)
+        input_payload.update(safe_metadata)
     return {
         "schema_version": RENDER_COMPARISON_SCHEMA_VERSION,
         "ruleset_version": RENDER_COMPARISON_RULESET_VERSION,
         "observed_at": datetime.now(UTC).isoformat(),
-        "input": {
-            "selected_urls": [_render_comparison_safe_value(url, digest) for url in selected_urls],
-            "selected_count": len(selected_urls),
-            "input_capped": capped,
-            "sampling_basis": "exact_operator_supplied_urls",
-        },
+        "input": input_payload,
         "summary": {
             "states": state_counts,
             "findings": finding_counts,
@@ -2997,6 +3120,8 @@ def _write_render_comparison_output(payload: dict[str, object], output: str) -> 
         "state",
         "state_reason",
         "primary_summary",
+        "stratum",
+        "stratum_source",
         "finding_code",
         "severity",
         "field",
@@ -3010,7 +3135,7 @@ def _write_render_comparison_output(payload: dict[str, object], output: str) -> 
         writer.writeheader()
         for item in cast("list[dict[str, object]]", payload["results"]):
             findings = cast("list[dict[str, object]]", item["findings"])
-            base = {key: item.get(key) for key in columns[:6]}
+            base = {key: item.get(key) for key in columns[:8]}
             for finding in findings or [{}]:
                 writer.writerow(
                     {
@@ -3026,42 +3151,105 @@ def _write_render_comparison_output(payload: dict[str, object], output: str) -> 
                 )
 
 
+def _render_comparison_provenance_html(input_payload: Mapping[str, object]) -> str:
+    """Describe the sample source honestly, including an interrupted source run."""
+    facts: list[tuple[str, str]] = [
+        ("Sampling basis", str(input_payload.get("sampling_basis", "unknown"))),
+        ("Selected URLs", str(input_payload.get("selected_count", 0))),
+        ("Input capped", str(input_payload.get("input_capped", False))),
+    ]
+    if input_payload.get("candidate_count") is not None:
+        facts.append(("Candidate URLs", str(input_payload["candidate_count"])))
+    source_run = input_payload.get("source_crawl_run")
+    if isinstance(source_run, Mapping):
+        completeness = "complete" if source_run.get("complete") else "partial or interrupted"
+        facts.append(("Source crawl run", str(source_run.get("run_id", "unknown"))))
+        facts.append(("Source run status", f"{source_run.get('status', 'unknown')} ({completeness})"))
+    if input_payload.get("selected_at"):
+        facts.append(("Selected at", str(input_payload["selected_at"])))
+    rows = "".join(f"<tr><th>{html.escape(name)}</th><td>{html.escape(value)}</td></tr>" for name, value in facts)
+    return f'<h2>Sample provenance</h2><table class="facts"><tbody>{rows}</tbody></table>'
+
+
+def _render_comparison_strata_html(input_payload: Mapping[str, object]) -> str:
+    """Render per-stratum coverage so totals reconcile with the detail rows."""
+    strata = input_payload.get("strata")
+    if not isinstance(strata, list) or not strata:
+        return ""
+    rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(cast('Mapping[str, object]', item).get('stratum', '')))}</td>"
+        f"<td>{html.escape(str(cast('Mapping[str, object]', item).get('candidate_count', 0)))}</td>"
+        f"<td>{html.escape(str(cast('Mapping[str, object]', item).get('selected_count', 0)))}</td>"
+        "</tr>"
+        for item in strata
+    )
+    selected_total = sum(
+        int(cast("int", cast("Mapping[str, object]", item).get("selected_count", 0) or 0)) for item in strata
+    )
+    return (
+        "<h2>Path strata coverage</h2>"
+        "<p>Computed strata are path strata, not inferred templates. "
+        f"Selected across strata: {selected_total}.</p>"
+        "<table><thead><tr><th>Stratum</th><th>Candidates</th><th>Selected</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+    )
+
+
 def _write_render_comparison_html(payload: dict[str, object], output: str) -> None:
     """Write a bounded, self-contained analyst view without embedding HTML bodies."""
     results = cast("list[dict[str, object]]", payload["results"])
+    input_payload = cast("dict[str, object]", payload.get("input", {}))
     rows: list[str] = []
+    stratum_options: list[str] = []
     for result in results:
         findings = cast("list[dict[str, object]]", result["findings"])
         detail = (
             "<br>".join(html.escape(f"{item['severity']}: {item['code']} — {item['explanation']}") for item in findings)
             or "Equivalent"
         )
+        stratum = str(result.get("stratum", "unknown"))
+        if stratum not in stratum_options:
+            stratum_options.append(stratum)
         rows.append(
-            "<tr>"
+            f'<tr data-stratum="{html.escape(stratum, quote=True)}">'
             f"<td>{html.escape(str(result['url']))}</td>"
+            f"<td>{html.escape(stratum)}</td>"
             f"<td>{html.escape(str(result['state']))}</td>"
             f"<td>{html.escape(str(result['primary_summary']))}</td>"
             f"<td>{detail}</td>"
             "</tr>"
         )
+    options = "".join(
+        f'<option value="{html.escape(item, quote=True)}">{html.escape(item)}</option>'
+        for item in sorted(stratum_options)
+    )
+    stratum_filter = (
+        '<p><label for="stratum-filter">Filter by stratum: </label>'
+        f'<select id="stratum-filter"><option value="">All strata</option>{options}</select></p>'
+    )
+    script = (
+        "<script>document.getElementById('stratum-filter').addEventListener('change',function(event){"
+        "var wanted=event.target.value;"
+        "document.querySelectorAll('#results tbody tr').forEach(function(row){"
+        "row.hidden=Boolean(wanted)&&row.getAttribute('data-stratum')!==wanted;});});</script>"
+    )
     summary = cast("dict[str, object]", payload["summary"])
     document = f"""<!doctype html>
 <html lang=\"en\"><head><meta charset=\"utf-8\"><title>Render parity audit</title>
-<style>body{{font-family:system-ui,sans-serif;margin:2rem;color:#1f2933}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #cbd5e1;padding:.6rem;vertical-align:top;text-align:left}}th{{background:#0f6b5c;color:white}}code{{white-space:pre-wrap}}</style>
+<style>body{{font-family:system-ui,sans-serif;margin:2rem;color:#1f2933}}table{{border-collapse:collapse;width:100%;margin-bottom:1.5rem}}th,td{{border:1px solid #cbd5e1;padding:.6rem;vertical-align:top;text-align:left}}th{{background:#0f6b5c;color:white}}table.facts th{{width:14rem}}code{{white-space:pre-wrap}}</style>
 </head><body><h1>Raw versus rendered SEO parity</h1><p>{html.escape(str(payload["caveat"]))}</p>
 <p><code>{html.escape(json.dumps(summary, ensure_ascii=False))}</code></p>
-<table><thead><tr><th>URL</th><th>Evidence state</th><th>Primary summary</th><th>Findings</th></tr></thead><tbody>{"".join(rows)}</tbody></table>
+{_render_comparison_provenance_html(input_payload)}
+{_render_comparison_strata_html(input_payload)}
+<h2>Comparisons</h2>{stratum_filter}
+<table id=\"results\"><thead><tr><th>URL</th><th>Stratum</th><th>Evidence state</th><th>Primary summary</th><th>Findings</th></tr></thead><tbody>{"".join(rows)}</tbody></table>
+{script}
 </body></html>"""
     Path(output).write_text(document, encoding="utf-8")
 
 
 async def _run_compare_renders(args: argparse.Namespace) -> int:
-    if args.crawl_run_id:
-        print(
-            "Error: --crawl-run-id selection is not available for compare-renders yet; supply exact URLs or --csv-file",
-            file=sys.stderr,
-        )
-        return EXIT_VALIDATION
     if args.max_pages < 1:
         print("Error: --max-pages must be at least 1 for compare-renders", file=sys.stderr)
         return EXIT_VALIDATION
@@ -3078,24 +3266,111 @@ async def _run_compare_renders(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
-    urls = list(dict.fromkeys([*_collect_seed_urls(args), *config.csv_urls]))
-    if not urls:
-        print("Error: provide a URL, one or more --seed-url values, or --csv-file", file=sys.stderr)
+    explicit_urls = list(dict.fromkeys([*_collect_seed_urls(args), *config.csv_urls]))
+    try:
+        template_labels = _render_template_labels(args)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
-    selected = urls[: args.max_pages]
-    capped = len(selected) < len(urls)
+    source_run_id: str | None = args.crawl_run_id
+    store: AsyncpgStore | None = None
+    input_metadata: dict[str, object] | None = None
+    if source_run_id:
+        if explicit_urls:
+            print("Error: --crawl-run-id cannot be combined with URLs, --seed-url, or --csv-file", file=sys.stderr)
+            return EXIT_VALIDATION
+        store = _store_from_args(args)
+        try:
+            await store.initialize()
+            source_run = await store.get_crawl_run(source_run_id)
+            if source_run is None:
+                await store.close()
+                store = None
+                print(f"Error: crawl run not found: {scrub_text(source_run_id)}", file=sys.stderr)
+                return EXIT_VALIDATION
+            candidates = await store.fetch_render_comparison_candidates(run_id=source_run_id)
+        except (OSError, ValueError, asyncpg.PostgresError) as exc:
+            await store.close()
+            store = None
+            print(f"Error: unable to select crawl run: {scrub_text(str(exc))}", file=sys.stderr)
+            return EXIT_VALIDATION
+        selected, strata, url_strata = _select_run_render_candidates(candidates, max_pages=args.max_pages)
+        _, stratum_sources = _render_url_strata(candidates)
+        input_metadata = {
+            "sampling_basis": "deterministic_host_locale_path_depth_strata",
+            "source_crawl_run": {
+                "run_id": source_run_id,
+                "status": source_run["status"],
+                "complete": source_run["status"] == "complete",
+                "interrupted": source_run["status"] == "interrupted",
+            },
+            "candidate_count": len(candidates),
+            "sample_size": len(selected),
+            "selected_at": datetime.now(UTC).isoformat(),
+            "strata": strata,
+        }
+        capped = len(selected) < len(candidates)
+    else:
+        if not explicit_urls:
+            print("Error: provide a URL, one or more --seed-url values, --csv-file, or --crawl-run-id", file=sys.stderr)
+            return EXIT_VALIDATION
+        selected = explicit_urls[: args.max_pages]
+        capped = len(selected) < len(explicit_urls)
+        url_strata, stratum_sources = _render_url_strata(
+            [{"url": url, "template": template_labels.get(url)} for url in explicit_urls]
+        )
+        input_metadata = {"strata": _render_stratum_coverage(url_strata, selected)}
     engine = CrawlEngine(config)
     try:
         comparisons = await compare_rendered_sample(engine, selected, max_concurrent=args.render_concurrency)
+    except BaseException:
+        if store is not None:
+            await store.close()
+        raise
     finally:
         await engine.close()
-    payload = _render_comparison_payload(comparisons, selected_urls=selected, capped=capped)
+    payload = _render_comparison_payload(
+        comparisons,
+        selected_urls=selected,
+        capped=capped,
+        input_metadata=input_metadata,
+        url_strata=url_strata,
+        stratum_sources=stratum_sources,
+    )
     if args.output:
         _write_render_comparison_output(payload, args.output)
         print(f"Wrote {len(comparisons)} render-comparison rows to {args.output}")
     if args.html_report:
         _write_render_comparison_html(payload, args.html_report)
         print(f"Wrote render-comparison HTML report to {args.html_report}")
+    if args.persist:
+        if store is None:
+            store = _store_from_args(args)
+            try:
+                await store.initialize()
+            except (OSError, ValueError, asyncpg.PostgresError) as exc:
+                await store.close()
+                store = None
+                print(f"Error: unable to initialize render-comparison storage: {scrub_text(str(exc))}", file=sys.stderr)
+                return EXIT_FAILURE
+        try:
+            session_id = await store.persist_render_comparison_session(
+                source_crawl_run_id=source_run_id,
+                schema_version=RENDER_COMPARISON_SCHEMA_VERSION,
+                ruleset_version=RENDER_COMPARISON_RULESET_VERSION,
+                input_metadata=cast("dict[str, object]", payload["input"]),
+                summary=cast("dict[str, object]", payload["summary"]),
+                results=cast("list[dict[str, object]]", payload["results"]),
+            )
+            print(f"Persisted render-comparison session {session_id}")
+        except (OSError, ValueError, asyncpg.PostgresError) as exc:
+            print(f"Error: unable to persist render comparison: {scrub_text(str(exc))}", file=sys.stderr)
+            return EXIT_FAILURE
+        finally:
+            await store.close()
+            store = None
+    elif store is not None:
+        await store.close()
     summary = cast("dict[str, object]", payload["summary"])
     print(json.dumps({"schema_version": RENDER_COMPARISON_SCHEMA_VERSION, **summary}, indent=2))
     if all(item.state in {"inconclusive", "failed"} for item in comparisons):
@@ -3643,6 +3918,8 @@ def _build_parser() -> argparse.ArgumentParser:
             action.help = "One or more exact URLs to compare (input order is retained)."
         if action.dest == "max_pages":
             action.help = "Maximum exact URLs to compare (default 20; must be at least 1)."
+        if action.dest == "crawl_run_id":
+            action.help = "Crawl run whose successful stored HTML snapshots select live recheck URLs."
     render_compare_parser.add_argument(
         "--render-concurrency",
         type=positive_int,
@@ -3654,6 +3931,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write versioned comparison JSON (or CSV when the filename ends in .csv)",
     )
     render_compare_parser.add_argument("--html-report", help="Write a self-contained HTML summary report")
+    render_compare_parser.add_argument(
+        "--csv-template-column",
+        default="template",
+        help="Optional CSV column holding operator template labels (default: template)",
+    )
+    render_compare_parser.add_argument(
+        "--persist",
+        action="store_true",
+        help="Persist bounded redacted evidence as a render-comparison session (PostgreSQL)",
+    )
     render_compare_parser.add_argument(
         "--fail-on",
         choices=("high", "medium", "low", "any"),
