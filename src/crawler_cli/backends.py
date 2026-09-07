@@ -875,6 +875,15 @@ class AiohttpBackend(FetchBackend):
             self._session = None
 
 
+def _browser_url_denied(url: str, policy: DestinationPolicy) -> bool:
+    """Decide a browser URL the guard could not reduce to a literal address."""
+    try:
+        normalize_destination_url(url)
+    except DestinationRejection:
+        return True
+    return False
+
+
 class _GuardedResolver(aiohttp.abc.AbstractResolver):
     """Classify every resolved address at connect time (ticket 149).
 
@@ -1208,10 +1217,63 @@ class PlaywrightBackend(FetchBackend):
             )
         return payload
 
+    def _destination_policy(self) -> DestinationPolicy | None:
+        """Return the built-in guard for this browser run, or None when off."""
+        if self.config.portal_connection_policy is not None or self.config.destination_guard == "off":
+            return None
+        return DestinationPolicy(
+            allow_private_network=self.config.allow_private_network,
+            allow_networks=tuple(ip_network(cidr, strict=False) for cidr in self.config.allow_network_cidrs),
+        )
+
+    async def _install_destination_route_locked(self) -> None:
+        """Reject disallowed browser URLs before Chromium dispatches them.
+
+        This is URL interception, not connection pinning: Chromium resolves DNS
+        inside its own process, so a hostname that passes here can still resolve
+        to a denied address. Ticket 149 requires that distinction be reported
+        rather than presented as rebinding safety, so the capability object
+        keeps browser paths false and records the interception separately.
+
+        It still blocks the cases that matter most in practice -- a literal
+        metadata or loopback URL, and any non-HTTP scheme -- across navigation
+        and every subresource.
+        """
+        assert self._context is not None
+        policy = self._destination_policy()
+        if policy is None:
+            return
+
+        async def _guard(route: object, request: object) -> None:
+            url = str(getattr(request, "url", ""))
+            try:
+                _url, hostname, _port = normalize_destination_url(url)
+                literal = ip_address(hostname)
+            except (DestinationRejection, ValueError):
+                # Either the URL is structurally disallowed, or the host is a
+                # name this process cannot resolve on Chromium's behalf.
+                if _browser_url_denied(url, policy):
+                    with contextlib.suppress(Exception):
+                        await route.abort("blockedbyclient")  # type: ignore[attr-defined]
+                    return
+                with contextlib.suppress(Exception):
+                    await route.continue_()  # type: ignore[attr-defined]
+                return
+            if classify_address(literal, policy) is not None:
+                with contextlib.suppress(Exception):
+                    await route.abort("blockedbyclient")  # type: ignore[attr-defined]
+                return
+            with contextlib.suppress(Exception):
+                await route.continue_()  # type: ignore[attr-defined]
+
+        with contextlib.suppress(Exception):
+            await self._context.route("**/*", _guard)
+
     async def _initialize_context_locked(self) -> None:
         assert self._context is not None
         self._context_request_count = 0
         self._context_recycle_requested = False
+        await self._install_destination_route_locked()
         cookie_payload = self._playwright_cookie_payload()
         if cookie_payload:
             with contextlib.suppress(Exception):

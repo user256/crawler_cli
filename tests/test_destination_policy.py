@@ -570,10 +570,12 @@ def test_capabilities_report_no_cover_behind_a_proxy():
 
 
 @pytest.mark.parametrize("backend", ["curl_cffi", "playwright"])
-def test_capabilities_report_no_cover_on_backends_without_the_guard(backend):
+def test_capabilities_report_no_address_cover_on_backends_without_the_guard(backend):
+    """Neither backend classifies the address a connection actually reaches."""
     caps = destination_capabilities(guard="resolver", backend=backend, proxy_configured=False, portal_policy=False)
     assert caps.initial_url is False
-    assert any(backend in item for item in caps.limitations)
+    assert caps.dns_rebinding_safe is False
+    assert caps.limitations != ()
 
 
 def test_capabilities_defer_to_an_external_portal_policy():
@@ -693,3 +695,60 @@ async def test_archive_discovery_uses_a_guarded_connector():
         await guarded.close()
 
     assert _guarded_connector(CrawlConfig(destination_guard="off")) is None
+
+
+# ---------------------------------------------------------------------------
+# Browser URL interception (ticket 149)
+# ---------------------------------------------------------------------------
+
+
+def test_capabilities_record_browser_interception_without_claiming_pinning():
+    """Interception is real, but it is not rebinding safety.
+
+    Chromium resolves DNS in its own process, so a hostname permitted here can
+    still reach a denied address. Ticket 149 forbids presenting one as the
+    other.
+    """
+    caps = destination_capabilities(guard="resolver", backend="playwright", proxy_configured=False, portal_policy=False)
+    assert caps.browser_url_interception is True
+    assert caps.browser_navigation is False
+    assert caps.browser_subresources is False
+    assert caps.connection_pinning is False
+    assert caps.dns_rebinding_safe is False
+    assert any("resolves DNS itself" in item for item in caps.limitations)
+
+
+def test_curl_cffi_reports_no_interception_and_no_guard():
+    caps = destination_capabilities(guard="resolver", backend="curl_cffi", proxy_configured=False, portal_policy=False)
+    assert caps.browser_url_interception is False
+    assert caps.initial_url is False
+
+
+@pytest.mark.playwright_smoke
+@pytest.mark.asyncio
+async def test_browser_blocks_a_denied_url_before_dispatch():
+    """Prove the route aborts in real Chromium, not just in principle.
+
+    The guard-off case is the control: the same URL must reach the network and
+    fail differently, so a passing test cannot be explained by Chromium's own
+    blocking.
+    """
+    from crawler_cli.backends import PlaywrightBackend
+
+    denied = CrawlConfig(backend="playwright", destination_guard="resolver", timeout_seconds=8)
+    backend = PlaywrightBackend(denied)
+    try:
+        with pytest.raises(Exception) as excinfo:
+            await backend.fetch("http://169.254.169.254/latest/meta-data/")
+        assert "ERR_BLOCKED_BY_CLIENT" in str(excinfo.value)
+    finally:
+        await backend.close()
+
+    allowed = CrawlConfig(backend="playwright", destination_guard="off", timeout_seconds=8)
+    backend = PlaywrightBackend(allowed)
+    try:
+        with pytest.raises(Exception) as excinfo:
+            await backend.fetch("http://127.0.0.1:8080/")
+        assert "ERR_BLOCKED_BY_CLIENT" not in str(excinfo.value)
+    finally:
+        await backend.close()

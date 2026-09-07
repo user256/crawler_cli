@@ -139,6 +139,8 @@ async def playwright_smoke_site(unused_tcp_port: int) -> SmokeSite:
 async def test_crawl_engine_real_playwright_smoke(playwright_smoke_site: SmokeSite) -> None:
     config = CrawlConfig(
         backend="playwright",
+        # Loopback fixture server; browser URL interception has its own suite.
+        destination_guard="off",
         timeout_seconds=5.0,
         playwright_network_idle_timeout_seconds=1.0,
         playwright_wait_for_selector=".app-ready",
@@ -229,6 +231,8 @@ async def test_playwright_backend_recovers_after_timeout_and_cleans_up(playwrigh
     backend = PlaywrightBackend(
         CrawlConfig(
             backend="playwright",
+            # Loopback fixture server; see the note above.
+            destination_guard="off",
             timeout_seconds=0.2,
             playwright_network_idle_timeout_seconds=0.0,
         )
