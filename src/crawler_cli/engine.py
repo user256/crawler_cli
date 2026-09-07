@@ -1474,10 +1474,10 @@ class CrawlEngine:
 
     async def _fetch_unscoped(self, url: str, purpose: ConnectionPurpose):
         """Perform the backend fetch itself, after admission has been decided."""
-        if self.config.portal_connection_policy is not None:
+        if self.config.portal_connection_policy is not None or self.config.destination_guard == "pinned":
             fetch_for_purpose = getattr(self.backend, "fetch_for_purpose", None)
             if fetch_for_purpose is None:
-                raise RuntimeError("Portal connection policy requires a policy-aware backend")
+                raise RuntimeError("A connection policy requires a policy-aware backend")
             return await fetch_for_purpose(url, purpose)
         fetch_resilient = getattr(self.backend, "fetch_resilient", None)
         if fetch_resilient is not None:

@@ -36,6 +36,8 @@ import socket
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from .portal_policy import PinnedConnection
+
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
@@ -195,9 +197,11 @@ def destination_capabilities(
       hostname target is never classified (a literal-IP target still is);
     * an external Portal policy, which owns the decision instead.
 
-    ``connection_pinning`` is reported false even for ``pinned``: the built-in
-    guard validates inside resolution but does not yet pin an approved address
-    to the socket. Declaring otherwise would overstate the guarantee.
+    ``connection_pinning`` is true only for ``pinned``, which re-authorizes and
+    pins one approved address per hop through the same one-shot connector the
+    Portal path uses. ``resolver`` validates inside resolution instead: that
+    closes the check/connect gap without pinning, so it is reported honestly as
+    rebinding-safe but not pinning.
     """
     if portal_policy:
         return DestinationCapabilities(guard="portal", limitations=("an external Portal policy owns the decision",))
@@ -214,9 +218,6 @@ def destination_capabilities(
             remote_dns=True,
             limitations=("a proxy resolves the target hostname, so only literal-IP targets are classified",),
         )
-    limitations: tuple[str, ...] = ()
-    if guard == "pinned":
-        limitations = ("strict pinning is not implemented for the built-in guard; it behaves as resolver",)
     return DestinationCapabilities(
         guard=guard,
         initial_url=True,
@@ -224,10 +225,11 @@ def destination_capabilities(
         robots=True,
         sitemap=True,
         probes=True,
-        # Validation runs inside resolution with the DNS cache disabled, so no
-        # re-resolution can occur between the check and the connection.
+        connection_pinning=guard == "pinned",
+        # Both tiers close the check/connect gap: `pinned` fixes the approved
+        # address to the socket, and `resolver` validates inside resolution
+        # with the DNS cache disabled, so no re-resolution can intervene.
         dns_rebinding_safe=True,
-        limitations=limitations,
     )
 
 
@@ -408,3 +410,29 @@ def select_permitted_address(answers: list[str], policy: DestinationPolicy) -> s
             raise DestinationRejection(REASON_MIXED_ANSWER, ", ".join(sorted(denied.values())))
         raise DestinationRejection(sorted(denied.values())[0], "")
     return answers[0]
+
+
+class DefaultDestinationPolicy:
+    """The built-in guard, shaped as a ``PortalConnectionPolicy`` (ticket 149).
+
+    Satisfying that protocol is the whole point: the aiohttp backend already
+    re-authorizes and pins every redirect hop for a Portal deployment, so the
+    strict tier reuses that loop rather than growing a second one. This class
+    supplies only the decision.
+    """
+
+    def __init__(self, policy: DestinationPolicy) -> None:
+        self._policy = policy
+
+    async def authorize(self, url: str, purpose: str) -> PinnedConnection:
+        """Resolve, validate, and return the one address this hop may use."""
+        _url, hostname, port = normalize_destination_url(url)
+        try:
+            literal = ipaddress.ip_address(hostname)
+        except ValueError:
+            answers = await resolve_destination(hostname, port)
+        else:
+            # A literal-IP URL is never resolved, so it is its own answer set.
+            answers = [str(literal)]
+        address = select_permitted_address(answers, self._policy)
+        return PinnedConnection(hostname=hostname, port=port, address=address)

@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from crawler_cli import CrawlConfig
+from crawler_cli.portal_policy import validate_pinned_connection
 from crawler_cli.backends import AiohttpBackend, _GuardedResolver
 from crawler_cli.destination_policy import (
     REASON_DENIED_HOSTNAME,
@@ -32,6 +33,7 @@ from crawler_cli.destination_policy import (
     REASON_UNSUPPORTED_SCHEME,
     DestinationPolicy,
     DestinationRejection,
+    DefaultDestinationPolicy,
     classify_address,
     destination_capabilities,
     normalize_destination_url,
@@ -545,11 +547,17 @@ def test_capabilities_report_full_cover_for_a_guarded_aiohttp_run():
     assert caps.browser_subresources is False
 
 
-def test_capabilities_never_claim_pinning_the_builtin_guard_does_not_do():
-    """`pinned` passes stricter validation but does not yet pin a socket."""
-    caps = destination_capabilities(guard="pinned", backend="aiohttp", proxy_configured=False, portal_policy=False)
-    assert caps.connection_pinning is False
-    assert any("not implemented" in item for item in caps.limitations)
+def test_only_the_strict_tier_claims_connection_pinning():
+    """`resolver` is rebinding-safe without pinning; `pinned` pins."""
+    resolver = destination_capabilities(
+        guard="resolver", backend="aiohttp", proxy_configured=False, portal_policy=False
+    )
+    assert resolver.connection_pinning is False
+    assert resolver.dns_rebinding_safe is True
+
+    pinned = destination_capabilities(guard="pinned", backend="aiohttp", proxy_configured=False, portal_policy=False)
+    assert pinned.connection_pinning is True
+    assert pinned.limitations == ()
 
 
 def test_capabilities_report_no_cover_behind_a_proxy():
@@ -583,3 +591,86 @@ def test_run_snapshot_records_what_the_guard_actually_enforced():
     assert caps["guarded_paths"]["robots"] is True
     assert caps["guarded_paths"]["browser_navigation"] is False
     assert caps["connection_pinning"] is False
+
+
+# ---------------------------------------------------------------------------
+# Strict pinning tier (ticket 149)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_strict_policy_pins_the_validated_address(monkeypatch):
+    policy = DefaultDestinationPolicy(DestinationPolicy())
+
+    async def resolve(_host, _port):
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr("crawler_cli.destination_policy.resolve_destination", resolve)
+    pinned = await policy.authorize("http://example.com/a", "initial")
+
+    assert pinned.hostname == "example.com"
+    assert pinned.port == 80
+    assert pinned.address == "93.184.216.34"
+    # The pinned answer must satisfy the shared contract the aiohttp loop
+    # enforces before it opens the socket.
+    validate_pinned_connection("http://example.com/a", pinned)
+
+
+@pytest.mark.asyncio
+async def test_strict_policy_refuses_a_denied_address(monkeypatch):
+    policy = DefaultDestinationPolicy(DestinationPolicy())
+
+    async def resolve(_host, _port):
+        return ["10.0.0.8"]
+
+    monkeypatch.setattr("crawler_cli.destination_policy.resolve_destination", resolve)
+    with pytest.raises(DestinationRejection):
+        await policy.authorize("http://internal.example/", "initial")
+
+
+@pytest.mark.asyncio
+async def test_strict_policy_fails_closed_on_a_rebinding_answer_set(monkeypatch):
+    """A hop answering with both a public and a private address is denied."""
+    policy = DefaultDestinationPolicy(DestinationPolicy())
+
+    async def resolve(_host, _port):
+        return ["93.184.216.34", "10.0.0.8"]
+
+    monkeypatch.setattr("crawler_cli.destination_policy.resolve_destination", resolve)
+    with pytest.raises(DestinationRejection) as excinfo:
+        await policy.authorize("http://rebind.example/", "initial")
+    assert excinfo.value.reason == REASON_MIXED_ANSWER
+
+
+@pytest.mark.asyncio
+async def test_strict_policy_pins_a_literal_ip_to_itself():
+    policy = DefaultDestinationPolicy(DestinationPolicy())
+    pinned = await policy.authorize("http://93.184.216.34/", "initial")
+    assert pinned.address == "93.184.216.34"
+    validate_pinned_connection("http://93.184.216.34/", pinned)
+
+
+@pytest.mark.asyncio
+async def test_strict_tier_drives_the_pinned_loop_for_every_hop(monkeypatch):
+    """The strict tier must reuse the per-hop authorize/pin loop, not fetch()."""
+    from crawler_cli.backends import AiohttpBackend
+
+    backend = AiohttpBackend(CrawlConfig(destination_guard="pinned", challenge_escalate_to_browser=False))
+    authorized: list[str] = []
+
+    async def fake_fetch_pinned(url, pinned, requested_url, *, minimal_headers=False):
+        authorized.append(url)
+        response = SimpleNamespace(status=200, url=url)
+        return response, None
+
+    monkeypatch.setattr(backend, "_fetch_pinned", fake_fetch_pinned)
+    monkeypatch.setattr(
+        "crawler_cli.destination_policy.resolve_destination",
+        lambda _h, _p: _resolved(["93.184.216.34"]),
+    )
+    await backend.fetch_for_purpose("http://example.com/", "initial")
+    assert authorized == ["http://example.com/"]
+
+
+async def _resolved(addresses):
+    return addresses
