@@ -14,6 +14,7 @@ import socket
 
 import pytest
 
+from crawler_cli import CrawlConfig
 from crawler_cli.destination_policy import (
     REASON_DENIED_HOSTNAME,
     REASON_LINK_LOCAL,
@@ -253,3 +254,60 @@ async def test_resolution_returns_the_complete_deduplicated_answer_set(monkeypat
 
     monkeypatch.setattr("asyncio.get_running_loop", lambda: type("L", (), {"getaddrinfo": staticmethod(resolve)})())
     assert await resolve_destination("example.com", 80) == ["10.0.0.8", "93.184.216.34"]
+
+
+# ---------------------------------------------------------------------------
+# Config surface (ticket 149 step 2)
+# ---------------------------------------------------------------------------
+
+
+def test_guard_defaults_to_the_resolver_tier_for_ordinary_crawls():
+    config = CrawlConfig()
+    assert config.destination_guard == "resolver"
+    assert config.allow_private_network is False
+    assert config.allow_network_cidrs == ()
+
+
+def test_unknown_guard_tier_is_rejected():
+    with pytest.raises(ValueError, match="destination_guard must be"):
+        CrawlConfig(destination_guard="strict")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"backend": "playwright", "challenge_escalate_to_browser": False}, "requires the aiohttp backend"),
+        (
+            {"proxy": "http://proxy.example:8080", "challenge_escalate_to_browser": False},
+            "cannot be combined with a proxy",
+        ),
+        ({"obscura_enabled": True, "challenge_escalate_to_browser": False}, "Obscura backend"),
+        ({}, "challenge_escalate_to_browser=False"),
+    ],
+)
+def test_strict_pinned_mode_fails_closed_on_paths_it_cannot_guard(kwargs, match):
+    """Strict mode must refuse, not warn, on a path whose sockets it cannot reach."""
+    with pytest.raises(ValueError, match=match):
+        CrawlConfig(destination_guard="pinned", **kwargs)
+
+
+def test_strict_pinned_mode_accepts_the_guardable_aiohttp_path():
+    config = CrawlConfig(destination_guard="pinned", challenge_escalate_to_browser=False)
+    assert config.destination_guard == "pinned"
+
+
+def test_malformed_allowlist_cidr_is_rejected():
+    with pytest.raises(ValueError, match="not a valid network"):
+        CrawlConfig(allow_network_cidrs=("10.0.0.0/999",))
+
+
+@pytest.mark.parametrize("cidr", ["127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4"])
+def test_allowlist_cannot_reopen_the_always_denied_tier(cidr):
+    """The allowlist narrows the private tier; it never reopens loopback."""
+    with pytest.raises(ValueError, match="loopback, link-local or multicast"):
+        CrawlConfig(allow_network_cidrs=(cidr,))
+
+
+def test_allowlist_accepts_an_ordinary_private_range():
+    config = CrawlConfig(allow_network_cidrs=("10.1.0.0/16",))
+    assert config.allow_network_cidrs == ("10.1.0.0/16",)
