@@ -15,6 +15,7 @@ import socket
 import pytest
 
 from crawler_cli import CrawlConfig
+from crawler_cli.backends import AiohttpBackend, _GuardedResolver
 from crawler_cli.destination_policy import (
     REASON_DENIED_HOSTNAME,
     REASON_LINK_LOCAL,
@@ -94,16 +95,25 @@ def test_embedded_addresses_are_unwrapped_and_denied(address, note):
     assert classify_address(address, DEFAULT) is not None, note
 
 
-def test_nat64_wrapping_loopback_is_reported_as_globally_routable_by_the_stdlib():
-    """Guard the assumption this module exists to defeat.
+def test_embedded_addresses_are_denied_whatever_the_stdlib_says_about_them():
+    """The contract holds regardless of the interpreter's own classification.
 
-    If a future Python starts classifying the NAT64 prefix correctly this test
-    fails loudly, which is the moment to revisit the unwrapping code — not to
-    silently keep a redundant check.
+    Do not assert fixed ``ipaddress`` values here. ``::ffff:127.0.0.1`` reports
+    ``is_loopback`` False on CPython 3.12.3 and True on later patch releases,
+    so an assertion on the stdlib's answer fails on some interpreters while the
+    behaviour this module guarantees is unchanged. Unwrapping makes the outcome
+    independent of which way the interpreter classifies the outer address.
     """
-    assert ipaddress.ip_address("64:ff9b::7f00:1").is_global is True
-    assert ipaddress.ip_address("::ffff:127.0.0.1").is_loopback is False
     assert classify_address("64:ff9b::7f00:1", DEFAULT) == REASON_TRANSLATED
+    assert classify_address("::ffff:127.0.0.1", DEFAULT) is not None
+
+
+def test_naive_is_global_check_would_admit_the_nat64_wrapped_loopback():
+    """Show why the unwrapping exists, without asserting a stdlib constant."""
+    nat64 = ipaddress.ip_address("64:ff9b::7f00:1")
+    if nat64.is_global:
+        # The interpreter considers it publicly routable; the guard must not.
+        assert classify_address(nat64, DEFAULT) == REASON_TRANSLATED
 
 
 def test_private_exception_widens_only_the_private_tier():
@@ -128,17 +138,21 @@ def test_private_exception_widens_only_the_private_tier():
         assert classify_address(address, PRIVATE_ALLOWED) is not None, address
 
 
-def test_stdlib_is_private_is_broader_than_the_exception_this_module_grants():
-    """Document why the private tier is an explicit list, not `is_private`."""
+def test_private_exception_does_not_reach_documentation_or_reserved_ranges():
+    """Why the private tier is an explicit list rather than `is_private`.
+
+    Every address below is reported as private by ``ipaddress`` on the
+    interpreters checked, so defining the exception against that attribute
+    would quietly grant reach into documentation, benchmarking and
+    reserved-for-future-use space.
+    """
     for address in ("240.0.0.1", "192.0.2.5", "203.0.113.5", "198.18.0.1", "2001:db8::1"):
-        assert ipaddress.ip_address(address).is_private is True, address
         assert classify_address(address, PRIVATE_ALLOWED) == REASON_RESERVED, address
 
 
 def test_ipv6_instance_metadata_is_denied_despite_the_private_exception():
-    """fd00:ec2::254 sits inside fc00::/7 and is not link-local."""
-    assert ipaddress.ip_address("fd00:ec2::254").is_private is True
-    assert ipaddress.ip_address("fd00:ec2::254").is_link_local is False
+    """fd00:ec2::254 sits inside fc00::/7, so the exception would reach it."""
+    assert ipaddress.ip_address("fd00:ec2::254") in ipaddress.ip_network("fc00::/7")
     assert classify_address("fd00:ec2::254", PRIVATE_ALLOWED) == REASON_METADATA
 
 
@@ -311,3 +325,96 @@ def test_allowlist_cannot_reopen_the_always_denied_tier(cidr):
 def test_allowlist_accepts_an_ordinary_private_range():
     config = CrawlConfig(allow_network_cidrs=("10.1.0.0/16",))
     assert config.allow_network_cidrs == ("10.1.0.0/16",)
+
+
+# ---------------------------------------------------------------------------
+# aiohttp resolver tier (ticket 149 step 3)
+# ---------------------------------------------------------------------------
+
+
+class _StubResolver:
+    """Stand-in for aiohttp's DefaultResolver returning fixed answers."""
+
+    def __init__(self, addresses: list[str]) -> None:
+        self.addresses = addresses
+        self.closed = False
+
+    async def resolve(self, host: str, port: int = 0, family: int = 0) -> list[dict[str, object]]:
+        return [
+            {"hostname": host, "host": address, "port": port, "family": 0, "proto": 0, "flags": 0}
+            for address in self.addresses
+        ]
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_guarded_resolver_passes_a_wholly_public_answer_through():
+    resolver = _GuardedResolver(DEFAULT, _StubResolver(["93.184.216.34"]))
+    hosts = await resolver.resolve("example.com", 80)
+    assert [entry["host"] for entry in hosts] == ["93.184.216.34"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.8", "169.254.169.254", "64:ff9b::7f00:1"])
+async def test_guarded_resolver_denies_a_forbidden_answer(address):
+    resolver = _GuardedResolver(DEFAULT, _StubResolver([address]))
+    with pytest.raises(DestinationRejection):
+        await resolver.resolve("evil.example", 80)
+
+
+@pytest.mark.asyncio
+async def test_guarded_resolver_denies_a_rebinding_answer_set_as_a_unit():
+    """A name answering with both a public and a private address is denied."""
+    resolver = _GuardedResolver(DEFAULT, _StubResolver(["93.184.216.34", "10.0.0.8"]))
+    with pytest.raises(DestinationRejection) as excinfo:
+        await resolver.resolve("rebind.example", 80)
+    assert excinfo.value.reason == REASON_MIXED_ANSWER
+
+
+@pytest.mark.asyncio
+async def test_guarded_resolver_closes_the_resolver_it_wraps():
+    inner = _StubResolver(["93.184.216.34"])
+    await _GuardedResolver(DEFAULT, inner).close()
+    assert inner.closed is True
+
+
+@pytest.mark.parametrize("url", ["http://169.254.169.254/latest/meta-data/", "http://127.0.0.1:8000/", "http://[::1]/"])
+def test_literal_ip_urls_are_rejected_before_the_request(url):
+    """aiohttp connects to a literal-IP URL without consulting a resolver.
+
+    Without this pre-request check the resolver guard never sees these, so the
+    metadata endpoint would be reachable despite the guard being active.
+    """
+    backend = AiohttpBackend(CrawlConfig())
+    with pytest.raises(DestinationRejection):
+        backend._guard_request_url(url)
+
+
+def test_public_literal_ip_url_is_allowed():
+    AiohttpBackend(CrawlConfig())._guard_request_url("http://93.184.216.34/")
+
+
+def test_guard_stands_down_when_an_external_portal_policy_owns_the_decision():
+    class _Policy:
+        async def authorize(self, url: str, purpose: str) -> None: ...
+
+    backend = AiohttpBackend(CrawlConfig(portal_connection_policy=_Policy(), challenge_escalate_to_browser=False))
+    assert backend._destination_policy() is None
+    # The portal policy, not this guard, decides -- so no rejection here.
+    backend._guard_request_url("http://127.0.0.1/")
+
+
+def test_guard_is_absent_when_explicitly_turned_off():
+    backend = AiohttpBackend(CrawlConfig(destination_guard="off"))
+    assert backend._destination_policy() is None
+    backend._guard_request_url("http://127.0.0.1/")
+
+
+def test_guard_carries_the_operator_allowlist_into_the_policy():
+    backend = AiohttpBackend(CrawlConfig(allow_network_cidrs=("10.1.0.0/16",), allow_private_network=True))
+    policy = backend._destination_policy()
+    assert policy is not None
+    assert policy.allow_private_network is True
+    assert classify_address("10.1.2.3", policy) is None

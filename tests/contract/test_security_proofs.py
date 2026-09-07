@@ -154,6 +154,9 @@ async def test_authenticated_crawl_logs_and_artifact_never_contain_secret(auth: 
         respect_robots_txt=False,
         same_host_only=False,
         enable_content_hashing=True,
+        # Loopback fixture server; the ticket-149 destination guard has its own
+        # suite. This proof is about secrets never reaching logs or artifacts.
+        destination_guard="off",
     )
     engine = CrawlEngine(config, store=MemoryStore())
     try:
@@ -189,6 +192,8 @@ def _backend(backend_cls, auth: AuthConfig):
             backend=name_map[backend_cls],
             auth=auth,
             follow_redirects=True,
+            # Loopback fixture server; see the note above.
+            destination_guard="off",
         )
     )
 
