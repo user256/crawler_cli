@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from .amp import is_amp_url_shape
 from .archive import discover_historical_urls
 from .authorisation import ScopeManifestDenied, ScopePurpose, describe_manifest
+from .destination_policy import DestinationRejection, destination_capabilities
 from .backends import ObscuraFetchBackend, PlaywrightBackend, RateLimiter, build_backend
 from .budget import RunBudget, RunBudgetExhausted
 from .challenge import detect_challenge
@@ -156,6 +157,14 @@ def _crawl_run_config_snapshot(config: CrawlConfig, seeds: list[str]) -> dict[st
         "destination_guard": config.destination_guard,
         "allow_private_network": config.allow_private_network,
         "allow_network_cidrs": sorted(config.allow_network_cidrs),
+        # What the guard actually enforced for this run, so a resumed or
+        # audited run is judged on real coverage rather than the flag alone.
+        "destination_capabilities": destination_capabilities(
+            guard=config.destination_guard,
+            backend=config.backend,
+            proxy_configured=bool(config.proxy or config.proxies),
+            portal_policy=config.portal_connection_policy is not None,
+        ).as_dict(),
     }
     if config.scope_predicate is not None:
         # Only present when a scope manifest is active, so a manifest-free
@@ -239,10 +248,17 @@ class CrawlEngine:
         self._rate_limiter = RateLimiter(config.min_interval_seconds)
         self._robots = RobotsPolicyCache(
             config,
-            # The legacy cache fetcher is retained for ordinary crawls. A
-            # Portal-policy crawl must not bypass its connection guard (or the
-            # budget attached to it) while resolving robots.txt.
-            fetch_response=self._fetch_for_purpose if config.portal_connection_policy is not None else None,
+            # robots.txt is fetched at the very host the destination guard
+            # exists to protect against, before anything else and following
+            # redirects, so it must never use the cache's own unguarded
+            # session. Route it through the backend whenever either guard is
+            # active; the legacy fetcher remains only for a fully unguarded run
+            # (ticket 149, and ticket 148's budget for the Portal path).
+            fetch_response=(
+                self._fetch_for_purpose
+                if config.portal_connection_policy is not None or config.destination_guard != "off"
+                else None
+            ),
         )
         self._host_delays: dict[str, asyncio.Lock] = {}
         self._host_last_fetch: dict[str, float] = {}
@@ -1098,6 +1114,19 @@ class CrawlEngine:
                     extra={"event": "scope_manifest_denied", "url": exc.url, "reason": exc.reason},
                 )
                 return self._skip_result(url, f"scope_manifest_denied:{exc.reason}")
+            except DestinationRejection as exc:
+                # The destination guard denied the address before a socket was
+                # opened (ticket 149), so like a scope denial this is neither an
+                # HTTP failure nor a circuit-breaker event. Recording it as a
+                # fetch error would let a guarded host's denials open the
+                # breaker for a site that never refused anything.
+                logger.warning(
+                    "Destination guard denied %s (%s) — no request was made",
+                    url,
+                    exc.reason,
+                    extra={"event": "destination_denied", "url": url, "reason": exc.reason},
+                )
+                return self._skip_result(url, f"destination_denied:{exc.reason}")
             except RunBudgetExhausted as exc:
                 # Admission exhaustion is an expected partial terminal result,
                 # not a failed fetch or a circuit-breaker event.
@@ -1368,6 +1397,16 @@ class CrawlEngine:
                     exc.url,
                     exc.reason,
                     extra={"event": "scope_manifest_denied", "url": exc.url, "reason": exc.reason},
+                )
+                return None
+            except DestinationRejection as exc:
+                # Same reasoning as the page path: an auxiliary fetch denied
+                # before its socket opened is not a host failure (ticket 149).
+                logger.warning(
+                    "Destination guard denied auxiliary fetch %s (%s) — no request was made",
+                    url,
+                    exc.reason,
+                    extra={"event": "destination_denied", "url": url, "reason": exc.reason},
                 )
                 return None
             except Exception as exc:

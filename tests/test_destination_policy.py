@@ -33,6 +33,7 @@ from crawler_cli.destination_policy import (
     DestinationPolicy,
     DestinationRejection,
     classify_address,
+    destination_capabilities,
     normalize_destination_url,
     resolve_destination,
     select_permitted_address,
@@ -478,3 +479,107 @@ def test_guard_carries_the_operator_allowlist_into_the_policy():
     assert policy.allow_private_network is True
     assert classify_address("10.1.2.3", policy) is None
     assert classify_address("10.2.2.3", policy) == REASON_PRIVATE
+
+
+# ---------------------------------------------------------------------------
+# Engine observability and auxiliary-path coverage (ticket 149)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_denied_destination_is_a_typed_skip_and_not_a_fetch_error(monkeypatch):
+    """A pre-connection denial is not an HTTP failure.
+
+    Recording it as a fetch error would also feed the circuit breaker, so a
+    guarded run could open the breaker against a host that never refused
+    anything.
+    """
+    from crawler_cli import CrawlEngine
+    from crawler_cli.persistence import MemoryStore
+
+    engine = CrawlEngine(CrawlConfig(respect_robots_txt=False), store=MemoryStore())
+    breaker_failures: list[str] = []
+    monkeypatch.setattr(
+        engine,
+        "_record_breaker_failure",
+        lambda *args, **kwargs: breaker_failures.append(str(args)),
+    )
+    try:
+        result = await engine.crawl("http://127.0.0.1:9/")
+    finally:
+        await engine.close()
+
+    assert result.status == 0
+    assert result.skip_reason == "destination_denied:loopback"
+    assert breaker_failures == []
+
+
+def test_robots_is_fetched_through_the_guard_when_it_is_active():
+    """robots.txt is the first request made, at the host being guarded against.
+
+    The robots cache keeps its own unguarded aiohttp session for legacy
+    unguarded runs; wiring it to the backend is what stops that session being
+    used while a guard is in force.
+    """
+    from crawler_cli import CrawlEngine
+
+    guarded = CrawlEngine(CrawlConfig(destination_guard="resolver"))
+    assert guarded._robots._fetch_response is not None
+
+    unguarded = CrawlEngine(CrawlConfig(destination_guard="off"))
+    assert unguarded._robots._fetch_response is None
+
+
+# ---------------------------------------------------------------------------
+# Capability declaration (ticket 149)
+# ---------------------------------------------------------------------------
+
+
+def test_capabilities_report_full_cover_for_a_guarded_aiohttp_run():
+    caps = destination_capabilities(guard="resolver", backend="aiohttp", proxy_configured=False, portal_policy=False)
+    assert caps.initial_url and caps.http_redirect and caps.robots and caps.sitemap and caps.probes
+    assert caps.dns_rebinding_safe is True
+    assert caps.limitations == ()
+    # Browser paths are never covered by an HTTP-only guard.
+    assert caps.browser_navigation is False
+    assert caps.browser_subresources is False
+
+
+def test_capabilities_never_claim_pinning_the_builtin_guard_does_not_do():
+    """`pinned` passes stricter validation but does not yet pin a socket."""
+    caps = destination_capabilities(guard="pinned", backend="aiohttp", proxy_configured=False, portal_policy=False)
+    assert caps.connection_pinning is False
+    assert any("not implemented" in item for item in caps.limitations)
+
+
+def test_capabilities_report_no_cover_behind_a_proxy():
+    """A proxy resolves the target, so the guard never sees its address."""
+    caps = destination_capabilities(guard="resolver", backend="aiohttp", proxy_configured=True, portal_policy=False)
+    assert caps.remote_dns is True
+    assert caps.initial_url is False
+    assert caps.robots is False
+    assert any("proxy resolves" in item for item in caps.limitations)
+
+
+@pytest.mark.parametrize("backend", ["curl_cffi", "playwright"])
+def test_capabilities_report_no_cover_on_backends_without_the_guard(backend):
+    caps = destination_capabilities(guard="resolver", backend=backend, proxy_configured=False, portal_policy=False)
+    assert caps.initial_url is False
+    assert any(backend in item for item in caps.limitations)
+
+
+def test_capabilities_defer_to_an_external_portal_policy():
+    caps = destination_capabilities(guard="resolver", backend="aiohttp", proxy_configured=False, portal_policy=True)
+    assert caps.guard == "portal"
+    assert caps.initial_url is False
+
+
+def test_run_snapshot_records_what_the_guard_actually_enforced():
+    from crawler_cli.engine import _crawl_run_config_snapshot
+
+    snapshot = _crawl_run_config_snapshot(CrawlConfig(destination_guard="resolver"), ["https://example.com/"])
+    caps = snapshot["destination_capabilities"]
+    assert caps["destination_guard"] == "resolver"
+    assert caps["guarded_paths"]["robots"] is True
+    assert caps["guarded_paths"]["browser_navigation"] is False
+    assert caps["connection_pinning"] is False

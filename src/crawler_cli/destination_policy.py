@@ -140,6 +140,97 @@ class DestinationPolicy:
         return any(ip in network for network in self.allow_networks if ip.version == network.version)
 
 
+@dataclass(frozen=True, slots=True)
+class DestinationCapabilities:
+    """What the destination guard actually covers for one run.
+
+    Every field states what is enforced, never what is intended. A caller that
+    needs a guarantee reads this and fails closed; ticket 149 forbids printing
+    a warning and proceeding.
+    """
+
+    guard: str
+    initial_url: bool = False
+    http_redirect: bool = False
+    robots: bool = False
+    sitemap: bool = False
+    probes: bool = False
+    browser_navigation: bool = False
+    browser_subresources: bool = False
+    connection_pinning: bool = False
+    dns_rebinding_safe: bool = False
+    remote_dns: bool = False
+    limitations: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "destination_guard": self.guard,
+            "guarded_paths": {
+                "initial_url": self.initial_url,
+                "http_redirect": self.http_redirect,
+                "robots": self.robots,
+                "sitemap": self.sitemap,
+                "probes": self.probes,
+                "browser_navigation": self.browser_navigation,
+                "browser_subresources": self.browser_subresources,
+            },
+            "connection_pinning": self.connection_pinning,
+            "dns_rebinding_safe": self.dns_rebinding_safe,
+            "remote_dns": self.remote_dns,
+            "limitations": list(self.limitations),
+        }
+
+
+def destination_capabilities(
+    *, guard: str, backend: str, proxy_configured: bool, portal_policy: bool
+) -> DestinationCapabilities:
+    """Describe the guard's real coverage, never its intended coverage.
+
+    Three cases deliberately report no coverage rather than partial coverage:
+
+    * a non-aiohttp backend, because the guard is wired only into the aiohttp
+      fetch path;
+    * a configured proxy, because the proxy resolves the target hostname and
+      the crawler's resolver only ever sees the proxy's own address, so a
+      hostname target is never classified (a literal-IP target still is);
+    * an external Portal policy, which owns the decision instead.
+
+    ``connection_pinning`` is reported false even for ``pinned``: the built-in
+    guard validates inside resolution but does not yet pin an approved address
+    to the socket. Declaring otherwise would overstate the guarantee.
+    """
+    if portal_policy:
+        return DestinationCapabilities(guard="portal", limitations=("an external Portal policy owns the decision",))
+    if guard == "off":
+        return DestinationCapabilities(guard="off", limitations=("the destination guard is disabled",))
+    if backend != "aiohttp":
+        return DestinationCapabilities(
+            guard=guard,
+            limitations=(f"the {backend} backend does not implement the destination guard",),
+        )
+    if proxy_configured:
+        return DestinationCapabilities(
+            guard=guard,
+            remote_dns=True,
+            limitations=("a proxy resolves the target hostname, so only literal-IP targets are classified",),
+        )
+    limitations: tuple[str, ...] = ()
+    if guard == "pinned":
+        limitations = ("strict pinning is not implemented for the built-in guard; it behaves as resolver",)
+    return DestinationCapabilities(
+        guard=guard,
+        initial_url=True,
+        http_redirect=True,
+        robots=True,
+        sitemap=True,
+        probes=True,
+        # Validation runs inside resolution with the DNS cache disabled, so no
+        # re-resolution can occur between the check and the connection.
+        dns_rebinding_safe=True,
+        limitations=limitations,
+    )
+
+
 def _unwrap_embedded(ip: IPAddress) -> IPAddress | None:
     """Return the IPv4 address embedded in *ip*, if it carries one.
 

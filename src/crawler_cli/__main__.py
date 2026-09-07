@@ -55,6 +55,7 @@ from .cookies import (
     scoped_cookies_from_pairs,
 )
 from .csv_urls import load_labelled_urls_from_csv, load_urls_from_csv
+from .destination_policy import destination_capabilities
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
 from .exit_codes import EXIT_FAILURE, EXIT_FINDINGS, EXIT_VALIDATION, resolve_crawl_exit_code
@@ -1543,6 +1544,18 @@ async def _run_crawl(args: argparse.Namespace) -> int:
             print(f"Error: {exc}", file=sys.stderr)
             return EXIT_VALIDATION
         print(describe_manifest(config.scope_predicate.manifest))
+
+    guard_capabilities = destination_capabilities(
+        guard=config.destination_guard,
+        backend=config.backend,
+        proxy_configured=bool(config.proxy or config.proxies),
+        portal_policy=config.portal_connection_policy is not None,
+    )
+    if config.destination_guard != "off" and guard_capabilities.limitations:
+        # The guard is enabled but does not cover what the operator would
+        # reasonably assume. Say so rather than letting the flag imply cover.
+        for limitation in guard_capabilities.limitations:
+            logger.warning("DESTINATION GUARD LIMITED: %s", limitation)
 
     if config.allow_private_network:
         networks = ", ".join(config.allow_network_cidrs) if config.allow_network_cidrs else "all RFC1918/IPv6 ULA"
