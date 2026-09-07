@@ -80,6 +80,7 @@ Ticket files remain the source of truth for scope and DoD.
   Google's single-pass JSON-LD entity compatibility. Ticket **160** turns the
   raw-versus-rendered primitives into a first-class parity audit; next
   unreserved ticket number is **161**. Do not reuse **110**.
+  *(superseded 2026-08-25: 161 is filed; next is **162**.)*
 
 ### Current position (2026-08-12)
 
@@ -90,13 +91,40 @@ Ticket files remain the source of truth for scope and DoD.
 - Next unreserved ticket number is **135**. *(superseded 2026-08-21: 135–159
   were taken on disk; next is 160.)*
 
+### Current position (2026-08-25)
+
+- Register reconciled against `master` after a status-drift audit. Five entries
+  were stale: **130** (released as `v0.2.2` on 2026-07-29, not `in review`);
+  **144** (PR #64), **148** (PR #65) and **153** (PR #66) had all landed while
+  still recorded as `proposed`; and **160** (PR #68) was recorded as
+  `in progress` after merging. Ticket **159** was already recorded correctly.
+- Ticket **160** is now `done` (2026-09-07): PR #68 shipped the exact-URL and CSV
+  same-navigation comparison, reports, and exit contract, and ticket **161**
+  delivered the remainders — run-backed `--crawl-run-id` selection, template and
+  path-strata coverage, and the opt-in run-scoped persistence session.
+- Shipped releases: `v0.2.0`, `v0.2.2`, `v0.3.0`. `v0.2.1` stays permanently
+  excluded (closed, unmerged PR #50, not an ancestor of `master`).
+- Foundation chain **144 -> 148 + 153** is complete, so the security-evidence
+  lane is unblocked. Next by dependency order: **149** (P1/security, SSRF and
+  rebinding safety, depends on 148), then **147** (P1 crawler self-safety,
+  depends on 144). Evidence features **145/146/150/151/152/154** are unblocked
+  on 144+148+153 but several still also require 149 or 129.
+- Still `proposed` and untouched: Magento hygiene **131 -> 132 -> 133**, then
+  **134**; and **158** (P3 adaptive speculative feedback, depends on completed
+  156).
+- No open pull requests and no open issues at the time of this audit. Ticket
+  **161** was filed on 2026-08-25 for the ticket 160 remainders and landed on
+  2026-09-07, so the next unreserved ticket number is **162**; do not reuse
+  **110**.
+
+
 ### Ordering rules
 
 - Correctness and evidence hardening precede presentation work that consumes
   the affected fields.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**160**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**162**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -377,7 +405,7 @@ Review + merge of tickets **087 / 088 / 089 / 092 / 108** (PRs #26 / #22 / #24 /
 - `127` `done` [ticket-127-compare-store-dsn-env.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-127-compare-store-dsn-env.md) — **P2:** the ticket-122 per-side compare store flags take a literal DSN, putting credentials in shell history and the process list. Resolve each side from the environment instead — `CRAWLER_CLI_<SIDE>_POSTGRES_DSN` (also `PostgreSQLCrawler_` prefix) plus `--<side>-store-env VAR`, with inline `--<side>-store` kept as an override; named-but-unset variable fails fast. Implemented on `agent/127-compare-store-dsn-env`
 - `128` `done` (2026-07-18) [ticket-128-crawler-gui-chrome-profile-picker.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-128-crawler-gui-chrome-profile-picker.md) — **P2:** live GUI Chrome/Chromium profile discovery, lock preflight, dedicated-user-data guidance, persistent Playwright argv mapping, and Obscura/profile exclusion.
 - `129` `done` (2026-07-21) [ticket-129-playwright-auth-origin-scoping.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-129-playwright-auth-origin-scoping.md) — **P2 (security):** Playwright backend sets `http_credentials` without an `origin` restriction. Scoped credentials/headers per-origin natively using `route.fetch` to ensure cross-origin redirects strip credentials while same-origin redirects retain them. Playwright now passes all security proof tests and is fully supported in the portal-integration contract.
-- `130` `in review` (2026-07-29) [ticket-130-v022-release-prep.md](./ticket-130-v022-release-prep.md) — **P0 release safety:** prepare, but do not publish, crawler-cli v0.2.2 for the reviewed PR #51 HTTP-only Portal policy hook. The remote v0.2.1 tag is unusable (closed/unmerged PR #50, off-master) and must never be reused or moved. Immutable release evidence, not a mutable branch/tag, is required before Portal can pin it.
+- `130` `done` (2026-07-29, PR #53, released v0.2.2 2026-07-29) [ticket-130-v022-release-prep.md](./ticket-130-v022-release-prep.md) — **P0 release safety:** prepared crawler-cli v0.2.2 for the reviewed PR #51 HTTP-only Portal policy hook. The `v0.2.2` tag and GitHub Release exist and are the first immutable release Portal may pin; the remote `v0.2.1` tag remains permanently excluded. Superseded for new pins by `v0.3.0` (PR #61, released 2026-08-10).
 
 ### Magento hygiene pass (Timber Living / Yoma, 2026-08-12)
 
@@ -400,16 +428,16 @@ exploit payloads stay un-ticketed. Review the lane as a dependency graph, not
 ticket-number order: 153 deliberately lands before the detectors that consume
 its evidence contract.
 
-- `144` `proposed` [ticket-144-adversarial-crawler-scope.md](./ticket-144-adversarial-crawler-scope.md) — **P1:** README/SKILL/CLI help: evidence crawler, not evasion, not pentest; out-of-scope list; constrain 137
+- `144` `done` (2026-08-21, PR #64) [ticket-144-adversarial-crawler-scope.md](./ticket-144-adversarial-crawler-scope.md) — **P1:** README/SKILL/CLI help now name the product boundary — evidence crawler, not evasion, not pentest — with an explicit out-of-scope list, corrected dual-use flag help, and a `tests/contract/test_product_scope_contract.py` guard. Foundation for 145–154.
 - `145` `proposed` [ticket-145-client-split-measurement.md](./ticket-145-client-split-measurement.md) — **P2, depends on 144+148+149+153:** bounded plain vs impersonate vs spoofed-bot UA matrix; no retry-on-403; spoofed Googlebot is not Googlebot
 - `146` `proposed` [ticket-146-authorised-exposure-inventory.md](./ticket-146-authorised-exposure-inventory.md) — **P2, depends on 144+148+149+153:** declared non-prod hosts, CLI soft-404 fingerprint, sitemap leftovers, and published error/test URLs; no payloads
 - `147` `proposed` [ticket-147-crawler-self-safety.md](./ticket-147-crawler-self-safety.md) — **P1/safety, depends on 144:** regression-lock existing GET-only HTTP(S); add session-mutating URL policy, robots confirmation, typed skip evidence; strict-mode integration uses 148
-- `148` `proposed` [ticket-148-authorisation-scope-manifest.md](./ticket-148-authorisation-scope-manifest.md) — **P1, depends on 144:** versioned operator attestation and exact origin/path/time/method scope; one fail-closed predicate for every URL source; blocks security-adjacent fetch modes
+- `148` `done` (2026-08-21, PR #65) [ticket-148-authorisation-scope-manifest.md](./ticket-148-authorisation-scope-manifest.md) — **P1, depends on 144:** versioned operator attestation with exact origin/path/time/method scope and one fail-closed predicate applied to every URL source; gates security-adjacent fetch modes. Unblocks 149 and 152.
 - `149` `proposed` [ticket-149-default-network-ssrf-safety.md](./ticket-149-default-network-ssrf-safety.md) — **P1/security, depends on 148:** block special/private destinations and rebinding across redirects/auxiliary fetches; honest per-backend capabilities; double-confirmed private-network exception
 - `150` `proposed` [ticket-150-passive-security-posture.md](./ticket-150-passive-security-posture.md) — **P2, depends on 144+149+153:** passive security headers, redacted cookie attributes, TLS capability/facts, observed CORS response posture, and mixed content
 - `151` `proposed` [ticket-151-passive-form-api-inventory.md](./ticket-151-passive-form-api-inventory.md) — **P2, depends on 144+148+153+155:** passive forms/controls, linked API descriptions, router/GraphQL/source-map semantics; reuses 155 and never widens page-only following
 - `152` `proposed` [ticket-152-supplied-session-differential.md](./ticket-152-supplied-session-differential.md) — **P2, depends on 129+148+149+153:** isolated anonymous/operator-supplied profiles over one fixed URL set; triage comparisons, no identifier or role mutation
-- `153` `proposed` [ticket-153-security-evidence-redaction.md](./ticket-153-security-evidence-redaction.md) — **P1/security, depends on 144:** shared versioned finding contract; central header/cookie/query/config/body redaction; retention and secret-absence proofs; blocks 145, 146, 150, 151, 152, 154
+- `153` `done` (2026-08-21, PR #66) [ticket-153-security-evidence-redaction.md](./ticket-153-security-evidence-redaction.md) — **P1/security, depends on 144:** shared versioned finding contract plus central header/cookie/query/config/body redaction, with retention and secret-absence proofs (including exported crawl-artifact header redaction). Unblocks 145, 146, 150, 151, 152, 154.
 - `154` `proposed` [ticket-154-safe-error-disclosure-detection.md](./ticket-154-safe-error-disclosure-detection.md) — **P2, depends on 146+153:** passive multi-signal debug/error/directory-index/internal-disclosure findings over already-fetched responses; zero extra requests
 
 ### Static JavaScript URL discovery (2026-08-21)
@@ -434,7 +462,8 @@ an optional outcome-feedback layer and does not block either discovery path.
 
 ### Raw-versus-rendered SEO parity audit (2026-08-24)
 
-- `160` `in progress` [ticket-160-first-class-render-parity-audit.md](./ticket-160-first-class-render-parity-audit.md) — **P1, builds on completed 019+031+097+153+157+159:** same-navigation raw response versus hydrated DOM; typed completeness and multi-finding SEO signal/content/link/schema comparison; deterministic bounded sampling; versioned JSON/CSV and safe visual HTML report; no Googlebot-emulation claim
+- `160` `done` (2026-08-24 PR #68, completed 2026-09-07 by ticket 161) [ticket-160-first-class-render-parity-audit.md](./ticket-160-first-class-render-parity-audit.md) — **P1, builds on completed 019+031+097+153+157+159:** `crawler-cli compare-renders` over exact URLs, `--csv-file`, and `--crawl-run-id`, same-navigation raw-versus-hydrated comparison, typed completeness, multiple typed findings, `crawler-cli/render-comparison/1` JSON plus CSV and self-contained HTML report with strata coverage and filter, and the `--fail-on`/`--fail-on-incomplete` exit contract. No Googlebot-emulation claim.
+- `161` `done` (2026-09-07) [ticket-161-render-parity-run-selection-and-persistence.md](./ticket-161-render-parity-run-selection-and-persistence.md) — **P1, depends on 153+157+159 and the first delivery of 160:** run-backed `--crawl-run-id` selection with deterministic sampling and honest run/partial provenance, operator template labels plus computed path strata and stratum coverage/filtering in JSON/CSV/HTML, and the optional run-scoped render-comparison persistence session. Closes ticket 160.
 
 Deferred lanes remain below.
 

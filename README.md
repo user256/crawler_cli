@@ -1235,6 +1235,11 @@ crawler-cli compare-renders https://example.com/ \
   --seed-url https://example.com/products/ \
   --csv-file representative-pages.csv \
   --max-pages 20 --render-concurrency 1
+
+# Recheck a deterministic, bounded live sample from one stored crawl run.
+# Stored HTML selects candidates only; it is never compared with a current DOM.
+crawler-cli compare-renders --crawl-run-id crawl-20260825T120000Z-example \
+  --max-pages 20 --persist --postgres-dsn "$CRAWLER_CLI_POSTGRES_DSN"
 ```
 
 The output separates complete, partial, and inconclusive comparisons. It
@@ -1244,6 +1249,22 @@ a partial browser settle is never presented as an equivalent page. A rendered
 DOM difference is crawler evidence, not proof of Googlebot behavior—use Search
 Console URL Inspection, Rich Results Test, or verified Googlebot logs for that
 specific conclusion.
+
+`--csv-file` accepts an optional `template` column (rename it with
+`--csv-template-column`) holding operator template labels. A labelled URL keeps
+that label as its stratum; every other URL falls back to a computed *path
+stratum* from host, HTML language, path section, and depth. Computed strata are
+never presented as inferred templates. JSON, CSV, and the HTML report all carry
+the per-URL `stratum` and `stratum_source`, and the HTML report adds a sample
+provenance block, a per-stratum coverage table, and a stratum filter.
+
+`--crawl-run-id` selects only successful snapshots that retained decoded HTML,
+then distributes the cap deterministically across host, HTML language, path
+section, and URL depth strata. The output records the source run's status (so
+an interrupted source is never presented as complete), every selected URL, and
+stratum coverage. `--persist` stores the redacted, bounded signal evidence and
+typed findings in a separate comparison session linked to that source run; it
+does not duplicate either HTML document.
 
 The older library helper remains available when deliberately comparing two
 independent clients. Its result is labelled `independent_http`, because it is

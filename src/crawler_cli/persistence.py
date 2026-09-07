@@ -22,6 +22,7 @@ from .models import (
     RenderUrlCandidate,
     RobotsDirectives,
 )
+from .redaction import CorrelationDigest, project_url, scrub_text
 from .schema import create_schema_content_hash, identify_schema_relationships
 from .security_persistence import (
     SECURITY_SCHEMA_STATEMENTS,
@@ -131,6 +132,7 @@ class AmpHygieneRow(TypedDict):
 
 
 DEFAULT_CRAWL_RUN_ID = "legacy"
+_RENDER_COMPARISON_DOCUMENT_KEYS = frozenset({"raw_html", "rendered_html", "html", "html_document"})
 
 
 class CrawlRunRecord(TypedDict):
@@ -142,6 +144,13 @@ class CrawlRunRecord(TypedDict):
     config: dict[str, Any]
     created_at: int
     updated_at: int
+
+
+class RenderComparisonCandidate(TypedDict):
+    """A successfully decoded HTML page eligible for a live render recheck."""
+
+    url: str
+    html_lang: str | None
 
 
 SCHEMA_STATEMENTS = [
@@ -369,6 +378,55 @@ SCHEMA_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_page_run_snapshots_run_status
     ON page_run_snapshots(run_id, final_status_code)
+    """,
+    # Ticket 160: render parity is a live, same-navigation observation, so
+    # retain only its bounded, already-redacted evidence. It is deliberately
+    # not a second HTML store. Tying a session to its source crawl run makes
+    # retention and run deletion unambiguous.
+    """
+    CREATE TABLE IF NOT EXISTS render_comparison_sessions (
+        id BIGSERIAL PRIMARY KEY,
+        source_crawl_run_id TEXT REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+        schema_version TEXT NOT NULL,
+        ruleset_version TEXT NOT NULL,
+        input_json JSONB NOT NULL,
+        summary_json JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS render_comparison_results (
+        id BIGSERIAL PRIMARY KEY,
+        session_id BIGINT NOT NULL REFERENCES render_comparison_sessions(id) ON DELETE CASCADE,
+        result_ordinal INTEGER NOT NULL,
+        url TEXT NOT NULL,
+        state TEXT NOT NULL,
+        state_reason TEXT,
+        primary_summary TEXT NOT NULL,
+        observed_at TEXT,
+        evidence_json JSONB NOT NULL,
+        UNIQUE (session_id, result_ordinal)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_render_comparison_results_session
+    ON render_comparison_results(session_id, result_ordinal)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS render_comparison_findings (
+        id BIGSERIAL PRIMARY KEY,
+        result_id BIGINT NOT NULL REFERENCES render_comparison_results(id) ON DELETE CASCADE,
+        finding_ordinal INTEGER NOT NULL,
+        code TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        field TEXT NOT NULL,
+        evidence_json JSONB NOT NULL,
+        UNIQUE (result_id, finding_ordinal)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_render_comparison_findings_result
+    ON render_comparison_findings(result_id, finding_ordinal)
     """,
     """
     CREATE TABLE IF NOT EXISTS javascript_url_candidates (
@@ -1037,6 +1095,9 @@ SCHEMA_STATEMENTS.extend(SECURITY_SCHEMA_STATEMENTS)
 
 # Tables owned by crawler_cli (used for truncate / row-count summaries).
 CRAWL_TABLES: tuple[str, ...] = SECURITY_TABLES + (
+    "render_comparison_findings",
+    "render_comparison_results",
+    "render_comparison_sessions",
     "run_page_embeddings",
     "run_intent_signatures",
     "run_url_identity",
@@ -1093,6 +1154,29 @@ def encode_html_for_storage(text: str, *, compress: bool) -> bytes | None:
     if compress:
         return compress_html(text)
     return text.encode("utf-8")
+
+
+def _redact_render_comparison_evidence(value: object, digest: CorrelationDigest) -> object:
+    """Apply the ticket-153 projection contract before render evidence is stored."""
+    if isinstance(value, str):
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return scrub_text(value)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return project_url(value, digest=digest).redacted
+        return scrub_text(value)
+    if isinstance(value, list):
+        return [_redact_render_comparison_evidence(item, digest) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_render_comparison_evidence(item, digest) for item in value]
+    if isinstance(value, dict):
+        return {
+            scrub_text(str(key)): _redact_render_comparison_evidence(item, digest)
+            for key, item in value.items()
+            if str(key).lower() not in _RENDER_COMPARISON_DOCUMENT_KEYS
+        }
+    return value
 
 
 class MemoryStore:
@@ -1603,6 +1687,110 @@ class AsyncpgStore:
         if not rows:
             raise ValueError("no crawl runs found")
         raise ValueError("multiple crawl runs exist; pass --crawl-run-id to select one")
+
+    async def fetch_render_comparison_candidates(self, *, run_id: str) -> list[RenderComparisonCandidate]:
+        """Return only stored, successful HTML snapshots from one crawl run.
+
+        Stored HTML is selection evidence only: callers must still perform a
+        fresh same-navigation comparison, never compare this historical body
+        with a current DOM.
+        """
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT u.url, s.html_lang
+                FROM page_run_snapshots s
+                JOIN urls u ON u.id = s.url_id
+                WHERE s.run_id = $1
+                  AND s.final_status_code BETWEEN 200 AND 299
+                  AND s.html_compressed IS NOT NULL
+                  AND s.challenge IS NULL
+                  AND s.skip_reason IS NULL
+                ORDER BY u.url
+                """,
+                run_id,
+            )
+        return [
+            {"url": str(row["url"]), "html_lang": str(row["html_lang"]) if row["html_lang"] else None} for row in rows
+        ]
+
+    async def persist_render_comparison_session(
+        self,
+        *,
+        source_crawl_run_id: str | None,
+        schema_version: str,
+        ruleset_version: str,
+        input_metadata: dict[str, object],
+        summary: dict[str, object],
+        results: list[dict[str, object]],
+    ) -> int:
+        """Persist bounded redacted render-parity evidence and typed findings."""
+        await self.connect()
+        assert self.pool is not None
+        digest = CorrelationDigest.for_run(source_crawl_run_id or "")
+        safe_input = _redact_render_comparison_evidence(input_metadata, digest)
+        safe_summary = _redact_render_comparison_evidence(summary, digest)
+        safe_results = _redact_render_comparison_evidence(results, digest)
+        assert isinstance(safe_input, dict)
+        assert isinstance(safe_summary, dict)
+        assert isinstance(safe_results, list)
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                session_id = await conn.fetchval(
+                    """
+                    INSERT INTO render_comparison_sessions
+                        (source_crawl_run_id, schema_version, ruleset_version, input_json, summary_json)
+                    VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+                    RETURNING id
+                    """,
+                    source_crawl_run_id,
+                    schema_version,
+                    ruleset_version,
+                    json.dumps(safe_input, ensure_ascii=False),
+                    json.dumps(safe_summary, ensure_ascii=False),
+                )
+                for ordinal, result in enumerate(safe_results):
+                    assert isinstance(result, dict)
+                    evidence = {key: value for key, value in result.items() if key != "findings"}
+                    result_id = await conn.fetchval(
+                        """
+                        INSERT INTO render_comparison_results
+                            (session_id, result_ordinal, url, state, state_reason, primary_summary, observed_at, evidence_json)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                        RETURNING id
+                        """,
+                        session_id,
+                        ordinal,
+                        str(result["url"]),
+                        str(result["state"]),
+                        str(result.get("state_reason")) if result.get("state_reason") is not None else None,
+                        str(result["primary_summary"]),
+                        str(result.get("observed_at")) if result.get("observed_at") is not None else None,
+                        json.dumps(evidence, ensure_ascii=False),
+                    )
+                    findings = cast("list[dict[str, object]]", result.get("findings", []))
+                    if findings:
+                        await conn.executemany(
+                            """
+                            INSERT INTO render_comparison_findings
+                                (result_id, finding_ordinal, code, severity, field, evidence_json)
+                            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                            """,
+                            [
+                                (
+                                    result_id,
+                                    finding_ordinal,
+                                    str(finding["code"]),
+                                    str(finding["severity"]),
+                                    str(finding["field"]),
+                                    json.dumps(finding, ensure_ascii=False),
+                                )
+                                for finding_ordinal, finding in enumerate(findings)
+                            ],
+                        )
+        return int(session_id)
 
     async def update_crawl_run_status(self, run_id: str, status: str) -> None:
         await self.connect()

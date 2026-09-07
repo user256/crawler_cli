@@ -1707,6 +1707,84 @@ async def test_persist_comparison_session_roundtrips_new_columns(store: AsyncpgS
 
 
 @pytest.mark.asyncio
+async def test_render_comparison_candidates_and_session_are_scoped_to_one_run(store: AsyncpgStore) -> None:
+    """Ticket 160: live render rechecks select one run and persist no HTML."""
+    url = "https://render-history.example/products/widget?token=SUPERSECRET123"
+    await store.create_crawl_run("render-source", seed_urls=[url], config_hash="render", config={})
+    await store.persist(
+        CrawlResult(
+            requested_url=url,
+            final_url=url,
+            status=200,
+            headers={"Content-Type": "text/html"},
+            content_type="text/html",
+            fetch_backend="aiohttp",
+            extracted=ExtractedContent(
+                title="Widget",
+                meta_description=None,
+                meta_robots=RobotsDirectives(),
+                x_robots_tag=RobotsDirectives(),
+                canonical=None,
+                x_canonical=None,
+                hreflang_links=[],
+                html_lang="en",
+                headings={"h1": ["Widget"], "h2": []},
+                text="Widget",
+                word_count=1,
+                metadata={},
+            ),
+            raw_html="<html><body>stored historical body must not be copied</body></html>",
+        )
+    )
+
+    assert await store.fetch_render_comparison_candidates(run_id="render-source") == [{"url": url, "html_lang": "en"}]
+    session_id = await store.persist_render_comparison_session(
+        source_crawl_run_id="render-source",
+        schema_version="crawler-cli/render-comparison/1",
+        ruleset_version="render-parity/1",
+        input_metadata={"sampling_basis": "path_strata", "selected_urls": [url]},
+        summary={"states": {"complete": 1}, "findings": {"canonical_changed": 1}},
+        results=[
+            {
+                "url": url,
+                "state": "complete",
+                "state_reason": None,
+                "primary_summary": "canonical_changed",
+                "observed_at": "2026-08-25T12:00:00+00:00",
+                "raw_html": "<html>stored historical body must not be copied</html>",
+                "signals": {"canonical": {"raw": "/old", "rendered": "/new"}},
+                "findings": [
+                    {
+                        "code": "canonical_changed",
+                        "severity": "high",
+                        "field": "canonical",
+                        "explanation": "Canonical differs.",
+                    }
+                ],
+            }
+        ],
+    )
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        session = await conn.fetchrow(
+            "SELECT source_crawl_run_id, input_json FROM render_comparison_sessions WHERE id = $1", session_id
+        )
+        result = await conn.fetchrow(
+            "SELECT url, evidence_json FROM render_comparison_results WHERE session_id = $1", session_id
+        )
+        findings = await conn.fetchval(
+            "SELECT COUNT(*) FROM render_comparison_findings f "
+            "JOIN render_comparison_results r ON r.id = f.result_id WHERE r.session_id = $1",
+            session_id,
+        )
+    assert session is not None and session["source_crawl_run_id"] == "render-source"
+    assert session is not None and "SUPERSECRET123" not in json.dumps(session["input_json"])
+    assert result is not None and "SUPERSECRET123" not in json.dumps(dict(result))
+    assert result is not None and "stored historical body" not in json.dumps(result["evidence_json"])
+    assert findings == 1
+
+
+@pytest.mark.asyncio
 async def test_compare_urls_persist_writes_a_session(store: AsyncpgStore, dsn: str, tmp_path) -> None:
     """Ticket 123 C: `compare-urls --persist` is exercised end-to-end."""
     from crawler_cli.__main__ import _build_parser, _dispatch
