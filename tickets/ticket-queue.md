@@ -163,14 +163,24 @@ Ticket files remain the source of truth for scope and DoD.
   the aiohttp `_GuardedResolver` tier plus the literal-IP pre-request check that
   covers the URLs a resolver is never asked about.
 
-  **The guard is opt-in**: `destination_guard` defaults to `off`, so nothing
-  changes for existing callers. Ticket 149 asks for deny-by-default and **that
-  half is deliberately not delivered**. Turning it on denies loopback for every
-  caller, which stops an ordinary `crawler-cli http://localhost:3000/` and broke
-  this repository's own tests in three waves — unit, the security-proof
-  contracts, then the Postgres integration suite — because every one of them
-  drives a loopback fixture server. The posture switch needs a repo-wide fixture
-  sweep and its own review; do not flip the default without both.
+  **The deny-by-default posture landed in the follow-up (2026-09-07).**
+  `destination_guard` now defaults to `resolver`. It shipped opt-in first
+  because turning it on denies loopback for every caller, which stops an
+  ordinary `crawler-cli http://localhost:3000/` and broke this repository's own
+  tests in three waves — unit, the security-proof contracts, then the Postgres
+  integration suite — since every one of them drives a loopback fixture server.
+  Those fixtures now pass `destination_guard="off"` explicitly, one site at a
+  time; the guard has its own suite.
+
+  The follow-up also resolved the spec gap that made the switch awkward: an
+  exact `--allow-network-cidr` may now name loopback, so an owned local service
+  is crawlable under explicit authorisation instead of being unreachable at any
+  setting other than `off`. The allowlist reopens the private and loopback tiers
+  only — metadata, link-local, multicast, reserved and unspecified addresses
+  stay denied however the run is configured, and link-local or multicast CIDRs
+  are refused at construction. Supplying exact CIDRs disables the blanket
+  RFC1918/ULA allowance, so they genuinely narrow rather than widen. Verified
+  by direct execution, not just by the test suite.
 
   Two findings from building it, both verified rather than assumed:
 

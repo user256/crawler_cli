@@ -217,3 +217,15 @@ partially done (2026-09-07, PR #72; Priority: **P1/security**, depends on
 **146**, **150–152**, and **154**) — crawler-host protection and honest backend
 capabilities, not target-side SSRF testing. Prior art and verified
 classification traps recorded 2026-09-07; see ticket **162**.
+
+### Remediation follow-up (2026-09-07)
+
+The built-in resolver guard is now the default. CLI private/local access is
+double-confirmed by `allow_private_network: true` in the scope manifest and
+`--allow-private-network` on the invocation; repeatable `--allow-network-cidr`
+values narrow access and may explicitly name loopback for local development.
+Redirect targets are checked before aiohttp follows them, including literal IP
+targets that bypass its resolver. Guard posture and exceptions are included in
+the resumable-run fingerprint. Remaining backend-capability, strict pinning,
+auxiliary-path observability, and artifact work keeps this ticket partially
+done.

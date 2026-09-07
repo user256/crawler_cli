@@ -93,7 +93,6 @@ _EXPLICIT_PRIVATE_NETWORKS: tuple[IPNetwork, ...] = (
 
 _DENIED_HOSTNAMES: frozenset[str] = frozenset(
     {
-        "localhost",
         "metadata",
         "metadata.google.internal",
         "metadata.goog",
@@ -101,7 +100,7 @@ _DENIED_HOSTNAMES: frozenset[str] = frozenset(
     }
 )
 
-_DENIED_HOSTNAME_SUFFIXES: tuple[str, ...] = (".localhost", ".local", ".internal")
+_DENIED_HOSTNAME_SUFFIXES: tuple[str, ...] = ()
 
 _ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
@@ -128,9 +127,9 @@ class DestinationPolicy:
     """Which address classes this crawl may connect to.
 
     The default denies every address that is not globally routable. Loopback,
-    link-local, metadata, multicast, reserved and unspecified addresses stay
-    denied whatever else is set: ``allow_private_network`` widens the private
-    tier only, and never reopens the always-denied tier.
+    Link-local, metadata, multicast, reserved and unspecified addresses stay
+    denied whatever else is set. ``allow_private_network`` widens the private
+    tier; an exact CIDR may additionally authorize loopback for local crawling.
     """
 
     allow_private_network: bool = False
@@ -199,10 +198,10 @@ def classify_address(address: str | IPAddress, policy: DestinationPolicy) -> str
 
     embedded = _unwrap_embedded(ip)
     if embedded is not None:
-        # Judge the address that traffic actually reaches. An explicit operator
-        # allowlist still applies to the literal address as written.
-        if policy.permits_network(ip):
-            return None
+        # Judge the address that traffic actually reaches. The allowlist is
+        # deliberately limited to direct private/local destinations: allowing
+        # the outer translated range would let NAT64 or 6to4 reopen a forbidden
+        # inner address unexpectedly.
         inner = _classify_plain(embedded)
         if inner is not None:
             return REASON_TRANSLATED if not isinstance(ip, ipaddress.IPv4Address) else inner
@@ -211,9 +210,12 @@ def classify_address(address: str | IPAddress, policy: DestinationPolicy) -> str
     reason = _classify_plain(ip)
     if reason is None:
         return None
-    if policy.permits_network(ip):
+    # An exact operator allowlist may reopen private and loopback destinations
+    # (notably a local fixture/service), but never infrastructure-sensitive or
+    # non-unicast classes.
+    if reason in {REASON_PRIVATE, REASON_LOOPBACK} and policy.permits_network(ip):
         return None
-    if reason == REASON_PRIVATE and policy.allow_private_network:
+    if reason == REASON_PRIVATE and policy.allow_private_network and not policy.allow_networks:
         return None
     return reason
 

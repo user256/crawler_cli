@@ -21,6 +21,15 @@ if TYPE_CHECKING:
 
 BackendName = Literal["aiohttp", "curl_cffi", "playwright"]
 
+_ALLOWLISTABLE_DESTINATION_NETWORKS: tuple[IPv4Network | IPv6Network, ...] = (
+    ip_network("10.0.0.0/8"),
+    ip_network("172.16.0.0/12"),
+    ip_network("192.168.0.0/16"),
+    ip_network("127.0.0.0/8"),
+    ip_network("fc00::/7"),
+    ip_network("::1/128"),
+)
+
 
 def _validated_allow_network(cidr: str) -> IPv4Network | IPv6Network:
     """Parse one operator-supplied allowlist entry, rejecting a malformed one."""
@@ -28,6 +37,17 @@ def _validated_allow_network(cidr: str) -> IPv4Network | IPv6Network:
         return ip_network(cidr, strict=False)
     except ValueError as exc:
         raise ValueError(f"allow_network_cidrs entry is not a valid network: {cidr}") from exc
+
+
+def _is_allowlistable_destination_network(network: IPv4Network | IPv6Network) -> bool:
+    for permitted in _ALLOWLISTABLE_DESTINATION_NETWORKS:
+        if isinstance(network, IPv4Network) and isinstance(permitted, IPv4Network):
+            if network.subnet_of(permitted):
+                return True
+        elif isinstance(network, IPv6Network) and isinstance(permitted, IPv6Network):
+            if network.subnet_of(permitted):
+                return True
+    return False
 
 
 # Circuit-breaker defaults, shared between CrawlConfig and the CLI's env-var
@@ -190,7 +210,7 @@ class CrawlConfig:
     """Optional Portal-owned, per-connection URL policy.  It is supported only
     by the aiohttp backend and covers initial HTTP requests, redirects and
     sitemap fetches; browser navigation and live comparison remain unsupported."""
-    destination_guard: Literal["off", "resolver", "pinned"] = "off"
+    destination_guard: Literal["off", "resolver", "pinned"] = "resolver"
     """Built-in destination-address guard for crawls with no Portal policy
     (ticket 149).
 
@@ -199,12 +219,8 @@ class CrawlConfig:
     connector cost that pinning imposes.  ``pinned`` is the strict mode,
     re-resolving and pinning every hop.
 
-    The default is deliberately ``off`` for now.  Ticket 149 wants deny-by-
-    default, but switching the default denies loopback and private addresses,
-    which stops an ordinary ``crawler-cli http://localhost:3000/`` and breaks
-    every test in this repository that drives a loopback fixture server.  That
-    posture change is a deliberate, separately reviewable step; it is not
-    something to slip in alongside the mechanism.  See ticket 149."""
+    ``resolver`` is the default. Local/private crawling requires an explicit
+    network exception; trusted callers may explicitly select ``off``."""
     allow_private_network: bool = False
     """Permit RFC1918 and IPv6 ULA destinations (ticket 149).
 
@@ -455,12 +471,15 @@ class CrawlConfig:
             raise ValueError(f"destination_guard must be off, resolver or pinned, got {self.destination_guard!r}")
         for cidr in self.allow_network_cidrs:
             network = _validated_allow_network(cidr)
-            # The allowlist narrows the private tier; it never reopens the tier
-            # that stays denied however the run is configured.
-            if network.is_loopback or network.is_link_local or network.is_multicast:
+            # Keep this a narrowing control. Without the subnet check, entries
+            # such as 0.0.0.0/0 or 64:ff9b::/96 could reopen loopback through
+            # an address class the private/local exception never meant to cover.
+            if not _is_allowlistable_destination_network(network):
                 raise ValueError(
-                    f"allow_network_cidrs cannot include a loopback, link-local or multicast range: {cidr}"
+                    f"allow_network_cidrs entries must be subnets of RFC1918, IPv6 ULA, or loopback ranges: {cidr}"
                 )
+        if self.allow_network_cidrs and not self.allow_private_network:
+            raise ValueError("allow_network_cidrs requires allow_private_network=True")
         if self.destination_guard == "pinned":
             # Strict mode must not be claimed on a path whose sockets the guard
             # cannot reach. Fail closed rather than warn, as the portal policy

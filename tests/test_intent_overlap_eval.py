@@ -153,6 +153,9 @@ async def test_intent_overlap_eval_fixture_matches_golden(fixture_site_and_store
         same_host_only=True,
         discover_sitemaps=False,
         default_open_crawl_limit=0,
+        # Loopback fixture server; this eval measures intent overlap, not
+        # address policy, which has its own suite.
+        destination_guard="off",
     )
     engine = CrawlEngine(cfg, store=store)
     await engine.crawl_list([f"{base}{p}" for p in _fixture_pages(base)])
