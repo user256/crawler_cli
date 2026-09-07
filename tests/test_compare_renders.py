@@ -215,7 +215,7 @@ def test_run_selection_is_deterministic_and_covers_strata_before_duplicates():
         {"url": "https://blog.example.com/posts/a", "html_lang": "en"},
     ]
 
-    selected, strata, url_strata = _select_run_render_candidates(candidates, max_pages=3)
+    selected, strata, url_strata, stratum_sources = _select_run_render_candidates(candidates, max_pages=3)
 
     assert selected == [
         "https://blog.example.com/posts/a",
@@ -228,6 +228,7 @@ def test_run_selection_is_deterministic_and_covers_strata_before_duplicates():
     assert {url_strata[url] for url in selected} == {item["stratum"] for item in strata}
     assert not any("template" in item["stratum"] for item in strata)
     assert _select_run_render_candidates(candidates, max_pages=3)[0] == selected
+    assert set(stratum_sources.values()) == {"computed_path_stratum"}
 
 
 @pytest.mark.asyncio

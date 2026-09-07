@@ -3008,14 +3008,14 @@ def _render_stratum_coverage(url_strata: Mapping[str, str], selected: Sequence[s
 
 def _select_run_render_candidates(
     candidates: Sequence[Mapping[str, object]], *, max_pages: int
-) -> tuple[list[str], list[dict[str, object]], dict[str, str]]:
+) -> tuple[list[str], list[dict[str, object]], dict[str, str], dict[str, str]]:
     """Stratify one immutable run deterministically without reading its HTML.
 
     One URL from every material stratum is taken before a second URL from any
     stratum. This favors representative coverage while retaining a stable order
     and a hard rendering cap.
     """
-    url_strata, _sources = _render_url_strata(candidates)
+    url_strata, stratum_sources = _render_url_strata(candidates)
     buckets: dict[str, list[str]] = {}
     for url, stratum in url_strata.items():
         buckets.setdefault(stratum, []).append(url)
@@ -3038,7 +3038,7 @@ def _select_run_render_candidates(
                 break
         if not added:
             break
-    return selected, _render_stratum_coverage(url_strata, selected), url_strata
+    return selected, _render_stratum_coverage(url_strata, selected), url_strata, stratum_sources
 
 
 def _render_template_labels(args: argparse.Namespace) -> dict[str, str]:
@@ -3294,8 +3294,9 @@ async def _run_compare_renders(args: argparse.Namespace) -> int:
             store = None
             print(f"Error: unable to select crawl run: {scrub_text(str(exc))}", file=sys.stderr)
             return EXIT_VALIDATION
-        selected, strata, url_strata = _select_run_render_candidates(candidates, max_pages=args.max_pages)
-        _, stratum_sources = _render_url_strata(candidates)
+        selected, strata, url_strata, stratum_sources = _select_run_render_candidates(
+            candidates, max_pages=args.max_pages
+        )
         input_metadata = {
             "sampling_basis": "deterministic_host_locale_path_depth_strata",
             "source_crawl_run": {
