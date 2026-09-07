@@ -751,7 +751,16 @@ async def test_plain_response_cap_truncation_still_extracts_on_legacy_backends()
     app = web.Application()
     app.router.add_get("/", page)
     runner, base = await _start_app(app)
-    engine = CrawlEngine(CrawlConfig(max_response_bytes=1000, respect_robots_txt=False, backend="aiohttp"))
+    engine = CrawlEngine(
+        CrawlConfig(
+            max_response_bytes=1000,
+            respect_robots_txt=False,
+            backend="aiohttp",
+            # Loopback fixture server; this test is about response caps, and
+            # the ticket-149 destination guard has its own suite.
+            destination_guard="off",
+        )
+    )
     try:
         result = await engine.crawl(f"{base}/")
     finally:

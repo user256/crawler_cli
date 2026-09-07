@@ -143,7 +143,13 @@ async def test_aiohttp_basic_auth_not_forwarded_to_cross_origin_redirect() -> No
     destination_runner, destination_url = await _start_app(destination_app)
     redirect_to = f"{destination_url}/"
     backend = AiohttpBackend(
-        CrawlConfig(auth=AuthConfig(auth_type="basic", username="user", password="pass"), follow_redirects=True)
+        # Loopback fixture server: the ticket-149 destination guard is off here
+        # so this test proves credential scoping, not address policy.
+        CrawlConfig(
+            auth=AuthConfig(auth_type="basic", username="user", password="pass"),
+            follow_redirects=True,
+            destination_guard="off",
+        )
     )
     try:
         result = await backend.fetch(f"{start_url}/")
@@ -182,6 +188,7 @@ async def test_curl_cffi_basic_auth_not_forwarded_to_cross_origin_redirect() -> 
             backend="curl_cffi",
             auth=AuthConfig(auth_type="basic", username="user", password="pass"),
             follow_redirects=True,
+            destination_guard="off",
         )
     )
     try:

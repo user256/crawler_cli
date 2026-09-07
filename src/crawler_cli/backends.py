@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ipaddress
+from ipaddress import ip_address, ip_network
 import json
 import os
 import signal
@@ -25,6 +26,13 @@ from .cookies import build_cookie_header, build_scoped_cookie_header
 from .javascript_urls import _normalise_http_url
 from .models import BodyTruncationReason, BrowserRequestObservation, FetchResponse
 from .proxy_pool import ProxyPool
+from .destination_policy import (
+    DestinationPolicy,
+    DestinationRejection,
+    classify_address,
+    normalize_destination_url,
+    select_permitted_address,
+)
 from .portal_policy import ConnectionPurpose, PortalPolicyError, PinnedConnection, validate_pinned_connection
 
 # Content-type prefixes that are never HTML/XML and should not be fully
@@ -613,12 +621,49 @@ class AiohttpBackend(FetchBackend):
             return self._ssl_context
         return None
 
+    def _destination_policy(self) -> DestinationPolicy | None:
+        """Return the built-in guard for this run, or None when it is off.
+
+        An external Portal policy owns the decision when one is configured, so
+        the built-in guard stands down rather than second-guessing it.
+        """
+        if self.config.portal_connection_policy is not None or self.config.destination_guard == "off":
+            return None
+        return DestinationPolicy(
+            allow_private_network=self.config.allow_private_network,
+            allow_networks=tuple(ip_network(cidr, strict=False) for cidr in self.config.allow_network_cidrs),
+        )
+
+    def _guard_request_url(self, url: str) -> None:
+        """Reject a URL the guarding resolver would never be asked about.
+
+        aiohttp connects straight to a literal-IP URL without consulting a
+        resolver, so without this check ``http://169.254.169.254/`` would pass
+        the resolver guard untouched.
+        """
+        policy = self._destination_policy()
+        if policy is None:
+            return
+        _url, hostname, _port = normalize_destination_url(url)
+        try:
+            literal = ip_address(hostname)
+        except ValueError:
+            return
+        reason = classify_address(literal, policy)
+        if reason is not None:
+            raise DestinationRejection(reason, hostname)
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
+            policy = self._destination_policy()
             connector = aiohttp.TCPConnector(
                 limit=max(self.config.max_concurrency, 10),
                 ssl=self._get_ssl_context(),
+                resolver=_GuardedResolver(policy) if policy is not None else None,
+                # A cached answer would let a name that resolved to a permitted
+                # address earlier be reused after it starts resolving elsewhere.
+                use_dns_cache=policy is None,
             )
             self._session = aiohttp.ClientSession(
                 timeout=timeout,
@@ -627,6 +672,7 @@ class AiohttpBackend(FetchBackend):
         return self._session
 
     async def fetch(self, url: str) -> FetchResponse:
+        self._guard_request_url(url)
         session = await self._get_session()
         headers = _request_headers(self.config, url)
         auth = _basic_auth(self.config, url)
@@ -799,6 +845,34 @@ class AiohttpBackend(FetchBackend):
         if self._session is not None and not self._session.closed:
             await self._session.close()
             self._session = None
+
+
+class _GuardedResolver(aiohttp.abc.AbstractResolver):
+    """Classify every resolved address at connect time (ticket 149).
+
+    This is the default ``resolver`` guard tier. Because the check runs inside
+    resolution, it sees exactly the addresses the socket will use and there is
+    no window between checking and connecting -- it closes the rebinding gap
+    structurally, and far more cheaply than a per-request pinned connector.
+
+    It cannot see a URL that names a literal IP, because aiohttp connects to
+    those without consulting a resolver at all. ``AiohttpBackend`` therefore
+    also checks the request URL before the request is made.
+    """
+
+    def __init__(self, policy: DestinationPolicy, inner: aiohttp.abc.AbstractResolver | None = None) -> None:
+        self._policy = policy
+        self._inner = inner or aiohttp.DefaultResolver()
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_UNSPEC) -> list[dict[str, object]]:
+        hosts = await self._inner.resolve(host, port, family)
+        addresses = [str(entry["host"]) for entry in hosts]
+        # Fail closed on the whole answer set: see select_permitted_address.
+        select_permitted_address(addresses, self._policy)
+        return hosts
+
+    async def close(self) -> None:
+        await self._inner.close()
 
 
 class _PinnedResolver(aiohttp.abc.AbstractResolver):

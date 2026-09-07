@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from ipaddress import IPv4Network, IPv6Network, ip_network
 from typing import TYPE_CHECKING, Literal
 
 from .auth import AuthConfig
@@ -19,6 +20,15 @@ if TYPE_CHECKING:
 
 
 BackendName = Literal["aiohttp", "curl_cffi", "playwright"]
+
+
+def _validated_allow_network(cidr: str) -> IPv4Network | IPv6Network:
+    """Parse one operator-supplied allowlist entry, rejecting a malformed one."""
+    try:
+        return ip_network(cidr, strict=False)
+    except ValueError as exc:
+        raise ValueError(f"allow_network_cidrs entry is not a valid network: {cidr}") from exc
+
 
 # Circuit-breaker defaults, shared between CrawlConfig and the CLI's env-var
 # fallback resolution in __main__._build_config. Threshold was raised from 3 to
@@ -180,6 +190,32 @@ class CrawlConfig:
     """Optional Portal-owned, per-connection URL policy.  It is supported only
     by the aiohttp backend and covers initial HTTP requests, redirects and
     sitemap fetches; browser navigation and live comparison remain unsupported."""
+    destination_guard: Literal["off", "resolver", "pinned"] = "off"
+    """Built-in destination-address guard for crawls with no Portal policy
+    (ticket 149).
+
+    ``resolver`` classifies addresses as the connection is made, protecting the
+    crawler host and the networks it can reach without the per-request
+    connector cost that pinning imposes.  ``pinned`` is the strict mode,
+    re-resolving and pinning every hop.
+
+    The default is deliberately ``off`` for now.  Ticket 149 wants deny-by-
+    default, but switching the default denies loopback and private addresses,
+    which stops an ordinary ``crawler-cli http://localhost:3000/`` and breaks
+    every test in this repository that drives a loopback fixture server.  That
+    posture change is a deliberate, separately reviewable step; it is not
+    something to slip in alongside the mechanism.  See ticket 149."""
+    allow_private_network: bool = False
+    """Permit RFC1918 and IPv6 ULA destinations (ticket 149).
+
+    This is the double-confirmed exception for authorised crawling of systems
+    the operator runs themselves.  It widens the private tier only: loopback,
+    link-local, metadata, multicast, reserved, documentation and benchmarking
+    addresses stay denied.  Requires manifest permission plus explicit
+    invocation intent at the CLI layer."""
+    allow_network_cidrs: tuple[str, ...] = ()
+    """Exact networks the operator allowlisted, preferred over the blanket
+    ``allow_private_network`` because it names what is being reached."""
     challenge_max_escalations: int = 1
     """Max browser escalations per URL before recording it as blocked."""
     cookies: dict[str, str] = field(default_factory=dict)
@@ -414,6 +450,34 @@ class CrawlConfig:
                 raise ValueError(
                     "portal_connection_policy cannot be combined with render URL discovery; "
                     "browser subrequests are not policy-guarded"
+                )
+        if self.destination_guard not in {"off", "resolver", "pinned"}:
+            raise ValueError(f"destination_guard must be off, resolver or pinned, got {self.destination_guard!r}")
+        for cidr in self.allow_network_cidrs:
+            network = _validated_allow_network(cidr)
+            # The allowlist narrows the private tier; it never reopens the tier
+            # that stays denied however the run is configured.
+            if network.is_loopback or network.is_link_local or network.is_multicast:
+                raise ValueError(
+                    f"allow_network_cidrs cannot include a loopback, link-local or multicast range: {cidr}"
+                )
+        if self.destination_guard == "pinned":
+            # Strict mode must not be claimed on a path whose sockets the guard
+            # cannot reach. Fail closed rather than warn, as the portal policy
+            # rules above already do.
+            if self.backend != "aiohttp":
+                raise ValueError(f"destination_guard='pinned' requires the aiohttp backend, got {self.backend!r}")
+            if self.proxy or self.proxies:
+                raise ValueError(
+                    "destination_guard='pinned' cannot be combined with a proxy; "
+                    "the proxy resolves the target host, so the guard never sees its address"
+                )
+            if self.obscura_enabled:
+                raise ValueError("destination_guard='pinned' cannot be combined with the Obscura backend")
+            if self.challenge_escalate_to_browser:
+                raise ValueError(
+                    "destination_guard='pinned' requires challenge_escalate_to_browser=False "
+                    "because browser navigation cannot be address-pinned"
                 )
         if self.max_requests or self.max_bytes:
             if self.backend != "aiohttp" or self.portal_connection_policy is None:
