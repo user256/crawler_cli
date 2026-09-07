@@ -158,15 +158,34 @@ Ticket files remain the source of truth for scope and DoD.
   isolation, on an unmodified tree as well. Fixed in PR **#70** (merged
   2026-09-07) by budgeting against CPU time rather than wall clock; the 5ms
   budget itself is unchanged.
-- Ticket **149** is under way. PR **#72** adds the address-class decision core
-  and its config surface, deliberately with no wiring, so it changes no crawl
-  behaviour on its own. Building it found one trap the prior art and the plan
-  both missed: `ipaddress` reports `is_private` as **True** for reserved
-  `240.0.0.0/4`, the documentation ranges and benchmarking `198.18.0.0/15`, so
-  defining `--allow-private-network` against `is_private` would have granted
-  reach into all of them. The private tier is an explicit RFC1918 plus ULA list
-  for that reason. Backend wiring, the CLI double-confirmation and the honest
-  per-backend capability output remain to land.
+- Ticket **149** is **partially done** (PR **#72**, merged 2026-09-07). Landed:
+  the address-class decision (`destination_policy.py`), its config surface, and
+  the aiohttp `_GuardedResolver` tier plus the literal-IP pre-request check that
+  covers the URLs a resolver is never asked about.
+
+  **The guard is opt-in**: `destination_guard` defaults to `off`, so nothing
+  changes for existing callers. Ticket 149 asks for deny-by-default and **that
+  half is deliberately not delivered**. Turning it on denies loopback for every
+  caller, which stops an ordinary `crawler-cli http://localhost:3000/` and broke
+  this repository's own tests in three waves — unit, the security-proof
+  contracts, then the Postgres integration suite — because every one of them
+  drives a loopback fixture server. The posture switch needs a repo-wide fixture
+  sweep and its own review; do not flip the default without both.
+
+  Two findings from building it, both verified rather than assumed:
+
+  - `ipaddress` reports `is_private` as **True** for reserved `240.0.0.0/4`, the
+    documentation ranges and benchmarking `198.18.0.0/15`. Defining
+    `--allow-private-network` against `is_private` would have granted reach into
+    all of them, so the private tier is an explicit RFC1918 plus ULA list.
+  - `::ffff:127.0.0.1` reports `is_loopback` **False** on CPython 3.12.3 and
+    **True** on later patch releases. CI caught this where local runs could not.
+    Address-policy tests here must assert this project's contract, never the
+    interpreter's own classification.
+
+  Still to land: the deny-by-default posture switch, auxiliary fetch paths
+  (robots, archive), the CLI double-confirmation flags, honest per-backend
+  capability output, and rejection reasons in artifacts.
 
 
 ### Ordering rules
@@ -484,7 +503,7 @@ its evidence contract.
 - `146` `proposed` [ticket-146-authorised-exposure-inventory.md](./ticket-146-authorised-exposure-inventory.md) — **P2, depends on 144+148+149+153:** declared non-prod hosts, CLI soft-404 fingerprint, sitemap leftovers, and published error/test URLs; no payloads
 - `147` `proposed` [ticket-147-crawler-self-safety.md](./ticket-147-crawler-self-safety.md) — **P1/safety, depends on 144:** regression-lock existing GET-only HTTP(S); add session-mutating URL policy, robots confirmation, typed skip evidence; strict-mode integration uses 148
 - `148` `done` (2026-08-21, PR #65) [ticket-148-authorisation-scope-manifest.md](./ticket-148-authorisation-scope-manifest.md) — **P1, depends on 144:** versioned operator attestation with exact origin/path/time/method scope and one fail-closed predicate applied to every URL source; gates security-adjacent fetch modes. Unblocks 149 and 152.
-- `149` `proposed` [ticket-149-default-network-ssrf-safety.md](./ticket-149-default-network-ssrf-safety.md) — **P1/security, depends on 148:** block special/private destinations and rebinding across redirects/auxiliary fetches; honest per-backend capabilities; double-confirmed private-network exception. **Prior art:** `portal_adapter.py` on unmerged branch `feature/3350-portal-url-policy-v1` (`8fcdb54`) already implements the address-class policy and the per-hop resolve-validate-pin loop, with tests; read it first (see ticket 162).
+- `149` `partially done` (2026-09-07, PR #72) [ticket-149-default-network-ssrf-safety.md](./ticket-149-default-network-ssrf-safety.md) — **P1/security, depends on 148:** block special/private destinations and rebinding across redirects/auxiliary fetches; honest per-backend capabilities; double-confirmed private-network exception. **Prior art:** `portal_adapter.py` on unmerged branch `feature/3350-portal-url-policy-v1` (`8fcdb54`) already implements the address-class policy and the per-hop resolve-validate-pin loop, with tests; read it first (see ticket 162).
 - `150` `proposed` [ticket-150-passive-security-posture.md](./ticket-150-passive-security-posture.md) — **P2, depends on 144+149+153:** passive security headers, redacted cookie attributes, TLS capability/facts, observed CORS response posture, and mixed content
 - `151` `proposed` [ticket-151-passive-form-api-inventory.md](./ticket-151-passive-form-api-inventory.md) — **P2, depends on 144+148+153+155:** passive forms/controls, linked API descriptions, router/GraphQL/source-map semantics; reuses 155 and never widens page-only following
 - `152` `proposed` [ticket-152-supplied-session-differential.md](./ticket-152-supplied-session-differential.md) — **P2, depends on 129+148+149+153:** isolated anonymous/operator-supplied profiles over one fixed URL set; triage comparisons, no identifier or role mutation
