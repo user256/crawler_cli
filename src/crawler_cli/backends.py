@@ -27,13 +27,20 @@ from .javascript_urls import _normalise_http_url
 from .models import BodyTruncationReason, BrowserRequestObservation, FetchResponse
 from .proxy_pool import ProxyPool
 from .destination_policy import (
+    DefaultDestinationPolicy,
     DestinationPolicy,
     DestinationRejection,
     classify_address,
     normalize_destination_url,
     select_permitted_address,
 )
-from .portal_policy import ConnectionPurpose, PortalPolicyError, PinnedConnection, validate_pinned_connection
+from .portal_policy import (
+    ConnectionPurpose,
+    PinnedConnection,
+    PortalConnectionPolicy,
+    PortalPolicyError,
+    validate_pinned_connection,
+)
 
 # Content-type prefixes that are never HTML/XML and should not be fully
 # downloaded. The list is intentionally conservative: only clearly binary
@@ -758,8 +765,14 @@ class AiohttpBackend(FetchBackend):
             return result
 
     async def fetch_for_purpose(self, url: str, purpose: ConnectionPurpose) -> FetchResponse:
-        """Fetch through the optional Portal policy, following redirects manually."""
-        policy = self.config.portal_connection_policy
+        """Fetch through a connection policy, following redirects manually."""
+        policy: PortalConnectionPolicy | None = self.config.portal_connection_policy
+        if policy is None and self.config.destination_guard == "pinned":
+            # The strict tier reuses this loop rather than growing a second
+            # one: it re-authorizes and pins every hop already (ticket 149).
+            builtin = self._destination_policy()
+            if builtin is not None:
+                policy = DefaultDestinationPolicy(builtin)
         if policy is None:
             return await self.fetch_resilient(url)
 
