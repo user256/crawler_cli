@@ -478,3 +478,52 @@ def test_guard_carries_the_operator_allowlist_into_the_policy():
     assert policy.allow_private_network is True
     assert classify_address("10.1.2.3", policy) is None
     assert classify_address("10.2.2.3", policy) == REASON_PRIVATE
+
+
+# ---------------------------------------------------------------------------
+# Engine observability and auxiliary-path coverage (ticket 149)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_denied_destination_is_a_typed_skip_and_not_a_fetch_error(monkeypatch):
+    """A pre-connection denial is not an HTTP failure.
+
+    Recording it as a fetch error would also feed the circuit breaker, so a
+    guarded run could open the breaker against a host that never refused
+    anything.
+    """
+    from crawler_cli import CrawlEngine
+    from crawler_cli.persistence import MemoryStore
+
+    engine = CrawlEngine(CrawlConfig(respect_robots_txt=False), store=MemoryStore())
+    breaker_failures: list[str] = []
+    monkeypatch.setattr(
+        engine,
+        "_record_breaker_failure",
+        lambda *args, **kwargs: breaker_failures.append(str(args)),
+    )
+    try:
+        result = await engine.crawl("http://127.0.0.1:9/")
+    finally:
+        await engine.close()
+
+    assert result.status == 0
+    assert result.skip_reason == "destination_denied:loopback"
+    assert breaker_failures == []
+
+
+def test_robots_is_fetched_through_the_guard_when_it_is_active():
+    """robots.txt is the first request made, at the host being guarded against.
+
+    The robots cache keeps its own unguarded aiohttp session for legacy
+    unguarded runs; wiring it to the backend is what stops that session being
+    used while a guard is in force.
+    """
+    from crawler_cli import CrawlEngine
+
+    guarded = CrawlEngine(CrawlConfig(destination_guard="resolver"))
+    assert guarded._robots._fetch_response is not None
+
+    unguarded = CrawlEngine(CrawlConfig(destination_guard="off"))
+    assert unguarded._robots._fetch_response is None
