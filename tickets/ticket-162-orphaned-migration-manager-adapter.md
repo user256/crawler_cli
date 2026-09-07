@@ -44,15 +44,28 @@ Three facts make it unmergeable as it stands:
    redaction), 155–158 (URL discovery), 159, and 160/161. A three-dot diff is
    therefore misleadingly large: most of it is `master` moving on, not the
    branch changing anything.
-3. **Its best part is a duplicate of open work.** The adapter's address-class
-   policy — globally routable only for SaaS, RFC1918 and IPv6 ULA only under an
-   explicit `allow_private_network`, and loopback, link-local and metadata,
-   reserved, multicast, and unspecified always forbidden — plus its
-   re-resolve-and-pin-per-hop rebinding defence, is substantially the behaviour
-   ticket **149** (`default-network-ssrf-safety`, P1, still `proposed`)
-   specifies. `master`'s `portal_policy.py` (146 lines) is only the seam: it
-   defines `PinnedConnection` and delegates the decision to Portal. It contains
-   no address-class policy of its own.
+3. **Part of it duplicates open work — but less of it than first appeared.**
+   A detailed comparison against `master` (2026-09-07) narrowed the harvestable
+   surface considerably:
+
+   - `master` already has the *mechanism*. `AiohttpBackend.fetch_for_purpose`
+     (`backends.py`) is a per-hop redirect loop that calls
+     `validate_pinned_connection()` and fetches through a one-shot pinned
+     connector, and `master`'s `_PinnedResolver` is strictly better than the
+     branch's (it checks the port and defaults to `AF_UNSPEC`). Porting the
+     branch's `SafeHttpClient` would add a second, worse fetch path.
+   - What `master` lacks is the *decision*: `portal_policy.py` is only the seam,
+     delegating the choice to Portal. The branch's address-class policy and its
+     `_system_resolve` helper are the genuinely reusable parts.
+   - The branch's capability manifest is **dishonest by ticket 149's standard**.
+     Its `CAPABILITIES` dict claims `browser_navigation: True` and
+     `browser_subresource: True` for a build with no browser runtime at all.
+     `master`'s `policy_capabilities()` is the honest version. This is a reason
+     not to revive the manifest, not merely to update it.
+
+   So the overlap with ticket **149** (`default-network-ssrf-safety`, P1, still
+   `proposed`) is the address-class table, the per-hop re-resolution discipline,
+   and above all the branch's *tests*.
 
 ## Behavior contract
 
@@ -65,10 +78,18 @@ frozen `schema_version: 1` capability manifest never reviewed against the
 The recommended disposition is to **harvest, then retire**:
 
 - treat `portal_adapter.py` as reviewed prior art for ticket **149**, not as a
-  module to land. Its address-class table, its per-hop re-resolution, and its
-  "reject the complete answer set if any address is denied" rule are the parts
-  worth carrying forward, and its tests are worth reading as a specification of
-  the rebinding cases to cover;
+  module to land. Carry forward its address-class table, its `_system_resolve`
+  helper, its per-hop re-resolution discipline, and its "reject the complete
+  answer set if any address is denied" rule. Do **not** carry its
+  `SafeHttpClient`, its `_PinnedResolver`, or its `_origin` helper — `master`
+  already has better versions of all three;
+- carry across `tests/test_portal_adapter.py`'s rebinding cases specifically.
+  `test_every_connection_reresolves_and_pins_the_validated_answer` and
+  `test_redirect_to_private_is_rejected_before_second_connection` assert that
+  the second socket is never opened against a rebound answer, and
+  `test_mixed_dns_answer_set_fails_closed` asserts a mixed answer set is denied
+  as a unit rather than narrowed to its public member. These are the highest-
+  value artifacts on the branch;
 - keep the branch and this ticket as the durable pointer to it, so the work is
   findable without being on `master`;
 - do not revive the `migration-manager-crawler` entry point, the dispatch

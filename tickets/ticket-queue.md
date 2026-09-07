@@ -114,8 +114,59 @@ Ticket files remain the source of truth for scope and DoD.
   156).
 - No open pull requests and no open issues at the time of this audit. Ticket
   **161** was filed on 2026-08-25 for the ticket 160 remainders and landed on
-  2026-09-07, so the next unreserved ticket number is **162**; do not reuse
-  **110**.
+  2026-09-07, and ticket **162** was filed the same day, so the next unreserved
+  ticket number is **163**; do not reuse **110**.
+
+### Current position (2026-09-07)
+
+- Ticket **161** landed (PR **#69**, merged 2026-09-07), closing ticket **160**:
+  `compare-renders` gains run-backed `--crawl-run-id` selection with
+  deterministic host/locale/path/depth strata and honest source-run
+  completeness, operator template labels via the optional CSV `template`
+  column, per-URL `stratum`/`stratum_source` and stratum coverage in JSON, CSV,
+  and the HTML report (with a stratum filter), and an opt-in `--persist`
+  render-comparison session holding redacted bounded evidence and no HTML
+  document.
+- **Branch sweep.** Every branch was compared against `master` by patch
+  identity. All are merged or hold only squash-merge noise, with one exception:
+  `feature/3350-portal-url-policy-v1` (`8fcdb54`, 2026-07-28, never opened as a
+  PR) adds `src/crawler_cli/portal_adapter.py`, `tests/test_portal_adapter.py`,
+  and `docs/portal-migration-manager-adapter.md`, none of which exist on
+  `master`. It is **not mergeable as authored**: it hard-codes the permanently
+  excluded `v0.2.1` release, its contract baseline predates the whole 144–161
+  lane, and its capability manifest claims browser coverage it does not have.
+  Its address-class policy and its DNS-rebinding tests are reviewed prior art
+  for ticket **149** (`master` already has the better fetch mechanism). Filed as
+  ticket **162**.
+- Ticket **149** gained a verified appendix of address-classification traps that
+  the prior art does not handle — IPv4-mapped IPv6, NAT64 `64:ff9b::/96` (which
+  `ipaddress` reports as **globally routable** while wrapping `127.0.0.1`), 6to4,
+  IPv6 and Alibaba metadata addresses, and octal/decimal/hex IP literals. Each
+  was executed and confirmed before being recorded. Read it before implementing.
+- **Stash sweep.** Both entries in `git stash` are superseded and hold nothing
+  worth recovering: `stash@{0}` (on `docs/144-adversarial-crawler-scope`) is the
+  working copy of ticket 159, which landed as PR **#67** — it proposes
+  `crawler-cli/crawl-artifact/3` while `master` is already at `/7`; `stash@{1}`
+  is a `ticket-queue.md` WIP superseded by the 2026-08-25 register
+  reconciliation. They are left in place rather than dropped.
+- A leftover review worktree remains at
+  `/home/user256/GitRepos/crawler_cli_worktrees/wt-csv-open-seeds`
+  (`fix/csv-open-seeds`); that branch's content is fully in `master`, so the
+  worktree can be removed.
+- `tests/test_detection_analytics_perf.py::test_p99_under_5ms` was a
+  load-sensitive flake: it failed under a loaded full-suite run and passed in
+  isolation, on an unmodified tree as well. Fixed in PR **#70** (merged
+  2026-09-07) by budgeting against CPU time rather than wall clock; the 5ms
+  budget itself is unchanged.
+- Ticket **149** is under way. PR **#72** adds the address-class decision core
+  and its config surface, deliberately with no wiring, so it changes no crawl
+  behaviour on its own. Building it found one trap the prior art and the plan
+  both missed: `ipaddress` reports `is_private` as **True** for reserved
+  `240.0.0.0/4`, the documentation ranges and benchmarking `198.18.0.0/15`, so
+  defining `--allow-private-network` against `is_private` would have granted
+  reach into all of them. The private tier is an explicit RFC1918 plus ULA list
+  for that reason. Backend wiring, the CLI double-confirmation and the honest
+  per-backend capability output remain to land.
 
 
 ### Ordering rules
@@ -433,7 +484,7 @@ its evidence contract.
 - `146` `proposed` [ticket-146-authorised-exposure-inventory.md](./ticket-146-authorised-exposure-inventory.md) — **P2, depends on 144+148+149+153:** declared non-prod hosts, CLI soft-404 fingerprint, sitemap leftovers, and published error/test URLs; no payloads
 - `147` `proposed` [ticket-147-crawler-self-safety.md](./ticket-147-crawler-self-safety.md) — **P1/safety, depends on 144:** regression-lock existing GET-only HTTP(S); add session-mutating URL policy, robots confirmation, typed skip evidence; strict-mode integration uses 148
 - `148` `done` (2026-08-21, PR #65) [ticket-148-authorisation-scope-manifest.md](./ticket-148-authorisation-scope-manifest.md) — **P1, depends on 144:** versioned operator attestation with exact origin/path/time/method scope and one fail-closed predicate applied to every URL source; gates security-adjacent fetch modes. Unblocks 149 and 152.
-- `149` `proposed` [ticket-149-default-network-ssrf-safety.md](./ticket-149-default-network-ssrf-safety.md) — **P1/security, depends on 148:** block special/private destinations and rebinding across redirects/auxiliary fetches; honest per-backend capabilities; double-confirmed private-network exception
+- `149` `proposed` [ticket-149-default-network-ssrf-safety.md](./ticket-149-default-network-ssrf-safety.md) — **P1/security, depends on 148:** block special/private destinations and rebinding across redirects/auxiliary fetches; honest per-backend capabilities; double-confirmed private-network exception. **Prior art:** `portal_adapter.py` on unmerged branch `feature/3350-portal-url-policy-v1` (`8fcdb54`) already implements the address-class policy and the per-hop resolve-validate-pin loop, with tests; read it first (see ticket 162).
 - `150` `proposed` [ticket-150-passive-security-posture.md](./ticket-150-passive-security-posture.md) — **P2, depends on 144+149+153:** passive security headers, redacted cookie attributes, TLS capability/facts, observed CORS response posture, and mixed content
 - `151` `proposed` [ticket-151-passive-form-api-inventory.md](./ticket-151-passive-form-api-inventory.md) — **P2, depends on 144+148+153+155:** passive forms/controls, linked API descriptions, router/GraphQL/source-map semantics; reuses 155 and never widens page-only following
 - `152` `proposed` [ticket-152-supplied-session-differential.md](./ticket-152-supplied-session-differential.md) — **P2, depends on 129+148+149+153:** isolated anonymous/operator-supplied profiles over one fixed URL set; triage comparisons, no identifier or role mutation
@@ -464,6 +515,7 @@ an optional outcome-feedback layer and does not block either discovery path.
 
 - `160` `done` (2026-08-24 PR #68, completed 2026-09-07 by ticket 161) [ticket-160-first-class-render-parity-audit.md](./ticket-160-first-class-render-parity-audit.md) — **P1, builds on completed 019+031+097+153+157+159:** `crawler-cli compare-renders` over exact URLs, `--csv-file`, and `--crawl-run-id`, same-navigation raw-versus-hydrated comparison, typed completeness, multiple typed findings, `crawler-cli/render-comparison/1` JSON plus CSV and self-contained HTML report with strata coverage and filter, and the `--fail-on`/`--fail-on-incomplete` exit contract. No Googlebot-emulation claim.
 - `161` `done` (2026-09-07) [ticket-161-render-parity-run-selection-and-persistence.md](./ticket-161-render-parity-run-selection-and-persistence.md) — **P1, depends on 153+157+159 and the first delivery of 160:** run-backed `--crawl-run-id` selection with deterministic sampling and honest run/partial provenance, operator template labels plus computed path strata and stratum coverage/filtering in JSON/CSV/HTML, and the optional run-scoped render-comparison persistence session. Closes ticket 160.
+- `162` `proposed` (2026-09-07) [ticket-162-orphaned-migration-manager-adapter.md](./ticket-162-orphaned-migration-manager-adapter.md) — **P2, relates to completed 130 and proposed 149:** triage and disposition of the orphaned Portal Migration Manager adapter on `feature/3350-portal-url-policy-v1`. Not mergeable as authored (pins the excluded `v0.2.1`; contract baseline predates 144–161). Recommended disposition is harvest-then-retire: carry its address-class policy and per-hop re-resolution into ticket 149 and leave the branch as history.
 
 Deferred lanes remain below.
 
