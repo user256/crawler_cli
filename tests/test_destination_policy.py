@@ -674,3 +674,22 @@ async def test_strict_tier_drives_the_pinned_loop_for_every_hop(monkeypatch):
 
 async def _resolved(addresses):
     return addresses
+
+
+@pytest.mark.asyncio
+async def test_archive_discovery_uses_a_guarded_connector():
+    """The archive endpoint is fixed and public, but its DNS answer is not.
+
+    A poisoned answer for web.archive.org would otherwise reach straight into
+    the crawler's own network through a bare session.
+    """
+    from crawler_cli.archive import _guarded_connector
+
+    guarded = _guarded_connector(CrawlConfig(destination_guard="resolver"))
+    assert guarded is not None
+    try:
+        assert isinstance(guarded._resolver, _GuardedResolver)
+    finally:
+        await guarded.close()
+
+    assert _guarded_connector(CrawlConfig(destination_guard="off")) is None
