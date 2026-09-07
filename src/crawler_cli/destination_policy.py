@@ -198,10 +198,10 @@ def classify_address(address: str | IPAddress, policy: DestinationPolicy) -> str
 
     embedded = _unwrap_embedded(ip)
     if embedded is not None:
-        # Judge the address that traffic actually reaches. An explicit operator
-        # allowlist still applies to the literal address as written.
-        if policy.permits_network(ip):
-            return None
+        # Judge the address that traffic actually reaches. The allowlist is
+        # deliberately limited to direct private/local destinations: allowing
+        # the outer translated range would let NAT64 or 6to4 reopen a forbidden
+        # inner address unexpectedly.
         inner = _classify_plain(embedded)
         if inner is not None:
             return REASON_TRANSLATED if not isinstance(ip, ipaddress.IPv4Address) else inner

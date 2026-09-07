@@ -321,11 +321,21 @@ def test_malformed_allowlist_cidr_is_rejected():
         CrawlConfig(allow_network_cidrs=("10.0.0.0/999",))
 
 
-@pytest.mark.parametrize("cidr", ["169.254.0.0/16", "224.0.0.0/4"])
+@pytest.mark.parametrize(
+    "cidr",
+    [
+        "0.0.0.0/0",
+        "169.254.0.0/16",
+        "224.0.0.0/4",
+        "::/0",
+        "64:ff9b::/96",
+        "2002::/16",
+    ],
+)
 def test_allowlist_cannot_reopen_the_always_denied_tier(cidr):
     """The allowlist never reopens infrastructure-sensitive address classes."""
-    with pytest.raises(ValueError, match="link-local or multicast"):
-        CrawlConfig(allow_network_cidrs=(cidr,))
+    with pytest.raises(ValueError, match="must be subnets of RFC1918, IPv6 ULA, or loopback"):
+        CrawlConfig(allow_private_network=True, allow_network_cidrs=(cidr,))
 
 
 def test_exact_allowlist_can_authorise_loopback_for_local_crawling():
@@ -334,6 +344,15 @@ def test_exact_allowlist_can_authorise_loopback_for_local_crawling():
     assert policy is not None
     assert classify_address("127.0.0.1", policy) is None
     assert normalize_destination_url("http://localhost:3000/")[1] == "localhost"
+
+
+@pytest.mark.parametrize("address", ["64:ff9b::7f00:1", "2002:7f00:1::1"])
+def test_allowlist_does_not_authorise_translated_loopback(address):
+    policy = DestinationPolicy(
+        allow_private_network=True,
+        allow_networks=(ipaddress.ip_network("127.0.0.0/8"),),
+    )
+    assert classify_address(address, policy) == REASON_TRANSLATED
 
 
 def test_allowlist_accepts_an_ordinary_private_range():
