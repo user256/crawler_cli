@@ -8,7 +8,11 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from ipaddress import ip_network
+
+from .backends import _GuardedResolver
 from .config import CrawlConfig
+from .destination_policy import DestinationPolicy
 
 
 @dataclass(slots=True)
@@ -108,6 +112,22 @@ def _clean_url(
     return rebuilt
 
 
+def _guarded_connector(config: CrawlConfig) -> aiohttp.TCPConnector | None:
+    """Apply the destination guard to the archive endpoint (ticket 149).
+
+    The endpoint is a fixed public host, so the realistic threat is not an
+    operator-supplied URL but a poisoned answer for that host resolving into
+    the crawler's own network. Guarding it costs one connector.
+    """
+    if config.destination_guard == "off" or config.portal_connection_policy is not None:
+        return None
+    policy = DestinationPolicy(
+        allow_private_network=config.allow_private_network,
+        allow_networks=tuple(ip_network(cidr, strict=False) for cidr in config.allow_network_cidrs),
+    )
+    return aiohttp.TCPConnector(resolver=_GuardedResolver(policy), use_dns_cache=False)
+
+
 async def discover_historical_urls(
     domain_or_url: str,
     config: CrawlConfig,
@@ -132,7 +152,9 @@ async def discover_historical_urls(
     while attempts < 3:
         attempts += 1
         try:
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with aiohttp.ClientSession(
+                timeout=timeout, headers=headers, connector=_guarded_connector(config)
+            ) as session:
                 async with session.get(endpoint) as response:
                     if response.status == 429:
                         await asyncio.sleep(1.0 * attempts)

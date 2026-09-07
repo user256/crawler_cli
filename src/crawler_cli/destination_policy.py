@@ -162,6 +162,7 @@ class DestinationCapabilities:
     connection_pinning: bool = False
     dns_rebinding_safe: bool = False
     remote_dns: bool = False
+    browser_url_interception: bool = False
     limitations: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
@@ -179,6 +180,7 @@ class DestinationCapabilities:
             "connection_pinning": self.connection_pinning,
             "dns_rebinding_safe": self.dns_rebinding_safe,
             "remote_dns": self.remote_dns,
+            "browser_url_interception": self.browser_url_interception,
             "limitations": list(self.limitations),
         }
 
@@ -208,9 +210,22 @@ def destination_capabilities(
     if guard == "off":
         return DestinationCapabilities(guard="off", limitations=("the destination guard is disabled",))
     if backend != "aiohttp":
+        # A browser rejects disallowed URLs before dispatch, which is real but
+        # is not the same guarantee: Chromium resolves DNS in its own process,
+        # so a permitted hostname can still reach a denied address. Ticket 149
+        # forbids presenting interception as rebinding safety, so the guarded
+        # paths stay false and the interception is recorded on its own.
+        interception = backend == "playwright"
+        limitation = (
+            "browser URL interception rejects disallowed URLs before dispatch, but Chromium "
+            "resolves DNS itself, so a permitted hostname may still reach a denied address"
+            if interception
+            else f"the {backend} backend does not implement the destination guard"
+        )
         return DestinationCapabilities(
             guard=guard,
-            limitations=(f"the {backend} backend does not implement the destination guard",),
+            browser_url_interception=interception,
+            limitations=(limitation,),
         )
     if proxy_configured:
         return DestinationCapabilities(

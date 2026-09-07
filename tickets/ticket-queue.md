@@ -158,7 +158,7 @@ Ticket files remain the source of truth for scope and DoD.
   isolation, on an unmodified tree as well. Fixed in PR **#70** (merged
   2026-09-07) by budgeting against CPU time rather than wall clock; the 5ms
   budget itself is unchanged.
-- Ticket **149** is **partially done** (PR **#72**, merged 2026-09-07). Landed:
+- Ticket **149** is **done** (2026-09-07). Landed across PRs #72/#74/#75/#76 and the browser/archive follow-up:
   the address-class decision (`destination_policy.py`), its config surface, and
   the aiohttp `_GuardedResolver` tier plus the literal-IP pre-request check that
   covers the URLs a resolver is never asked about.
@@ -193,9 +193,23 @@ Ticket files remain the source of truth for scope and DoD.
     Address-policy tests here must assert this project's contract, never the
     interpreter's own classification.
 
-  Still to land: the deny-by-default posture switch, auxiliary fetch paths
-  (robots, archive), the CLI double-confirmation flags, honest per-backend
-  capability output, and rejection reasons in artifacts.
+  Everything in scope landed. Three findings are worth carrying forward:
+
+  - **robots.txt was fetched unguarded** through the robots cache's own bare
+    session, following redirects, as the crawl's first request at the host the
+    guard protects against. Any future auxiliary fetch path must be checked for
+    the same pattern.
+  - **Pre-connection denials fed the circuit breaker**, so a guarded run could
+    open the breaker against a host that never refused anything. Denials are now
+    typed skips with status 0.
+  - **Two limitations are declared, not fixed**: a proxy defeats the guard for
+    hostname targets (aiohttp resolves the proxy, not the target), and browser
+    URL interception is not rebinding safety (Chromium resolves DNS itself).
+    Both are reported in the capability object; strict mode rejects the proxy
+    combination outright.
+
+  This unblocks the evidence lane: **145**, **146**, **150** and **152** all
+  listed 149 as a dependency.
 
 
 ### Ordering rules
@@ -513,7 +527,7 @@ its evidence contract.
 - `146` `proposed` [ticket-146-authorised-exposure-inventory.md](./ticket-146-authorised-exposure-inventory.md) — **P2, depends on 144+148+149+153:** declared non-prod hosts, CLI soft-404 fingerprint, sitemap leftovers, and published error/test URLs; no payloads
 - `147` `proposed` [ticket-147-crawler-self-safety.md](./ticket-147-crawler-self-safety.md) — **P1/safety, depends on 144:** regression-lock existing GET-only HTTP(S); add session-mutating URL policy, robots confirmation, typed skip evidence; strict-mode integration uses 148
 - `148` `done` (2026-08-21, PR #65) [ticket-148-authorisation-scope-manifest.md](./ticket-148-authorisation-scope-manifest.md) — **P1, depends on 144:** versioned operator attestation with exact origin/path/time/method scope and one fail-closed predicate applied to every URL source; gates security-adjacent fetch modes. Unblocks 149 and 152.
-- `149` `partially done` (2026-09-07, PR #72) [ticket-149-default-network-ssrf-safety.md](./ticket-149-default-network-ssrf-safety.md) — **P1/security, depends on 148:** block special/private destinations and rebinding across redirects/auxiliary fetches; honest per-backend capabilities; double-confirmed private-network exception. **Prior art:** `portal_adapter.py` on unmerged branch `feature/3350-portal-url-policy-v1` (`8fcdb54`) already implements the address-class policy and the per-hop resolve-validate-pin loop, with tests; read it first (see ticket 162).
+- `149` `done` (2026-09-07, PRs #72/#74/#75/#76 + browser/archive follow-up) [ticket-149-default-network-ssrf-safety.md](./ticket-149-default-network-ssrf-safety.md) — **P1/security, depends on 148:** block special/private destinations and rebinding across redirects/auxiliary fetches; honest per-backend capabilities; double-confirmed private-network exception. **Prior art:** `portal_adapter.py` on unmerged branch `feature/3350-portal-url-policy-v1` (`8fcdb54`) already implements the address-class policy and the per-hop resolve-validate-pin loop, with tests; read it first (see ticket 162).
 - `150` `proposed` [ticket-150-passive-security-posture.md](./ticket-150-passive-security-posture.md) — **P2, depends on 144+149+153:** passive security headers, redacted cookie attributes, TLS capability/facts, observed CORS response posture, and mixed content
 - `151` `proposed` [ticket-151-passive-form-api-inventory.md](./ticket-151-passive-form-api-inventory.md) — **P2, depends on 144+148+153+155:** passive forms/controls, linked API descriptions, router/GraphQL/source-map semantics; reuses 155 and never widens page-only following
 - `152` `proposed` [ticket-152-supplied-session-differential.md](./ticket-152-supplied-session-differential.md) — **P2, depends on 129+148+149+153:** isolated anonymous/operator-supplied profiles over one fixed URL set; triage comparisons, no identifier or role mutation

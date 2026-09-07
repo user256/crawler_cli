@@ -212,11 +212,46 @@ rejection reasons in artifacts.
 
 ## Status
 
-partially done (2026-09-07, PR #72; Priority: **P1/security**, depends on
-**148**; should land before
+done (2026-09-07, PRs #72, #74, #75, #76 and the browser/archive follow-up;
+Priority: **P1/security**, depends on **148**; landed before
 **146**, **150–152**, and **154**) — crawler-host protection and honest backend
 capabilities, not target-side SSRF testing. Prior art and verified
 classification traps recorded 2026-09-07; see ticket **162**.
+
+### Completion (2026-09-07, PRs #75, #76 and the browser/archive follow-up)
+
+All remaining scope landed:
+
+- **Auxiliary paths.** robots.txt was being fetched through the robots cache's
+  own bare session, following redirects, at the very host the guard exists to
+  protect against and as the first request of the crawl. It now routes through
+  the guarded backend. The archive discovery endpoint is guarded too: it is a
+  fixed public host, so the real threat there is a poisoned answer for it.
+- **Structured rejection reasons.** A pre-connection denial is a typed skip,
+  `destination_denied:<reason>` with status 0, on both the page and auxiliary
+  paths. It previously fell through to the generic handler, which recorded it
+  as a fetch error *and* fed the circuit breaker, so a guarded run could open
+  the breaker against a host that never refused anything.
+- **Strict pinning.** `destination_guard="pinned"` pins. It reuses the loop the
+  Portal path already has — `DefaultDestinationPolicy` satisfies
+  `PortalConnectionPolicy` and supplies only the decision — rather than growing
+  a second mechanism.
+- **Capability declaration.** Serialized into the run snapshot, stating what is
+  enforced rather than intended.
+
+Two limitations are declared rather than implied, because the ticket forbids
+warning-and-proceeding:
+
+- **A proxy defeats the guard for hostname targets.** aiohttp resolves the
+  proxy's address, so the guarding resolver never sees the target's. Only a
+  literal-IP target is still classified. Reported as `remote_dns` with every
+  guarded path false; strict mode rejects the combination outright.
+- **Browser URL interception is not rebinding safety.** Chromium resolves DNS
+  in its own process, so a hostname permitted at the route can still reach a
+  denied address. `browser_navigation` and `browser_subresources` stay false;
+  the interception is its own `browser_url_interception` field. Verified in
+  real Chromium with a guard-off control, so a pass cannot be explained by
+  Chromium's own blocking.
 
 ### Remediation follow-up (2026-09-07)
 
