@@ -21,18 +21,43 @@ someone runs `git add -f`. These two reached `master` empty.
 ## Sources used
 
 1. **`tickets/adversarial-crawler-ticket-review-brief-2026-08-21.md`** — the
-   reviewed and approved scope. Line numbers below refer to this file at
-   md5 `31f7ff54b457dc12d90e3605e01c2600`, 25214 bytes, mtime 2026-08-21 12:05.
+   surviving review recommendation and scope record. Line numbers below refer
+   to this file at md5 `31f7ff54b457dc12d90e3605e01c2600`, 25214 bytes, mtime
+   2026-08-21 12:05.
+
+   **It is not a record of approval.** Its disposition section is headed
+   "Final review disposition **proposed**" (line 592), it *requests* approval
+   ("Approve now: 144, corrected 147, 148, 149, and 153 ... subject to the
+   explicit reviewer decisions above", 594–595), and the reviewer decision
+   checkboxes above it are **unchecked** (585–590, including
+   "- [ ] Approve implementation order 144 → 148+153 → 149+147"). So it records
+   what a reviewer recommended, not what was signed off. Both reconstructed
+   tickets stay `proposed` for that reason.
 
    **This file was itself untracked and had never been committed.** It is added
    to git in this change, because it is the only surviving record of the
-   approved scope and the register already links to it.
+   surviving scope record for both tickets and the register already links to it.
 
 2. **`tickets/ticket-queue.md`** — the register one-liners: line 539 for 145,
    line 541 for 147.
 
-No other source was used. Nothing was inferred from the codebase, and nothing
-was invented to fill a gap.
+### Authoritative versus non-authoritative
+
+Those two are the **authoritative scope sources**: everything normative in the
+reconstructed tickets traces to them, and nothing was invented to fill a gap in
+either.
+
+They are not the only material in the files. Two other kinds appear, both
+labelled inline and both **non-authoritative**:
+
+- **Implementation guidance derived from the current codebase** — the
+  `scope_manifest_denied:` / `destination_denied:` typed-skip precedents in
+  `engine.py`, and the existing
+  `--ignore-robots` / `--confirm-ignore-robots` / manifest triple gate named in
+  147's robots section. These describe what the code does today. They are
+  offered as the obvious way to satisfy a sourced requirement, not as scope.
+- **Reviewer-authored proposals** — listed per ticket below. Not derived from
+  any source, explicitly marked "Proposal (not approved)" in the ticket files.
 
 ## Ticket 147 — claim-by-claim
 
@@ -53,13 +78,27 @@ was invented to fill a gap.
 - The **worked example** distinguishing `/logout` as a path segment from
   `/blog/how-we-built-logout-flows`. The brief states the boundary rule and the
   false-positive risk; the illustration is mine.
-- The **candidate rule list** (sign-out, cart/checkout, subscribe/unsubscribe,
-  destructive account actions). The brief says "session-mutating" without
-  enumerating. Treat this list as a proposal to review, not as approved scope.
-- The wording that rejections follow the existing `scope_manifest_denied:` and
-  `destination_denied:` precedents in `engine.py`. The brief requires "typed
-  skip counts/provenance"; naming those two precedents is my choice, based on
-  what now exists in the code.
+- The **"evidence of mutating semantics" requirement** — that a rule needs an
+  exact known endpoint, an explicit action parameter, or an operator-supplied
+  rule, and that a suggestive path noun is never sufficient. The brief requires
+  path/query boundary awareness; this sharper requirement is mine, added after
+  review found that a noun-based rule set is itself the hazard.
+- The **candidate rule set**, now recorded as a *warning* rather than a
+  starting point. An earlier draft of this file listed sign-out, cart,
+  checkout, subscribe and preference paths as segments to match. That was
+  wrong and is corrected: `/cart`, `/checkout` and `/subscribe` routinely serve
+  safe, valuable GET pages, so matching those segments would suppress exactly
+  the ecommerce pages this crawler exists to measure. Marked "Proposal (not
+  approved)" and requires review before it becomes scope.
+
+### Implementation guidance, from the codebase rather than a source
+
+- Rejections following the existing `scope_manifest_denied:` and
+  `destination_denied:` typed-skip precedents in `engine.py`. The brief
+  requires "typed skip counts/provenance"; naming those two is my choice.
+- The existing `--ignore-robots` / `--confirm-ignore-robots` / manifest triple
+  gate named in the robots section. The brief requires "explicit robots
+  confirmation"; the specific flags are what the code already implements.
 
 ## Ticket 145 — claim-by-claim
 
@@ -84,13 +123,17 @@ rather than inventing the missing specifics.
 ### Written by me, not from a source
 
 - Framing "no retry-on-403" as an instance of the ticket-144 evasion boundary.
-  Both facts are sourced; connecting them is mine.
+  Both facts are sourced; connecting them is mine. Offered as implementation
+  guidance, not as scope.
 
 ## How to QA this
 
 - `sed -n '189,205p'` and `sed -n '225,240p'` on the brief cover the two ticket
   sections in full; they are short enough to read whole.
-- The "written by me" lists above are where to concentrate. Everything else is
-  a restatement of a cited line.
+- The "written by me" and "implementation guidance" lists above are where to
+  concentrate. Everything else is a restatement of a cited line.
+- In the ticket files, anything inside a "Proposal (not approved)" block is
+  mine and is not scope. Everything outside those blocks traces to a citation
+  in the tables above.
 - Both ticket files keep `proposed` status and carry a banner saying they are
   reconstructions and that the brief wins on any conflict.

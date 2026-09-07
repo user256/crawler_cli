@@ -1,12 +1,26 @@
 # Ticket 147: Crawler self-safety — session-mutating URLs and robots confirmation
 
 > **Reconstructed 2026-09-07.** This file was created empty on 2026-08-26 and
-> never written; it has no content in git history. The scope below is taken
-> from the reviewed source that does exist — the *Adversarial crawler ticket
+> never written; it has no content in git history. It is rebuilt from the only
+> surviving record of this ticket's scope — the *Adversarial crawler ticket
 > review brief 2026-08-21* (`### 147 — Crawler self-safety`, the wave-2 exit
 > gate, the shared admission sequence, and the 132/134 interaction notes) plus
-> the register entry for 147. Nothing here is new invention. Treat any conflict
-> with the brief as the brief winning, and re-approve before implementing.
+> the register entry for 147.
+>
+> That brief is a **review recommendation, not an approval**: its disposition
+> section is headed "Final review disposition proposed" and its reviewer
+> decision checkboxes are unchecked. Treat it as the surviving scope record,
+> not as sign-off.
+>
+> This file mixes two kinds of content, labelled throughout:
+>
+> - **Reconstructed scope** — restatement of the brief or the register, cited
+>   in `RECONSTRUCTION-PROVENANCE-145-147.md`. Normative once approved.
+> - **Proposal (not approved)** — written during reconstruction to make the
+>   scope actionable. **Not** derived from any source, and not normative.
+>   Marked inline.
+>
+> The brief wins on any conflict. Re-approve before implementing.
 
 ## Goal
 
@@ -43,12 +57,35 @@ treatment for rejected URLs.
   positives on benign editorial URLs. `/logout` as a path segment is a
   signout; `/blog/how-we-built-logout-flows` is an article. Ship benign
   editorial fixtures that must not be rejected.
-- Cover at least sign-out, cart and checkout mutation, subscribe/unsubscribe
-  and preference toggles, and destructive account actions, as path segments or
-  as explicit query parameters — never as a bare substring anywhere in the URL.
+- **A rule needs evidence of mutating semantics, not a suggestive noun.** A
+  path segment naming a feature is not evidence that requesting it mutates
+  anything. Admissible evidence is an exact known endpoint, or an explicit
+  action parameter (for example `?action=delete`, `?logout=1`), or a
+  site-specific rule the operator supplies. A bare noun is never sufficient.
 - Provide narrow overrides so an operator crawling their own staging system can
   permit a specific pattern, in the spirit of ticket 149's exception: explicit,
   recorded, and never a blanket "ignore this policy" switch.
+
+> **Proposal (not approved) — candidate rule set.** The brief says
+> "session-mutating" without enumerating, so no rule list is sourced. The
+> obvious nouns are actively dangerous as path-segment rules and are recorded
+> here as a warning rather than a starting point:
+>
+> `/cart`, `/checkout`, `/subscribe` and preference paths **routinely serve
+> safe, valuable GET pages**. A cart page, a checkout landing page and a
+> subscription plans page are ordinary indexable content, and this is an
+> ecommerce SEO crawler. Matching those segments would suppress exactly the
+> pages the product exists to measure — a worse outcome than the risk it
+> avoids.
+>
+> Sign-out is the one case where the segment itself is strong evidence, because
+> `/logout` is conventionally an action rather than a page. Even there, prefer a
+> known endpoint or an action parameter.
+>
+> Recommended default: ship **no** noun-based rules. Start from operator-supplied
+> endpoints plus explicit action parameters, and add a built-in rule only with a
+> fixture proving it does not suppress a benign page. Requires review before it
+> becomes scope.
 
 ### Robots confirmation
 
@@ -62,9 +99,12 @@ treatment for rejected URLs.
 
 - A rejected URL is a **typed skip with provenance**, not a fetch error and not
   a silent drop: which rule matched, which URL source it came from, and which
-  hop. It records zero HTTP status because no request is made, following the
-  `scope_manifest_denied:` and `destination_denied:` precedents already in
-  `engine.py`.
+  hop. It records zero HTTP status because no request is made.
+
+  *Implementation guidance, not sourced scope:* `engine.py` already has two
+  precedents for exactly this shape — `scope_manifest_denied:<reason>` and
+  `destination_denied:<reason>`, both typed skips with status 0 that
+  deliberately do not feed the circuit breaker. Follow them.
 - Report typed counts per rule so an operator can see what the policy cost them.
 
 ### Budgets
@@ -93,8 +133,12 @@ treatment for rejected URLs.
   admitted at one source cannot bypass it at another.
 - Benign editorial fixtures containing mutating words inside slugs are **not**
   rejected. This is the review's named risk and needs explicit coverage.
-- Path-segment and query-parameter matches are rejected; bare substring matches
-  are not sufficient grounds for rejection.
+- **Benign commerce fixtures are not rejected**: a `/cart` page, a `/checkout`
+  landing page and a `/subscribe` plans page must all still be crawled. Any
+  proposed built-in rule must ship a fixture proving it does not suppress them.
+- Rejection requires evidence of mutating semantics — a known endpoint, an
+  explicit action parameter, or an operator-supplied rule. A bare substring or
+  a suggestive path noun is not sufficient grounds.
 - Rejections are typed skips with rule and source provenance and zero status,
   distinct from fetch errors, scope denials and destination denials.
 - Rejected URLs do not consume the useful-page budget.

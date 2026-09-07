@@ -1,13 +1,20 @@
 # Ticket 145: Client-split measurement
 
 > **Reconstructed 2026-09-07.** This file was created empty on 2026-08-26 and
-> never written; it has no content in git history. The scope below comes from
-> the reviewed source that does exist — the *Adversarial crawler ticket review
-> brief 2026-08-21* (`### 145 — Client-split measurement`) plus the register
-> entry for 145. Nothing here is new invention. The brief notes a
+> never written; it has no content in git history. It is rebuilt from the only
+> surviving record of this ticket's scope — the *Adversarial crawler ticket
+> review brief 2026-08-21* (`### 145 — Client-split measurement`) plus the
+> register entry for 145.
+>
+> That brief is a **review recommendation, not an approval**: its disposition
+> is headed "Final review disposition proposed" and its reviewer decision
+> checkboxes are unchecked.
+>
+> Everything below restates the brief or the register, cited in
+> `RECONSTRUCTION-PROVENANCE-145-147.md`. The brief notes a
 > "controlled-measurement contract now in the ticket" that is not recoverable,
-> so treat this as a faithful summary rather than the original, and re-approve
-> before implementing.
+> so this is a faithful summary of what survives rather than the original.
+> Approve before implementing.
 
 ## Goal
 

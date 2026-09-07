@@ -217,9 +217,14 @@ Ticket files remain the source of truth for scope and DoD.
   never written — neither has any content in git history, so the scope of a P1
   safety ticket (147) and a P2 evidence ticket (145) existed only as register
   one-liners. Both were reconstructed on 2026-09-07 from the
-  2026-08-21 review brief, which holds the reviewed and approved scope for
-  each. Both files carry a banner saying so. **Re-approve both before
-  implementing**, and prefer the brief if anything conflicts.
+  2026-08-21 review brief, which is the surviving scope record for each. That
+  brief is a **recommendation, not an approval**: its disposition is headed
+  "Final review disposition proposed" and its reviewer decision checkboxes are
+  unchecked. Both files carry a banner saying so, and separate reconstructed
+  scope from reviewer-authored proposals, which are marked "Proposal (not
+  approved)". **Approve both before implementing**, and prefer the brief if
+  anything conflicts. Provenance is mapped claim by claim in
+  `RECONSTRUCTION-PROVENANCE-145-147.md`.
 
   `tickets/` is gitignored, so a ticket file only exists in the repository once
   someone runs `git add -f`. That is how two files reached `master` empty; it is
