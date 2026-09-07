@@ -33,6 +33,7 @@ from crawler_cli.destination_policy import (
     DestinationPolicy,
     DestinationRejection,
     classify_address,
+    destination_capabilities,
     normalize_destination_url,
     resolve_destination,
     select_permitted_address,
@@ -527,3 +528,58 @@ def test_robots_is_fetched_through_the_guard_when_it_is_active():
 
     unguarded = CrawlEngine(CrawlConfig(destination_guard="off"))
     assert unguarded._robots._fetch_response is None
+
+
+# ---------------------------------------------------------------------------
+# Capability declaration (ticket 149)
+# ---------------------------------------------------------------------------
+
+
+def test_capabilities_report_full_cover_for_a_guarded_aiohttp_run():
+    caps = destination_capabilities(guard="resolver", backend="aiohttp", proxy_configured=False, portal_policy=False)
+    assert caps.initial_url and caps.http_redirect and caps.robots and caps.sitemap and caps.probes
+    assert caps.dns_rebinding_safe is True
+    assert caps.limitations == ()
+    # Browser paths are never covered by an HTTP-only guard.
+    assert caps.browser_navigation is False
+    assert caps.browser_subresources is False
+
+
+def test_capabilities_never_claim_pinning_the_builtin_guard_does_not_do():
+    """`pinned` passes stricter validation but does not yet pin a socket."""
+    caps = destination_capabilities(guard="pinned", backend="aiohttp", proxy_configured=False, portal_policy=False)
+    assert caps.connection_pinning is False
+    assert any("not implemented" in item for item in caps.limitations)
+
+
+def test_capabilities_report_no_cover_behind_a_proxy():
+    """A proxy resolves the target, so the guard never sees its address."""
+    caps = destination_capabilities(guard="resolver", backend="aiohttp", proxy_configured=True, portal_policy=False)
+    assert caps.remote_dns is True
+    assert caps.initial_url is False
+    assert caps.robots is False
+    assert any("proxy resolves" in item for item in caps.limitations)
+
+
+@pytest.mark.parametrize("backend", ["curl_cffi", "playwright"])
+def test_capabilities_report_no_cover_on_backends_without_the_guard(backend):
+    caps = destination_capabilities(guard="resolver", backend=backend, proxy_configured=False, portal_policy=False)
+    assert caps.initial_url is False
+    assert any(backend in item for item in caps.limitations)
+
+
+def test_capabilities_defer_to_an_external_portal_policy():
+    caps = destination_capabilities(guard="resolver", backend="aiohttp", proxy_configured=False, portal_policy=True)
+    assert caps.guard == "portal"
+    assert caps.initial_url is False
+
+
+def test_run_snapshot_records_what_the_guard_actually_enforced():
+    from crawler_cli.engine import _crawl_run_config_snapshot
+
+    snapshot = _crawl_run_config_snapshot(CrawlConfig(destination_guard="resolver"), ["https://example.com/"])
+    caps = snapshot["destination_capabilities"]
+    assert caps["destination_guard"] == "resolver"
+    assert caps["guarded_paths"]["robots"] is True
+    assert caps["guarded_paths"]["browser_navigation"] is False
+    assert caps["connection_pinning"] is False

@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from .amp import is_amp_url_shape
 from .archive import discover_historical_urls
 from .authorisation import ScopeManifestDenied, ScopePurpose, describe_manifest
-from .destination_policy import DestinationRejection
+from .destination_policy import DestinationRejection, destination_capabilities
 from .backends import ObscuraFetchBackend, PlaywrightBackend, RateLimiter, build_backend
 from .budget import RunBudget, RunBudgetExhausted
 from .challenge import detect_challenge
@@ -157,6 +157,14 @@ def _crawl_run_config_snapshot(config: CrawlConfig, seeds: list[str]) -> dict[st
         "destination_guard": config.destination_guard,
         "allow_private_network": config.allow_private_network,
         "allow_network_cidrs": sorted(config.allow_network_cidrs),
+        # What the guard actually enforced for this run, so a resumed or
+        # audited run is judged on real coverage rather than the flag alone.
+        "destination_capabilities": destination_capabilities(
+            guard=config.destination_guard,
+            backend=config.backend,
+            proxy_configured=bool(config.proxy or config.proxies),
+            portal_policy=config.portal_connection_policy is not None,
+        ).as_dict(),
     }
     if config.scope_predicate is not None:
         # Only present when a scope manifest is active, so a manifest-free
