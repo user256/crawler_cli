@@ -191,9 +191,29 @@ reason codes, an exact-CIDR allowlist (it is all-RFC1918-or-nothing), the
 proxy/browser/curl_cffi capability story, the live-comparison fetch paths, and a
 distinct `probe` connection purpose.
 
+## Delivery status (2026-09-07, PR #72)
+
+Landed: `destination_policy.py` (address-class decision, embedded-address
+unwrapping, metadata denylist, single normalization path, fail-closed mixed
+answer sets), the `destination_guard` / `allow_private_network` /
+`allow_network_cidrs` config surface with strict-mode fail-closed validation,
+and the aiohttp `_GuardedResolver` tier plus the literal-IP pre-request check.
+
+**Not delivered: the deny-by-default posture.** `destination_guard` defaults to
+`off`. Turning it on denies loopback for every caller, stopping an ordinary
+`crawler-cli http://localhost:3000/` and breaking every test in this repository
+that drives a loopback fixture server — unit, security-proof contract, and
+Postgres integration alike. That switch needs a repo-wide fixture sweep and its
+own review.
+
+Still to land: the posture switch, auxiliary fetch paths (robots, archive), the
+CLI double-confirmation flags, honest per-backend capability output, and
+rejection reasons in artifacts.
+
 ## Status
 
-proposed (Priority: **P1/security**, depends on **148**; should land before
+partially done (2026-09-07, PR #72; Priority: **P1/security**, depends on
+**148**; should land before
 **146**, **150–152**, and **154**) — crawler-host protection and honest backend
 capabilities, not target-side SSRF testing. Prior art and verified
 classification traps recorded 2026-09-07; see ticket **162**.
