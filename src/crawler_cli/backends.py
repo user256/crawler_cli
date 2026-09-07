@@ -653,6 +653,17 @@ class AiohttpBackend(FetchBackend):
         if reason is not None:
             raise DestinationRejection(reason, hostname)
 
+    async def _guard_redirect(
+        self,
+        _session: aiohttp.ClientSession,
+        _context: aiohttp.TraceConfigCtx,
+        params: aiohttp.TraceRequestRedirectParams,
+    ) -> None:
+        """Validate literal redirect targets before aiohttp opens the next hop."""
+        location = params.response.headers.get("Location")
+        if location:
+            self._guard_request_url(urljoin(str(params.response.url), location))
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
@@ -665,9 +676,13 @@ class AiohttpBackend(FetchBackend):
                 # address earlier be reused after it starts resolving elsewhere.
                 use_dns_cache=policy is None,
             )
+            trace = aiohttp.TraceConfig()
+
+            trace.on_request_redirect.append(self._guard_redirect)
             self._session = aiohttp.ClientSession(
                 timeout=timeout,
                 connector=connector,
+                trace_configs=[trace],
             )
         return self._session
 

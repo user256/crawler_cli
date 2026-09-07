@@ -153,6 +153,9 @@ def _crawl_run_config_snapshot(config: CrawlConfig, seeds: list[str]) -> dict[st
         "max_render_links_per_page": config.max_render_links_per_page,
         # A guarded job must not be resumed by an unguarded worker.
         "portal_connection_policy": config.portal_connection_policy is not None,
+        "destination_guard": config.destination_guard,
+        "allow_private_network": config.allow_private_network,
+        "allow_network_cidrs": sorted(config.allow_network_cidrs),
     }
     if config.scope_predicate is not None:
         # Only present when a scope manifest is active, so a manifest-free

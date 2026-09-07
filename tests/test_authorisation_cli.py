@@ -213,6 +213,38 @@ def test_ignore_robots_without_a_manifest_is_unchanged() -> None:
     assert config.respect_robots_txt is False
 
 
+def test_destination_guard_is_on_by_default() -> None:
+    assert _build_config(parse_args()).destination_guard == "resolver"
+
+
+def test_private_network_requires_manifest_permission_and_explicit_intent(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires --scope-manifest"):
+        _build_config(parse_args("--allow-private-network"))
+
+    denied = manifest_path(tmp_path)
+    with pytest.raises(ValueError, match="allow_private_network to false"):
+        _build_config(parse_args("--scope-manifest", denied, "--allow-private-network"))
+
+    permitted = manifest_path(tmp_path, allow_private_network=True)
+    config = _build_config(
+        parse_args(
+            "--scope-manifest",
+            permitted,
+            "--allow-private-network",
+            "--allow-network-cidr",
+            "127.0.0.0/8",
+        )
+    )
+    assert config.allow_private_network is True
+    assert config.allow_network_cidrs == ("127.0.0.0/8",)
+
+
+def test_exact_network_without_intent_flag_is_rejected(tmp_path: Path) -> None:
+    permitted = manifest_path(tmp_path, allow_private_network=True)
+    with pytest.raises(ValueError, match="requires --allow-private-network"):
+        _build_config(parse_args("--scope-manifest", permitted, "--allow-network-cidr", "127.0.0.0/8"))
+
+
 # --- Input-set preflight ----------------------------------------------------------
 
 

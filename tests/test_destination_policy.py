@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from types import SimpleNamespace
 
 import pytest
 
@@ -180,7 +181,7 @@ def test_alternate_ip_literal_spellings_are_rejected(hostname):
     assert excinfo.value.reason == REASON_UNSUPPORTED_LITERAL
 
 
-@pytest.mark.parametrize("hostname", ["localhost", "foo.localhost", "metadata.google.internal", "box.internal"])
+@pytest.mark.parametrize("hostname", ["metadata", "metadata.google.internal", "instance-data"])
 def test_denied_hostnames_are_rejected_before_any_resolution(hostname):
     with pytest.raises(DestinationRejection) as excinfo:
         normalize_destination_url(f"http://{hostname}/")
@@ -275,16 +276,9 @@ async def test_resolution_returns_the_complete_deduplicated_answer_set(monkeypat
 # ---------------------------------------------------------------------------
 
 
-def test_guard_is_opt_in_until_the_posture_change_lands():
-    """Ticket 149 wants deny-by-default; that switch is a separate step.
-
-    Enabling it here would deny loopback for every caller, stopping an ordinary
-    crawl of a local server and breaking every fixture-server test in this
-    repository. The mechanism lands first; the posture change follows on its
-    own, with the repo-wide fixture sweep it requires.
-    """
+def test_guard_is_enabled_by_default():
     config = CrawlConfig()
-    assert config.destination_guard == "off"
+    assert config.destination_guard == "resolver"
     assert config.allow_private_network is False
     assert config.allow_network_cidrs == ()
 
@@ -327,15 +321,23 @@ def test_malformed_allowlist_cidr_is_rejected():
         CrawlConfig(allow_network_cidrs=("10.0.0.0/999",))
 
 
-@pytest.mark.parametrize("cidr", ["127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4"])
+@pytest.mark.parametrize("cidr", ["169.254.0.0/16", "224.0.0.0/4"])
 def test_allowlist_cannot_reopen_the_always_denied_tier(cidr):
-    """The allowlist narrows the private tier; it never reopens loopback."""
-    with pytest.raises(ValueError, match="loopback, link-local or multicast"):
+    """The allowlist never reopens infrastructure-sensitive address classes."""
+    with pytest.raises(ValueError, match="link-local or multicast"):
         CrawlConfig(allow_network_cidrs=(cidr,))
 
 
+def test_exact_allowlist_can_authorise_loopback_for_local_crawling():
+    config = CrawlConfig(allow_private_network=True, allow_network_cidrs=("127.0.0.0/8",))
+    policy = AiohttpBackend(config)._destination_policy()
+    assert policy is not None
+    assert classify_address("127.0.0.1", policy) is None
+    assert normalize_destination_url("http://localhost:3000/")[1] == "localhost"
+
+
 def test_allowlist_accepts_an_ordinary_private_range():
-    config = CrawlConfig(allow_network_cidrs=("10.1.0.0/16",))
+    config = CrawlConfig(allow_private_network=True, allow_network_cidrs=("10.1.0.0/16",))
     assert config.allow_network_cidrs == ("10.1.0.0/16",)
 
 
@@ -408,6 +410,20 @@ def test_public_literal_ip_url_is_allowed():
     AiohttpBackend(CrawlConfig(destination_guard="resolver"))._guard_request_url("http://93.184.216.34/")
 
 
+@pytest.mark.asyncio
+async def test_literal_redirect_is_rejected_before_aiohttp_opens_the_next_hop():
+    backend = AiohttpBackend(CrawlConfig())
+    params = SimpleNamespace(
+        response=SimpleNamespace(
+            url="https://public.example/start",
+            headers={"Location": "http://127.0.0.1/admin"},
+        )
+    )
+    with pytest.raises(DestinationRejection) as excinfo:
+        await backend._guard_redirect(None, None, params)  # type: ignore[arg-type]
+    assert excinfo.value.reason == REASON_LOOPBACK
+
+
 def test_guard_stands_down_when_an_external_portal_policy_owns_the_decision():
     class _Policy:
         async def authorize(self, url: str, purpose: str) -> None: ...
@@ -442,3 +458,4 @@ def test_guard_carries_the_operator_allowlist_into_the_policy():
     assert policy is not None
     assert policy.allow_private_network is True
     assert classify_address("10.1.2.3", policy) is None
+    assert classify_address("10.2.2.3", policy) == REASON_PRIVATE

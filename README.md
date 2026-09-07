@@ -801,7 +801,16 @@ config = CrawlConfig(respect_robots_txt=False)
 
 ### Authorisation and scope manifest
 
-Ordinary technical-SEO crawling does not require a manifest and is unchanged.
+Ordinary aiohttp crawls deny loopback, private, link-local, metadata, and other
+non-public destination addresses by default. Use `--destination-guard off`
+only in a trusted environment. To crawl an owned private or local service,
+the scope manifest must set `allow_private_network: true` and the invocation
+must also pass `--allow-private-network`. Prefer a narrow repeatable exception,
+for example `--allow-network-cidr 127.0.0.0/8`; omitting CIDRs permits all
+RFC1918 and IPv6 ULA ranges but still does not permit metadata/link-local
+addresses.
+
+Ordinary public technical-SEO crawling does not require a manifest.
 For work where the declared scope needs to be recorded and enforced, pass
 `--scope-manifest PATH` with a `crawler-cli/scope-manifest/1` JSON document:
 

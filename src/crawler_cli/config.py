@@ -190,7 +190,7 @@ class CrawlConfig:
     """Optional Portal-owned, per-connection URL policy.  It is supported only
     by the aiohttp backend and covers initial HTTP requests, redirects and
     sitemap fetches; browser navigation and live comparison remain unsupported."""
-    destination_guard: Literal["off", "resolver", "pinned"] = "off"
+    destination_guard: Literal["off", "resolver", "pinned"] = "resolver"
     """Built-in destination-address guard for crawls with no Portal policy
     (ticket 149).
 
@@ -199,12 +199,8 @@ class CrawlConfig:
     connector cost that pinning imposes.  ``pinned`` is the strict mode,
     re-resolving and pinning every hop.
 
-    The default is deliberately ``off`` for now.  Ticket 149 wants deny-by-
-    default, but switching the default denies loopback and private addresses,
-    which stops an ordinary ``crawler-cli http://localhost:3000/`` and breaks
-    every test in this repository that drives a loopback fixture server.  That
-    posture change is a deliberate, separately reviewable step; it is not
-    something to slip in alongside the mechanism.  See ticket 149."""
+    ``resolver`` is the default. Local/private crawling requires an explicit
+    network exception; trusted callers may explicitly select ``off``."""
     allow_private_network: bool = False
     """Permit RFC1918 and IPv6 ULA destinations (ticket 149).
 
@@ -455,12 +451,15 @@ class CrawlConfig:
             raise ValueError(f"destination_guard must be off, resolver or pinned, got {self.destination_guard!r}")
         for cidr in self.allow_network_cidrs:
             network = _validated_allow_network(cidr)
-            # The allowlist narrows the private tier; it never reopens the tier
-            # that stays denied however the run is configured.
-            if network.is_loopback or network.is_link_local or network.is_multicast:
+            # Exact loopback ranges are useful for explicitly authorised local
+            # development crawls. Link-local and multicast ranges remain
+            # ineligible because they include infrastructure/metadata targets.
+            if network.is_link_local or network.is_multicast:
                 raise ValueError(
-                    f"allow_network_cidrs cannot include a loopback, link-local or multicast range: {cidr}"
+                    f"allow_network_cidrs cannot include a link-local or multicast range: {cidr}"
                 )
+        if self.allow_network_cidrs and not self.allow_private_network:
+            raise ValueError("allow_network_cidrs requires allow_private_network=True")
         if self.destination_guard == "pinned":
             # Strict mode must not be claimed on a path whose sockets the guard
             # cannot reach. Fail closed rather than warn, as the portal policy

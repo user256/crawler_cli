@@ -637,6 +637,16 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     # cannot have produced any DNS or HTTP activity.
     manifest_path = getattr(args, "scope_manifest", "") or ""
     scope_predicate = compile_scope_predicate(load_scope_manifest(manifest_path)) if manifest_path else None
+    destination_guard = getattr(args, "destination_guard", "resolver")
+    allow_private_network = bool(getattr(args, "allow_private_network", False))
+    allow_network_cidrs = tuple(getattr(args, "allow_network_cidrs", []) or [])
+    if allow_private_network or allow_network_cidrs:
+        if not allow_private_network:
+            raise ValueError("--allow-network-cidr requires --allow-private-network for explicit invocation intent")
+        if scope_predicate is None:
+            raise ValueError("--allow-private-network requires --scope-manifest")
+        if not scope_predicate.manifest.allow_private_network:
+            raise ValueError("scope manifest sets allow_private_network to false")
     assert_cli_narrows_scope(
         scope_predicate,
         allowed_hosts=allowed_hosts,
@@ -697,6 +707,9 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
             False if portal_connection_policy is not None else not getattr(args, "no_challenge_escalation", False)
         ),
         portal_connection_policy=portal_connection_policy,
+        destination_guard=cast("Literal['off', 'resolver', 'pinned']", destination_guard),
+        allow_private_network=allow_private_network,
+        allow_network_cidrs=allow_network_cidrs,
         extraction_rules=extraction_rules,
         discover_sitemaps=not args.skip_sitemaps,
         allowed_hosts=allowed_hosts,
@@ -1052,6 +1065,26 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
             "ATTESTATION only: it is not proof of legal permission and does not replace organisational "
             "approval. Ordinary technical-SEO crawling does not require it."
         ),
+    )
+    destination = parser.add_argument_group("Destination-network safety")
+    destination.add_argument(
+        "--destination-guard",
+        choices=["off", "resolver", "pinned"],
+        default="resolver",
+        help="Destination-address guard (default: resolver). Use off only for a trusted environment.",
+    )
+    destination.add_argument(
+        "--allow-private-network",
+        action="store_true",
+        help="Permit private destinations explicitly authorised by the scope manifest.",
+    )
+    destination.add_argument(
+        "--allow-network-cidr",
+        dest="allow_network_cidrs",
+        action="append",
+        default=[],
+        metavar="CIDR",
+        help="Permit this exact private or loopback CIDR (repeatable; also requires --allow-private-network).",
     )
     authorisation.add_argument(
         "--confirm-ignore-robots",
@@ -1510,6 +1543,13 @@ async def _run_crawl(args: argparse.Namespace) -> int:
             print(f"Error: {exc}", file=sys.stderr)
             return EXIT_VALIDATION
         print(describe_manifest(config.scope_predicate.manifest))
+
+    if config.allow_private_network:
+        networks = ", ".join(config.allow_network_cidrs) if config.allow_network_cidrs else "all RFC1918/IPv6 ULA"
+        logger.warning(
+            "PRIVATE-NETWORK ACCESS ENABLED for %s; scope-manifest permission and explicit invocation intent are active",
+            networks,
+        )
 
     if config.circuit_breaker_enabled:
         logger.info(
