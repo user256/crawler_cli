@@ -13,8 +13,6 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
-
 from crawler_cli.__main__ import _build_parser, _run_exposure_inventory
 from crawler_cli.authorisation import SCOPE_MANIFEST_SCHEMA_VERSION
 
