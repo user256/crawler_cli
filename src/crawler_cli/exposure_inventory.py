@@ -38,6 +38,7 @@ STATE_RESOLVER_ERROR = "resolver_error"
 STATE_TIMEOUT = "resolver_timeout"
 STATE_BLOCKED_BY_POLICY = "blocked_by_policy"
 STATE_RESOLVED = "resolved"
+STATE_FETCH_FAILED = "fetch_failed"
 STATE_REACHABLE = "reachable"
 STATE_FINDING_CANDIDATE = "finding_candidate"
 
@@ -361,3 +362,114 @@ async def resolve_candidates(
 def fetchable_candidates(resolutions: list[CandidateResolution]) -> list[CandidateResolution]:
     """Return only the candidates an HTTP request is permitted for."""
     return [resolution for resolution in resolutions if resolution.fetchable]
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateEvidence:
+    """Bounded HTTP evidence from one candidate origin.
+
+    ``auth_demanded`` records that the host asked for credentials. Ticket 146
+    is explicit that this is where the inventory stops: a 401 is the finding.
+    Trying to get past it would make this a different product (ticket 144).
+    """
+
+    resolution: CandidateResolution
+    state: str
+    status: int | None = None
+    final_url: str | None = None
+    title: str | None = None
+    x_robots_tag: str | None = None
+    auth_demanded: bool = False
+    redirect_target: str | None = None
+    detail: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            **self.resolution.as_dict(),
+            "state": self.state,
+            "http": {
+                "status": self.status,
+                "final_url": self.final_url,
+                "title": self.title,
+                "x_robots_tag": self.x_robots_tag,
+                "auth_demanded": self.auth_demanded,
+                "redirect_target": self.redirect_target,
+            },
+            "detail": self.detail,
+        }
+
+
+def candidate_probe_url(origin: str, path: str = "/") -> str:
+    """Return the single URL this inventory may request on a candidate origin.
+
+    One exact path, defaulting to ``/``. The host is never searched: ticket 146
+    inventories what an authorised origin serves at a declared path, and
+    guessing further paths is forced browsing, which ticket 144 excludes.
+    """
+    if not path.startswith("/"):
+        raise ExposureInventoryError(f"candidate path must be absolute, got {path!r}")
+    if "*" in path or "?" in path:
+        raise ExposureInventoryError(f"candidate path must be one exact path, got {path!r}")
+    return f"{origin.rstrip('/')}{path}"
+
+
+async def probe_candidates(
+    resolutions: list[CandidateResolution],
+    fetch: Callable[[str], Awaitable[object]],
+    *,
+    path: str = "/",
+) -> list[CandidateEvidence]:
+    """Make at most one bounded GET per fetchable candidate.
+
+    Candidates that were never authorised, never resolved, or blocked by the
+    destination policy are passed through with their existing state: this stage
+    adds evidence, and never upgrades a refusal into an attempt.
+
+    Exactly one request per candidate. There is no retry and no second path,
+    because a retry loop against a host that refused is the behaviour ticket
+    144 rules out.
+    """
+    evidence: list[CandidateEvidence] = []
+    for resolution in resolutions:
+        if not resolution.fetchable or resolution.decision.origin is None:
+            evidence.append(CandidateEvidence(resolution=resolution, state=resolution.state))
+            continue
+        url = candidate_probe_url(resolution.decision.origin, path)
+        try:
+            response = await fetch(url)
+        except Exception as exc:  # noqa: BLE001 - a failed probe is a state, not a crash
+            evidence.append(
+                CandidateEvidence(
+                    resolution=resolution,
+                    state=STATE_FETCH_FAILED,
+                    detail=type(exc).__name__,
+                )
+            )
+            continue
+        status = int(getattr(response, "status", 0) or 0)
+        headers = dict(getattr(response, "headers", {}) or {})
+        extracted = getattr(response, "extracted", None)
+        final_url = str(getattr(response, "final_url", url) or url)
+        evidence.append(
+            CandidateEvidence(
+                resolution=resolution,
+                state=STATE_REACHABLE,
+                status=status,
+                final_url=final_url,
+                title=getattr(extracted, "title", None) if extracted is not None else None,
+                x_robots_tag=_header(headers, "x-robots-tag"),
+                # A demand for credentials is the finding. The inventory records
+                # it and stops; it never attempts to satisfy it.
+                auth_demanded=status in {401, 403},
+                redirect_target=final_url if final_url != url else None,
+            )
+        )
+    return evidence
+
+
+def _header(headers: dict[str, object], name: str) -> str | None:
+    """Case-insensitive header lookup."""
+    for key, value in headers.items():
+        if str(key).lower() == name:
+            return str(value)
+    return None

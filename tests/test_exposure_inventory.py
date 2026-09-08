@@ -10,6 +10,7 @@ declared.
 from __future__ import annotations
 
 import socket
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,18 +21,22 @@ from crawler_cli.exposure_inventory import (
     STATE_NO_ADDRESS,
     STATE_NOT_AUTHORISED,
     STATE_NOT_TESTED,
+    STATE_FETCH_FAILED,
     STATE_NXDOMAIN,
+    STATE_REACHABLE,
     STATE_RESOLVED,
     STATE_RESOLVER_ERROR,
     STATE_TIMEOUT,
     CandidateDecision,
     ExposureInventoryError,
     authorise_candidates,
+    candidate_probe_url,
     authorised_origins,
     derive_candidate_hosts,
     fetchable_candidates,
     host_from_url,
     normalise_labels,
+    probe_candidates,
     registrable_domain,
     resolve_candidates,
 )
@@ -359,3 +364,151 @@ async def test_resolution_serialisation_keeps_every_state_distinct():
     assert payload["addresses"] == ["93.184.216.34"]
     assert payload["authorised"] is True
     assert payload["source"] == "derived_label"
+
+
+# ---------------------------------------------------------------------------
+# Bounded probe — one request, one path, no bypass
+# ---------------------------------------------------------------------------
+
+
+class _RecordingFetcher:
+    """Fetch stand-in recording every URL requested."""
+
+    def __init__(self, response=None, error=None):
+        self.response = response
+        self.error = error
+        self.requested: list[str] = []
+
+    async def __call__(self, url: str):
+        self.requested.append(url)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+def _response(status=200, headers=None, title="Staging", final_url=None):
+    return SimpleNamespace(
+        status=status,
+        headers=headers or {},
+        extracted=SimpleNamespace(title=title),
+        final_url=final_url,
+    )
+
+
+async def _resolved_candidate(addresses=("93.184.216.34",)):
+    decisions = authorise_candidates(
+        derive_candidate_hosts(["www.example.com"], labels=("dev",)), ["https://dev.example.com"]
+    )
+    return await resolve_candidates(decisions, resolver=_RecordingResolver({"dev.example.com": list(addresses)}))
+
+
+@pytest.mark.asyncio
+async def test_probe_makes_exactly_one_request_at_one_exact_path():
+    """Ticket 146: one bounded GET. Never search the host."""
+    resolutions = await _resolved_candidate()
+    fetcher = _RecordingFetcher(_response())
+
+    evidence = await probe_candidates(resolutions, fetcher)
+
+    assert fetcher.requested == ["https://dev.example.com/"]
+    assert evidence[0].state == STATE_REACHABLE
+    assert evidence[0].status == 200
+
+
+@pytest.mark.asyncio
+async def test_probe_never_requests_an_unfetchable_candidate():
+    """A refusal is never upgraded into an attempt by a later stage."""
+    decisions = authorise_candidates(
+        derive_candidate_hosts(["www.example.com"], labels=("dev", "staging")), ["https://dev.example.com"]
+    )
+    resolutions = await resolve_candidates(
+        decisions,
+        policy=DestinationPolicy(),
+        resolver=_RecordingResolver({"dev.example.com": ["10.0.0.8"]}),
+    )
+    fetcher = _RecordingFetcher(_response())
+
+    evidence = await probe_candidates(resolutions, fetcher)
+
+    # dev resolved to a private address; staging was never authorised.
+    assert fetcher.requested == []
+    assert {e.state for e in evidence} == {STATE_BLOCKED_BY_POLICY, STATE_NOT_AUTHORISED}
+
+
+@pytest.mark.asyncio
+async def test_probe_records_a_credential_demand_without_attempting_it():
+    """A 401 is the finding. Ticket 144 rules out trying to get past it."""
+    resolutions = await _resolved_candidate()
+    fetcher = _RecordingFetcher(_response(status=401, title=None))
+
+    evidence = await probe_candidates(resolutions, fetcher)
+
+    assert evidence[0].auth_demanded is True
+    assert evidence[0].status == 401
+    # One request only: no retry with credentials, no second path.
+    assert len(fetcher.requested) == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_records_x_robots_tag_case_insensitively():
+    resolutions = await _resolved_candidate()
+    fetcher = _RecordingFetcher(_response(headers={"X-Robots-Tag": "noindex"}))
+
+    evidence = await probe_candidates(resolutions, fetcher)
+
+    assert evidence[0].x_robots_tag == "noindex"
+    assert evidence[0].title == "Staging"
+
+
+@pytest.mark.asyncio
+async def test_probe_records_a_redirect_target():
+    resolutions = await _resolved_candidate()
+    fetcher = _RecordingFetcher(_response(final_url="https://www.example.com/"))
+
+    evidence = await probe_candidates(resolutions, fetcher)
+
+    assert evidence[0].redirect_target == "https://www.example.com/"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_probe_is_a_state_not_a_crash():
+    resolutions = await _resolved_candidate()
+    fetcher = _RecordingFetcher(error=TimeoutError())
+
+    evidence = await probe_candidates(resolutions, fetcher)
+
+    assert evidence[0].state == STATE_FETCH_FAILED
+    assert evidence[0].detail == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_probe_honours_an_operator_supplied_exact_path():
+    resolutions = await _resolved_candidate()
+    fetcher = _RecordingFetcher(_response())
+
+    await probe_candidates(resolutions, fetcher, path="/health")
+
+    assert fetcher.requested == ["https://dev.example.com/health"]
+
+
+@pytest.mark.parametrize("path", ["health", "/search?q=*", "/*"])
+def test_a_probe_path_must_be_one_exact_absolute_path(path):
+    with pytest.raises(ExposureInventoryError):
+        candidate_probe_url("https://dev.example.com", path)
+
+
+@pytest.mark.asyncio
+async def test_evidence_serialisation_preserves_the_whole_chain():
+    resolutions = await _resolved_candidate()
+    fetcher = _RecordingFetcher(_response(headers={"x-robots-tag": "noindex"}))
+
+    payload = (await probe_candidates(resolutions, fetcher))[0].as_dict()
+
+    assert payload["hostname"] == "dev.example.com"
+    assert payload["source"] == "derived_label"
+    assert payload["authorised"] is True
+    assert payload["addresses"] == ["93.184.216.34"]
+    assert payload["state"] == STATE_REACHABLE
+    assert payload["http"]["status"] == 200
+    assert payload["http"]["x_robots_tag"] == "noindex"
+    assert payload["http"]["auth_demanded"] is False
