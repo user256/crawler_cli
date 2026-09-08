@@ -48,6 +48,11 @@ dependencies = [
   "curl_cffi>=0.7.0",
   "defusedxml>=0.7",
   "lxml>=5.2",
+  # Public Suffix List for registrable-domain derivation (ticket 146). Chosen
+  # because it ships the list in-package and performs no network I/O: a crawler
+  # with a destination guard must not fetch a suffix list at runtime. Releases
+  # are dated, so refreshing the list is a version bump.
+  "publicsuffixlist>=1.0.2",
 ]
 
 [project.urls]
