@@ -18,11 +18,15 @@ caller, gated behind :func:`authorise_candidates`.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import asyncio
+import socket
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from publicsuffixlist import PublicSuffixList
+
+from .destination_policy import DestinationPolicy, classify_address
 
 # Outcome states. Ticket 146 requires these to stay distinct so that "we never
 # looked" can never be read as "we looked and it was clean".
@@ -33,6 +37,7 @@ STATE_NO_ADDRESS = "no_address"
 STATE_RESOLVER_ERROR = "resolver_error"
 STATE_TIMEOUT = "resolver_timeout"
 STATE_BLOCKED_BY_POLICY = "blocked_by_policy"
+STATE_RESOLVED = "resolved"
 STATE_REACHABLE = "reachable"
 STATE_FINDING_CANDIDATE = "finding_candidate"
 
@@ -246,3 +251,113 @@ def authorise_candidates(
 def authorised_origins(decisions: list[CandidateDecision]) -> list[str]:
     """Return only the origins a caller may resolve, in deterministic order."""
     return sorted({decision.origin for decision in decisions if decision.authorised and decision.origin})
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateResolution:
+    """What one authorised candidate resolved to, and whether it may be fetched.
+
+    A DNS result is an inventory fact in its own right. ``nxdomain`` for a
+    ``dev.`` label is a useful answer, not a failure to report.
+    """
+
+    decision: CandidateDecision
+    state: str
+    addresses: tuple[str, ...] = ()
+    detail: str | None = None
+
+    @property
+    def fetchable(self) -> bool:
+        """True only when an HTTP request is permitted for this candidate."""
+        return self.state == STATE_RESOLVED
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            **self.decision.as_dict(),
+            "state": self.state,
+            "addresses": list(self.addresses),
+            "detail": self.detail,
+        }
+
+
+async def _default_resolver(hostname: str, port: int) -> list[str]:
+    loop = asyncio.get_running_loop()
+    records = await loop.getaddrinfo(hostname, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
+    return sorted({str(record[4][0]) for record in records})
+
+
+def _dns_failure_state(exc: BaseException) -> tuple[str, str]:
+    """Map a resolver failure onto a distinct, reportable state.
+
+    Ticket 146 requires NXDOMAIN, no-address, timeout and resolver error to
+    stay distinguishable: "this name does not exist" and "we could not ask" are
+    different facts about a site, and collapsing them hides the difference.
+    """
+    if isinstance(exc, TimeoutError):
+        return STATE_TIMEOUT, "resolution timed out"
+    if isinstance(exc, socket.gaierror):
+        code = getattr(exc, "errno", None)
+        if code in {socket.EAI_NONAME, getattr(socket, "EAI_NODATA", socket.EAI_NONAME)}:
+            return STATE_NXDOMAIN, "name does not resolve"
+        if code == socket.EAI_AGAIN:
+            return STATE_TIMEOUT, "resolver temporarily unavailable"
+        return STATE_RESOLVER_ERROR, "resolver error"
+    return STATE_RESOLVER_ERROR, "resolver error"
+
+
+async def resolve_candidates(
+    decisions: list[CandidateDecision],
+    *,
+    policy: DestinationPolicy | None = None,
+    resolver: Callable[[str, int], Awaitable[list[str]]] | None = None,
+    timeout_seconds: float = 5.0,
+) -> list[CandidateResolution]:
+    """Resolve only the authorised candidates, and classify what comes back.
+
+    Unauthorised candidates are passed straight through untouched: they are
+    never handed to the resolver, because the lookup would itself be traffic
+    about a host the operator never declared.
+
+    Every returned address is then checked against the ticket-149 destination
+    policy, and a mixed answer set fails closed as a unit exactly as it does
+    there — narrowing to the permitted member would leave the same rebinding
+    primitive.
+    """
+    resolve = resolver or _default_resolver
+    results: list[CandidateResolution] = []
+    for decision in decisions:
+        if not decision.authorised or decision.origin is None:
+            results.append(CandidateResolution(decision=decision, state=decision.state))
+            continue
+        hostname = decision.candidate.hostname
+        port = 443 if decision.origin.startswith("https://") else 80
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                addresses = await resolve(hostname, port)
+        except Exception as exc:  # noqa: BLE001 - every failure maps to a state
+            state, detail = _dns_failure_state(exc)
+            results.append(CandidateResolution(decision=decision, state=state, detail=detail))
+            continue
+        if not addresses:
+            results.append(CandidateResolution(decision=decision, state=STATE_NO_ADDRESS, detail="no address records"))
+            continue
+        if policy is not None:
+            denied = {address: classify_address(address, policy) for address in addresses}
+            reasons = sorted({reason for reason in denied.values() if reason is not None})
+            if reasons:
+                results.append(
+                    CandidateResolution(
+                        decision=decision,
+                        state=STATE_BLOCKED_BY_POLICY,
+                        addresses=tuple(addresses),
+                        detail=", ".join(reasons),
+                    )
+                )
+                continue
+        results.append(CandidateResolution(decision=decision, state=STATE_RESOLVED, addresses=tuple(addresses)))
+    return results
+
+
+def fetchable_candidates(resolutions: list[CandidateResolution]) -> list[CandidateResolution]:
+    """Return only the candidates an HTTP request is permitted for."""
+    return [resolution for resolution in resolutions if resolution.fetchable]

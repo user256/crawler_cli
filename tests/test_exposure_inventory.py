@@ -9,20 +9,31 @@ declared.
 
 from __future__ import annotations
 
+import socket
+
 import pytest
 
+from crawler_cli.destination_policy import DestinationPolicy
 from crawler_cli.exposure_inventory import (
     DEFAULT_NONPROD_LABELS,
+    STATE_BLOCKED_BY_POLICY,
+    STATE_NO_ADDRESS,
     STATE_NOT_AUTHORISED,
     STATE_NOT_TESTED,
+    STATE_NXDOMAIN,
+    STATE_RESOLVED,
+    STATE_RESOLVER_ERROR,
+    STATE_TIMEOUT,
     CandidateDecision,
     ExposureInventoryError,
     authorise_candidates,
     authorised_origins,
     derive_candidate_hosts,
+    fetchable_candidates,
     host_from_url,
     normalise_labels,
     registrable_domain,
+    resolve_candidates,
 )
 
 
@@ -223,3 +234,128 @@ def test_decision_serialisation_keeps_source_and_state_distinct():
         "state": STATE_NOT_AUTHORISED,
         "origin": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Resolution — only for authorised candidates, with distinguishable outcomes
+# ---------------------------------------------------------------------------
+
+
+class _RecordingResolver:
+    """Resolver stand-in that records every hostname it was asked about."""
+
+    def __init__(self, answers=None, error=None):
+        self.answers = answers or {}
+        self.error = error
+        self.asked: list[str] = []
+
+    async def __call__(self, hostname: str, port: int) -> list[str]:
+        self.asked.append(hostname)
+        if self.error is not None:
+            raise self.error
+        return self.answers.get(hostname, [])
+
+
+def _decisions(labels, origins):
+    return authorise_candidates(derive_candidate_hosts(["www.example.com"], labels=labels), origins)
+
+
+@pytest.mark.asyncio
+async def test_an_unauthorised_candidate_is_never_handed_to_the_resolver():
+    """The central safety property of ticket 146.
+
+    A DNS query is observable traffic about a host nobody declared, so an
+    undeclared candidate must not reach the resolver at all.
+    """
+    resolver = _RecordingResolver({"dev.example.com": ["93.184.216.34"]})
+    decisions = _decisions(("dev", "staging"), ["https://dev.example.com"])
+
+    results = await resolve_candidates(decisions, resolver=resolver)
+
+    assert resolver.asked == ["dev.example.com"]
+    by_host = {r.decision.candidate.hostname: r for r in results}
+    assert by_host["staging.example.com"].state == STATE_NOT_AUTHORISED
+    assert by_host["staging.example.com"].addresses == ()
+    assert by_host["staging.example.com"].fetchable is False
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_authorised_candidate_becomes_fetchable():
+    resolver = _RecordingResolver({"dev.example.com": ["93.184.216.34"]})
+    results = await resolve_candidates(_decisions(("dev",), ["https://dev.example.com"]), resolver=resolver)
+
+    assert results[0].state == STATE_RESOLVED
+    assert results[0].addresses == ("93.184.216.34",)
+    assert results[0].fetchable is True
+    assert fetchable_candidates(results) == results
+
+
+@pytest.mark.asyncio
+async def test_nxdomain_is_a_reportable_result_not_an_error():
+    """A dev. label that does not exist is a useful inventory fact."""
+    resolver = _RecordingResolver(error=socket.gaierror(socket.EAI_NONAME, "Name or service not known"))
+    results = await resolve_candidates(_decisions(("dev",), ["https://dev.example.com"]), resolver=resolver)
+
+    assert results[0].state == STATE_NXDOMAIN
+    assert results[0].fetchable is False
+
+
+@pytest.mark.asyncio
+async def test_resolver_states_stay_distinguishable():
+    """ "Does not exist" and "we could not ask" are different facts."""
+    cases = {
+        socket.gaierror(socket.EAI_AGAIN, "try again"): STATE_TIMEOUT,
+        socket.gaierror(socket.EAI_FAIL, "fail"): STATE_RESOLVER_ERROR,
+        TimeoutError(): STATE_TIMEOUT,
+    }
+    for error, expected in cases.items():
+        resolver = _RecordingResolver(error=error)
+        results = await resolve_candidates(_decisions(("dev",), ["https://dev.example.com"]), resolver=resolver)
+        assert results[0].state == expected, error
+
+
+@pytest.mark.asyncio
+async def test_an_empty_answer_set_is_reported_as_no_address():
+    resolver = _RecordingResolver({"dev.example.com": []})
+    results = await resolve_candidates(_decisions(("dev",), ["https://dev.example.com"]), resolver=resolver)
+
+    assert results[0].state == STATE_NO_ADDRESS
+    assert results[0].fetchable is False
+
+
+@pytest.mark.asyncio
+async def test_a_private_address_is_blocked_by_the_destination_policy():
+    """Ticket 149 decides where a connection may go; 146 records that it did."""
+    resolver = _RecordingResolver({"dev.example.com": ["10.0.0.8"]})
+    results = await resolve_candidates(
+        _decisions(("dev",), ["https://dev.example.com"]), policy=DestinationPolicy(), resolver=resolver
+    )
+
+    assert results[0].state == STATE_BLOCKED_BY_POLICY
+    assert results[0].detail == "private_address"
+    assert results[0].fetchable is False
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_answer_set_fails_closed_as_a_unit():
+    """Same rule as ticket 149: narrowing to the public member keeps the
+    rebinding primitive the guard exists to remove."""
+    resolver = _RecordingResolver({"dev.example.com": ["93.184.216.34", "127.0.0.1"]})
+    results = await resolve_candidates(
+        _decisions(("dev",), ["https://dev.example.com"]), policy=DestinationPolicy(), resolver=resolver
+    )
+
+    assert results[0].state == STATE_BLOCKED_BY_POLICY
+    assert results[0].fetchable is False
+
+
+@pytest.mark.asyncio
+async def test_resolution_serialisation_keeps_every_state_distinct():
+    resolver = _RecordingResolver({"dev.example.com": ["93.184.216.34"]})
+    results = await resolve_candidates(_decisions(("dev",), ["https://dev.example.com"]), resolver=resolver)
+
+    payload = results[0].as_dict()
+    assert payload["state"] == STATE_RESOLVED
+    assert payload["addresses"] == ["93.184.216.34"]
+    assert payload["authorised"] is True
+    assert payload["source"] == "derived_label"
