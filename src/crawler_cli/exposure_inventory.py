@@ -28,7 +28,9 @@ from urllib.parse import urlsplit
 
 from publicsuffixlist import PublicSuffixList
 
+from .comparison import DEFAULT_SIMHASH_THRESHOLD
 from .destination_policy import DestinationPolicy, classify_address
+from .hashing import hamming64
 from .redaction import CorrelationDigest, project_url
 
 # Outcome states. Ticket 146 requires these to stay distinct so that "we never
@@ -538,3 +540,101 @@ def build_inventory_artifact(
             "never resolved or requested."
         ),
     }
+
+
+@dataclass(frozen=True, slots=True)
+class ErrorTemplateMatch:
+    """How closely one crawled 200 resembles the site's own error page.
+
+    ``similar`` and ``indexable`` are separate fields on purpose. Ticket 146
+    requires similarity to be classified separately from indexability: a page
+    that looks like the 404 template is a *candidate*, and it only becomes
+    interesting when the site also serves it as an indexable 200.
+    """
+
+    url: str
+    status: int
+    similar: bool
+    indexable: bool
+    simhash_distance: int | None = None
+    title_matches: bool = False
+    path_hint: str | None = None
+
+    @property
+    def finding_candidate(self) -> bool:
+        """An indexable 200 that resembles the error template."""
+        return self.similar and self.indexable
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "url": self.url,
+            "status": self.status,
+            "similar_to_error_template": self.similar,
+            "indexable": self.indexable,
+            "simhash_distance": self.simhash_distance,
+            "title_matches": self.title_matches,
+            "path_hint": self.path_hint,
+            "finding_candidate": self.finding_candidate,
+        }
+
+
+def _path_hint(url: str) -> str | None:
+    """Return the suspicious token in a URL path, if it carries one.
+
+    A hint is provenance, never a verdict. Ticket 146 is explicit that a URL
+    containing ``404`` or ``test`` is a candidate and not a finding by itself,
+    so this only ever annotates a comparison that stands on its own evidence.
+    """
+    path = (urlsplit(url).path or "").lower()
+    for token in ("page-for-tests", "404", "not-found", "notfound", "error", "test"):
+        if token in path:
+            return token
+    return None
+
+
+def compare_to_error_template(
+    fingerprint: object,
+    crawled: Iterable[object],
+    *,
+    simhash_threshold: int = DEFAULT_SIMHASH_THRESHOLD,
+) -> list[ErrorTemplateMatch]:
+    """Compare already-crawled 200s against the site's own error fingerprint.
+
+    Makes no requests: the fingerprint came from one bounded probe and the
+    pages were already fetched by the parent crawl.
+
+    Similarity uses the same SimHash distance and default threshold as
+    ``comparison.py`` rather than a second scale, so "near-duplicate" means one
+    thing across this codebase.
+    """
+    reference_simhash = getattr(fingerprint, "simhash", None)
+    reference_title = (getattr(fingerprint, "title", None) or "").strip().lower()
+    matches: list[ErrorTemplateMatch] = []
+    for page in crawled:
+        status = int(getattr(page, "status", 0) or 0)
+        url = str(getattr(page, "url", "") or getattr(page, "final_url", "") or "")
+        if not url:
+            continue
+        page_simhash = getattr(page, "simhash", None)
+        distance: int | None = None
+        if reference_simhash is not None and page_simhash is not None:
+            distance = hamming64(int(reference_simhash), int(page_simhash))
+        title = (getattr(page, "title", None) or "").strip().lower()
+        title_matches = bool(reference_title) and title == reference_title
+        similar = (distance is not None and distance <= simhash_threshold) or title_matches
+        if not similar:
+            continue
+        matches.append(
+            ErrorTemplateMatch(
+                url=url,
+                status=status,
+                similar=True,
+                # Indexability is the site's own claim about the page, kept
+                # apart from how much it resembles the error template.
+                indexable=status == 200 and not bool(getattr(page, "noindex", False)),
+                simhash_distance=distance,
+                title_matches=title_matches,
+                path_hint=_path_hint(url),
+            )
+        )
+    return matches
