@@ -55,10 +55,20 @@ from .cookies import (
     scoped_cookies_from_pairs,
 )
 from .csv_urls import load_labelled_urls_from_csv, load_urls_from_csv
-from .destination_policy import destination_capabilities
+from .destination_policy import DestinationPolicy, destination_capabilities
+from .exposure_inventory import (
+    DEFAULT_NONPROD_LABELS,
+    authorise_candidates,
+    build_inventory_artifact,
+    derive_candidate_hosts,
+    host_from_url,
+    normalise_labels,
+    probe_candidates,
+    resolve_candidates,
+)
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
-from .exit_codes import EXIT_FAILURE, EXIT_FINDINGS, EXIT_VALIDATION, resolve_crawl_exit_code
+from .exit_codes import EXIT_FAILURE, EXIT_FINDINGS, EXIT_SUCCESS, EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
@@ -3578,6 +3588,71 @@ async def _run_generate_sitemap(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_exposure_inventory(args: argparse.Namespace) -> int:
+    """Run the authorised exposure inventory (ticket 146).
+
+    The manifest is required and validated before anything touches the
+    network: deriving and resolving extra hostnames widens the target set, so
+    the operator must have declared those origins first.
+    """
+    from ipaddress import ip_network
+
+    from .authorisation import compile_scope_predicate, load_scope_manifest
+
+    if not getattr(args, "scope_manifest", ""):
+        print(
+            "Error: exposure-inventory requires --scope-manifest; deriving hostnames "
+            "expands the target set and must be declared first",
+            file=sys.stderr,
+        )
+        return EXIT_VALIDATION
+    try:
+        predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
+        labels = normalise_labels(args.label) if args.label else DEFAULT_NONPROD_LABELS
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+
+    seeds = _collect_seed_urls(args)
+    if not seeds:
+        print("Error: provide at least one crawled URL to derive candidates from", file=sys.stderr)
+        return EXIT_VALIDATION
+    crawled_hosts = [host for host in (host_from_url(url) for url in seeds) if host]
+
+    candidates = derive_candidate_hosts(crawled_hosts, labels=labels)
+    decisions = authorise_candidates(candidates, predicate.manifest.allowed_origins)
+
+    config = _build_config(args)
+    engine = CrawlEngine(config)
+    try:
+        resolutions = await resolve_candidates(
+            decisions,
+            policy=DestinationPolicy(
+                allow_private_network=config.allow_private_network,
+                allow_networks=tuple(ip_network(cidr, strict=False) for cidr in config.allow_network_cidrs),
+            ),
+        )
+
+        async def fetch(url: str):
+            return await engine.crawl(url)
+
+        evidence = await probe_candidates(resolutions, fetch, path=args.candidate_path)
+    finally:
+        await engine.close()
+
+    payload = build_inventory_artifact(
+        evidence,
+        scope_manifest_digest=predicate.digest,
+        labels=labels,
+    )
+    if args.output:
+        Path(args.output).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"Wrote exposure inventory for {len(evidence)} candidates to {args.output}")
+    summary = cast("dict[str, object]", payload["summary"])
+    print(json.dumps({"schema_version": payload["schema_version"], **summary}, indent=2))
+    return EXIT_SUCCESS
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crawler-cli",
@@ -4097,6 +4172,26 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_postgres_args(sitemap_parser)
     _add_reporting_run_selector(sitemap_parser)
 
+    exposure_parser = subparsers.add_parser(
+        "exposure-inventory",
+        help="Inventory declared non-production hosts and error-template exposure (authorised operators only)",
+    )
+    exposure_parser.add_argument("url", nargs="*", help="Crawled URLs whose registrable domains seed the candidates")
+    exposure_parser.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        metavar="LABEL",
+        help="Additional non-production DNS label (repeatable; wildcards are rejected)",
+    )
+    exposure_parser.add_argument(
+        "--candidate-path",
+        default="/",
+        help="The one exact path requested on each authorised candidate (default: /)",
+    )
+    exposure_parser.add_argument("-o", "--output", help="Write the versioned JSON inventory artifact")
+    _add_crawl_args(exposure_parser)
+
     install_parser = subparsers.add_parser(
         "install-obscura",
         help="Download the prebuilt Obscura browser binary for this platform",
@@ -4147,6 +4242,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "delete-crawl",
         "compact-crawl",
         "generate-sitemap",
+        "exposure-inventory",
         "install-obscura",
     }:
         return argv
@@ -4206,6 +4302,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_compact_crawl(args)
     if command == "generate-sitemap":
         return await _run_generate_sitemap(args)
+    if command == "exposure-inventory":
+        return await _run_exposure_inventory(args)
     print(f"Unknown command: {command}", file=sys.stderr)
     return 2
 
