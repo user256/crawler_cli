@@ -39,6 +39,8 @@ from crawler_cli.exposure_inventory import (
     derive_candidate_hosts,
     fetchable_candidates,
     host_from_url,
+    inventory_sitemap_hosts,
+    non_preferred_sitemap_hosts,
     normalise_labels,
     probe_candidates,
     registrable_domain,
@@ -705,3 +707,84 @@ def test_comparison_makes_no_requests():
     """The fingerprint came from one probe; the pages were already crawled."""
     matches = compare_to_error_template(_fingerprint(), [_page("https://example.com/page-404/")])
     assert matches[0].as_dict()["finding_candidate"] is True
+
+
+# ---------------------------------------------------------------------------
+# Sitemap host inventory — publication is evidence, never permission
+# ---------------------------------------------------------------------------
+
+
+_LOCS = [
+    "https://www.example.com/",
+    "https://www.example.com/about",
+    "https://en.example.com/legacy",
+    "https://cdn-old.example.net/asset",
+]
+
+
+def test_every_published_host_is_inventoried():
+    records = inventory_sitemap_hosts(_LOCS, preferred_host="www.example.com")
+
+    assert [r.hostname for r in records] == ["cdn-old.example.net", "en.example.com", "www.example.com"]
+    assert {r.hostname: r.loc_count for r in records}["www.example.com"] == 2
+
+
+def test_a_published_host_is_reported_without_becoming_authorised():
+    """The sapiens case: a dead en. host still advertised in the sitemap.
+
+    It is reported because the operator's own sitemap names it, and it stays
+    unauthorised because the manifest does not.
+    """
+    records = inventory_sitemap_hosts(
+        _LOCS, preferred_host="www.example.com", allowed_origins=["https://www.example.com"]
+    )
+    by_host = {r.hostname: r for r in records}
+
+    assert by_host["en.example.com"].loc_count == 1
+    assert by_host["en.example.com"].authorised is False
+    assert by_host["www.example.com"].authorised is True
+
+
+def test_non_preferred_hosts_are_the_interesting_ones():
+    records = inventory_sitemap_hosts(_LOCS, preferred_host="www.example.com")
+
+    assert [r.hostname for r in non_preferred_sitemap_hosts(records)] == [
+        "cdn-old.example.net",
+        "en.example.com",
+    ]
+
+
+def test_sample_paths_are_bounded_and_deduplicated():
+    locs = [f"https://en.example.com/page-{i}" for i in range(10)] + ["https://en.example.com/page-0"]
+    records = inventory_sitemap_hosts(locs, sample_limit=3)
+
+    assert len(records[0].sample_paths) == 3
+    assert len(set(records[0].sample_paths)) == 3
+
+
+def test_unparseable_locs_are_skipped_rather_than_crashing():
+    records = inventory_sitemap_hosts(["not a url", "", "https://example.com/ok"])
+    assert [r.hostname for r in records] == ["example.com"]
+
+
+def test_inventory_is_deterministic():
+    first = inventory_sitemap_hosts(_LOCS)
+    second = inventory_sitemap_hosts(list(reversed(_LOCS)))
+    assert [r.hostname for r in first] == [r.hostname for r in second]
+
+
+def test_without_a_preferred_host_nothing_is_marked_preferred():
+    records = inventory_sitemap_hosts(_LOCS)
+    assert all(r.is_preferred_host is False for r in records)
+    assert len(non_preferred_sitemap_hosts(records)) == len(records)
+
+
+def test_sitemap_record_serialises_the_authorisation_decision():
+    records = inventory_sitemap_hosts(["https://en.example.com/legacy"], allowed_origins=["https://www.example.com"])
+    assert records[0].as_dict() == {
+        "hostname": "en.example.com",
+        "loc_count": 1,
+        "is_preferred_host": False,
+        "authorised": False,
+        "sample_paths": ["/legacy"],
+    }

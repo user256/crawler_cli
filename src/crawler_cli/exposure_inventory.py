@@ -638,3 +638,87 @@ def compare_to_error_template(
             )
         )
     return matches
+
+
+@dataclass(frozen=True, slots=True)
+class SitemapHostRecord:
+    """One host an already-authorised sitemap published, and its standing.
+
+    A sitemap is the operator's own statement about what they publish, so a
+    host appearing there is evidence worth reporting even when it is dead. It
+    is still not permission to resolve or fetch that host: ``authorised``
+    reflects the manifest, never the sitemap.
+    """
+
+    hostname: str
+    loc_count: int
+    is_preferred_host: bool
+    authorised: bool
+    sample_paths: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "hostname": self.hostname,
+            "loc_count": self.loc_count,
+            "is_preferred_host": self.is_preferred_host,
+            "authorised": self.authorised,
+            "sample_paths": list(self.sample_paths),
+        }
+
+
+def inventory_sitemap_hosts(
+    sitemap_locs: Iterable[str],
+    *,
+    preferred_host: str | None = None,
+    allowed_origins: Iterable[str] | None = None,
+    sample_limit: int = 3,
+) -> list[SitemapHostRecord]:
+    """Inventory every host an authorised sitemap explicitly published.
+
+    Reports hosts the sitemap names even when they are dead, on a legacy CDN,
+    or a leftover ``content.`` / ``en.`` prefix: a sitemap advertising a host
+    the operator no longer runs is exactly the finding this is for, and it is
+    visible without a single request.
+
+    Publication is not permission. ``authorised`` is decided against the
+    ticket-148 manifest origins only, so an unauthorised host is inventoried
+    and reported without becoming eligible for DNS or HTTP enrichment.
+    """
+    origins = frozenset(str(origin).strip().rstrip("/").lower() for origin in (allowed_origins or ()))
+    preferred = (preferred_host or "").strip().rstrip(".").lower()
+
+    counts: dict[str, int] = {}
+    samples: dict[str, list[str]] = {}
+    for loc in sitemap_locs:
+        host = host_from_url(str(loc))
+        if not host:
+            continue
+        counts[host] = counts.get(host, 0) + 1
+        paths = samples.setdefault(host, [])
+        if len(paths) < sample_limit:
+            path = urlsplit(str(loc)).path or "/"
+            if path not in paths:
+                paths.append(path)
+
+    records: list[SitemapHostRecord] = []
+    for host in sorted(counts):
+        authorised = any(f"{scheme}://{host}" in origins for scheme in ("https", "http"))
+        records.append(
+            SitemapHostRecord(
+                hostname=host,
+                loc_count=counts[host],
+                is_preferred_host=bool(preferred) and host == preferred,
+                authorised=authorised,
+                sample_paths=tuple(samples.get(host, ())),
+            )
+        )
+    return records
+
+
+def non_preferred_sitemap_hosts(records: list[SitemapHostRecord]) -> list[SitemapHostRecord]:
+    """Return the published hosts that are not the site's preferred host.
+
+    These are the interesting ones: a sitemap that advertises a host other than
+    the canonical one is publishing something the operator may not know about.
+    """
+    return [record for record in records if not record.is_preferred_host]
