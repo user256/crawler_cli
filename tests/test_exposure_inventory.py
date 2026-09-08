@@ -9,12 +9,14 @@ declared.
 
 from __future__ import annotations
 
+import json
 import socket
 from types import SimpleNamespace
 
 import pytest
 
 from crawler_cli.destination_policy import DestinationPolicy
+from crawler_cli.redaction import CorrelationDigest
 from crawler_cli.exposure_inventory import (
     DEFAULT_NONPROD_LABELS,
     STATE_BLOCKED_BY_POLICY,
@@ -30,6 +32,7 @@ from crawler_cli.exposure_inventory import (
     CandidateDecision,
     ExposureInventoryError,
     authorise_candidates,
+    build_inventory_artifact,
     candidate_probe_url,
     authorised_origins,
     derive_candidate_hosts,
@@ -512,3 +515,91 @@ async def test_evidence_serialisation_preserves_the_whole_chain():
     assert payload["http"]["status"] == 200
     assert payload["http"]["x_robots_tag"] == "noindex"
     assert payload["http"]["auth_demanded"] is False
+
+
+# ---------------------------------------------------------------------------
+# Artifact — versioned, redacted, and honest about what was never tested
+# ---------------------------------------------------------------------------
+
+
+_FIXED_DIGEST = CorrelationDigest.from_key(b"exposure-inventory-test-key")
+
+
+async def _evidence_for_artifact():
+    decisions = authorise_candidates(
+        derive_candidate_hosts(["www.example.com"], labels=("dev", "staging")),
+        ["https://dev.example.com"],
+    )
+    resolutions = await resolve_candidates(
+        decisions, resolver=_RecordingResolver({"dev.example.com": ["93.184.216.34"]})
+    )
+    fetcher = _RecordingFetcher(_response(headers={"x-robots-tag": "noindex"}))
+    return await probe_candidates(resolutions, fetcher)
+
+
+@pytest.mark.asyncio
+async def test_artifact_is_versioned_and_carries_the_scope_digest():
+    artifact = build_inventory_artifact(
+        await _evidence_for_artifact(),
+        scope_manifest_digest="sha256:abc",
+        labels=("dev", "staging"),
+        digest=_FIXED_DIGEST,
+    )
+
+    assert artifact["schema_version"] == "crawler-cli/exposure-inventory/1"
+    assert artifact["label_set_version"] == "crawler-cli/nonprod-labels/1"
+    assert artifact["scope_manifest_digest"] == "sha256:abc"
+    assert artifact["labels"] == ["dev", "staging"]
+
+
+@pytest.mark.asyncio
+async def test_artifact_counts_keep_never_looked_separate_from_looked_and_clean():
+    """Ticket 146: absent enrichment must never read as a clean result."""
+    artifact = build_inventory_artifact(
+        await _evidence_for_artifact(),
+        scope_manifest_digest=None,
+        labels=("dev", "staging"),
+        digest=_FIXED_DIGEST,
+    )
+    summary = artifact["summary"]
+
+    assert summary["candidates"] == 2
+    assert summary["states"][STATE_REACHABLE] == 1
+    assert summary["states"][STATE_NOT_AUTHORISED] == 1
+    # Exactly one HTTP request was made, and the artifact says so.
+    assert summary["requested"] == 1
+
+
+@pytest.mark.asyncio
+async def test_artifact_redacts_sensitive_values_in_urls_it_did_not_compose():
+    """A redirect target is chosen by the site, not by this command."""
+    decisions = authorise_candidates(
+        derive_candidate_hosts(["www.example.com"], labels=("dev",)), ["https://dev.example.com"]
+    )
+    resolutions = await resolve_candidates(
+        decisions, resolver=_RecordingResolver({"dev.example.com": ["93.184.216.34"]})
+    )
+    fetcher = _RecordingFetcher(_response(final_url="https://dev.example.com/?token=SUPERSECRET123"))
+    evidence = await probe_candidates(resolutions, fetcher)
+
+    artifact = build_inventory_artifact(evidence, scope_manifest_digest=None, labels=("dev",), digest=_FIXED_DIGEST)
+    serialised = json.dumps(artifact)
+
+    assert "SUPERSECRET123" not in serialised
+    assert artifact["candidates"][0]["http"]["redirect_target"] is not None
+
+
+@pytest.mark.asyncio
+async def test_artifact_states_the_derived_is_not_a_finding_caveat():
+    artifact = build_inventory_artifact(
+        await _evidence_for_artifact(), scope_manifest_digest=None, labels=("dev",), digest=_FIXED_DIGEST
+    )
+    assert "not findings" in str(artifact["caveat"]) or "not a vulnerability" in str(artifact["caveat"])
+
+
+@pytest.mark.asyncio
+async def test_artifact_serialises_to_json():
+    artifact = build_inventory_artifact(
+        await _evidence_for_artifact(), scope_manifest_digest=None, labels=("dev",), digest=_FIXED_DIGEST
+    )
+    assert json.loads(json.dumps(artifact))["summary"]["candidates"] == 2
