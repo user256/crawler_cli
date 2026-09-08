@@ -92,6 +92,17 @@ ann = [
 viz = [
   "umap-learn>=0.5",
 ]
+# Pinned exactly, and deliberately. A formatter is a consistency tool: a new
+# ruff release can reformat untouched files, so an unpinned `ruff format
+# --check` fails CI on a change that did not cause it. That happened here --
+# CI installed ruff unpinned while a developer machine had drifted to an older
+# version, and the two disagreed about how one `raise` should wrap. Bump these
+# on purpose, with the reformat in its own commit.
+lint = [
+  "ruff==0.16.6",
+  "mypy==2.3.1",
+]
+
 test = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",

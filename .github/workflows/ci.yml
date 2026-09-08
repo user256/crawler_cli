@@ -268,7 +268,7 @@ jobs:
           cache: "pip"
 
       - name: Install lint tools
-        run: pip install -e ".[test]" ruff mypy
+        run: pip install -e ".[test,lint]"
 
       - name: ruff lint
         run: ruff check src/ tests/
