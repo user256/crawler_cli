@@ -22,11 +22,14 @@ import asyncio
 import socket
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import cast
 from urllib.parse import urlsplit
 
 from publicsuffixlist import PublicSuffixList
 
 from .destination_policy import DestinationPolicy, classify_address
+from .redaction import CorrelationDigest, project_url
 
 # Outcome states. Ticket 146 requires these to stay distinct so that "we never
 # looked" can never be read as "we looked and it was clean".
@@ -48,6 +51,8 @@ STATE_FINDING_CANDIDATE = "finding_candidate"
 DEFAULT_NONPROD_LABELS: tuple[str, ...] = ("cms", "dev", "preview", "stage", "staging", "test", "uat")
 
 CANDIDATE_LABEL_SET_VERSION = "crawler-cli/nonprod-labels/1"
+
+EXPOSURE_INVENTORY_SCHEMA_VERSION = "crawler-cli/exposure-inventory/1"
 
 _psl = PublicSuffixList()
 
@@ -473,3 +478,63 @@ def _header(headers: dict[str, object], name: str) -> str | None:
         if str(key).lower() == name:
             return str(value)
     return None
+
+
+def _redacted_url(url: str | None, digest: CorrelationDigest) -> str | None:
+    """Apply the ticket-153 projection to a URL this command did not compose.
+
+    Candidate and redirect URLs can carry sensitive query values even though
+    the inventory only ever requested one bare path: a redirect target is
+    chosen by the site, not by us.
+    """
+    if not url:
+        return None
+    return project_url(url, digest=digest).redacted
+
+
+def build_inventory_artifact(
+    evidence: list[CandidateEvidence],
+    *,
+    scope_manifest_digest: str | None,
+    labels: tuple[str, ...],
+    digest: CorrelationDigest | None = None,
+) -> dict[str, object]:
+    """Assemble the versioned, redacted exposure-inventory artifact.
+
+    Counts are reported per state so that "never looked" can never be read as
+    "looked and found nothing": ``not_authorised_not_resolved`` and
+    ``reachable`` are separate lines, and absent enrichment is never a clean
+    result.
+    """
+    correlation = digest or CorrelationDigest.for_run()
+    rows: list[dict[str, object]] = []
+    counts: dict[str, int] = {}
+    for item in evidence:
+        row = item.as_dict()
+        row["hostname"] = str(row["hostname"])
+        http = cast("dict[str, object]", row["http"])
+        http["final_url"] = _redacted_url(item.final_url, correlation)
+        http["redirect_target"] = _redacted_url(item.redirect_target, correlation)
+        row["origin"] = _redacted_url(item.resolution.decision.origin, correlation)
+        rows.append(row)
+        counts[item.state] = counts.get(item.state, 0) + 1
+    return {
+        "schema_version": EXPOSURE_INVENTORY_SCHEMA_VERSION,
+        "label_set_version": CANDIDATE_LABEL_SET_VERSION,
+        "observed_at": datetime.now(UTC).isoformat(),
+        "scope_manifest_digest": scope_manifest_digest,
+        "labels": list(labels),
+        "summary": {
+            "candidates": len(evidence),
+            "states": counts,
+            # Requested is the honest cost figure: how many HTTP requests this
+            # command actually made against the operator's systems.
+            "requested": counts.get(STATE_REACHABLE, 0) + counts.get(STATE_FETCH_FAILED, 0),
+        },
+        "candidates": rows,
+        "caveat": (
+            "Derived hostnames are candidates, not findings. A resolving host is an "
+            "inventory fact, not a vulnerability, and an unauthorised candidate was "
+            "never resolved or requested."
+        ),
+    }
