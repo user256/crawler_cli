@@ -54,10 +54,11 @@ treatment for rejected URLs.
   admitted at one source must not bypass the policy at another.
 - **Rules must understand path and query boundaries.** The review names broad
   substring matching as the principal risk: it creates damaging false
-  positives on benign editorial URLs. `/logout` as a path segment is a
-  signout; `/blog/how-we-built-logout-flows` is an article. Ship benign
-  editorial fixtures that must not be rejected.
-- **A rule needs evidence of mutating semantics, not a suggestive noun.** A
+  positives on benign editorial URLs. Ship benign editorial fixtures that must
+  not be rejected.
+- **Proposal (not approved) — worked example:** `/logout` as a path segment is
+  a signout; `/blog/how-we-built-logout-flows` is an article.
+- **Proposal (not approved) — require evidence of mutating semantics.** A
   path segment naming a feature is not evidence that requesting it mutates
   anything. Admissible evidence is an exact known endpoint, or an explicit
   action parameter (for example `?action=delete`, `?logout=1`), or a
@@ -133,12 +134,14 @@ treatment for rejected URLs.
   admitted at one source cannot bypass it at another.
 - Benign editorial fixtures containing mutating words inside slugs are **not**
   rejected. This is the review's named risk and needs explicit coverage.
-- **Benign commerce fixtures are not rejected**: a `/cart` page, a `/checkout`
-  landing page and a `/subscribe` plans page must all still be crawled. Any
-  proposed built-in rule must ship a fixture proving it does not suppress them.
-- Rejection requires evidence of mutating semantics — a known endpoint, an
-  explicit action parameter, or an operator-supplied rule. A bare substring or
-  a suggestive path noun is not sufficient grounds.
+- **Proposal (not approved) — benign commerce fixtures are not rejected**: a
+  `/cart` page, a `/checkout` landing page and a `/subscribe` plans page must
+  all still be crawled. Any proposed built-in rule must ship a fixture proving
+  it does not suppress them.
+- **Proposal (not approved):** rejection requires evidence of mutating
+  semantics — a known endpoint, an explicit action parameter, or an
+  operator-supplied rule. A bare substring or a suggestive path noun is not
+  sufficient grounds.
 - Rejections are typed skips with rule and source provenance and zero status,
   distinct from fetch errors, scope denials and destination denials.
 - Rejected URLs do not consume the useful-page budget.

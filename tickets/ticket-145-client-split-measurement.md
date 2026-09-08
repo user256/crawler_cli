@@ -44,9 +44,8 @@ Consequences the review states explicitly:
 - **No challenge escalation inside the matrix.** Escalating one cell to a
   browser changes more than the declared dimension.
 - **No proxy rotation inside the matrix.** Egress is a controlled variable.
-- **No retry-on-403.** Retrying until something succeeds is the evasion
-  pattern ticket 144 rules out; a 403 is a result, not a problem to route
-  around.
+- **No retry-on-403.** The register requires this explicitly: a 403 is a result,
+  not a problem to route around.
 
 ### The dimension
 

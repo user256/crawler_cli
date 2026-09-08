@@ -35,8 +35,8 @@ someone runs `git add -f`. These two reached `master` empty.
    tickets stay `proposed` for that reason.
 
    **This file was itself untracked and had never been committed.** It is added
-   to git in this change, because it is the only surviving record of the
-   surviving scope record for both tickets and the register already links to it.
+   to git in this change, because it is the only surviving scope record for
+   both tickets and the register already links to it.
 
 2. **`tickets/ticket-queue.md`** — the register one-liners: line 539 for 145,
    line 541 for 147.
@@ -132,8 +132,8 @@ rather than inventing the missing specifics.
   sections in full; they are short enough to read whole.
 - The "written by me" and "implementation guidance" lists above are where to
   concentrate. Everything else is a restatement of a cited line.
-- In the ticket files, anything inside a "Proposal (not approved)" block is
-  mine and is not scope. Everything outside those blocks traces to a citation
-  in the tables above.
+- In the ticket files, reviewer-authored material is labelled "Proposal (not
+  approved)" and is not scope. Implementation guidance is also labelled.
+  Everything else traces to a citation in the tables above.
 - Both ticket files keep `proposed` status and carry a banner saying they are
   reconstructions and that the brief wins on any conflict.
