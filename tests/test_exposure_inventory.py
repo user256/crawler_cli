@@ -34,6 +34,7 @@ from crawler_cli.exposure_inventory import (
     authorise_candidates,
     build_inventory_artifact,
     candidate_probe_url,
+    compare_to_error_template,
     authorised_origins,
     derive_candidate_hosts,
     fetchable_candidates,
@@ -603,3 +604,104 @@ async def test_artifact_serialises_to_json():
         await _evidence_for_artifact(), scope_manifest_digest=None, labels=("dev",), digest=_FIXED_DIGEST
     )
     assert json.loads(json.dumps(artifact))["summary"]["candidates"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Soft-404 comparison — similarity and indexability are separate claims
+# ---------------------------------------------------------------------------
+
+
+def _fingerprint(simhash=0b0, title="Page not found"):
+    return SimpleNamespace(simhash=simhash, title=title)
+
+
+def _page(url, status=200, simhash=0b0, title="Page not found", noindex=False):
+    return SimpleNamespace(url=url, status=status, simhash=simhash, title=title, noindex=noindex)
+
+
+def test_an_indexable_page_matching_the_error_template_is_a_finding_candidate():
+    """The sapiens case: /page-404/ served as an indexable 200."""
+    matches = compare_to_error_template(_fingerprint(), [_page("https://example.com/page-404/")])
+
+    assert len(matches) == 1
+    assert matches[0].similar is True
+    assert matches[0].indexable is True
+    assert matches[0].finding_candidate is True
+    assert matches[0].path_hint == "404"
+
+
+def test_a_genuine_404_resembling_the_template_is_not_a_finding():
+    """Similarity and indexability are separate claims.
+
+    A real 404 that looks like the error template is the site working
+    correctly, so it must not be reported as a candidate.
+    """
+    matches = compare_to_error_template(_fingerprint(), [_page("https://example.com/missing", status=404)])
+
+    assert matches[0].similar is True
+    assert matches[0].indexable is False
+    assert matches[0].finding_candidate is False
+
+
+def test_a_noindexed_error_page_is_not_a_finding_candidate():
+    matches = compare_to_error_template(_fingerprint(), [_page("https://example.com/page-404/", noindex=True)])
+    assert matches[0].indexable is False
+    assert matches[0].finding_candidate is False
+
+
+def test_a_dissimilar_page_is_not_reported_at_all():
+    far = 0xFFFF_FFFF_FFFF_FFFF
+    matches = compare_to_error_template(
+        _fingerprint(simhash=0), [_page("https://example.com/about", simhash=far, title="About us")]
+    )
+    assert matches == []
+
+
+def test_similarity_uses_the_shared_simhash_threshold():
+    """One definition of "near duplicate" across the codebase."""
+    within = 0b111  # distance 3, inside the default threshold of 4
+    beyond = 0b111_1111  # distance 7, outside it
+
+    assert compare_to_error_template(_fingerprint(), [_page("https://a/", simhash=within, title="x")])
+    assert compare_to_error_template(_fingerprint(), [_page("https://b/", simhash=beyond, title="x")]) == []
+
+
+def test_a_matching_title_alone_is_enough_to_compare():
+    """Sites often serve the error template with an identical title."""
+    matches = compare_to_error_template(_fingerprint(simhash=None), [_page("https://example.com/x", simhash=None)])
+    assert matches[0].title_matches is True
+    assert matches[0].simhash_distance is None
+
+
+@pytest.mark.parametrize(
+    ("url", "hint"),
+    [
+        ("https://example.com/page-for-tests/", "page-for-tests"),
+        ("https://example.com/page-404/", "404"),
+        ("https://example.com/error/", "error"),
+        ("https://example.com/about/", None),
+    ],
+)
+def test_path_hints_are_provenance_not_a_verdict(url, hint):
+    """Ticket 146: a URL containing 404 or test is a candidate, not a finding.
+
+    The hint only ever annotates a comparison that already stands on its own
+    evidence, so a benign URL is never promoted by its spelling alone.
+    """
+    matches = compare_to_error_template(_fingerprint(), [_page(url)])
+    assert matches[0].path_hint == hint
+
+
+def test_a_suspicious_path_without_similarity_is_not_reported():
+    far = 0xFFFF_FFFF_FFFF_FFFF
+    matches = compare_to_error_template(
+        _fingerprint(simhash=0),
+        [_page("https://example.com/page-404/", simhash=far, title="Real content")],
+    )
+    assert matches == []
+
+
+def test_comparison_makes_no_requests():
+    """The fingerprint came from one probe; the pages were already crawled."""
+    matches = compare_to_error_template(_fingerprint(), [_page("https://example.com/page-404/")])
+    assert matches[0].as_dict()["finding_candidate"] is True
