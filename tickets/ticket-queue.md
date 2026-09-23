@@ -4,6 +4,28 @@ A list of tickets, their status and the md file which summarises action taken fo
 **Authoritative register** for status, acceptance notes, and delivery order.
 Ticket files remain the source of truth for scope and DoD.
 
+### Current position (2026-09-23)
+
+- **Register reconciliation.** The 2026-07-22 wiring audit was filed on disk
+  as tickets 130–143, colliding with the already-assigned release and Magento
+  lane. The audit lane is now **163–176**: 163 list-run isolation; 164 sitemap
+  hreflang retention; 165 skip-budget semantics; 166 Playwright byte cap; 167
+  Obscura auth/status parity; 168 browser per-host proxy selection; 169 UA
+  precedence; 170 fresh challenge proxy; 171 rate-limit CLI/GUI wiring; 172
+  GUI DSN hygiene; 173 GUI run-scoped graph; 174 refresh-days documentation;
+  175 concurrency/skip-sitemaps drift; and 176 List max-pages semantics.
+  The Magento tickets retain 131–134 and release ticket 130 remains closed.
+- **Stale status closed:** ticket **146** shipped in PRs #80–#87; its
+  `exposure-inventory` command and dedicated tests are present. Ticket **162**
+  is complete: ticket 149 landed the relevant guard and the unmerged adapter
+  remains documented prior art, not merge material.
+- **New Shopify findings:** 177 raw HTTP sitemaps under `--js`; 178
+  run-scoped inlink orphans; 179 Playwright redirect-status evidence; 180
+  changed-seed resume intent; 181 429 versus challenge accounting; 182 system
+  Chromium discovery. The next unreserved number is **183**.
+- Cached `origin/master` is one commit ahead (`e652f99`, reconstructed tickets
+  145 and 147). It has not been merged into this dirty working tree.
+
 ### Current position (2026-07-17)
 
 - Ticket **122** (PR **#47**) is reviewed and **merged**: compare `--replace`
@@ -236,7 +258,7 @@ Ticket files remain the source of truth for scope and DoD.
   the affected fields.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**162**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**183**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -542,7 +564,7 @@ its evidence contract.
 
 - `144` `done` (2026-08-21, PR #64) [ticket-144-adversarial-crawler-scope.md](./ticket-144-adversarial-crawler-scope.md) — **P1:** README/SKILL/CLI help now name the product boundary — evidence crawler, not evasion, not pentest — with an explicit out-of-scope list, corrected dual-use flag help, and a `tests/contract/test_product_scope_contract.py` guard. Foundation for 145–154.
 - `145` `proposed` [ticket-145-client-split-measurement.md](./ticket-145-client-split-measurement.md) — **P2, depends on 144+148+149+153:** bounded plain vs impersonate vs spoofed-bot UA matrix; no retry-on-403; spoofed Googlebot is not Googlebot
-- `146` `proposed` [ticket-146-authorised-exposure-inventory.md](./ticket-146-authorised-exposure-inventory.md) — **P2, depends on 144+148+149+153:** declared non-prod hosts, CLI soft-404 fingerprint, sitemap leftovers, and published error/test URLs; no payloads
+- `146` `done` (2026-09-23, PRs #80–#87) [ticket-146-authorised-exposure-inventory.md](./ticket-146-authorised-exposure-inventory.md) — **P2:** shipped the scope-gated `exposure-inventory` command, bounded declared-host probes, soft-404/sitemap evidence, redacted versioned artifact, and dedicated regression tests; no payloads
 - `147` `proposed` [ticket-147-crawler-self-safety.md](./ticket-147-crawler-self-safety.md) — **P1/safety, depends on 144:** regression-lock existing GET-only HTTP(S); add session-mutating URL policy, robots confirmation, typed skip evidence; strict-mode integration uses 148
 - `148` `done` (2026-08-21, PR #65) [ticket-148-authorisation-scope-manifest.md](./ticket-148-authorisation-scope-manifest.md) — **P1, depends on 144:** versioned operator attestation with exact origin/path/time/method scope and one fail-closed predicate applied to every URL source; gates security-adjacent fetch modes. Unblocks 149 and 152.
 - `149` `done` (2026-09-07, PRs #72/#74/#75/#76 + browser/archive follow-up) [ticket-149-default-network-ssrf-safety.md](./ticket-149-default-network-ssrf-safety.md) — **P1/security, depends on 148:** block special/private destinations and rebinding across redirects/auxiliary fetches; honest per-backend capabilities; double-confirmed private-network exception. **Prior art:** `portal_adapter.py` on unmerged branch `feature/3350-portal-url-policy-v1` (`8fcdb54`) already implements the address-class policy and the per-hop resolve-validate-pin loop, with tests; read it first (see ticket 162).
@@ -576,7 +598,37 @@ an optional outcome-feedback layer and does not block either discovery path.
 
 - `160` `done` (2026-08-24 PR #68, completed 2026-09-07 by ticket 161) [ticket-160-first-class-render-parity-audit.md](./ticket-160-first-class-render-parity-audit.md) — **P1, builds on completed 019+031+097+153+157+159:** `crawler-cli compare-renders` over exact URLs, `--csv-file`, and `--crawl-run-id`, same-navigation raw-versus-hydrated comparison, typed completeness, multiple typed findings, `crawler-cli/render-comparison/1` JSON plus CSV and self-contained HTML report with strata coverage and filter, and the `--fail-on`/`--fail-on-incomplete` exit contract. No Googlebot-emulation claim.
 - `161` `done` (2026-09-07) [ticket-161-render-parity-run-selection-and-persistence.md](./ticket-161-render-parity-run-selection-and-persistence.md) — **P1, depends on 153+157+159 and the first delivery of 160:** run-backed `--crawl-run-id` selection with deterministic sampling and honest run/partial provenance, operator template labels plus computed path strata and stratum coverage/filtering in JSON/CSV/HTML, and the optional run-scoped render-comparison persistence session. Closes ticket 160.
-- `162` `proposed` (2026-09-07) [ticket-162-orphaned-migration-manager-adapter.md](./ticket-162-orphaned-migration-manager-adapter.md) — **P2, relates to completed 130 and proposed 149:** triage and disposition of the orphaned Portal Migration Manager adapter on `feature/3350-portal-url-policy-v1`. Not mergeable as authored (pins the excluded `v0.2.1`; contract baseline predates 144–161). Recommended disposition is harvest-then-retire: carry its address-class policy and per-hop re-resolution into ticket 149 and leave the branch as history.
+- `162` `done` (2026-09-23) [ticket-162-orphaned-migration-manager-adapter.md](./ticket-162-orphaned-migration-manager-adapter.md) — **P2:** ticket 149 landed the relevant guard; retain `feature/3350-portal-url-policy-v1` as documented prior art, not merge material.
+
+### Correctness backlog reconciliation (2026-09-23)
+
+The 2026-07-22 wiring-audit tickets were renumbered from their colliding local
+130–143 identifiers. Magento hygiene keeps 131–134 and the release remains
+130; audit identifiers are now 163–176.
+
+- `163` `proposed` [ticket-163-list-crawl-run-id-isolation.md](./ticket-163-list-crawl-run-id-isolation.md) — **P0:** List/CSV crawls honour `--crawl-run-id`
+- `164` `proposed` [ticket-164-sitemap-hreflang-snapshot-retention.md](./ticket-164-sitemap-hreflang-snapshot-retention.md) — **P0:** retain sitemap-only hreflang in run snapshots
+- `165` `proposed` [ticket-165-skip-outcomes-session-budget.md](./ticket-165-skip-outcomes-session-budget.md) — **P1:** make `--max-pages` semantics consistent for skips and content
+- `166` `proposed` [ticket-166-playwright-max-response-bytes-text.md](./ticket-166-playwright-max-response-bytes-text.md) — **P1:** cap parsed Playwright text as well as body
+- `167` `proposed` [ticket-167-obscura-fetch-auth-status-parity.md](./ticket-167-obscura-fetch-auth-status-parity.md) — **P1:** prevent silent Obscura auth/status falsehoods
+- `168` `proposed` [ticket-168-playwright-per-host-proxy-select.md](./ticket-168-playwright-per-host-proxy-select.md) — **P1:** make browser `per-host` proxy selection honest
+- `169` `proposed` [ticket-169-custom-ua-vs-per-domain-ua.md](./ticket-169-custom-ua-vs-per-domain-ua.md) — **P2:** restore per-domain UA precedence
+- `170` `proposed` [ticket-170-challenge-escalate-fresh-proxy.md](./ticket-170-challenge-escalate-fresh-proxy.md) — **P2:** select a distinct proxy for bounded challenge escalation
+- `171` `proposed` [ticket-171-rate-limit-cli-gui-delay.md](./ticket-171-rate-limit-cli-gui-delay.md) — **P2:** wire crawl rate limit through CLI/GUI
+- `172` `proposed` [ticket-172-gui-crawl-dsn-env.md](./ticket-172-gui-crawl-dsn-env.md) — **P2:** keep GUI DSNs off argv
+- `173` `proposed` [ticket-173-gui-run-scoped-link-graph.md](./ticket-173-gui-run-scoped-link-graph.md) — **P2:** scope GUI link graph to the selected run
+- `174` `proposed` [ticket-174-refresh-days-run-scope.md](./ticket-174-refresh-days-run-scope.md) — **P3:** document and lock refresh-days scope
+- `175` `proposed` [ticket-175-concurrency-skip-sitemaps-hygiene.md](./ticket-175-concurrency-skip-sitemaps-hygiene.md) — **P3:** resolve config/CLI drift
+- `176` `proposed` [ticket-176-list-max-pages-semantics.md](./ticket-176-list-max-pages-semantics.md) — **P2:** make GUI List max-pages honest
+
+### Shopify crawl correctness follow-ups (2026-09-23)
+
+- `177` `proposed` [ticket-177-raw-http-sitemap-fetch-under-js.md](./ticket-177-raw-http-sitemap-fetch-under-js.md) — **P1:** fetch sitemap documents as raw HTTP under browser page backends
+- `178` `proposed` [ticket-178-orphans-use-run-scoped-inlinks.md](./ticket-178-orphans-use-run-scoped-inlinks.md) — **P1:** define orphans from same-run internal inlinks
+- `179` `proposed` [ticket-179-playwright-redirect-status-evidence.md](./ticket-179-playwright-redirect-status-evidence.md) — **P1:** retain requested/final redirect status evidence in Playwright
+- `180` `proposed` [ticket-180-resume-seed-mismatch-intent.md](./ticket-180-resume-seed-mismatch-intent.md) — **P1:** do not silently discard changed resume seeds
+- `181` `proposed` [ticket-181-rate-limit-vs-challenge-accounting.md](./ticket-181-rate-limit-vs-challenge-accounting.md) — **P2:** distinguish 429 rate limits from challenges and count distinct URLs
+- `182` `proposed` [ticket-182-playwright-system-chromium-discovery.md](./ticket-182-playwright-system-chromium-discovery.md) — **P3:** bounded system-Chromium fallback after bundled launch failure
 
 Deferred lanes remain below.
 
