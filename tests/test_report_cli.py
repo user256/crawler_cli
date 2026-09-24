@@ -164,6 +164,10 @@ class FakeReports:
         self.calls.append(("internal-link-quality", {}))
         return []
 
+    async def link_graph_metrics(self):
+        self.calls.append(("link-graph-metrics", {}))
+        return [{"graph_complete": True}]
+
     async def tracking_parameter_links(self):
         self.calls.append(("tracking-parameter-links", {}))
         return []
@@ -327,6 +331,7 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "schema-compatibility",
         "image-issues",
         "internal-link-quality",
+        "link-graph-metrics",
         "tracking-parameter-links",
         "near-duplicates",
         "internal-authority",

@@ -128,16 +128,32 @@ class CrawlReports:
 
     async def orphan_pages(self) -> list[dict[str, object]]:
         run_id = await self._run_id()
-        return await self._fetch(
+        run = await self.store.get_crawl_run(run_id)
+        pages = await self._fetch(
             """
-            SELECT u.url
+            SELECT u.url, u.kind, s.links_json, s.content_extracted,
+                   s.render_discovery_attempted, s.render_discovery_complete
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
-            LEFT JOIN frontier f ON f.run_id = s.run_id AND f.url_id = u.id
-            WHERE s.run_id = $1 AND u.kind = 'html' AND f.parent_id IS NULL
+            WHERE s.run_id = $1 AND u.kind = 'html'
             ORDER BY u.url
             """,
             run_id,
         )
+        graph = _build_link_graph(pages)
+        inbound = graph["inbound"]
+        complete = graph["complete"] and bool(run and run.get("status") == "complete")
+        seeds = set(run.get("seed_urls", [])) if run and isinstance(run.get("seed_urls"), list) else set()
+        return [
+            {
+                "url": str(page["url"]),
+                "candidate_type": "crawled_html_zero_observed_inlinks",
+                "observed_inlink_count": 0,
+                "graph_complete": complete,
+                "seed": str(page["url"]) in seeds,
+            }
+            for page in pages
+            if inbound.get(str(page["url"]), 0) == 0
+        ]
 
     async def indexability_reasons(self) -> list[dict[str, object]]:
         run_id = await self._run_id()
@@ -166,7 +182,9 @@ class CrawlReports:
         run_id = await self._run_id()
         return await self._fetch(
             """
-            SELECT src.url AS requested_url, dst.url AS final_url, pm.initial_status_code, pm.final_status_code
+            SELECT src.url AS requested_url, dst.url AS final_url,
+                   pm.initial_status_code, pm.final_status_code,
+                   pm.redirect_chain_json AS ordered_hops
             FROM page_run_snapshots pm
             JOIN urls src ON src.id = pm.url_id
             JOIN urls dst ON dst.id = pm.final_url_id
@@ -331,39 +349,126 @@ class CrawlReports:
         )
 
     async def internal_link_quality(self) -> list[dict[str, object]]:
-        """Internal links carrying weak crawl or consolidation signals."""
+        """Run-scoped internal link instances with every applicable issue."""
         run_id = await self._run_id()
-        return await self._fetch(
+        rows = await self._fetch(
             """
-            WITH edges AS (
-                SELECT source.url AS source_url, link ->> 'href' AS target_url,
-                       NULLIF(link ->> 'anchor_text', '') AS anchor_text,
-                       link ->> 'xpath' AS xpath
-                FROM page_run_snapshots snapshot
-                JOIN urls source ON source.id = snapshot.url_id
-                CROSS JOIN LATERAL jsonb_array_elements(snapshot.links_json) link
-                WHERE snapshot.run_id = $1
-            )
-            SELECT edges.source_url, edges.target_url, edges.anchor_text, edges.xpath,
-                   target.final_status_code AS target_status,
-                   target.overall_indexable AS target_indexable,
-                   CASE
-                     WHEN edges.anchor_text IS NULL THEN 'empty_anchor'
-                     WHEN target.final_status_code BETWEEN 300 AND 399 THEN 'redirect_target'
-                     WHEN target.final_status_code >= 400 THEN 'error_target'
-                     WHEN target.overall_indexable = FALSE THEN 'non_indexable_target'
-                   END AS issue
-            FROM edges
-            LEFT JOIN urls target_url ON target_url.url = edges.target_url
-            LEFT JOIN page_run_snapshots target
-              ON target.run_id = $1 AND target.url_id = target_url.id
-            WHERE edges.anchor_text IS NULL
-               OR target.final_status_code >= 300
-               OR target.overall_indexable = FALSE
-            ORDER BY edges.source_url, edges.target_url
+            SELECT source.url AS source_url, source_snapshot.overall_indexable AS source_indexable,
+                   link AS link_evidence, target_snapshot.initial_status_code AS target_initial_status,
+                   target_snapshot.final_status_code AS target_status,
+                   target_snapshot.final_url_id AS target_final_url_id,
+                   target_snapshot.url_id AS target_url_id,
+                   target_snapshot.overall_indexable AS target_indexable,
+                   target_snapshot.html_meta_allows, target_snapshot.http_header_allows,
+                   target_snapshot.canonical_urls_json, target_snapshot.challenge,
+                   target_url.url AS target_saved_url
+            FROM page_run_snapshots source_snapshot
+            JOIN urls source ON source.id = source_snapshot.url_id
+            CROSS JOIN LATERAL jsonb_array_elements(source_snapshot.links_json) link
+            LEFT JOIN urls target_url ON target_url.url = link ->> 'href'
+            LEFT JOIN page_run_snapshots target_snapshot
+              ON target_snapshot.run_id = $1 AND target_snapshot.url_id = target_url.id
+            WHERE source_snapshot.run_id = $1
+            ORDER BY source.url, link ->> 'href', link ->> 'xpath'
             """,
             run_id,
         )
+        graph_hosts = {urlparse(str(row["source_url"])).hostname for row in rows}
+        findings: list[dict[str, object]] = []
+        for row in rows:
+            evidence = _json_object(row.get("link_evidence"))
+            target_url = str(evidence.get("href", ""))
+            host = urlparse(target_url).hostname
+            if not target_url or host not in graph_hosts:
+                continue
+            issues: list[str] = []
+            anchor = evidence.get("anchor_text")
+            if not isinstance(anchor, str) or not anchor.strip():
+                issues.append("empty_anchor")
+            status = row.get("target_status")
+            initial_status = row.get("target_initial_status")
+            if row.get("target_url_id") is not None and (
+                row.get("target_final_url_id") != row.get("target_url_id")
+                or (isinstance(initial_status, int) and 300 <= initial_status < 400)
+            ):
+                issues.append("redirect_target")
+            if isinstance(status, int) and status >= 400 and not row.get("challenge"):
+                issues.append("error_target")
+            if row.get("challenge"):
+                issues.append("challenge_target")
+            if row.get("html_meta_allows") is False or row.get("http_header_allows") is False:
+                issues.append("noindex_target")
+            if row.get("target_indexable") is False:
+                issues.append("non_indexable_target")
+            canonicals = _json_list(row.get("canonical_urls_json"))
+            canonical = str(canonicals[0]) if canonicals else None
+            if canonical and _without_fragment(canonical) != _without_fragment(target_url):
+                issues.append("noncanonical_target")
+            if urlparse(target_url).query:
+                issues.append("parameter_target")
+            if not issues:
+                continue
+            # Keep the legacy scalar field for ticket-185's live-failure join;
+            # issue_list carries simultaneous facts without hiding any.
+            legacy_issue = "error_target" if "error_target" in issues else issues[0]
+            findings.append(
+                {
+                    "source_url": row["source_url"],
+                    "source_indexable": row.get("source_indexable"),
+                    "target_url": target_url,
+                    "target_status": status,
+                    "target_initial_status": initial_status,
+                    "target_indexable": row.get("target_indexable"),
+                    "anchor_text": anchor,
+                    "xpath": evidence.get("xpath"),
+                    "original_href": evidence.get("original_href"),
+                    "is_image": evidence.get("is_image", False),
+                    "fragment": evidence.get("fragment"),
+                    "rel": evidence.get("rel", []),
+                    "discovery_source": evidence.get("discovery_source", "legacy_unspecified"),
+                    "issues": issues,
+                    "issue": legacy_issue,
+                }
+            )
+        return findings
+
+    async def link_graph_metrics(self) -> list[dict[str, object]]:
+        """Separate edge counts from qualified depth/reachability claims."""
+        run_id = await self._run_id()
+        pages = await self._fetch(
+            """
+            SELECT u.url, s.links_json, s.content_extracted,
+                   s.render_discovery_attempted, s.render_discovery_complete
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1 AND u.kind = 'html' ORDER BY u.url
+            """,
+            run_id,
+        )
+        graph = _build_link_graph(pages)
+        run = await self.store.get_crawl_run(run_id)
+        graph["complete"] = graph["complete"] and bool(run and run.get("status") == "complete")
+        seeds = run.get("seed_urls", []) if run and isinstance(run.get("seed_urls"), list) else []
+        adjacency = graph["adjacency"]
+        depths: dict[str, int] = {}
+        pending = [str(seed) for seed in seeds if str(seed) in adjacency]
+        depths.update({seed: 0 for seed in pending})
+        while pending:
+            source = pending.pop(0)
+            for target in sorted(adjacency.get(source, set())):
+                if target not in depths:
+                    depths[target] = depths[source] + 1
+                    pending.append(target)
+        return [
+            {
+                "unique_sources": graph["source_count"],
+                "unique_targets": graph["target_count"],
+                "link_instances": graph["instance_count"],
+                "graph_complete": graph["complete"],
+                "reachable_pages": len(depths) if graph["complete"] else None,
+                "max_depth": max(depths.values(), default=0) if graph["complete"] else None,
+                "depth_qualification": "complete_saved_graph" if graph["complete"] else "unqualified_incomplete_graph",
+            }
+        ]
 
     async def tracking_parameter_links(self) -> list[dict[str, object]]:
         """Internal links that publish known analytics/session parameters."""
@@ -658,11 +763,34 @@ class CrawlReports:
         async with self.store.pool.acquire() as conn:
             await conn.execute(
                 """
-                CREATE MATERIALIZED VIEW IF NOT EXISTS crawler_orphan_pages AS
-                SELECT u.url
-                FROM urls u
-                LEFT JOIN frontier f ON f.url_id = u.id
-                WHERE u.kind = 'html' AND f.parent_id IS NULL
+                DROP MATERIALIZED VIEW IF EXISTS crawler_orphan_pages
+                """
+            )
+            await conn.execute(
+                """
+                CREATE MATERIALIZED VIEW crawler_orphan_pages AS
+                SELECT s.run_id, u.url,
+                       'crawled_html_zero_observed_inlinks'::TEXT AS candidate_type,
+                       (r.status = 'complete' AND NOT EXISTS (
+                           SELECT 1 FROM page_run_snapshots coverage
+                           JOIN urls covered_url ON covered_url.id = coverage.url_id
+                           WHERE coverage.run_id = s.run_id AND covered_url.kind = 'html'
+                             AND (coverage.content_extracted IS DISTINCT FROM TRUE
+                                  OR (coverage.render_discovery_attempted
+                                      AND coverage.render_discovery_complete IS DISTINCT FROM TRUE))
+                       )) AS graph_complete
+                FROM page_run_snapshots s
+                JOIN urls u ON u.id = s.url_id
+                JOIN crawl_runs r ON r.run_id = s.run_id
+                WHERE u.kind = 'html'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM page_run_snapshots source_snapshot
+                      JOIN urls source ON source.id = source_snapshot.url_id
+                      CROSS JOIN LATERAL jsonb_array_elements(source_snapshot.links_json) link
+                      WHERE source_snapshot.run_id = s.run_id
+                        AND source.url <> u.url
+                        AND link ->> 'href' = u.url
+                  )
                 """
             )
 
@@ -672,3 +800,64 @@ class CrawlReports:
         async with self.store.pool.acquire() as conn:
             rows = await conn.fetch(query, *args)
         return [dict(row) for row in rows]
+
+
+def _json_object(value: object) -> dict[str, object]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _json_list(value: object) -> list[object]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    return value if isinstance(value, list) else []
+
+
+def _without_fragment(value: str) -> str:
+    return urlparse(value)._replace(fragment="").geturl()
+
+
+def _build_link_graph(pages: list[dict[str, object]]) -> dict[str, Any]:
+    """Build edges only between same-run HTML snapshot nodes and in-scope hosts."""
+    nodes = {str(page["url"]) for page in pages}
+    hosts = {urlparse(url).hostname for url in nodes}
+    inbound = {url: 0 for url in nodes}
+    adjacency: dict[str, set[str]] = {url: set() for url in nodes}
+    instances = 0
+    sources: set[str] = set()
+    targets: set[str] = set()
+    complete = bool(pages)
+    for page in pages:
+        if page.get("content_extracted") is not True:
+            complete = False
+        if page.get("render_discovery_attempted") is True and page.get("render_discovery_complete") is not True:
+            complete = False
+        source = str(page["url"])
+        for raw_link in _json_list(page.get("links_json")):
+            link = raw_link if isinstance(raw_link, dict) else {}
+            target = str(link.get("href", ""))
+            if target not in nodes or urlparse(target).hostname not in hosts:
+                continue
+            instances += 1
+            sources.add(source)
+            targets.add(target)
+            adjacency[source].add(target)
+            # Self-links are preserved as instances, but do not count as an
+            # incoming discovery edge for orphan classification.
+            if source != target:
+                inbound[target] += 1
+    return {
+        "inbound": inbound,
+        "adjacency": adjacency,
+        "complete": complete,
+        "source_count": len(sources),
+        "target_count": len(targets),
+        "instance_count": instances,
+    }

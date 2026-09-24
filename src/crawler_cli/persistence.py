@@ -371,6 +371,7 @@ SCHEMA_STATEMENTS = [
         indexability_evidence_json JSONB,
         schema_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         links_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        redirect_chain_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         images_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         analytics_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         amphtml_url TEXT,
@@ -516,6 +517,7 @@ SCHEMA_STATEMENTS = [
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS indexability_evidence_json JSONB""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS schema_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS links_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS redirect_chain_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS images_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS content_extracted BOOLEAN""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS analytics_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
@@ -2543,7 +2545,17 @@ class AsyncpgStore:
             ]
             schema = list(extracted.schema_data or [])
             links = [
-                {"href": link.href, "anchor_text": link.anchor_text, "xpath": link.xpath}
+                {
+                    "href": link.href,
+                    "original_href": link.original_href,
+                    "anchor_text": link.anchor_text,
+                    "xpath": link.xpath,
+                    "is_image": link.is_image,
+                    "fragment": link.fragment,
+                    "url_parameters": link.url_parameters,
+                    "rel": link.rel,
+                    "discovery_source": "html_anchor",
+                }
                 for link in (result.discovered_links or [])
                 if link.href
             ]
@@ -2590,12 +2602,12 @@ class AsyncpgStore:
                 custom_data, html_meta_allows, http_header_allows, overall_indexable, challenge,
                 skip_reason, content_extracted, ttfb_seconds, total_duration_seconds, lcp_ms, cls, inp_ms, canonical_urls_json, hreflang_json, robots_json, schema_json,
                 links_json, images_json, analytics_json, indexability_evidence_json, amphtml_url, render_discovery_attempted,
-                render_discovery_complete, render_discovery_skip_reason
+                render_discovery_complete, render_discovery_skip_reason, redirect_chain_json
             ) VALUES (
                 $1, $2, $3, $4, $5, EXTRACT(EPOCH FROM NOW())::INTEGER,
                 $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
                 $17::jsonb, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
-                $29::jsonb, $30::jsonb, $31::jsonb, $32::jsonb, $33::jsonb, $34::jsonb, $35::jsonb, $36::jsonb, $37, $38, $39, $40
+                $29::jsonb, $30::jsonb, $31::jsonb, $32::jsonb, $33::jsonb, $34::jsonb, $35::jsonb, $36::jsonb, $37, $38, $39, $40, $41::jsonb
             )
             ON CONFLICT (run_id, url_id) DO UPDATE SET
                 final_url_id = EXCLUDED.final_url_id,
@@ -2637,11 +2649,12 @@ class AsyncpgStore:
                 , render_discovery_attempted = EXCLUDED.render_discovery_attempted
                 , render_discovery_complete = EXCLUDED.render_discovery_complete
                 , render_discovery_skip_reason = EXCLUDED.render_discovery_skip_reason
+                , redirect_chain_json = EXCLUDED.redirect_chain_json
             """,
             self.active_run_id,
             url_id,
             final_url_id,
-            result.status,
+            (result.redirect_chain[0].get("status") if result.redirect_chain else result.status),
             result.status,
             json.dumps(result.headers, sort_keys=True),
             html_blob,
@@ -2678,6 +2691,7 @@ class AsyncpgStore:
             result.render_discovery_attempted,
             result.render_discovery_complete,
             result.render_discovery_skip_reason,
+            json.dumps(result.redirect_chain),
         )
 
     async def _persist_once(self, result: CrawlResult) -> None:

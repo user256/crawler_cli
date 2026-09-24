@@ -2232,6 +2232,8 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.image_issues()
     if name == "internal-link-quality":
         return await reports.internal_link_quality()
+    if name == "link-graph-metrics":
+        return await reports.link_graph_metrics()
     if name == "tracking-parameter-links":
         return await reports.tracking_parameter_links()
     if name == "near-duplicates":
@@ -2365,6 +2367,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         capability_by_report = {
             "image-issues": "images_json",
             "internal-link-quality": "links_json",
+            "link-graph-metrics": "links_json",
             "tracking-parameter-links": "links_json",
             "near-duplicates": "content_hash_simhash",
         }

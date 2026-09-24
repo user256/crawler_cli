@@ -32,6 +32,7 @@ TECHNICAL_AUDIT_REPORTS = (
     "schema-compatibility",
     "image-issues",
     "internal-link-quality",
+    "link-graph-metrics",
     "tracking-parameter-links",
     "near-duplicates",
     "internal-authority",
@@ -118,6 +119,7 @@ def build_technical_audit(
     parsed_html_count = _optional_int(context.get("parsed_html_count"))
     hashed_count = _optional_int(context.get("hashed_count"))
     completion_state = str(context.get("completion_state", "unavailable"))
+    graph_complete = bool(rows["link-graph-metrics"] and rows["link-graph-metrics"][0].get("graph_complete") is True)
 
     capabilities = context.get("schema_capabilities", {})
     if not isinstance(capabilities, Mapping):
@@ -201,10 +203,14 @@ def build_technical_audit(
             "orphan-candidates",
             "Orphan-page candidates",
             "Orphan candidates",
-            rows["orphans"],
+            rows["orphans"] if graph_complete else [],
             "finding",
             "Zero observed parent does not prove an orphan without graph-coverage evidence.",
-            available=source_coverage["orphans"]["available"] is True,
+            available=(
+                source_coverage["orphans"]["available"] is True
+                and source_coverage["link-graph-metrics"]["available"] is True
+                and graph_complete
+            ),
             denominator=parsed_html_count,
             completion_state=completion_state,
             qualification="coverage_required",
