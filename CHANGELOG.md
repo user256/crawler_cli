@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bounded live rechecks for saved failing link targets require an explicit
+  authorization manifest; only repeated in-scope HTTP failures can become
+  client actions, while recovered/challenged/disallowed/transport-error states
+  remain distinct and non-publishable.
+
 - Run-scoped indexability evidence preserves explicit robots declarations by
   source channel and user-agent scope; conflicts require a genuine explicit
   index/noindex contradiction.
