@@ -611,6 +611,16 @@ joins the default set only when `--expected-id` is supplied. Like the other
 snapshot readers, `report` requires `--crawl-run-id` when the database holds
 multiple runs.
 
+`technical-audit` writes a run-scoped evidence bundle with crawl completion,
+extraction coverage and a registry that identifies implemented, conditional,
+unimplemented and analyst-judgement checks. Incomplete or unmeasured coverage
+cannot be reported as a clean zero:
+
+```bash
+crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
+  --out ./audit-evidence/technical-audit.json
+```
+
 ### Run snapshots and retention
 
 Each fetch is retained as an immutable page snapshot for its crawl run. The
@@ -694,7 +704,7 @@ crawler-cli compare-urls --pairs mapping.csv \
 
 Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any` and exits **3** (findings) when tripped — distinct from `2` (usage error). Replacements are literal strings applied in order (no regex in v1).
 
-JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/7`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
+JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/8`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
 
 ### 4. Storage lifecycle
 

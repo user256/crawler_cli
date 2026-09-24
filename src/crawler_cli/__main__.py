@@ -74,6 +74,7 @@ from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
 from .reports import CrawlReports
+from .technical_audit import TECHNICAL_AUDIT_REPORTS, build_technical_audit
 from .validators import (
     non_negative_float,
     non_negative_int,
@@ -2008,6 +2009,17 @@ class _SavedHreflangLink(TypedDict, total=False):
     source: Literal["http_header", "html_head", "sitemap"]
 
 
+class _SavedImageReference(TypedDict, total=False):
+    url: str
+    source: Literal["img_src", "img_srcset", "picture_source"]
+    alt: str | None
+    alt_present: bool
+    width: int | None
+    height: int | None
+    loading: str | None
+    xpath: str
+
+
 class _SavedExtracted(TypedDict, total=False):
     title: str | None
     meta_description: str | None
@@ -2021,6 +2033,7 @@ class _SavedExtracted(TypedDict, total=False):
     text: str
     word_count: int
     metadata: dict[str, Any]
+    image_references: list[_SavedImageReference]
     schema_data: list[dict[str, Any]]
 
 
@@ -2176,6 +2189,11 @@ _REPORT_NAMES = (
     "missing-analytics",
     "missing-expected-id",
     "schema-compatibility",
+    "image-issues",
+    "internal-link-quality",
+    "tracking-parameter-links",
+    "near-duplicates",
+    "internal-authority",
 )
 
 
@@ -2208,6 +2226,16 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.pages_missing_expected_id(args.expected_id)
     if name == "schema-compatibility":
         return await reports.schema_compatibility()
+    if name == "image-issues":
+        return await reports.image_issues()
+    if name == "internal-link-quality":
+        return await reports.internal_link_quality()
+    if name == "tracking-parameter-links":
+        return await reports.tracking_parameter_links()
+    if name == "near-duplicates":
+        return await reports.near_duplicates(threshold=args.simhash_threshold, limit=args.similarity_limit)
+    if name == "internal-authority":
+        return await reports.internal_authority()
     raise ValueError(f"unknown report: {name}")
 
 
@@ -2312,6 +2340,68 @@ async def _run_report(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_technical_audit(args: argparse.Namespace) -> int:
+    """Build one deterministic evidence bundle from a stored crawl run."""
+    import asyncpg
+
+    store = _store_from_args(args)
+    reports = CrawlReports(store, run_id=args.crawl_run_id)
+    try:
+        # Resolve before fetching so the emitted artifact records the exact
+        # stored run even when the operator deliberately selected "latest".
+        run_id = await reports._run_id()
+        run_context = await reports.technical_audit_context()
+        run_context["audit_options"] = {
+            "simhash_threshold": args.simhash_threshold,
+            "similarity_limit": args.similarity_limit,
+            "similarity_selection": "indexable pages ordered by URL; first N pages",
+        }
+        capabilities = run_context.get("schema_capabilities", {})
+        if not isinstance(capabilities, dict):
+            capabilities = {}
+        capability_by_report = {
+            "image-issues": "images_json",
+            "internal-link-quality": "links_json",
+            "tracking-parameter-links": "links_json",
+            "near-duplicates": "content_hash_simhash",
+        }
+        evidence = {}
+        for name in TECHNICAL_AUDIT_REPORTS:
+            capability = capability_by_report.get(name)
+            if capability and capabilities.get(capability) is not True:
+                continue
+            evidence[name] = await _fetch_report(reports, name, args)
+        final_run = await store.get_crawl_run(run_id)
+        initial_updated_at = run_context.get("updated_at")
+        final_updated_at = final_run.get("updated_at") if final_run else None
+        same_run_state = (
+            final_run is not None
+            and final_run.get("status") == run_context.get("run_status")
+            and final_updated_at == initial_updated_at
+        )
+        run_context["snapshot_consistency"] = "stable" if same_run_state else "changed_during_collection"
+        if not same_run_state:
+            run_context["completion_state"] = "partial"
+            run_context["status_after_collection"] = final_run.get("status") if final_run else "missing"
+    except asyncpg.exceptions.UndefinedTableError as exc:
+        print(
+            f"Error: {exc}. This database has no run-aware snapshot schema — it either "
+            "predates snapshots (re-crawl with a current version) or is not a crawler_cli database.",
+            file=sys.stderr,
+        )
+        return EXIT_VALIDATION
+    finally:
+        await store.close()
+
+    audit = build_technical_audit(crawl_run_id=run_id, reports=evidence, run_context=run_context)
+    output = Path(args.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(audit, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    print(f"Wrote deterministic technical audit to {output}")
+
+    return EXIT_SUCCESS
+
+
 def _load_saved_crawl(path: Path) -> "CrawlJobResult":
     from .models import (
         BrowserRuntime,
@@ -2320,6 +2410,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         DiscoveredLink,
         ExtractedContent,
         HreflangLink,
+        ImageReference,
         JavaScriptUrlCandidate,
         CssUrlCandidate,
         RenderUrlCandidate,
@@ -2378,6 +2469,20 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             text=str(payload.get("text", "")),
             word_count=int(payload.get("word_count", 0) or 0),
             metadata=dict(payload.get("metadata", {}) or {}),
+            image_references=[
+                ImageReference(
+                    url=str(image.get("url", "")),
+                    source=image.get("source", "img_src"),
+                    alt=image.get("alt"),
+                    alt_present=bool(image.get("alt_present", False)),
+                    width=image.get("width"),
+                    height=image.get("height"),
+                    loading=image.get("loading"),
+                    xpath=str(image.get("xpath", "")),
+                )
+                for image in payload.get("image_references", []) or []
+                if isinstance(image, dict) and image.get("url")
+            ],
             schema_data=schema_data,
         )
 
@@ -2507,7 +2612,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             redirect_chain=list(item.get("redirect_chain", []) or []),
         )
 
-    known_artifact_versions = frozenset(f"crawler-cli/crawl-artifact/{version}" for version in range(1, 8))
+    known_artifact_versions = frozenset(f"crawler-cli/crawl-artifact/{version}" for version in range(1, 9))
 
     def _validate_schema_version(payload: Mapping[str, object]) -> None:
         """Accept unstamped or known historical artifacts, reject unknown stamps."""
@@ -3897,8 +4002,40 @@ def _build_parser() -> argparse.ArgumentParser:
         "--expected-id",
         help="Analytics identifier the missing-expected-id report checks for (e.g. 'G-XXXX')",
     )
+    report_parser.add_argument(
+        "--simhash-threshold",
+        type=non_negative_int,
+        default=4,
+        help="Maximum Hamming distance for near-duplicates (default 4)",
+    )
+    report_parser.add_argument(
+        "--similarity-limit",
+        type=non_negative_int,
+        default=5000,
+        help="Maximum indexable pages compared by near-duplicates (default 5000)",
+    )
     _add_postgres_args(report_parser)
     _add_reporting_run_selector(report_parser)
+
+    audit_parser = subparsers.add_parser(
+        "technical-audit",
+        help="Build a deterministic technical-audit evidence bundle from one stored crawl run",
+    )
+    audit_parser.add_argument("--out", required=True, help="Write the deterministic audit JSON to this path")
+    audit_parser.add_argument(
+        "--simhash-threshold",
+        type=non_negative_int,
+        default=4,
+        help="Maximum Hamming distance for near-duplicates (default 4)",
+    )
+    audit_parser.add_argument(
+        "--similarity-limit",
+        type=non_negative_int,
+        default=5000,
+        help="Maximum indexable pages compared by near-duplicates (default 5000)",
+    )
+    _add_postgres_args(audit_parser)
+    _add_reporting_run_selector(audit_parser)
 
     cmp_parser = subparsers.add_parser(
         "compare",
@@ -4288,6 +4425,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return _run_render_report(args)
     if command == "report":
         return await _run_report(args)
+    if command == "technical-audit":
+        return await _run_technical_audit(args)
     if command == "compare":
         return await _run_compare(args)
     if command == "compare-urls":

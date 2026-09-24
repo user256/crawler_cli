@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Run-scoped technical-audit extensions: image reference extraction and issue
+  reporting, internal link-quality evidence, tracking-parameter links,
+  PageRank-like internal authority scores, and SimHash near-duplicate pairs.
+
 - Speculative URL discovery across static JavaScript, CSS, and render time
   (tickets 155, 156, and 157). `--discover-js-urls` inventories bounded
   URL-like literals from executable inline scripts and same-scope linked
@@ -27,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `report render-attempts` outputs and their run-scoped PostgreSQL tables.
 
 ### Changed
+
+- **Breaking for artifact consumers:** saved crawl artifacts advance to
+  `crawler-cli/crawl-artifact/8` and add `extracted.image_references`. Version 7
+  and earlier artifacts remain loadable.
 
 - **Breaking for artifact consumers:** saved crawl artifacts are stamped
   `crawler-cli/crawl-artifact/7`, carrying the speculative-discovery evidence

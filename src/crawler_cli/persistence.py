@@ -356,6 +356,7 @@ SCHEMA_STATEMENTS = [
         overall_indexable BOOLEAN,
         challenge TEXT,
         skip_reason TEXT,
+        content_extracted BOOLEAN,
         ttfb_seconds DOUBLE PRECISION,
         total_duration_seconds DOUBLE PRECISION,
         lcp_ms DOUBLE PRECISION,
@@ -369,6 +370,7 @@ SCHEMA_STATEMENTS = [
         robots_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         schema_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         links_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        images_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         analytics_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         amphtml_url TEXT,
         variant_kind TEXT,
@@ -512,6 +514,8 @@ SCHEMA_STATEMENTS = [
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS robots_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS schema_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS links_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS images_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS content_extracted BOOLEAN""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS analytics_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS variant_kind TEXT""",
     """
@@ -2515,6 +2519,7 @@ class AsyncpgStore:
         robots: list[object] = []
         schema: list[object] = []
         links: list[dict[str, object]] = []
+        images: list[dict[str, object]] = []
         analytics: list[dict[str, object]] = []
         if extracted is not None:
             canonicals = [u for u in (extracted.canonical, extracted.x_canonical) if u]
@@ -2529,6 +2534,20 @@ class AsyncpgStore:
                 {"href": link.href, "anchor_text": link.anchor_text, "xpath": link.xpath}
                 for link in (result.discovered_links or [])
                 if link.href
+            ]
+            images = [
+                {
+                    "url": image.url,
+                    "source": image.source,
+                    "alt": image.alt,
+                    "alt_present": image.alt_present,
+                    "width": image.width,
+                    "height": image.height,
+                    "loading": image.loading,
+                    "xpath": image.xpath,
+                }
+                for image in extracted.image_references
+                if image.url
             ]
             detected = result.detected_analytics
             if detected is not None:
@@ -2557,14 +2576,14 @@ class AsyncpgStore:
                 headers_json, html_compressed, title, meta_description, h1_tags, h2_tags,
                 word_count, html_lang, content_length, content_hash_sha256, content_hash_simhash,
                 custom_data, html_meta_allows, http_header_allows, overall_indexable, challenge,
-                skip_reason, ttfb_seconds, total_duration_seconds, lcp_ms, cls, inp_ms, canonical_urls_json, hreflang_json, robots_json, schema_json,
-                links_json, analytics_json, amphtml_url, render_discovery_attempted,
+                skip_reason, content_extracted, ttfb_seconds, total_duration_seconds, lcp_ms, cls, inp_ms, canonical_urls_json, hreflang_json, robots_json, schema_json,
+                links_json, images_json, analytics_json, amphtml_url, render_discovery_attempted,
                 render_discovery_complete, render_discovery_skip_reason
             ) VALUES (
                 $1, $2, $3, $4, $5, EXTRACT(EPOCH FROM NOW())::INTEGER,
                 $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                $17::jsonb, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb, $29::jsonb,
-                $30::jsonb, $31::jsonb, $32::jsonb, $33::jsonb, $34, $35, $36, $37
+                $17::jsonb, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
+                $29::jsonb, $30::jsonb, $31::jsonb, $32::jsonb, $33::jsonb, $34::jsonb, $35::jsonb, $36, $37, $38, $39
             )
             ON CONFLICT (run_id, url_id) DO UPDATE SET
                 final_url_id = EXCLUDED.final_url_id,
@@ -2588,6 +2607,7 @@ class AsyncpgStore:
                 overall_indexable = EXCLUDED.overall_indexable,
                 challenge = EXCLUDED.challenge,
                 skip_reason = EXCLUDED.skip_reason,
+                content_extracted = EXCLUDED.content_extracted,
                 ttfb_seconds = EXCLUDED.ttfb_seconds,
                 total_duration_seconds = EXCLUDED.total_duration_seconds,
                 lcp_ms = EXCLUDED.lcp_ms,
@@ -2598,6 +2618,7 @@ class AsyncpgStore:
                 robots_json = EXCLUDED.robots_json,
                 schema_json = EXCLUDED.schema_json,
                 links_json = EXCLUDED.links_json,
+                images_json = EXCLUDED.images_json,
                 analytics_json = EXCLUDED.analytics_json
                 , amphtml_url = EXCLUDED.amphtml_url
                 , render_discovery_attempted = EXCLUDED.render_discovery_attempted
@@ -2626,6 +2647,7 @@ class AsyncpgStore:
             overall_indexable if extracted else None,
             result.challenge,
             result.skip_reason,
+            extracted is not None,
             result.ttfb_seconds,
             result.total_duration_seconds,
             result.lcp_ms,
@@ -2636,6 +2658,7 @@ class AsyncpgStore:
             json.dumps(robots),
             json.dumps(schema),
             json.dumps(links),
+            json.dumps(images),
             json.dumps(analytics),
             extracted.amphtml if extracted else None,
             result.render_discovery_attempted,

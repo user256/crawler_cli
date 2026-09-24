@@ -107,6 +107,20 @@ class HreflangLink:
 
 
 @dataclass(slots=True)
+class ImageReference:
+    """An image candidate as published by an HTML document."""
+
+    url: str
+    source: Literal["img_src", "img_srcset", "picture_source"]
+    alt: str | None
+    alt_present: bool
+    width: int | None = None
+    height: int | None = None
+    loading: str | None = None
+    xpath: str = ""
+
+
+@dataclass(slots=True)
 class RobotsDirectives:
     noindex: bool = False
     nofollow: bool = False
@@ -127,6 +141,7 @@ class ExtractedContent:
     text: str
     word_count: int
     metadata: dict[str, Any]
+    image_references: list[ImageReference] = field(default_factory=list)
     amphtml: str | None = None
     """Absolute URL from ``<link rel="amphtml" href=...>`` — the page's declared
     AMP variant.  Captured so AMP variants get a first-class page<->AMP pairing
