@@ -222,6 +222,33 @@ async def test_similarity_reports_missing_hashes_instead_of_claiming_a_pass():
 
 
 @pytest.mark.asyncio
+async def test_similarity_limit_is_hard_bounded_and_population_truncation_is_explicit():
+    class CappedReports(StubReports):
+        def __init__(self):
+            super().__init__(
+                [
+                    {
+                        "url": "https://e.test/a",
+                        "html_compressed": compress_html("<main>one</main>"),
+                        "eligible_population": 6001,
+                    }
+                ]
+            )
+            self.fetch_args = ()
+
+        async def _fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+            self.fetch_args = args
+            return self.rows
+
+    reports = CappedReports()
+    await reports.near_duplicates(limit=6001)
+    assert reports.fetch_args[-1] == 5000
+    coverage = (await reports.similarity_coverage())[0]
+    assert coverage["sample_limit"] == 5000
+    assert coverage["truncated"] is True
+
+
+@pytest.mark.asyncio
 async def test_internal_authority_rewards_linked_page_and_handles_sink():
     reports = GraphReports(
         [
@@ -252,10 +279,22 @@ async def test_internal_authority_rewards_linked_page_and_handles_sink():
                 "render_discovery_attempted": False,
                 "links_json": [{"href": "https://e.test/b"}],
             },
+            {
+                "url": "https://e.test/file.pdf",
+                "kind": "asset",
+                "overall_indexable": True,
+                "canonical_urls_json": [],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+                "links_json": [],
+            },
         ]
     )
-    rows = {row["url"]: row for row in await reports.internal_authority()}
+    first = await reports.internal_authority()
+    assert first == await reports.internal_authority()
+    rows = {row["url"]: row for row in first}
     assert "https://e.test/alias" not in rows
+    assert "https://e.test/file.pdf" not in rows
     assert rows["https://e.test/b"]["authority_score"] == 100.0
     assert rows["https://e.test/b"]["unique_inlinks"] == 1
     assert rows["https://e.test/a"]["unique_outlinks"] == 1

@@ -712,7 +712,8 @@ class CrawlReports:
         eligible = [
             row
             for row in pages
-            if row.get("overall_indexable") is True
+            if row.get("kind") == "html"
+            and row.get("overall_indexable") is True
             and _canonical_state(str(row["url"]), row.get("canonical_urls_json")) != "noncanonical"
         ]
         urls = {str(row["url"]) for row in eligible}
@@ -788,7 +789,8 @@ class CrawlReports:
         eligible = [
             row
             for row in pages
-            if row.get("overall_indexable") is True
+            if row.get("kind") == "html"
+            and row.get("overall_indexable") is True
             and _canonical_state(str(row["url"]), row.get("canonical_urls_json")) != "noncanonical"
         ]
         return [
