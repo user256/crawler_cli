@@ -53,6 +53,7 @@ class FakeReports:
                 "images_json": True,
                 "links_json": True,
                 "content_hash_simhash": True,
+                "indexability_evidence_json": True,
             },
         }
 

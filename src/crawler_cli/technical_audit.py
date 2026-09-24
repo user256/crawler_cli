@@ -14,6 +14,8 @@ from importlib.metadata import PackageNotFoundError, version
 import json
 
 from .schema import JSON_LD_PARSER_MODE, _PARSER
+from .indexability import directive_conflicts
+from .models import RobotsDirectiveEvidence
 
 
 TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/1"
@@ -110,14 +112,21 @@ def build_technical_audit(
     hashed_count = _optional_int(context.get("hashed_count"))
     completion_state = str(context.get("completion_state", "unavailable"))
 
+    capabilities = context.get("schema_capabilities", {})
+    if not isinstance(capabilities, Mapping):
+        capabilities = {}
+    has_directive_evidence = capabilities.get("indexability_evidence_json") is True
     indexability_rows = [row for row in rows["indexability"] if row.get("content_extracted") is True]
-    indexability_conflicts = [
-        row
-        for row in indexability_rows
-        if row.get("html_meta_allows") is not None
-        and row.get("http_header_allows") is not None
-        and row.get("html_meta_allows") != row.get("http_header_allows")
-    ]
+    directive_data_complete = has_directive_evidence and all(
+        row.get("directive_evidence") is not None for row in indexability_rows
+    )
+    indexability_conflicts = []
+    if has_directive_evidence:
+        for row in indexability_rows:
+            declarations = _parse_directive_evidence(row.get("directive_evidence"))
+            conflicts = directive_conflicts(declarations)
+            if conflicts:
+                indexability_conflicts.append({**row, "conflicts": conflicts})
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
     link_failures = [row for row in rows["internal-link-quality"] if row.get("issue") == "error_target"]
 
@@ -129,7 +138,7 @@ def build_technical_audit(
             indexability_conflicts,
             "finding",
             "HTML and HTTP indexing directives disagree on the same saved response.",
-            available=source_coverage["indexability"]["available"] is True,
+            available=source_coverage["indexability"]["available"] is True and directive_data_complete,
             denominator=parsed_html_count,
             completion_state=completion_state,
         ),
@@ -369,6 +378,28 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
+def _parse_directive_evidence(value: object) -> list[RobotsDirectiveEvidence]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        channel, agent, raw = item.get("channel"), item.get("user_agent"), item.get("raw_value")
+        directives = item.get("directives")
+        if channel not in {"html_meta", "http_header"} or not isinstance(agent, str) or not isinstance(raw, str):
+            continue
+        if not isinstance(directives, list) or not all(isinstance(token, str) for token in directives):
+            continue
+        result.append(RobotsDirectiveEvidence(channel, agent, raw, list(directives)))
+    return result
+
+
 def _package_version(name: str) -> str:
     try:
         return version(name)
@@ -398,7 +429,7 @@ def _indexability_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str
         _action(
             problem="Conflicting indexability directives",
             url=row.get("url", ""),
-            explanation="The saved HTML meta and HTTP header directives disagree.",
+            explanation=f"Explicit HTML and HTTP directives contradict: {row.get('conflicts', [])}.",
             fix="Choose one intended indexability state and make header and HTML directives agree.",
             impact="Conflicting signals can lead to unintended indexation handling.",
             evidence="indexability-directive-conflicts",
