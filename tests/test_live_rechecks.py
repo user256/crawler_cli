@@ -108,6 +108,13 @@ def test_collector_uses_probe_scope_robots_and_disabled_browser_escalation(monke
 
 def _reports():
     return {name: [] for name in TECHNICAL_AUDIT_REPORTS} | {
+        "metadata-locale-inventory": [
+            {
+                "record_type": "coverage",
+                "inventory_complete": True,
+                "eligible_indexable_count": 1,
+            }
+        ],
         "link-graph-metrics": [{"graph_complete": True}],
         "similarity-coverage": [
             {
