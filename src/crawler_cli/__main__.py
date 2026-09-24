@@ -2025,6 +2025,7 @@ class _SavedExtracted(TypedDict, total=False):
     meta_description: str | None
     meta_robots: list[str]
     x_robots_tag: list[str]
+    robots_directive_evidence: list[dict[str, object]]
     canonical: str | None
     x_canonical: str | None
     hreflang_links: list[_SavedHreflangLink]
@@ -2415,6 +2416,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         CssUrlCandidate,
         RenderUrlCandidate,
         RobotsDirectives,
+        RobotsDirectiveEvidence,
     )
 
     def _load_browser_runtime(payload: _SavedBrowserRuntime | None) -> BrowserRuntime | None:
@@ -2461,6 +2463,20 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             meta_description=payload.get("meta_description"),
             meta_robots=RobotsDirectives(raw=list(payload.get("meta_robots", []) or [])),
             x_robots_tag=RobotsDirectives(raw=list(payload.get("x_robots_tag", []) or [])),
+            robots_directive_evidence=[
+                RobotsDirectiveEvidence(
+                    channel=cast(Literal["html_meta", "http_header"], item.get("channel")),
+                    user_agent=str(item.get("user_agent", "*")),
+                    raw_value=str(item.get("raw_value", "")),
+                    directives=[
+                        str(token) for token in cast(list[object], item.get("directives")) if isinstance(token, str)
+                    ],
+                )
+                for item in payload.get("robots_directive_evidence", []) or []
+                if isinstance(item, dict)
+                and item.get("channel") in {"html_meta", "http_header"}
+                and isinstance(item.get("directives"), list)
+            ],
             canonical=payload.get("canonical"),
             x_canonical=payload.get("x_canonical"),
             hreflang_links=hreflang_links,
@@ -2612,7 +2628,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
             redirect_chain=list(item.get("redirect_chain", []) or []),
         )
 
-    known_artifact_versions = frozenset(f"crawler-cli/crawl-artifact/{version}" for version in range(1, 9))
+    known_artifact_versions = frozenset(f"crawler-cli/crawl-artifact/{version}" for version in range(1, 10))
 
     def _validate_schema_version(payload: Mapping[str, object]) -> None:
         """Accept unstamped or known historical artifacts, reject unknown stamps."""

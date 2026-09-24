@@ -5,7 +5,7 @@ from typing import Any
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, ExtractedContent, FetchResponse
 from .redaction import redact_headers
 
-CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/8"
+CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/9"
 """Schema identifier stamped on saved crawl artifacts (ticket 3344).
 
 Downstream consumers (e.g. the portal migration worker) pin on this string;
@@ -80,6 +80,15 @@ def serialize_extracted_content(extracted: ExtractedContent) -> dict[str, object
         "meta_description": extracted.meta_description,
         "meta_robots": extracted.meta_robots.raw,
         "x_robots_tag": extracted.x_robots_tag.raw,
+        "robots_directive_evidence": [
+            {
+                "channel": item.channel,
+                "user_agent": item.user_agent,
+                "raw_value": item.raw_value,
+                "directives": item.directives,
+            }
+            for item in extracted.robots_directive_evidence
+        ],
         "canonical": extracted.canonical,
         "x_canonical": extracted.x_canonical,
         "hreflang_links": [

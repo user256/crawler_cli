@@ -12,10 +12,11 @@ from urllib.parse import urlsplit
 from .config import CrawlConfig
 from .engine import CrawlEngine
 from .extract import extract_links, extract_page_data
+from .indexability import directive_conflicts
 from .intent_signature import extract_main_text
 from .models import CrawlResult, ExtractedContent
 
-RENDER_COMPARISON_RULESET_VERSION = "crawler-cli/render-comparison-rules/1"
+RENDER_COMPARISON_RULESET_VERSION = "crawler-cli/render-comparison-rules/2"
 RenderObservationState = Literal["complete", "partial", "inconclusive", "failed"]
 RenderFindingSeverity = Literal["high", "medium", "low"]
 
@@ -406,17 +407,17 @@ def compare_rendered_result(result: CrawlResult) -> RenderParityComparison:
                 state,
             )
         )
-    header_directives = set(rendered.x_robots_tag.raw)
-    if header_directives and header_directives != _directive_set(rendered):
+    conflicts = directive_conflicts(rendered.robots_directive_evidence)
+    if conflicts:
         comparison.findings.append(
             _finding(
                 "header_dom_conflict",
                 "high",
                 "robots_header",
-                "X-Robots-Tag conflicts with rendered meta robots directives.",
+                "Explicit X-Robots-Tag and HTML meta robots declarations contradict one another.",
                 "Align HTTP X-Robots-Tag and HTML meta robots directives.",
-                sorted(header_directives),
-                sorted(_directive_set(rendered)),
+                conflicts,
+                conflicts,
                 state,
             )
         )

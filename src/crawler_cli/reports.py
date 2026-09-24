@@ -55,6 +55,7 @@ class CrawlReports:
         snapshot_columns = {str(row["column_name"]) for row in column_rows}
         has_extraction_state = "content_extracted" in snapshot_columns
         has_images = "images_json" in snapshot_columns
+        has_directive_evidence = "indexability_evidence_json" in snapshot_columns
         extraction_true = "s.content_extracted IS TRUE" if has_extraction_state else "FALSE"
         extraction_false = "s.content_extracted IS FALSE" if has_extraction_state else "FALSE"
         extraction_unknown = "s.content_extracted IS NULL" if has_extraction_state else "TRUE"
@@ -115,6 +116,7 @@ class CrawlReports:
             "schema_capabilities": {
                 "content_extracted": has_extraction_state,
                 "images_json": has_images,
+                "indexability_evidence_json": has_directive_evidence,
                 "links_json": "links_json" in snapshot_columns,
                 "content_hash_simhash": "content_hash_simhash" in snapshot_columns,
             },
@@ -145,11 +147,14 @@ class CrawlReports:
                  AND table_name = 'page_run_snapshots'"""
         )
         has_extraction_state = any(row["column_name"] == "content_extracted" for row in column_rows)
+        has_directive_evidence = any(row["column_name"] == "indexability_evidence_json" for row in column_rows)
         extraction_field = "s.content_extracted" if has_extraction_state else "NULL::BOOLEAN"
+        evidence_field = "s.indexability_evidence_json" if has_directive_evidence else "NULL::JSONB"
         return await self._fetch(
             f"""
             SELECT u.url, s.html_meta_allows, s.http_header_allows, s.overall_indexable,
-                   {extraction_field} AS content_extracted
+                   {extraction_field} AS content_extracted,
+                   {evidence_field} AS directive_evidence
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
             WHERE s.run_id = $1
             ORDER BY u.url
