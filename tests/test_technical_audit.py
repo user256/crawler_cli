@@ -46,6 +46,16 @@ def test_audit_is_stable_and_never_calls_candidate_checks_healthy():
             }
         ],
         "near-duplicates": [],
+        "similarity-coverage": [
+            {
+                "eligible_population": 0,
+                "sampled_population": 0,
+                "truncated": False,
+                "findings_truncated": False,
+                "missing_primary_hashes": 0,
+            }
+        ],
+        "authority-coverage": [{"graph_complete": True, "canonical_indexable_population": 0}],
     }
     context = {
         "completion_state": "complete",
@@ -84,6 +94,31 @@ def test_missing_run_context_and_missing_source_are_not_reported_as_passes():
     assert checks["indexability-directive-conflicts"]["status"] == "unavailable"
     assert checks["near-duplicate-content"]["status"] == "unavailable"
     assert checks["indexability-directive-conflicts"]["denominator"] is None
+
+
+def test_similarity_sample_and_authority_graph_gaps_are_partial_not_pass():
+    reports = {
+        "near-duplicates": [],
+        "similarity-coverage": [
+            {
+                "eligible_population": 6000,
+                "sampled_population": 5000,
+                "truncated": True,
+                "findings_truncated": False,
+                "missing_primary_hashes": 0,
+            }
+        ],
+        "internal-authority": [],
+        "authority-coverage": [{"graph_complete": False, "canonical_indexable_population": 200}],
+    }
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports=reports,
+        run_context={"completion_state": "complete", "parsed_html_count": 6000},
+    )
+    checks = {check["id"]: check for check in audit["checks"]}
+    assert checks["near-duplicate-content"]["status"] == "partial"
+    assert checks["internal-authority-inventory"]["status"] == "partial"
 
 
 def test_source_provenance_is_deterministic_and_distinguishes_missing_from_empty():

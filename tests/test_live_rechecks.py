@@ -109,6 +109,16 @@ def test_collector_uses_probe_scope_robots_and_disabled_browser_escalation(monke
 def _reports():
     return {name: [] for name in TECHNICAL_AUDIT_REPORTS} | {
         "link-graph-metrics": [{"graph_complete": True}],
+        "similarity-coverage": [
+            {
+                "eligible_population": 1,
+                "sampled_population": 1,
+                "truncated": False,
+                "findings_truncated": False,
+                "missing_primary_hashes": 0,
+            }
+        ],
+        "authority-coverage": [{"graph_complete": True, "canonical_indexable_population": 1}],
         "internal-link-quality": [
             {
                 "source_url": "https://example.test/source",
