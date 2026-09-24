@@ -188,6 +188,10 @@ class FakeReports:
         self.calls.append(("authority-coverage", {}))
         return [{"graph_complete": True, "canonical_indexable_population": 1}]
 
+    async def metadata_locale_inventory(self):
+        self.calls.append(("metadata-locale-inventory", {}))
+        return []
+
 
 @pytest.fixture
 def fake_reports(monkeypatch):
@@ -345,6 +349,7 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "similarity-coverage",
         "internal-authority",
         "authority-coverage",
+        "metadata-locale-inventory",
     ]
 
 

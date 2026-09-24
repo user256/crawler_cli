@@ -12,6 +12,8 @@ from collections.abc import Mapping, Sequence
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
+import re
+from urllib.parse import parse_qsl, urlsplit
 
 from .schema import JSON_LD_PARSER_MODE, _PARSER
 from .indexability import directive_conflicts
@@ -38,6 +40,7 @@ TECHNICAL_AUDIT_REPORTS = (
     "similarity-coverage",
     "internal-authority",
     "authority-coverage",
+    "metadata-locale-inventory",
 )
 
 # Registry is intentionally wider than the currently implemented report set.
@@ -68,7 +71,11 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
         "state": "implemented_candidate",
         "source": "canonical indexable HTML and run-scoped link graph",
     },
-    {"id": "metadata-and-locale", "state": "not_implemented", "source": "stored page snapshots"},
+    {
+        "id": "metadata-and-locale",
+        "state": "implemented_candidate",
+        "source": "run-scoped parsed HTML snapshots; sitemap membership unavailable",
+    },
     {"id": "canonical-targets", "state": "not_implemented", "source": "canonical and live response evidence"},
     {"id": "hreflang-clusters", "state": "not_implemented", "source": "HTML, header and sitemap annotations"},
     {"id": "current-robots-and-sitemaps", "state": "not_implemented", "source": "live HTTP collection"},
@@ -96,6 +103,204 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
         "source": "site purpose and business evidence",
     },
 )
+
+
+def metadata_locale_report(source_rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """Classify saved metadata facts without converting incomplete evidence into defects."""
+    eligible: list[dict[str, object]] = []
+    excluded: dict[str, int] = {}
+    all_segments: dict[str, int] = {}
+    indexable_segments: dict[str, int] = {}
+    required = ("url", "kind", "final_status_code", "content_extracted", "overall_indexable")
+    for source in source_rows:
+        row = dict(source)
+        reason = None
+        if any(key not in row for key in required):
+            reason = "required_field_unavailable"
+        elif row.get("kind") != "html":
+            reason = "non_html"
+        elif row.get("challenge"):
+            reason = "challenged"
+        elif row.get("final_status_code") != 200:
+            reason = "status_not_200"
+        elif row.get("content_extracted") is not True:
+            reason = "content_not_extracted_or_unknown"
+        elif row.get("overall_indexable") not in (True, False):
+            reason = "indexability_unknown"
+        if reason:
+            excluded[reason] = excluded.get(reason, 0) + 1
+            if reason == "indexability_unknown":
+                url = str(row.get("url") or "")
+                unknown_context: dict[str, object] = {
+                    "locale": _clean_metadata(row.get("html_lang")) or "missing_locale",
+                    "template": _clean_metadata(row.get("template")) or "not_stored",
+                    "query_parameter_names": sorted(
+                        {key for key, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)}
+                    ),
+                    "canonical_state": _canonical_state(row.get("canonical_urls_json"), url),
+                    "indexability": "unknown",
+                }
+                segment = _segment_key(unknown_context)
+                all_segments[segment] = all_segments.get(segment, 0) + 1
+            continue
+        url = str(row.get("url") or "")
+        locale = _clean_metadata(row.get("html_lang"))
+        query_names = sorted({key for key, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)})
+        page_context: dict[str, object] = {
+            "url": _metadata_url(url),
+            "url_digest_sha256": hashlib.sha256(url.encode()).hexdigest(),
+            "locale": locale,
+            "indexable": row.get("overall_indexable"),
+            "template": _clean_metadata(row.get("template")) or "not_stored",
+            "variant_kind": _clean_metadata(row.get("variant_kind")) or "unknown",
+            "query_parameter_names": query_names,
+            "pagination_parameter_candidates": [
+                key for key in query_names if key.lower() in {"page", "paged", "p", "offset", "cursor"}
+            ],
+            "alias_url": _metadata_url(str(row["final_url"]))
+            if row.get("final_url") and row.get("final_url") != url
+            else None,
+            "canonical_state": _canonical_state(row.get("canonical_urls_json"), url),
+            "sitemap_inclusion": "unavailable_not_run_scoped",
+            "title_length": len(_clean_metadata(row.get("title")) or ""),
+            "description_length": len(_clean_metadata(row.get("meta_description")) or ""),
+            "h1_count": len([value for value in str(row.get("h1_tags") or "").splitlines() if value.strip()]),
+        }
+        eligible.append({**row, "_context": page_context})
+        segment = _segment_key(page_context)
+        all_segments[segment] = all_segments.get(segment, 0) + 1
+        if row.get("overall_indexable") is True:
+            segment = _segment_key(page_context)
+            indexable_segments[segment] = indexable_segments.get(segment, 0) + 1
+
+    candidates: list[dict[str, object]] = []
+    duplicate_groups: dict[tuple[str, str, str], list[dict[str, object]]] = {}
+    for row in eligible:
+        raw_context = row["_context"]
+        assert isinstance(raw_context, dict)
+        context: dict[str, object] = raw_context
+        if row.get("overall_indexable") is not True:
+            continue
+        title = _clean_metadata(row.get("title"))
+        description = _clean_metadata(row.get("meta_description"))
+        h1s = [value.strip() for value in str(row.get("h1_tags") or "").splitlines() if value.strip()]
+        for field, value in (
+            ("title", title),
+            ("description", description),
+            ("h1", "\n".join(h1s)),
+            ("html_lang", context["locale"]),
+        ):
+            if not value:
+                candidates.append(
+                    {
+                        "record_type": "candidate",
+                        "candidate_type": f"missing_{field}",
+                        **context,
+                        "visible_content_state": "unknown_without_rendered_confirmation" if field == "h1" else None,
+                    }
+                )
+        if len(h1s) > 1:
+            candidates.append({"record_type": "candidate", "candidate_type": "multiple_h1_markup", **context})
+        for field, value in (("title", title), ("description", description)):
+            if value and context["locale"]:
+                normalized = re.sub(r"\s+", " ", value).strip().casefold()
+                duplicate_groups.setdefault((field, str(context["locale"]).casefold(), normalized), []).append(
+                    {
+                        **context,
+                        "metadata_value": value,
+                    }
+                )
+    for (field, locale, normalized), members in sorted(duplicate_groups.items()):
+        if len(members) < 2:
+            continue
+        group_id = hashlib.sha256(f"{field}\0{locale}\0{normalized}".encode()).hexdigest()
+        for member in members:
+            candidates.append(
+                {
+                    "record_type": "candidate",
+                    "candidate_type": f"duplicate_{field}_same_locale",
+                    "duplicate_group_id": group_id,
+                    "affected_count": len(members),
+                    **member,
+                }
+            )
+    indexable_count = sum(row.get("overall_indexable") is True for row in eligible)
+    coverage = {
+        "record_type": "coverage",
+        "inventory_complete": not excluded.get("required_field_unavailable"),
+        "source_row_count": len(source_rows),
+        "eligible_count": len(eligible),
+        "eligible_indexable_count": indexable_count,
+        "eligible_noindex_count": len(eligible) - indexable_count,
+        "excluded_count": sum(excluded.values()),
+        "excluded_by_reason": excluded,
+        "segments": all_segments,
+        "indexable_segments": indexable_segments,
+        "sitemap_inclusion": "unavailable_not_run_scoped",
+        "locale_missing_count": sum(not _clean_metadata(row.get("html_lang")) for row in eligible),
+        "threshold_scoring": "not_configured; lengths are contextual only",
+        "thin_text_scoring": "unavailable_no_saved_primary_content_extraction_or_template_thresholds",
+        "eligible_length_ranges": _length_ranges(eligible),
+    }
+    return [coverage, *candidates]
+
+
+def _clean_metadata(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = re.sub(r"\s+", " ", str(value)).strip()
+    return normalized or None
+
+
+def _metadata_url(url: str) -> str:
+    """Keep query names for segmentation while never exporting query values."""
+    parts = urlsplit(url)
+    query_names = sorted({key for key, _ in parse_qsl(parts.query, keep_blank_values=True)})
+    return redact_url_without_digest(parts._replace(query="&".join(query_names)).geturl())
+
+
+def _segment_key(context: Mapping[str, object]) -> str:
+    query_state = "query" if context.get("query_parameter_names") else "clean"
+    return "|".join(
+        (
+            str(context.get("indexable", "noindex" if context.get("indexable") is False else "unknown")),
+            str(context.get("locale") or "missing_locale"),
+            str(context.get("template")),
+            query_state,
+            str(context.get("canonical_state")),
+            "sitemap_unavailable",
+        )
+    )
+
+
+def _length_ranges(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str, int | None]]:
+    values: dict[str, list[int]] = {"title": [], "description": [], "h1": []}
+    for row in rows:
+        context = row.get("_context")
+        if not isinstance(context, Mapping):
+            continue
+        for field in values:
+            number = context.get(f"{field}_length" if field != "h1" else "h1_count")
+            if isinstance(number, int):
+                values[field].append(number)
+    return {
+        field: {"min": min(numbers) if numbers else None, "max": max(numbers) if numbers else None}
+        for field, numbers in values.items()
+    }
+
+
+def _canonical_state(value: object, url: str) -> str:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            value = [value] if value else []
+    if not isinstance(value, list) or not value:
+        return "implicit_or_unavailable"
+    canonicals = [str(item) for item in value if item]
+    if not canonicals:
+        return "implicit_or_unavailable"
+    return "declared_self" if canonicals[0].split("#", 1)[0] == url.split("#", 1)[0] else "declared_nonself"
 
 
 def build_technical_audit(
@@ -181,6 +386,10 @@ def build_technical_audit(
         if live_rechecks is not None
         else not saved_link_failures
     )
+
+    metadata_rows = rows["metadata-locale-inventory"]
+    metadata_coverage = metadata_rows[0] if metadata_rows and metadata_rows[0].get("record_type") == "coverage" else {}
+    metadata_evidence = [row for row in metadata_rows if row.get("record_type") == "candidate"]
 
     checks = (
         _check(
@@ -293,6 +502,21 @@ def build_technical_audit(
             denominator=_optional_int(authority.get("canonical_indexable_population")),
             completion_state=completion_state,
         ),
+        _check(
+            "metadata-and-locale",
+            "Metadata and locale inventory",
+            "Metadata & locale",
+            metadata_evidence,
+            "finding",
+            "Saved parsed-HTML metadata candidates; rendered visibility and business impact are not inferred.",
+            available=(
+                source_coverage["metadata-locale-inventory"]["available"] is True
+                and metadata_coverage.get("inventory_complete") is True
+            ),
+            denominator=_optional_int(metadata_coverage.get("eligible_indexable_count")),
+            completion_state=completion_state,
+            qualification="analyst_only",
+        ),
     )
     for check in checks:
         if check["id"] == "near-duplicate-content" and not similarity_complete:
@@ -302,6 +526,9 @@ def build_technical_audit(
         if check["id"] == "internal-authority-inventory" and not authority_complete:
             check["status"] = "partial" if source_coverage["authority-coverage"]["available"] else "unavailable"
             check["qualification"] = "incomplete_graph"
+        if check["id"] == "metadata-and-locale" and metadata_coverage.get("inventory_complete") is not True:
+            check["status"] = "partial" if source_coverage["metadata-locale-inventory"]["available"] else "unavailable"
+            check["qualification"] = "incomplete_or_unknown_population"
 
     audit_log = [
         *_indexability_actions(indexability_conflicts),
@@ -343,6 +570,7 @@ def build_technical_audit(
         "crawl_run_id": crawl_run_id,
         "run_context": context,
         "source_coverage": source_coverage,
+        "metadata_locale_coverage": dict(metadata_coverage),
         "status_vocabulary": [
             "tested",
             "pass",
@@ -421,6 +649,16 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
         overview.append([str(check["title"]), str(check["status"])])
 
     tables: dict[str, list[list[object]]] = {"Overview": overview}
+    raw_metadata_coverage = audit.get("metadata_locale_coverage", {})
+    if isinstance(raw_metadata_coverage, Mapping) and raw_metadata_coverage:
+        tables["Metadata Coverage"] = [
+            ["Metric", "Value"],
+            *[
+                [str(key), json.dumps(value, sort_keys=True) if isinstance(value, (Mapping, list)) else value]
+                for key, value in sorted(raw_metadata_coverage.items())
+                if key != "record_type"
+            ],
+        ]
     client_actions = gate.get("client_actions", [])
     if gate.get("ready") is True and isinstance(client_actions, list) and client_actions:
         tables["Audit Log"] = _table(

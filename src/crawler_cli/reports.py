@@ -131,6 +131,32 @@ class CrawlReports:
             **stats,
         }
 
+    async def metadata_locale_inventory(self) -> list[dict[str, object]]:
+        """Return run-scoped page metadata for deterministic audit projection.
+
+        Only the explicitly configured ``custom_data.template`` value is
+        selected; arbitrary custom extraction fields may contain client data.
+        Sitemap membership is intentionally absent because URL sources are not
+        keyed by crawl run in the current schema.
+        """
+        run_id = await self._run_id()
+        rows = await self._fetch(
+            """
+            SELECT s.url_id, s.final_url_id, u.url, fu.url AS final_url,
+                   u.kind, s.final_status_code, s.content_extracted,
+                   s.overall_indexable, s.challenge, s.title, s.meta_description,
+                   s.h1_tags, s.html_lang, s.canonical_urls_json,
+                   s.variant_kind, s.custom_data ->> 'template' AS template
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            LEFT JOIN urls fu ON fu.id = s.final_url_id
+            WHERE s.run_id = $1
+            ORDER BY s.url_id
+            """,
+            run_id,
+        )
+        return [dict(row) for row in rows]
+
     async def orphan_pages(self) -> list[dict[str, object]]:
         run_id = await self._run_id()
         run = await self.store.get_crawl_run(run_id)
