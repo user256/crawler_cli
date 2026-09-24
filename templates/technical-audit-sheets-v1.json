@@ -1,0 +1,32 @@
+{
+  "version": "crawler-cli/technical-audit-sheets/1",
+  "manifest_tab": "Template Contract",
+  "marker_cells": {
+    "A1": "technical-audit-template",
+    "B1": "crawler-cli/technical-audit-sheets/1"
+  },
+  "managed_tabs": {
+    "Overview": {
+      "range": "A1:B50000",
+      "headers": ["Metric", "Value"],
+      "header_identity": "exact ordered display labels",
+      "formulas_allowed": false
+    },
+    "Audit Log": {
+      "range": "A1:L50000",
+      "headers": ["Problem", "URL", "Explanation", "Fix", "SEO Impact", "Action Needed", "Responsible Team", "Owner", "Acceptance Criteria", "Retest Status", "Evidence Reference", "Resolved"],
+      "header_identity": "exact ordered display labels",
+      "formulas_allowed": false
+    },
+    "Index conflicts": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Internal link failures": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Tracking parameters": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Orphan candidates": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Redirect chains": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Near duplicates": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Schema diagnostics": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Image issues": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Internal authority": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false}
+  },
+  "unmanaged_content": "Preserve all cells, formulas, notes, and formatting outside the managed ranges."
+}
