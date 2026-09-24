@@ -6,7 +6,7 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
-from .models import DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
+from .models import DiscoveredLink, ExtractedContent, HreflangLink, ImageReference, RobotsDirectives
 from .schema import _PARSER, extract_schema_data
 
 
@@ -46,6 +46,84 @@ def _rel_tokens(value: object) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         return [str(token).strip().lower() for token in value if str(token).strip()]
     return []
+
+
+def _positive_int(value: object) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _srcset_urls(value: object) -> list[str]:
+    urls: list[str] = []
+    for candidate in str(value or "").split(","):
+        parts = candidate.strip().split(maxsplit=1)
+        if not parts:
+            continue
+        url = parts[0]
+        if url:
+            urls.append(url)
+    return urls
+
+
+def extract_image_references(soup: BeautifulSoup, base_url: str) -> list[ImageReference]:
+    """Extract deduplicated image candidates and accessibility/layout evidence."""
+    references: list[ImageReference] = []
+    seen: set[tuple[str, str, str]] = set()
+    for image in soup.find_all("img"):
+        alt_present = image.has_attr("alt")
+        alt = str(image.get("alt", "")).strip() if alt_present else None
+        common = {
+            "alt": alt,
+            "alt_present": alt_present,
+            "width": _positive_int(image.get("width")),
+            "height": _positive_int(image.get("height")),
+            "loading": str(image.get("loading", "")).strip().lower() or None,
+            "xpath": generate_xpath(image),
+        }
+        candidates = [("img_src", str(image.get("src", "")).strip())]
+        candidates.extend(("img_srcset", url) for url in _srcset_urls(image.get("srcset")))
+        for source, raw_url in candidates:
+            if not raw_url:
+                continue
+            url = urljoin(base_url, raw_url)
+            if urlparse(url).scheme not in {"http", "https"}:
+                continue
+            key = (source, url, common["xpath"])
+            if key not in seen:
+                seen.add(key)
+                references.append(ImageReference(url=url, source=source, **common))
+
+    for source_node in soup.find_all("source", srcset=True):
+        if source_node.find_parent("picture") is None:
+            continue
+        fallback = source_node.find_parent("picture").find("img")
+        alt_present = bool(fallback and fallback.has_attr("alt"))
+        alt = str(fallback.get("alt", "")).strip() if alt_present and fallback else None
+        for raw_url in _srcset_urls(source_node.get("srcset")):
+            url = urljoin(base_url, raw_url)
+            if urlparse(url).scheme not in {"http", "https"}:
+                continue
+            xpath = generate_xpath(source_node)
+            key = ("picture_source", url, xpath)
+            if key in seen:
+                continue
+            seen.add(key)
+            references.append(
+                ImageReference(
+                    url=url,
+                    source="picture_source",
+                    alt=alt,
+                    alt_present=alt_present,
+                    width=_positive_int(fallback.get("width")) if fallback else None,
+                    height=_positive_int(fallback.get("height")) if fallback else None,
+                    loading=str(fallback.get("loading", "")).strip().lower() or None if fallback else None,
+                    xpath=xpath,
+                )
+            )
+    return references
 
 
 def _extract_header_hreflang(headers: dict[str, str], base_url: str) -> list[HreflangLink]:
@@ -166,6 +244,7 @@ def extract_page_data(
                 {tag.get("name", "").strip().lower() for tag in soup.find_all("meta") if tag.get("name")}
             ),
         },
+        image_references=extract_image_references(soup, base_url),
         schema_data=extract_schema_data(html, base_url, soup=soup),
     )
 

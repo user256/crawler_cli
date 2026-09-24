@@ -1,4 +1,4 @@
-from crawler_cli.extract import extract_links, generate_xpath
+from crawler_cli.extract import extract_image_references, extract_links, generate_xpath, parse_html
 from bs4 import BeautifulSoup
 
 
@@ -67,3 +67,25 @@ def test_generate_xpath_disambiguates_siblings():
     anchors = soup.find_all("a")
     paths = [generate_xpath(anchor) for anchor in anchors]
     assert paths[0] != paths[1]
+
+
+def test_extract_image_references_captures_srcset_alt_and_dimensions():
+    html = """
+    <picture>
+      <source srcset="/hero.webp 1x, /hero-2x.webp 2x">
+      <img src="/hero.jpg" srcset="/hero-small.jpg 480w" alt="Casino lobby"
+           width="800" height="450" loading="lazy">
+    </picture>
+    <img src="/decorative.svg" alt="">
+    <img src="/missing-alt.png">
+    """
+    images = extract_image_references(parse_html(html), "https://example.com/page")
+    by_url = {image.url: image for image in images}
+    assert by_url["https://example.com/hero.jpg"].alt == "Casino lobby"
+    assert by_url["https://example.com/hero.jpg"].width == 800
+    assert by_url["https://example.com/hero.jpg"].height == 450
+    assert by_url["https://example.com/hero-small.jpg"].source == "img_srcset"
+    assert by_url["https://example.com/hero.webp"].source == "picture_source"
+    assert by_url["https://example.com/decorative.svg"].alt_present is True
+    assert by_url["https://example.com/decorative.svg"].alt == ""
+    assert by_url["https://example.com/missing-alt.png"].alt_present is False

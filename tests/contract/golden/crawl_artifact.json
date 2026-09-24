@@ -1,5 +1,5 @@
 {
-  "schema_version": "crawler-cli/crawl-artifact/7",
+  "schema_version": "crawler-cli/crawl-artifact/8",
   "mode": "list",
   "run_id": "run-3344",
   "seed_urls": [
@@ -92,6 +92,7 @@
         "text": "",
         "word_count": 18,
         "metadata": {},
+        "image_references": [],
         "schema_data": []
       }
     },
@@ -158,6 +159,7 @@
         "text": "",
         "word_count": 18,
         "metadata": {},
+        "image_references": [],
         "schema_data": []
       }
     },
@@ -220,6 +222,7 @@
         "text": "",
         "word_count": 18,
         "metadata": {},
+        "image_references": [],
         "schema_data": []
       }
     },
@@ -277,6 +280,7 @@
         "text": "",
         "word_count": 18,
         "metadata": {},
+        "image_references": [],
         "schema_data": []
       }
     },
@@ -339,6 +343,7 @@
         "text": "",
         "word_count": 18,
         "metadata": {},
+        "image_references": [],
         "schema_data": []
       }
     },
@@ -439,6 +444,7 @@
         "text": "",
         "word_count": 18,
         "metadata": {},
+        "image_references": [],
         "schema_data": []
       }
     },
@@ -501,6 +507,7 @@
         "text": "",
         "word_count": 18,
         "metadata": {},
+        "image_references": [],
         "schema_data": []
       }
     }
