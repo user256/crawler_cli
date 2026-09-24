@@ -1,6 +1,6 @@
 """Golden contract: the saved crawl artifact schema (tickets 3344, 3685, 155, 156).
 
-Freezes ``crawler-cli/crawl-artifact/7``: the exact field set that
+Freezes ``crawler-cli/crawl-artifact/8``: the exact field set that
 ``serialize_crawl_job`` emits (redirect chains and static URL evidence included)
 and the loader's tolerance for legacy artifacts without ``schema_version``.
 """
@@ -106,7 +106,7 @@ def _job() -> CrawlJobResult:
 
 def test_crawl_artifact_matches_golden() -> None:
     payload = serialize_crawl_job(_job())
-    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/7"
+    assert payload["schema_version"] == CRAWL_ARTIFACT_SCHEMA_VERSION == "crawler-cli/crawl-artifact/8"
     assert set(payload.keys()) == EXPECTED_JOB_KEYS
     first_result = payload["results"][0]  # type: ignore[index]
     assert set(first_result.keys()) == EXPECTED_RESULT_KEYS

@@ -1,8 +1,29 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
+from urllib.parse import parse_qsl, urlparse
 
+from .hashing import hamming64
 from .persistence import AsyncpgStore
+
+
+_TRACKING_PARAMETERS = {
+    "_ga",
+    "_gl",
+    "dclid",
+    "fbclid",
+    "gclid",
+    "gbraid",
+    "msclkid",
+    "utm_campaign",
+    "utm_content",
+    "utm_id",
+    "utm_medium",
+    "utm_source",
+    "utm_term",
+    "wbraid",
+}
 
 
 class CrawlReports:
@@ -13,6 +34,95 @@ class CrawlReports:
     async def _run_id(self) -> str:
         """Resolve the selected report run without silently choosing one."""
         return await self.store.resolve_reporting_run_id(self.run_id)
+
+    async def technical_audit_context(self) -> dict[str, object]:
+        """Return scope, completion and extraction denominators for one run.
+
+        Do not emit the full crawl config or seed URLs: they may contain
+        credentials, private route names or query values. The returned scope
+        summary is useful for coverage without copying those values into audit
+        artifacts.
+        """
+        run_id = await self._run_id()
+        run = await self.store.get_crawl_run(run_id)
+        if run is None:
+            raise ValueError(f"crawl run not found: {run_id}")
+        column_rows = await self._fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_schema = current_schema()
+                 AND table_name = 'page_run_snapshots'"""
+        )
+        snapshot_columns = {str(row["column_name"]) for row in column_rows}
+        has_extraction_state = "content_extracted" in snapshot_columns
+        has_images = "images_json" in snapshot_columns
+        extraction_true = "s.content_extracted IS TRUE" if has_extraction_state else "FALSE"
+        extraction_false = "s.content_extracted IS FALSE" if has_extraction_state else "FALSE"
+        extraction_unknown = "s.content_extracted IS NULL" if has_extraction_state else "TRUE"
+        image_count = "COALESCE(SUM(jsonb_array_length(s.images_json)), 0)::INT" if has_images else "NULL::INT"
+        coverage = await self._fetch(
+            f"""
+            SELECT
+                COUNT(*)::INT AS snapshot_count,
+                COUNT(*) FILTER (WHERE u.kind = 'html')::INT AS html_count,
+                COUNT(*) FILTER (
+                    WHERE u.kind = 'html' AND s.final_status_code BETWEEN 200 AND 299
+                )::INT AS successful_html_count,
+                COUNT(*) FILTER (
+                    WHERE u.kind = 'html' AND {extraction_true}
+                )::INT AS parsed_html_count,
+                COUNT(*) FILTER (
+                    WHERE u.kind = 'html' AND {extraction_false}
+                )::INT AS unparsed_html_count,
+                COUNT(*) FILTER (
+                    WHERE u.kind = 'html' AND {extraction_unknown}
+                )::INT AS extraction_state_unknown_html_count,
+                COUNT(*) FILTER (WHERE s.challenge IS NOT NULL)::INT AS challenged_count,
+                COUNT(*) FILTER (WHERE s.content_hash_simhash IS NOT NULL)::INT AS hashed_count,
+                {image_count} AS image_reference_count,
+                MAX(s.fetched_at)::BIGINT AS last_snapshot_at
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1
+            """,
+            run_id,
+        )
+        stats = dict(coverage[0]) if coverage else {}
+        if not has_extraction_state:
+            stats["parsed_html_count"] = None
+            stats["unparsed_html_count"] = None
+        config = run.get("config") if isinstance(run.get("config"), dict) else {}
+        seed_urls = run.get("seed_urls") if isinstance(run.get("seed_urls"), list) else []
+        seed_hosts = sorted({parsed.hostname.lower() for seed in seed_urls if (parsed := urlparse(str(seed))).hostname})
+        declared_hosts = config.get("allowed_hosts", [])
+        if not isinstance(declared_hosts, list):
+            declared_hosts = []
+        declared_hosts = sorted({str(host).lower() for host in declared_hosts if host})
+        frontier = await self.store.frontier_stats(run_id=run_id)
+        run_status = str(run.get("status", "unknown"))
+        completion_state = "complete" if run_status == "complete" else run_status
+        return {
+            "run_id": run_id,
+            "run_status": run_status,
+            "completion_state": completion_state,
+            "mode": str(run.get("mode", "unknown")),
+            "created_at": run.get("created_at"),
+            "updated_at": run.get("updated_at"),
+            "config_hash": str(run.get("config_hash", "")),
+            "config_keys": sorted(str(key) for key in config),
+            "seed_count": len(seed_urls),
+            "seed_hosts": seed_hosts,
+            "declared_allowed_hosts": declared_hosts,
+            "schema_capabilities": {
+                "content_extracted": has_extraction_state,
+                "images_json": has_images,
+                "links_json": "links_json" in snapshot_columns,
+                "content_hash_simhash": "content_hash_simhash" in snapshot_columns,
+            },
+            "frontier_queued": frontier[0],
+            "frontier_pending": frontier[1],
+            "frontier_done": frontier[2],
+            **stats,
+        }
 
     async def orphan_pages(self) -> list[dict[str, object]]:
         run_id = await self._run_id()
@@ -29,9 +139,17 @@ class CrawlReports:
 
     async def indexability_reasons(self) -> list[dict[str, object]]:
         run_id = await self._run_id()
+        column_rows = await self._fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_schema = current_schema()
+                 AND table_name = 'page_run_snapshots'"""
+        )
+        has_extraction_state = any(row["column_name"] == "content_extracted" for row in column_rows)
+        extraction_field = "s.content_extracted" if has_extraction_state else "NULL::BOOLEAN"
         return await self._fetch(
-            """
-            SELECT u.url, s.html_meta_allows, s.http_header_allows, s.overall_indexable
+            f"""
+            SELECT u.url, s.html_meta_allows, s.http_header_allows, s.overall_indexable,
+                   {extraction_field} AS content_extracted
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
             WHERE s.run_id = $1
             ORDER BY u.url
@@ -181,6 +299,174 @@ class CrawlReports:
             """,
             run_id,
         )
+
+    async def image_issues(self) -> list[dict[str, object]]:
+        """Run-scoped image accessibility and layout evidence."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT u.url AS source_url, image ->> 'url' AS image_url,
+                   image ->> 'source' AS source_kind, image ->> 'xpath' AS xpath,
+                   issue.name AS issue,
+                   image ->> 'alt' AS alt,
+                   (image ->> 'width')::INTEGER AS width,
+                   (image ->> 'height')::INTEGER AS height,
+                   image ->> 'loading' AS loading
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            CROSS JOIN LATERAL jsonb_array_elements(s.images_json) image
+            CROSS JOIN LATERAL (VALUES
+              ('missing_alt_attribute', COALESCE((image ->> 'alt_present')::BOOLEAN, FALSE) = FALSE),
+              ('missing_dimensions', image ->> 'width' IS NULL OR image ->> 'height' IS NULL)
+            ) AS issue(name, applies)
+            WHERE s.run_id = $1 AND issue.applies
+            ORDER BY u.url, image ->> 'url', issue
+            """,
+            run_id,
+        )
+
+    async def internal_link_quality(self) -> list[dict[str, object]]:
+        """Internal links carrying weak crawl or consolidation signals."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            WITH edges AS (
+                SELECT source.url AS source_url, link ->> 'href' AS target_url,
+                       NULLIF(link ->> 'anchor_text', '') AS anchor_text,
+                       link ->> 'xpath' AS xpath
+                FROM page_run_snapshots snapshot
+                JOIN urls source ON source.id = snapshot.url_id
+                CROSS JOIN LATERAL jsonb_array_elements(snapshot.links_json) link
+                WHERE snapshot.run_id = $1
+            )
+            SELECT edges.source_url, edges.target_url, edges.anchor_text, edges.xpath,
+                   target.final_status_code AS target_status,
+                   target.overall_indexable AS target_indexable,
+                   CASE
+                     WHEN edges.anchor_text IS NULL THEN 'empty_anchor'
+                     WHEN target.final_status_code BETWEEN 300 AND 399 THEN 'redirect_target'
+                     WHEN target.final_status_code >= 400 THEN 'error_target'
+                     WHEN target.overall_indexable = FALSE THEN 'non_indexable_target'
+                   END AS issue
+            FROM edges
+            LEFT JOIN urls target_url ON target_url.url = edges.target_url
+            LEFT JOIN page_run_snapshots target
+              ON target.run_id = $1 AND target.url_id = target_url.id
+            WHERE edges.anchor_text IS NULL
+               OR target.final_status_code >= 300
+               OR target.overall_indexable = FALSE
+            ORDER BY edges.source_url, edges.target_url
+            """,
+            run_id,
+        )
+
+    async def tracking_parameter_links(self) -> list[dict[str, object]]:
+        """Internal links that publish known analytics/session parameters."""
+        run_id = await self._run_id()
+        rows = await self._fetch(
+            """
+            SELECT source.url AS source_url, link ->> 'href' AS target_url,
+                   link ->> 'anchor_text' AS anchor_text, link ->> 'xpath' AS xpath
+            FROM page_run_snapshots snapshot
+            JOIN urls source ON source.id = snapshot.url_id
+            CROSS JOIN LATERAL jsonb_array_elements(snapshot.links_json) link
+            WHERE snapshot.run_id = $1 AND (link ->> 'href') LIKE '%?%'
+            ORDER BY source.url, link ->> 'href'
+            """,
+            run_id,
+        )
+        findings: list[dict[str, object]] = []
+        for row in rows:
+            # The SQL deliberately retains the full link evidence so callers
+            # can use it for external-link analysis too. This report's claim
+            # is narrower: only first-party links create internal crawl paths.
+            if urlparse(str(row["source_url"])).netloc.lower() != urlparse(str(row["target_url"])).netloc.lower():
+                continue
+            keys = sorted({key.lower() for key, _ in parse_qsl(urlparse(str(row["target_url"])).query)})
+            tracking = [key for key in keys if key in _TRACKING_PARAMETERS]
+            if tracking:
+                findings.append({**row, "tracking_parameters": ",".join(tracking)})
+        return findings
+
+    async def near_duplicates(self, threshold: int = 4, limit: int = 5000) -> list[dict[str, object]]:
+        """Near-duplicate indexable pages using persisted 64-bit SimHash."""
+        run_id = await self._run_id()
+        rows = await self._fetch(
+            """
+            SELECT u.url, s.content_hash_sha256, s.content_hash_simhash
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1 AND s.overall_indexable = TRUE
+              AND s.content_hash_simhash IS NOT NULL
+            ORDER BY u.url LIMIT $2
+            """,
+            run_id,
+            limit,
+        )
+        findings: list[dict[str, object]] = []
+        for index, left in enumerate(rows):
+            for right in rows[index + 1 :]:
+                if left["content_hash_sha256"] == right["content_hash_sha256"]:
+                    continue
+                distance = hamming64(
+                    int(cast(int, left["content_hash_simhash"])),
+                    int(cast(int, right["content_hash_simhash"])),
+                )
+                if distance <= threshold:
+                    findings.append(
+                        {"url": left["url"], "near_duplicate_url": right["url"], "simhash_distance": distance}
+                    )
+        return sorted(findings, key=lambda row: (row["simhash_distance"], row["url"], row["near_duplicate_url"]))
+
+    async def internal_authority(self) -> list[dict[str, object]]:
+        """PageRank-like relative authority over indexable run-scoped pages."""
+        run_id = await self._run_id()
+        pages = await self._fetch(
+            """
+            SELECT u.url, s.links_json
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1 AND s.overall_indexable = TRUE
+            ORDER BY u.url
+            """,
+            run_id,
+        )
+        urls = {str(row["url"]) for row in pages}
+        if not urls:
+            return []
+        outgoing: dict[str, set[str]] = {}
+        for row in pages:
+            raw_links = row["links_json"] or []
+            if isinstance(raw_links, str):
+                raw_links = json.loads(raw_links)
+            links = cast(list[dict[str, Any]], raw_links)
+            outgoing[str(row["url"])] = {str(link["href"]) for link in links if link.get("href") in urls}
+        score = {url: 1.0 / len(urls) for url in urls}
+        damping = 0.85
+        for _ in range(50):
+            sink = sum(score[url] for url, targets in outgoing.items() if not targets)
+            updated = {url: (1.0 - damping) / len(urls) + damping * sink / len(urls) for url in urls}
+            for source, targets in outgoing.items():
+                if targets:
+                    contribution = damping * score[source] / len(targets)
+                    for target in targets:
+                        updated[target] += contribution
+            if max(abs(updated[url] - score[url]) for url in urls) < 1e-10:
+                score = updated
+                break
+            score = updated
+        inbound = {url: 0 for url in urls}
+        for targets in outgoing.values():
+            for target in targets:
+                inbound[target] += 1
+        maximum = max(score.values()) or 1.0
+        return [
+            {
+                "url": url,
+                "authority_score": round(100.0 * score[url] / maximum, 4),
+                "unique_inlinks": inbound[url],
+                "unique_outlinks": len(outgoing[url]),
+            }
+            for url in sorted(urls, key=lambda value: (score[value], value))
+        ]
 
     async def schema_compatibility(self) -> list[dict[str, object]]:
         """Run-scoped JSON-LD single-unescape compatibility findings."""
