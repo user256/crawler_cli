@@ -621,6 +621,15 @@ crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
   --out ./audit-evidence/technical-audit.json
 ```
 
+Saved link failures remain analyst-only until explicitly rechecked. To collect
+two live attempts for up to 25 in-scope failed targets, add
+`--recheck-live --scope-manifest ./authorized-scope.json`. The recheck honours
+robots.txt, the manifest and destination guard, does not escalate challenges
+to a browser, and keeps recovered or inconclusive targets out of client action
+tabs. Robots refusals, challenges, access denials, rate limits, DNS/TLS and
+other transport errors remain distinct. The JSON publication gate stays closed for incomplete coverage or
+unvalidated candidates.
+
 ### Run snapshots and retention
 
 Each fetch is retained as an immutable page snapshot for its crawl run. The

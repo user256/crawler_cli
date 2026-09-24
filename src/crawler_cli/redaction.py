@@ -544,6 +544,22 @@ def redact_query_string(query: str, *, policy: RedactionPolicy = DEFAULT_POLICY)
     return "&".join(pieces), tuple(redacted_keys)
 
 
+def redact_url_without_digest(raw_url: str, *, policy: RedactionPolicy = DEFAULT_POLICY) -> str:
+    """Redact URL credentials/query secrets without adding a random HMAC key.
+
+    Use this for deterministic evidence bundles whose exact URL correlation is
+    carried separately by a stable source-row reference.
+    """
+    try:
+        parts = urlsplit(raw_url)
+    except ValueError:
+        return REDACTED
+    netloc = parts.netloc.rsplit("@", 1)[-1]
+    query, _redacted_keys = redact_query_string(parts.query, policy=policy)
+    fragment = REDACTED if parts.fragment and policy.redact_fragment else parts.fragment
+    return urlunsplit((parts.scheme, netloc, parts.path, query, fragment))
+
+
 def project_url(
     raw_url: str,
     *,
