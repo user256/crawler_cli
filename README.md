@@ -630,6 +630,15 @@ tabs. Robots refusals, challenges, access denials, rate limits, DNS/TLS and
 other transport errors remain distinct. The JSON publication gate stays closed for incomplete coverage or
 unvalidated candidates.
 
+To explicitly copy a compatible Google Sheets v1 template after writing the
+JSON artifact, add `--publish-google-sheets --google-sheets-template SHEET_URL`.
+The default durable receipt is written beside `--out`; retain it to recover a
+partial copy. Retry with `--resume-google-sheets --google-sheets-receipt PATH`
+to reconcile that exact workbook. Publication never edits the source template,
+uses RAW cell input, and reports success only after readback. See
+[`docs/technical-audit-google-sheets.md`](docs/technical-audit-google-sheets.md)
+for OAuth and service-account setup.
+
 ### Run snapshots and retention
 
 Each fetch is retained as an immutable page snapshot for its crawl run. The
