@@ -31,8 +31,8 @@ from .performance_audit import (
 )
 
 
-TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/1"
-TECHNICAL_AUDIT_RULESET_VERSION = "technical-audit-rules/2"
+TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/2"
+TECHNICAL_AUDIT_RULESET_VERSION = "technical-audit-rules/3"
 
 # The report names are run-scoped and have no dependency on a changing live
 # endpoint.  Keep this list explicit so additions are intentional and appear
@@ -1263,7 +1263,20 @@ def build_technical_audit(
         *_tracking_actions(rows["tracking-parameter-links"]),
         *_schema_actions(schema_defects),
     ]
+    audit_log = _aggregate_actions(audit_log)
     client_actions = _link_actions(confirmed_link_failures)
+    evidence_index = _evidence_index(checks)
+    for action in [*audit_log, *client_actions]:
+        reference = str(action.get("Evidence Reference") or "")
+        if ";" in reference:
+            members = sorted(set(reference.split(";")))
+            grouped_reference = _evidence_id("grouped-action", {"members": members})
+            evidence_index[grouped_reference] = {
+                "record_type": "grouped_action_evidence",
+                "evidence_ids": members,
+                "evidence_count": len(members),
+            }
+            action["Evidence Reference"] = grouped_reference
     unresolved_link_failures = [row for row in analyst_link_failures if row.get("recheck_state") not in {"recovered"}]
     checks_complete = all(
         check["status"] not in {"partial", "unavailable", "error"}
@@ -1302,7 +1315,6 @@ def build_technical_audit(
         and live_rechecks is not None
         and checks_complete
         and not unresolved_link_failures
-        and not audit_log
     )
     publishable_actions = client_actions if publication_ready else []
     analyst_evidence = [
@@ -1318,8 +1330,6 @@ def build_technical_audit(
         publication_reasons.append("one or more deterministic checks have incomplete coverage")
     if unresolved_link_failures:
         publication_reasons.append("some saved link failures are unverified or not publishable")
-    if audit_log:
-        publication_reasons.append("saved action candidates require field-specific current validation")
     return {
         "schema_version": TECHNICAL_AUDIT_SCHEMA_VERSION,
         "ruleset_version": TECHNICAL_AUDIT_RULESET_VERSION,
@@ -1360,6 +1370,16 @@ def build_technical_audit(
         "check_registry": [dict(item) for item in TECHNICAL_AUDIT_CHECK_REGISTRY],
         "checks": list(checks),
         "audit_log": audit_log,
+        "evidence_index": evidence_index,
+        "recipient_projection": recipient_report_projection(
+            crawl_run_id=crawl_run_id,
+            run_context=context,
+            checks=checks,
+            actions=publishable_actions,
+            metadata_coverage=metadata_coverage,
+            canonical_coverage=canonical_hreflang_coverage,
+            performance_report=performance_report,
+        ),
         "analyst_evidence": analyst_evidence,
         "live_rechecks": [
             {
@@ -1395,34 +1415,35 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     assert isinstance(checks, list)
     raw_context = audit.get("run_context", {})
     context = raw_context if isinstance(raw_context, Mapping) else {}
-    raw_coverage = audit.get("source_coverage", {})
-    source_coverage = raw_coverage if isinstance(raw_coverage, Mapping) else {}
-    registry = audit.get("check_registry", [])
-    audit_log = audit.get("audit_log", [])
     raw_gate = audit.get("client_publication_gate", {})
     gate = raw_gate if isinstance(raw_gate, Mapping) else {}
     overview = [
         ["Metric", "Value"],
-        ["Audit schema", str(audit["schema_version"])],
-        ["Ruleset version", str(audit.get("ruleset_version", "unknown"))],
         ["Crawl run", str(audit["crawl_run_id"])],
         ["Run status", str(context.get("run_status", "unknown"))],
         ["Completion state", str(context.get("completion_state", "unavailable"))],
         ["Parsed HTML denominator", context.get("parsed_html_count", "unknown")],
         [
-            "Source reports available",
-            sum(bool(item["available"]) for item in source_coverage.values() if isinstance(item, Mapping)),
-        ],
-        ["Registry checks", len(registry) if isinstance(registry, list) else 0],
-        ["Candidate/action rows", len(audit_log) if isinstance(audit_log, list) else 0],
-        [
             "Client publication ready",
             gate.get("ready", False),
         ],
     ]
+    projection = audit.get("recipient_projection", {})
+    projection = projection if isinstance(projection, Mapping) else {}
+    overview.extend([[str(row[0]), row[1]] for row in projection.get("health_metrics", [])])
     for check in checks:
         assert isinstance(check, Mapping)
-        overview.append([str(check["title"]), str(check["status"])])
+        title = str(check["title"])
+        overview.append([title, str(check["status"])])
+        eligible = check.get("denominator")
+        tested = check.get("tested_count")
+        affected = check.get("affected_count", 0)
+        overview.append(
+            [
+                f"{title} — affected / tested / eligible",
+                f"{affected} / {tested if tested is not None else 'unknown'} / {eligible if eligible is not None else 'unknown'}",
+            ]
+        )
     structured_rules = audit.get("structured_data_rules", {})
     if isinstance(structured_rules, Mapping):
         overview.extend(
@@ -1448,6 +1469,13 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 ["Field CWV source", performance_coverage.get("field_cwv", "unavailable")],
             ]
         )
+    overview.extend(
+        [
+            ["Run scope", projection.get("scope", "unknown")],
+            ["Audit date", projection.get("run_date", "unknown")],
+            ["Coverage caveats", projection.get("coverage_caveats", "unknown")],
+        ]
+    )
 
     canonical_coverage = audit.get("canonical_hreflang_coverage", {})
     if isinstance(canonical_coverage, Mapping) and canonical_coverage:
@@ -1516,29 +1544,23 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
             [
                 ["Rendered same-navigation samples", rendered_coverage.get("sample_size", 0)],
                 ["Rendered sample complete", rendered_coverage.get("complete", False)],
-                ["Rendered-only links", rendered_coverage.get("rendered_only_link_count", 0)],
-                ["Raw-only links", rendered_coverage.get("raw_only_link_count", 0)],
             ]
         )
 
     tables: dict[str, list[list[object]]] = {"Overview": overview}
-    raw_metadata_coverage = audit.get("metadata_locale_coverage", {})
-    if isinstance(raw_metadata_coverage, Mapping) and raw_metadata_coverage:
-        tables["Metadata Coverage"] = [
-            ["Metric", "Value"],
-            *[
-                [str(key), json.dumps(value, sort_keys=True) if isinstance(value, (Mapping, list)) else value]
-                for key, value in sorted(raw_metadata_coverage.items())
-                if key != "record_type"
-            ],
-        ]
     client_actions = gate.get("client_actions", [])
     if gate.get("ready") is True and isinstance(client_actions, list) and client_actions:
         tables["Audit Log"] = _table(
             client_actions,
             (
                 "Problem",
-                "URL",
+                "Affected URL",
+                "Affected URL Count",
+                "Finding Count",
+                "Unique Source Pages",
+                "Link Instances",
+                "Severity",
+                "Severity Rationale",
                 "Explanation",
                 "Fix",
                 "SEO Impact",
@@ -1547,39 +1569,30 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 "Owner",
                 "Acceptance Criteria",
                 "Retest Status",
+                "Retest Date",
+                "Resolution Evidence",
+                "Historical Status",
+                "Live Status",
                 "Evidence Reference",
                 "Resolved",
             ),
         )
+    failing_targets = projection.get("failing_target_inventory", [])
+    if gate.get("ready") is True and isinstance(failing_targets, list) and failing_targets:
+        tables["Failing Link Targets"] = _table(failing_targets)
+    conditional_coverage = audit.get("conditional_get_coverage", {})
+    conditional_coverage = conditional_coverage if isinstance(conditional_coverage, Mapping) else {}
+    conditional_candidates: list[dict[str, object]] = []
     for check in checks:
-        assert isinstance(check, Mapping)
-        evidence = check["evidence"]
-        assert isinstance(evidence, list)
-        if evidence and str(check.get("qualification") or "") == "analyst_only":
-            detail_evidence = list(evidence)
-            if check.get("id") == "parameterized-canonical-links":
-                detail_evidence = [
-                    *parameter_coverage_rows,
-                    *detail_evidence,
-                ]
-            tables[str(check["detail_sheet"])] = _table(detail_evidence)
-    structured_report = audit.get("structured_data_report", [])
-    if isinstance(structured_report, list) and len(structured_report) > 1:
-        structured_rows = []
-        for source_row in structured_report[1:]:
-            if not isinstance(source_row, Mapping):
-                continue
-            export_row = dict(source_row)
-            # Keep exact raw evidence in the local JSON bundle with a digest,
-            # but avoid copying arbitrary page markup into a shared Sheet.
-            export_row.pop("raw_evidence_excerpt", None)
-            structured_rows.append(export_row)
-        tables["Structured Data"] = _table(structured_rows)
-    performance_report = audit.get("performance_report", [])
-    if isinstance(performance_report, list) and any(
-        isinstance(row, Mapping) and row.get("record_type") != "coverage" for row in performance_report
-    ):
-        tables["Performance"] = _table([row for row in performance_report if isinstance(row, Mapping)])
+        if not isinstance(check, Mapping) or check.get("id") != "performance-and-conditional-requests":
+            continue
+        evidence = check.get("evidence", [])
+        if isinstance(evidence, list):
+            conditional_candidates.extend(
+                dict(row) for row in evidence if isinstance(row, Mapping) and row.get("record_type") == "candidate"
+            )
+    if conditional_coverage.get("state") == "tested" and conditional_candidates:
+        tables["304 Recheck"] = _table(conditional_candidates)
     return tables
 
 
@@ -1673,77 +1686,345 @@ def _package_version(name: str) -> str:
 
 
 def _action(*, problem: str, url: object, explanation: str, fix: str, impact: str, evidence: str) -> dict[str, object]:
+    url_text = str(url or "")
     return {
         "Problem": problem,
-        "URL": url,
+        "Affected URL": redact_url_without_digest(url_text) if url_text else "",
+        "Affected URL Count": 1 if url_text else 0,
+        "Unique Source Pages": 0,
+        "Link Instances": 1,
+        "Severity": "Medium",
+        "Severity Rationale": "A deterministic defect is present in the saved crawl evidence; business value was not supplied.",
         "Explanation": explanation,
         "Fix": fix,
         "SEO Impact": impact,
         "Action Needed": "Yes",
         "Responsible Team": "Engineering",
         "Owner": "Unassigned",
-        "Acceptance Criteria": "Deploy the change and recheck the exact URL live.",
-        "Retest Status": "Not retested",
-        "Evidence Reference": evidence,
+        "Acceptance Criteria": f"Re-run the applicable check for {redact_url_without_digest(url_text) if url_text else 'the affected page'}; confirm the defect is absent and intended page behaviour is preserved.",
+        "Retest Status": "Remediation not retested",
+        "Retest Date": "",
+        "Resolution Evidence": "",
+        "Evidence Reference": _evidence_id(evidence, {"url": url_text, "explanation": explanation}),
         "Resolved": "No",
     }
 
 
 def _indexability_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     return [
-        _action(
-            problem="Conflicting indexability directives",
-            url=row.get("url", ""),
-            explanation=f"Explicit HTML and HTTP directives contradict: {row.get('conflicts', [])}.",
-            fix="Choose one intended indexability state and make header and HTML directives agree.",
-            impact="Conflicting signals can lead to unintended indexation handling.",
-            evidence="indexability-directive-conflicts",
-        )
+        {
+            **_action(
+                problem="Conflicting indexability directives",
+                url=row.get("url", ""),
+                explanation=f"Explicit HTML and HTTP directives contradict: {row.get('conflicts', [])}.",
+                fix="Choose one intended indexability state and make header and HTML directives agree.",
+                impact="Conflicting signals can lead to unintended indexation handling.",
+                evidence="indexability-directive-conflicts",
+            ),
+            "Evidence Reference": _evidence_id("indexability-directive-conflicts", row),
+            "Acceptance Criteria": "On the exact page, the intended robots state is declared consistently in HTTP headers and HTML; re-run the directive comparison.",
+        }
         for row in rows
     ]
 
 
 def _link_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    return [
-        _action(
-            problem="Internal link targets a repeatedly failing URL",
-            url=row.get("target_url", ""),
-            explanation=(
-                f"Saved status {row.get('target_status')}; bounded live rechecks repeatedly failed. "
-                f"Source: {row.get('source_url', '')}; anchor: {row.get('anchor_text', '')}."
-            ),
-            fix="Restore the destination or update the internal link to its intended working URL.",
-            impact="Repeatedly failing internal destinations interrupt navigation and waste crawl paths.",
-            evidence="internal-link-failures with live_recheck evidence",
+    by_target: dict[str, list[Mapping[str, object]]] = {}
+    for row in rows:
+        target = str(row.get("target_url") or "")
+        if target:
+            by_target.setdefault(target, []).append(row)
+    actions: list[dict[str, object]] = []
+    for target, members in sorted(by_target.items()):
+        source_urls = sorted({str(row.get("source_url") or "") for row in members if row.get("source_url")})
+        statuses = sorted(
+            {
+                str(live.get("status") or row.get("target_status") or "unknown")
+                for row in members
+                for live in [row.get("live_recheck")]
+                if isinstance(live, Mapping)
+            }
         )
-        for row in rows
+        instance_count = sum(_optional_int(row.get("link_instances")) or 1 for row in members)
+        action = _action(
+            problem="Internal links target a repeatedly failing URL",
+            url=target,
+            explanation=(
+                f"The target failed bounded live rechecks (status {', '.join(statuses) or 'unknown'}); "
+                f"{instance_count} link instances from {len(source_urls)} unique source pages point to it."
+            ),
+            fix="Restore the destination or update internal links to its intended working URL.",
+            impact="Repeatedly failing internal destinations interrupt navigation and waste crawl paths.",
+            evidence="internal-link-failures",
+        )
+        evidence_ids = sorted({_evidence_id("internal-link-failures", row) for row in members})
+        action.update(
+            {
+                "Problem": "Internal links target a repeatedly failing URL",
+                "Affected URL Count": 1,
+                "Unique Source Pages": len(source_urls),
+                "Link Instances": instance_count,
+                "Severity": "Medium",
+                "Severity Rationale": (
+                    f"{len(source_urls)} unique internal source pages still link to a live-confirmed failure; "
+                    "business value was not supplied."
+                ),
+                "Acceptance Criteria": (
+                    "The target returns the intended successful page or the internal links are changed to the "
+                    "approved replacement; recheck every affected source/target pair and confirm no repeat failure."
+                ),
+                "Evidence Reference": ";".join(evidence_ids),
+                "Historical Status": ", ".join(sorted({str(row.get("target_status") or "unknown") for row in members})),
+                "Live Status": ", ".join(statuses),
+                "Retest Status": "Live failure confirmed; remediation not retested",
+            }
+        )
+        actions.append(action)
+    return actions
+
+
+def _aggregate_actions(actions: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """Collapse repeated saved candidates by finding and affected target."""
+    groups: dict[tuple[str, str], list[Mapping[str, object]]] = {}
+    for action in actions:
+        key = (str(action.get("Problem") or ""), str(action.get("Affected URL") or ""))
+        groups.setdefault(key, []).append(action)
+    aggregated = []
+    for (problem, url), members in sorted(groups.items()):
+        first = dict(members[0])
+        first["Finding Count"] = len(members)
+        first["Affected URL Count"] = 1 if url else 0
+        sources = {str(row.get("Source URL")) for row in members if row.get("Source URL")}
+        first["Unique Source Pages"] = len(sources) if sources else max(
+            (_optional_int(row.get("Unique Source Pages")) or 0 for row in members), default=0
+        )
+        first["Link Instances"] = sum(_optional_int(row.get("Link Instances")) or 1 for row in members)
+        first["Evidence Reference"] = ";".join(sorted({str(row.get("Evidence Reference") or "") for row in members}))
+        first["Explanation"] = f"{len(members)} matching evidence records for this affected target. {first.get('Explanation', '')}"
+        aggregated.append(first)
+    return aggregated
+
+
+def _evidence_id(check_id: str, row: Mapping[str, object]) -> str:
+    payload = json.dumps({"check_id": check_id, "evidence": row}, sort_keys=True, separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _evidence_index(checks: Sequence[Mapping[str, object]]) -> dict[str, dict[str, object]]:
+    index: dict[str, dict[str, object]] = {}
+    for check in checks:
+        evidence = check.get("evidence", [])
+        if not isinstance(evidence, list):
+            continue
+        for row in evidence:
+            if isinstance(row, Mapping):
+                reference = _evidence_id(str(check.get("id") or "unknown"), row)
+                index[reference] = {"check_id": check.get("id"), "evidence": dict(row)}
+    return dict(sorted(index.items()))
+
+
+def recipient_report_projection(
+    *,
+    crawl_run_id: str,
+    run_context: Mapping[str, object],
+    checks: Sequence[Mapping[str, object]],
+    actions: Sequence[Mapping[str, object]],
+    metadata_coverage: Mapping[str, object],
+    canonical_coverage: Mapping[str, object],
+    performance_report: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Build the concise recipient view while retaining unknowns as unknown."""
+    check_map = {str(check.get("id")): check for check in checks}
+    metadata_check = check_map.get("metadata-and-locale", {})
+    metadata_rows = metadata_check.get("evidence", [])
+    metadata_rows = [row for row in metadata_rows if isinstance(row, Mapping)] if isinstance(metadata_rows, list) else []
+    type_counts: dict[str, int] = {}
+    for row in metadata_rows:
+        candidate_type = str(row.get("candidate_type") or "")
+        type_counts[candidate_type] = type_counts.get(candidate_type, 0) + 1
+    complete = metadata_coverage.get("inventory_complete") is True
+    raw_scope = run_context.get("seed_origins", [])
+    scope = ", ".join(str(value) for value in raw_scope if value) if isinstance(raw_scope, list) else "unknown"
+    internal_check = check_map.get("internal-link-failures", {})
+    raw_internal_evidence = internal_check.get("evidence", []) if isinstance(internal_check, Mapping) else []
+    internal_evidence = raw_internal_evidence if isinstance(raw_internal_evidence, list) else []
+    metrics: list[list[object]] = [
+        ["Indexable HTML pages tested", metadata_coverage.get("eligible_indexable_count", "unknown")],
     ]
+    for label, key in (
+        ("Indexable pages missing title", "missing_title"),
+        ("Indexable pages missing meta description", "missing_description"),
+        ("Indexable pages missing H1", "missing_h1"),
+        ("Same-locale duplicate title pages", "duplicate_title_same_locale"),
+        ("Same-locale duplicate description pages", "duplicate_description_same_locale"),
+    ):
+        metrics.append([label, type_counts.get(key, 0) if complete else "unknown (inventory incomplete)"])
+    for check_id, label in (
+        ("canonical-consistency", "Canonical issue records"),
+        ("hreflang-consistency", "Hreflang issue records"),
+    ):
+        check = check_map.get(check_id, {})
+        status = check.get("status")
+        value = check.get("row_count", 0) if status in {"pass", "finding", "no_observations"} else "unknown (coverage incomplete)"
+        metrics.append([label, value])
+    for group in performance_report[1:]:
+        if not isinstance(group, Mapping):
+            continue
+        ttfb = group.get("ttfb_seconds", {})
+        duration = group.get("total_duration_seconds", {})
+        ttfb_p90 = ttfb.get("p90") if isinstance(ttfb, Mapping) else None
+        duration_p90 = duration.get("p90") if isinstance(duration, Mapping) else None
+        stratum = f"{group.get('locale', 'unknown')} / {group.get('template', 'unknown')}"
+        metrics.append([f"Lab TTFB p90 ({stratum})", ttfb_p90 if ttfb_p90 is not None else "unknown"])
+        metrics.append([f"Lab total-duration p90 ({stratum})", duration_p90 if duration_p90 is not None else "unknown"])
+    metrics.extend(
+        [
+            ["Canonical/hreflang eligible pages", canonical_coverage.get("indexable_count", "unknown")],
+            ["Average crawl depth", "unknown (not available in this run projection)"],
+            ["Thin-content pages", "unknown (not measured by this audit bundle)"],
+            ["Run scope", scope],
+            ["Audit date", str(run_context.get("finished_at") or run_context.get("started_at") or "unknown")],
+            ["Qualified client actions", len(actions)],
+        ]
+    )
+    incomplete_checks = [
+        f"{check.get('title')} ({check.get('status')})"
+        for check in checks
+        if check.get("status") in {"partial", "unavailable", "error"}
+    ]
+    coverage_caveats = (
+        "; ".join(incomplete_checks) if incomplete_checks else "No partial/unavailable check states"
+    )
+    targets = []
+    for action in actions:
+        target = action.get("Affected URL")
+        source_rows = [
+            row for row in internal_evidence
+            if isinstance(row, Mapping) and redact_url_without_digest(str(row.get("target_url") or "")) == target
+        ]
+        sources = sorted({redact_url_without_digest(str(row.get("source_url") or "")) for row in source_rows if row.get("source_url")})
+        link_samples = [
+            {
+                "source_url": redact_url_without_digest(str(row.get("source_url") or "")),
+                "anchor_text": row.get("anchor_text"),
+                "xpath": row.get("xpath"),
+            }
+            for row in sorted(source_rows, key=lambda row: (str(row.get("source_url") or ""), str(row.get("xpath") or "")))[:10]
+        ]
+        targets.append(
+            {
+                "target_url": target,
+                "link_instances": action.get("Link Instances", 0),
+                "unique_source_pages": action.get("Unique Source Pages", 0),
+                "source_page_samples": sources[:10],
+                "source_sample_count": min(len(sources), 10),
+                "source_sample_complete": len(sources) <= 10,
+                "link_samples": link_samples,
+                "evidence_reference": action.get("Evidence Reference", ""),
+            }
+        )
+    return {
+        "crawl_run_id": crawl_run_id,
+        "run_date": run_context.get("finished_at") or run_context.get("started_at"),
+        "scope": run_context.get("seed_origins", []),
+        "health_metrics": metrics,
+        "coverage_caveats": coverage_caveats,
+        "actions": [dict(action) for action in actions],
+        "failing_target_inventory": targets,
+        "qualified_action_count": len(actions),
+    }
+
+
+def render_technical_audit_markdown(audit: Mapping[str, object]) -> str:
+    """Render the same recipient projection as a concise Markdown report."""
+    projection = audit.get("recipient_projection", {})
+    projection = projection if isinstance(projection, Mapping) else {}
+    lines = [
+        "# Technical SEO audit",
+        "",
+        f"- Crawl run: {projection.get('crawl_run_id', audit.get('crawl_run_id', 'unknown'))}",
+        f"- Date: {projection.get('run_date') or 'unknown'}",
+        f"- Scope: {', '.join(str(value) for value in projection.get('scope', []) if value) if isinstance(projection.get('scope', []), list) else 'unknown'}",
+        "",
+        "## Evidence summary",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+    ]
+    for metric in projection.get("health_metrics", []):
+        if isinstance(metric, list) and len(metric) >= 2:
+            lines.append(f"| {_markdown_cell(metric[0])} | {_markdown_cell(metric[1])} |")
+    lines.extend(["", "## Priorities", ""])
+    actions = projection.get("actions", [])
+    if not isinstance(actions, list) or not actions:
+        lines.append("No live-confirmed client actions are ready from this run.")
+    else:
+        for action in actions:
+            if not isinstance(action, Mapping):
+                continue
+            lines.extend(
+                [
+                    f"### {action.get('Severity', 'Unrated')}: {action.get('Problem', 'Finding')}",
+                    "",
+                    f"- Affected URL: {action.get('Affected URL', 'unknown')}",
+                    f"- Scope: {action.get('Link Instances', 0)} link instances from {action.get('Unique Source Pages', 0)} source pages.",
+                    f"- Evidence: `{action.get('Evidence Reference', 'unavailable')}`",
+                    f"- Why it matters: {action.get('SEO Impact', 'Impact not evaluated.')}",
+                    f"- Recommended action: {action.get('Fix', 'Review the evidence.')}",
+                    f"- Acceptance: {action.get('Acceptance Criteria', 'Retest required.')}",
+                    "",
+                ]
+            )
+    reasons = audit.get("client_publication_gate", {})
+    reasons = reasons if isinstance(reasons, Mapping) else {}
+    caveats = reasons.get("blocked_reasons", [])
+    coverage_caveat = projection.get("coverage_caveats")
+    caveat_lines = [f"- {reason}" for reason in caveats] if isinstance(caveats, list) else []
+    if coverage_caveat:
+        caveat_lines.insert(0, f"- Coverage: {coverage_caveat}")
+    if caveat_lines:
+        lines.extend(["## Scope caveats", "", *caveat_lines, ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _markdown_cell(value: object) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ")
 
 
 def _tracking_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     return [
-        _action(
-            problem="Internal link publishes tracking parameters",
-            url=row.get("target_url", ""),
-            explanation=f"Source: {row.get('source_url', '')}; parameters: {row.get('tracking_parameters', '')}.",
-            fix="Change the internal link to the clean canonical URL.",
-            impact="Crawlable tracking variants waste crawl paths and can overwrite attribution.",
-            evidence="tracking-parameter-links",
-        )
+        {
+            **_action(
+                problem="Internal link publishes tracking parameters",
+                url=row.get("target_url", ""),
+                explanation=f"Source: {row.get('source_url', '')}; parameters: {row.get('tracking_parameters', '')}.",
+                fix="Change the internal link to the clean canonical URL.",
+                impact="Crawlable tracking variants waste crawl paths and can overwrite attribution.",
+                evidence="tracking-parameter-links",
+            ),
+            "Evidence Reference": _evidence_id("tracking-parameter-links", row),
+            "Acceptance Criteria": "The source page links to the intended clean URL without analytics/session parameters; verify all affected link instances.",
+            "Unique Source Pages": 1 if row.get("source_url") else 0,
+            "Source URL": redact_url_without_digest(str(row.get("source_url") or "")),
+        }
         for row in rows
     ]
 
 
 def _schema_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     return [
-        _action(
-            problem="Structured-data parser defect",
-            url=row.get("url", ""),
-            explanation=f"{row.get('diagnostic_code', 'Unknown parser diagnostic')}: {row.get('evidence', '')}",
-            fix=str(row.get("remediation", "Correct the structured-data markup and validate it again.")),
-            impact="Invalid markup can prevent eligible structured-data features from being understood.",
-            evidence="schema-parser-defects",
-        )
+        {
+            **_action(
+                problem="Structured-data parser defect",
+                url=row.get("url", ""),
+                explanation=f"{row.get('diagnostic_code', 'Unknown parser diagnostic')}: {row.get('evidence', '')}",
+                fix=str(row.get("remediation", "Correct the structured-data markup and validate it again.")),
+                impact="Invalid markup can prevent eligible structured-data features from being understood.",
+                evidence="schema-parser-defects",
+            ),
+            "Evidence Reference": _evidence_id("schema-parser-defects", row),
+            "Acceptance Criteria": "The affected structured-data item parses without this diagnostic; feature eligibility is evaluated separately.",
+        }
         for row in rows
     ]
 
