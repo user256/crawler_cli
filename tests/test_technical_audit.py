@@ -5,6 +5,7 @@ from crawler_cli.technical_audit import (
     build_technical_audit,
     canonical_hreflang_report,
     metadata_locale_report,
+    render_technical_audit_markdown,
 )
 
 
@@ -126,9 +127,9 @@ def test_complete_metadata_inventory_reports_zero_findings_and_keeps_sheet_denom
     assert check["status"] == "pass"
     assert check["eligible_count"] == 12
     assert check["affected_count"] == 0
-    coverage_tab = audit_sheet_tables(audit)["Metadata Coverage"]
-    assert ["eligible_indexable_count", 12] in coverage_tab
-    assert ["excluded_by_reason", '{"challenged": 2}'] in coverage_tab
+    overview = audit_sheet_tables(audit)["Overview"]
+    assert ["Indexable HTML pages tested", 12] in overview
+    assert ["Indexable pages missing title", 0] in overview
 
 
 def test_canonical_report_preserves_channels_and_keeps_uncrawled_target_unknown():
@@ -318,7 +319,9 @@ def test_audit_is_stable_and_never_calls_candidate_checks_healthy():
     assert first["check_registry"]
     assert "canonical-targets" in {item["id"] for item in first["check_registry"]}
     assert len(first["audit_log"]) == 3
-    assert first["audit_log"][0]["Evidence Reference"] == "indexability-directive-conflicts"
+    evidence_reference = first["audit_log"][0]["Evidence Reference"]
+    assert evidence_reference.startswith("sha256:")
+    assert first["evidence_index"][evidence_reference]["check_id"] == "indexability-directive-conflicts"
 
 
 def test_sheet_tables_only_include_detail_tabs_with_evidence():
@@ -365,8 +368,8 @@ def test_timing_and_not_testable_conditional_probes_are_separate_from_client_act
     tables = audit_sheet_tables(audit)
     check = next(row for row in audit["checks"] if row["id"] == "performance-and-conditional-requests")
     assert check["status"] == "unavailable"
-    assert "Performance" in tables
-    assert "Conditional GET" not in tables
+    assert "Performance" not in tables
+    assert "304 Recheck" not in tables
     assert audit["performance_coverage"]["field_cwv"] == "unavailable_not_supplied"
     assert audit["client_publication_gate"]["client_actions"] == []
 
@@ -401,7 +404,7 @@ def test_unchanged_200_validator_warning_is_analyst_only_not_client_action():
     assert check["status"] == "finding"
     assert check["evidence"] == [candidate]
     assert audit["client_publication_gate"]["client_actions"] == []
-    assert "Conditional GET" in audit_sheet_tables(audit)
+    assert "304 Recheck" in audit_sheet_tables(audit)
 
 
 def test_parameter_url_family_sheet_includes_reconcilable_counts_and_link_instances():
@@ -423,11 +426,91 @@ def test_parameter_url_family_sheet_includes_reconcilable_counts_and_link_instan
         run_context={"completion_state": "complete", "parsed_html_count": 1},
     )
 
-    table = audit_sheet_tables(audit)["Parameter URL Families"]
+    assert "Parameter URL Families" not in audit_sheet_tables(audit)
+    check = next(row for row in audit["checks"] if row["id"] == "parameterized-canonical-links")
+    assert check["evidence"][0]["candidate_type"] == "internally_linked_noncanonical_parameter_url"
 
-    assert table[1][table[0].index("link_instances")] == 1
-    assert table[1][table[0].index("unique_targets")] == 1
-    assert table[2][table[0].index("target_url")] == "https://example.test/list?filter"
+
+def test_recipient_markdown_uses_healthy_denominators_and_keeps_unknown_unknown():
+    audit = build_technical_audit(
+        crawl_run_id="run-7",
+        reports={
+            "metadata-locale-inventory": [
+                {
+                    "record_type": "coverage",
+                    "inventory_complete": True,
+                    "eligible_indexable_count": 8,
+                    "eligible_noindex_count": 2,
+                    "excluded_count": 1,
+                },
+                {"record_type": "candidate", "candidate_type": "missing_title", "url": "https://e.test/a"},
+            ],
+            "canonical-hreflang-inventory": [
+                {"record_type": "coverage", "indexable_count": 8, "canonical_target_unknown_count": 1}
+            ],
+        },
+        run_context={"completion_state": "complete", "seed_origins": ["https://e.test/"]},
+    )
+
+    projection = audit["recipient_projection"]
+    metrics = {row[0]: row[1] for row in projection["health_metrics"]}
+    markdown = render_technical_audit_markdown(audit)
+    assert metrics["Indexable HTML pages tested"] == 8
+    assert metrics["Indexable pages missing title"] == 1
+    assert metrics["Indexable pages missing H1"] == 0
+    assert metrics["Thin-content pages"].startswith("unknown")
+    assert "unknown" in markdown
+    assert "No live-confirmed client actions" in markdown
+
+
+def test_link_actions_aggregate_thousands_of_instances_into_one_resolvable_action():
+    from crawler_cli.technical_audit import _bundle_action_evidence, _evidence_id, _evidence_index, _link_actions
+
+    rows = [
+        {
+            "target_url": "https://e.test/missing",
+            "target_status": 404,
+            "source_url": f"https://e.test/source-{index}",
+            "anchor_text": "Read more",
+            "xpath": f"/html/body/a[{index}]",
+            "live_recheck": {"state": "persistent_http_failure", "status": 404},
+        }
+        for index in range(2_000)
+    ]
+    actions = _link_actions(rows)
+    evidence_index = _evidence_index([{"id": "internal-link-failures", "evidence": rows}])
+    _bundle_action_evidence(actions, evidence_index)
+
+    assert len(actions) == 1
+    assert actions[0]["Link Instances"] == 2_000
+    assert actions[0]["Unique Source Pages"] == 2_000
+    assert actions[0]["Severity"] == "Medium"
+    assert "2000 unique internal source pages" in actions[0]["Severity Rationale"]
+    evidence_reference = actions[0]["Evidence Reference"]
+    assert evidence_reference in evidence_index
+    assert evidence_index[evidence_reference]["evidence_count"] == 2_000
+    assert len(str(evidence_reference)) == len("sha256:") + 64
+    assert set(evidence_index[evidence_reference]["evidence_ids"]) == {
+        _evidence_id("internal-link-failures", row) for row in rows
+    }
+
+
+def test_candidate_inventories_stay_out_of_recipient_detail_tabs():
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "orphans": [{"url": "https://e.test/orphan", "candidate_type": "crawled_html_zero_observed_inlinks"}],
+            "link-graph-metrics": [{"graph_complete": True}],
+            "internal-authority": [{"url": "https://e.test/authority", "score": 0.1}],
+            "structured-data-inventory": [{"url": "https://e.test/schema", "record_kind": "structured_data_item"}],
+        },
+        run_context={"completion_state": "complete", "parsed_html_count": 1},
+    )
+
+    tables = audit_sheet_tables(audit)
+    assert set(tables) == {"Overview"}
+    assert audit["structured_data_report"]
+    assert any(row["id"] == "orphan-candidates" and row["evidence"] for row in audit["checks"])
 
 
 def test_missing_run_context_and_missing_source_are_not_reported_as_passes():
