@@ -869,9 +869,7 @@ def build_technical_audit(
     url_variant_coverage = (
         url_variant_rows[0] if url_variant_rows and url_variant_rows[0].get("record_type") == "coverage" else {}
     )
-    url_variant_evidence = [
-        row for row in url_variant_rows if row.get("record_type") == "candidate"
-    ]
+    url_variant_evidence = [row for row in url_variant_rows if row.get("record_type") == "candidate"]
     render_rows = rows["rendered-mobile-resources"]
     render_coverage = render_rows[0] if render_rows and render_rows[0].get("record_type") == "coverage" else {}
     render_evidence = [row for row in render_rows if row.get("record_type") == "candidate"]
