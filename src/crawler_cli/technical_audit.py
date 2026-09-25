@@ -43,6 +43,7 @@ TECHNICAL_AUDIT_REPORTS = (
     "metadata-locale-inventory",
     "canonical-hreflang-inventory",
     "current-robots-sitemaps",
+    "url-variant-soft404",
 )
 
 # Registry is intentionally wider than the currently implemented report set.
@@ -93,7 +94,11 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
         "state": "implemented_conditional",
         "source": "explicit bounded current fetch; RFC 9309 rules and current sitemap parser",
     },
-    {"id": "url-variants-and-soft-404", "state": "not_implemented", "source": "controlled live probes"},
+    {
+        "id": "url-variants-and-soft-404",
+        "state": "implemented_conditional",
+        "source": "explicit bounded probes with valid saved controls and authorization scope",
+    },
     {
         "id": "rendered-mobile-and-resource-evidence",
         "state": "not_implemented",
@@ -257,6 +262,72 @@ def metadata_locale_report(source_rows: Sequence[Mapping[str, object]]) -> list[
         "eligible_length_ranges": _length_ranges(eligible),
     }
     return [coverage, *candidates]
+
+
+def parameterized_canonical_link_inventory(
+    source_rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Group internally linked parameter URLs with saved non-self canonicals."""
+    findings: list[dict[str, object]] = []
+    for source in source_rows:
+        issues = source.get("issues", [])
+        if isinstance(issues, str):
+            try:
+                issues = json.loads(issues)
+            except ValueError:
+                issues = []
+        if not isinstance(issues, list) or "parameter_target" not in issues or "noncanonical_target" not in issues:
+            continue
+        target = str(source.get("target_url") or "")
+        query = urlsplit(target).query
+        keys = sorted({key for key, _ in parse_qsl(query, keep_blank_values=True)})
+        if not keys:
+            continue
+        key_set = {key.casefold() for key in keys}
+        if key_set <= {"page", "paged", "p", "offset", "cursor"}:
+            family = "pagination"
+        elif key_set & {"sort", "order", "filter", "status", "theme", "country", "location", "search", "date"}:
+            family = "ui_state_or_search_review"
+        elif all(key.casefold().startswith("utm_") or key.casefold() in {"gclid", "_ga", "_gl"} for key in keys):
+            family = "tracking"
+        else:
+            family = "content_or_unknown_parameter"
+        findings.append(
+            {
+                "record_type": "candidate",
+                "candidate_type": "internally_linked_noncanonical_parameter_url",
+                "parameter_family": family,
+                "parameter_keys": keys,
+                "source_url": _metadata_url(str(source.get("source_url") or "")),
+                "source_url_digest_sha256": hashlib.sha256(str(source.get("source_url") or "").encode()).hexdigest(),
+                "source_indexable": source.get("source_indexable"),
+                "target_url": _metadata_url(target),
+                "target_url_digest_sha256": hashlib.sha256(target.encode()).hexdigest(),
+                "canonical_url": _metadata_url(str(source.get("target_canonical_url") or "")),
+                "anchor_text": _clean_metadata(source.get("anchor_text")),
+                "xpath": _clean_metadata(source.get("xpath")),
+                "qualification": "saved_link_and_canonical_evidence; parameter_purpose_requires_review",
+            }
+        )
+    counts: dict[str, int] = {}
+    targets: dict[str, set[str]] = {}
+    sources: dict[str, set[str]] = {}
+    for finding in findings:
+        family = str(finding["parameter_family"])
+        counts[family] = counts.get(family, 0) + 1
+        targets.setdefault(family, set()).add(str(finding["target_url_digest_sha256"]))
+        sources.setdefault(family, set()).add(str(finding["source_url_digest_sha256"]))
+    coverage = [
+        {
+            "record_type": "coverage",
+            "parameter_family": family,
+            "link_instances": count,
+            "unique_targets": len(targets[family]),
+            "unique_sources": len(sources[family]),
+        }
+        for family, count in sorted(counts.items())
+    ]
+    return [*coverage, *findings]
 
 
 def _clean_metadata(value: object) -> str | None:
@@ -757,6 +828,22 @@ def build_technical_audit(
         for row in current_site_files_rows
         if row.get("record_type") == "candidate"
     ]
+    parameterized_link_rows = parameterized_canonical_link_inventory(rows["internal-link-quality"])
+    parameterized_link_coverage = [
+        row for row in parameterized_link_rows if row.get("record_type") == "coverage"
+    ]
+    parameterized_link_evidence = [
+        {**row, "qualification": "analyst_only"}
+        for row in parameterized_link_rows
+        if row.get("record_type") == "candidate"
+    ]
+    url_variant_rows = rows["url-variant-soft404"]
+    url_variant_coverage = (
+        url_variant_rows[0] if url_variant_rows and url_variant_rows[0].get("record_type") == "coverage" else {}
+    )
+    url_variant_evidence = [
+        row for row in url_variant_rows if row.get("record_type") == "candidate"
+    ]
     canonical_evidence = [
         row
         for row in canonical_hreflang_rows
@@ -822,6 +909,18 @@ def build_technical_audit(
             available=source_coverage["tracking-parameter-links"]["available"] is True,
             denominator=parsed_html_count,
             completion_state=completion_state,
+        ),
+        _check(
+            "parameterized-canonical-links",
+            "Internally linked parameter URLs with non-self canonicals",
+            "Parameter URL Families",
+            parameterized_link_evidence,
+            "finding",
+            "Saved link and canonical evidence identify candidates; parameter purpose and route intent remain analyst-reviewed.",
+            available=source_coverage["internal-link-quality"]["available"] is True,
+            denominator=parsed_html_count,
+            completion_state=completion_state,
+            qualification="analyst_only",
         ),
         _check(
             "orphan-candidates",
@@ -957,6 +1056,21 @@ def build_technical_audit(
             completion_state=completion_state,
             qualification="analyst_only",
         ),
+        _check(
+            "url-variants-and-soft-404",
+            "Current URL variant and soft-404 probes",
+            "URL Variant Probes",
+            [{**row, "qualification": "analyst_only"} for row in url_variant_evidence],
+            "finding",
+            "Explicit synthetic probes use saved valid controls; demand, route intent, and rendered behavior must be verified.",
+            available=(
+                source_coverage["url-variant-soft404"]["available"] is True
+                and url_variant_coverage.get("record_type") == "coverage"
+            ),
+            denominator=_optional_int(url_variant_coverage.get("variant_probe_count")),
+            completion_state=completion_state,
+            qualification="analyst_only",
+        ),
     )
     for check in checks:
         if check["id"] == "near-duplicate-content" and not similarity_complete:
@@ -995,6 +1109,13 @@ def build_technical_audit(
             elif current_site_files_coverage.get("complete") is not True:
                 check["status"] = "partial"
                 check["qualification"] = "bounded_or_incomplete_current_fetch"
+        if check["id"] == "url-variants-and-soft-404":
+            if url_variant_coverage.get("record_type") != "coverage":
+                check["status"] = "unavailable"
+                check["qualification"] = "requires_explicit_current_probe"
+            elif url_variant_coverage.get("complete") is not True:
+                check["status"] = "partial"
+                check["qualification"] = "bounded_or_incomplete_current_probe"
 
     audit_log = [
         *_indexability_actions(indexability_conflicts),
@@ -1013,6 +1134,11 @@ def build_technical_audit(
             check["id"] == "current-robots-and-sitemaps"
             and check["status"] == "unavailable"
             and current_site_files_coverage.get("record_type") != "coverage"
+        )
+        and not (
+            check["id"] == "url-variants-and-soft-404"
+            and check["status"] == "unavailable"
+            and url_variant_coverage.get("record_type") != "coverage"
         )
     )
     publication_ready = (
@@ -1050,6 +1176,8 @@ def build_technical_audit(
         "metadata_locale_coverage": dict(metadata_coverage),
         "canonical_hreflang_coverage": dict(canonical_hreflang_coverage),
         "current_site_files_coverage": dict(current_site_files_coverage),
+        "parameterized_link_coverage": parameterized_link_coverage,
+        "url_variant_coverage": dict(url_variant_coverage),
         "status_vocabulary": [
             "tested",
             "pass",
@@ -1148,6 +1276,34 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 ["Current live page samples", len(samples) if isinstance(samples, list) else 0],
             ]
         )
+    parameter_coverage = audit.get("parameterized_link_coverage", [])
+    parameter_coverage_rows = (
+        [dict(row) for row in parameter_coverage if isinstance(row, Mapping)]
+        if isinstance(parameter_coverage, list)
+        else []
+    )
+    if parameter_coverage_rows:
+        overview.extend(
+            [
+                [
+                    "Canonicalized parameter link instances",
+                    sum((_optional_int(row.get("link_instances")) or 0) for row in parameter_coverage_rows),
+                ],
+                [
+                    "Canonicalized parameter URL targets",
+                    sum((_optional_int(row.get("unique_targets")) or 0) for row in parameter_coverage_rows),
+                ],
+            ]
+        )
+    variant_coverage = audit.get("url_variant_coverage", {})
+    if isinstance(variant_coverage, Mapping) and variant_coverage:
+        overview.extend(
+            [
+                ["Current URL-variant probes", variant_coverage.get("variant_probe_count", 0)],
+                ["Synthetic 404 hosts", variant_coverage.get("soft404_host_count", 0)],
+                ["URL-variant probe coverage complete", variant_coverage.get("complete", False)],
+            ]
+        )
 
     tables: dict[str, list[list[object]]] = {"Overview": overview}
     raw_metadata_coverage = audit.get("metadata_locale_coverage", {})
@@ -1184,7 +1340,13 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
         evidence = check["evidence"]
         assert isinstance(evidence, list)
         if evidence and str(check.get("qualification") or "") == "analyst_only":
-            tables[str(check["detail_sheet"])] = _table(evidence)
+            detail_evidence = list(evidence)
+            if check.get("id") == "parameterized-canonical-links":
+                detail_evidence = [
+                    *parameter_coverage_rows,
+                    *detail_evidence,
+                ]
+            tables[str(check["detail_sheet"])] = _table(detail_evidence)
     return tables
 
 
@@ -1365,6 +1527,10 @@ def _manual_checks() -> list[dict[str, str]]:
         {
             "id": "robots-and-sitemaps",
             "reason": "Use --fetch-current-robots-sitemaps for bounded live collection; fetches are not requested otherwise.",
+        },
+        {
+            "id": "url-variants-and-soft-404",
+            "reason": "Use --probe-url-variants for bounded probes; synthetic-only results remain analyst candidates pending route-demand and rendered validation.",
         },
         {"id": "rendered-parity", "reason": "Raw and rendered DOM signals require representative browser evidence."},
         {

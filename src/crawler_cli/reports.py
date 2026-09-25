@@ -200,7 +200,7 @@ class CrawlReports:
             """
             SELECT u.url, u.kind, s.final_status_code, s.overall_indexable,
                    s.content_extracted, s.html_lang, s.custom_data ->> 'template' AS template,
-                   s.canonical_urls_json
+                   s.canonical_urls_json, s.links_json
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
             WHERE s.run_id = $1
             ORDER BY s.url_id
@@ -502,6 +502,7 @@ class CrawlReports:
                     "target_status": status,
                     "target_initial_status": initial_status,
                     "target_indexable": row.get("target_indexable"),
+                    "target_canonical_url": canonical,
                     "anchor_text": anchor,
                     "xpath": evidence.get("xpath"),
                     "original_href": evidence.get("original_href"),
