@@ -2503,11 +2503,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             evidence["current-robots-sitemaps"] = [
                 coverage,
                 inventory,
-                *[
-                    dict(row, record_type="candidate")
-                    for row in validation_candidates
-                    if isinstance(row, Mapping)
-                ],
+                *[dict(row, record_type="candidate") for row in validation_candidates if isinstance(row, Mapping)],
             ]
         if args.probe_url_variants:
             if run_context.get("authorization_scope_active") is True and not args.scope_manifest:

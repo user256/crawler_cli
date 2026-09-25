@@ -195,9 +195,7 @@ async def collect_current_site_files(
         }
         if response.status != 200:
             document["state"] = (
-                "not_found"
-                if response.status == 404 and discovery_source == "well_known_path"
-                else "http_error"
+                "not_found" if response.status == 404 and discovery_source == "well_known_path" else "http_error"
             )
             documents.append(document)
             if document["state"] != "not_found":
@@ -343,9 +341,7 @@ async def collect_current_site_files(
                     }
                 )
             seen_languages.add(code)
-            if code != "x-default" and not re.fullmatch(
-                r"(?:[a-z]{2,3}|[a-z]{4}|[a-z]{5,8})(?:-[a-z0-9]{1,8})*", code
-            ):
+            if code != "x-default" and not re.fullmatch(r"(?:[a-z]{2,3}|[a-z]{4}|[a-z]{5,8})(?:-[a-z0-9]{1,8})*", code):
                 validation.append(
                     {"candidate_type": "invalid_sitemap_hreflang_syntax", "url": entry["url"], "hreflang": code}
                 )
