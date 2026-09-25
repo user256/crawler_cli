@@ -2524,11 +2524,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             evidence["current-robots-sitemaps"] = [
                 coverage,
                 inventory,
-                *[
-                    dict(row, record_type="candidate")
-                    for row in validation_candidates
-                    if isinstance(row, Mapping)
-                ],
+                *[dict(row, record_type="candidate") for row in validation_candidates if isinstance(row, Mapping)],
             ]
         if args.recheck_live:
             if not args.scope_manifest:
