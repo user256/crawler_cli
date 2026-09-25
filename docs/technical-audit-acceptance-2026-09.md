@@ -26,10 +26,13 @@ gated and skipped when `CRAWLER_CLI_TEST_DSN` is unset.
 
 ## Not verified in this environment
 
-- `CRAWLER_CLI_TEST_DSN` was unset: multi-site/run isolation, partial and
-  legacy PostgreSQL data, and resumed/concurrent evidence boundaries have not
-  been exercised against a real database in this acceptance run. The new
-  DSN-gated regression is present, but its live outcome is unverified.
+- `CRAWLER_CLI_TEST_DSN` was unset for the local command run, so the focused
+  local suite skipped PostgreSQL fixtures. GitHub Actions' PostgreSQL
+  integration job does configure the test DSN, runs the integration-marked
+  suite including the new multi-site/run/partial-page audit regression, and
+  passed on PRs #103 and #104. The separate legacy/resume/concurrent checks in
+  that module also ran there; these are CI fixture results, not evidence from
+  a representative customer crawl store.
 - `GOOGLE_DOCS_OAUTH_TOKEN_FILE` and `GOOGLE_APPLICATION_CREDENTIALS` were
   unset, and no disposable template ID was supplied: actual template copying,
   API writes/readback, layout review, stale-tab cleanup, and induced partial-
