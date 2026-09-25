@@ -67,12 +67,13 @@ async def soft_404_fingerprint(engine, base_url: str) -> SoftFourOhFourFingerpri
         redirect_chain=list(result.redirect_chain),
         canonical=result.extracted.canonical if result.extracted else None,
         noindex_by_saved_directives=(
-            result.extracted.meta_robots.noindex or result.extracted.x_robots_tag.noindex
-            if result.extracted
-            else None
+            result.extracted.meta_robots.noindex or result.extracted.x_robots_tag.noindex if result.extracted else None
         ),
         elapsed_seconds=result.total_duration_seconds,
         error_phrase_in_body=bool(
-            result.raw_html and re.search(r"\b(page not found|not found|404|does not exist|no longer available)\b", result.raw_html, re.I)
+            result.raw_html
+            and re.search(
+                r"\b(page not found|not found|404|does not exist|no longer available)\b", result.raw_html, re.I
+            )
         ),
     )

@@ -18,6 +18,7 @@ from .redaction import redact_url_without_digest, scrub_text
 GOOGLE_STRUCTURED_DATA_RULESET_VERSION = "crawler-cli/google-structured-data-rules/1"
 GOOGLE_RULES_VERIFIED_ON = "2026-09-25"
 
+
 @dataclass(frozen=True)
 class GoogleFeatureRule:
     feature: str
@@ -94,11 +95,7 @@ def structured_data_inventory_report(
     bytes are represented by digest and bounded scrubbed excerpt, not copied
     wholesale into a publication artifact.
     """
-    rules_by_type = {
-        schema_type: rule
-        for rule in GOOGLE_FEATURE_RULES
-        for schema_type in rule.schema_types
-    }
+    rules_by_type = {schema_type: rule for rule in GOOGLE_FEATURE_RULES for schema_type in rule.schema_types}
     items = [dict(row) for row in source_rows]
     items.extend(dict(row) for row in rendered_rows)
     candidates: list[dict[str, object]] = []
@@ -136,9 +133,11 @@ def structured_data_inventory_report(
                 else "unavailable"
             ),
             "stored_schema_validation": (
-                "local_check_pass" if row.get("is_valid") is True else
-                "local_check_fail" if row.get("is_valid") is False else
-                "unavailable"
+                "local_check_pass"
+                if row.get("is_valid") is True
+                else "local_check_fail"
+                if row.get("is_valid") is False
+                else "unavailable"
             ),
             "schema_validation_scope": "existing_local_checks_not_a_comprehensive_schema_org_validator",
             "validation_errors": _safe_value(row.get("validation_errors", [])),
@@ -161,11 +160,7 @@ def structured_data_inventory_report(
                 for group in rule.required_groups
                 if not any(_has_path(parsed, path) for path in group)
             ]
-            recommended_missing = [
-                str(path)
-                for path in rule.recommended
-                if not _has_path(parsed, str(path))
-            ]
+            recommended_missing = [str(path) for path in rule.recommended if not _has_path(parsed, str(path))]
             if missing or missing_groups:
                 candidates.append(
                     {
@@ -250,10 +245,24 @@ def _itemlist_checks(row: Mapping[str, object], parsed: Mapping[str, object]) ->
         ]
     entries = [item for item in values if isinstance(item, Mapping)]
     if len(entries) != len(values):
-        findings.append(_itemlist_candidate("itemlist_element_not_listitem_object", base, element_indexes=[i for i, v in enumerate(values) if not isinstance(v, Mapping)]))
+        findings.append(
+            _itemlist_candidate(
+                "itemlist_element_not_listitem_object",
+                base,
+                element_indexes=[i for i, v in enumerate(values) if not isinstance(v, Mapping)],
+            )
+        )
     typed_entries = [item for item in entries if "ListItem" in _types(item)]
     if len(typed_entries) != len(entries):
-        findings.append(_itemlist_candidate("itemlist_element_type_unexpected", base, element_indexes=[i for i, v in enumerate(values) if not isinstance(v, Mapping) or "ListItem" not in _types(v)]))
+        findings.append(
+            _itemlist_candidate(
+                "itemlist_element_type_unexpected",
+                base,
+                element_indexes=[
+                    i for i, v in enumerate(values) if not isinstance(v, Mapping) or "ListItem" not in _types(v)
+                ],
+            )
+        )
 
     summary_shape = bool(entries) and all(not _has_path(item, "item") for item in entries)
     all_in_one_shape = bool(entries) and all(_has_path(item, "item") for item in entries)
@@ -269,16 +278,29 @@ def _itemlist_checks(row: Mapping[str, object], parsed: Mapping[str, object]) ->
             continue
         position = item.get("position")
         if not isinstance(position, int) or isinstance(position, bool) or position < 1:
-            findings.append(_itemlist_candidate("itemlist_position_invalid", base, item_index=index, observed_position=position))
+            findings.append(
+                _itemlist_candidate("itemlist_position_invalid", base, item_index=index, observed_position=position)
+            )
         else:
             positions.append((index, position))
         item_url = item.get("url")
         if not isinstance(item_url, str) or not _valid_http_url(item_url):
-            findings.append(_itemlist_candidate("itemlist_summary_url_invalid", base, item_index=index, observed_url=_safe_url(item_url) if isinstance(item_url, str) else None))
+            findings.append(
+                _itemlist_candidate(
+                    "itemlist_summary_url_invalid",
+                    base,
+                    item_index=index,
+                    observed_url=_safe_url(item_url) if isinstance(item_url, str) else None,
+                )
+            )
         else:
             urls.append((index, item_url))
             if not _same_domain_or_subdomain(item_url, str(row.get("url") or "")):
-                findings.append(_itemlist_candidate("itemlist_summary_url_off_domain", base, item_index=index, observed_url=_safe_url(item_url)))
+                findings.append(
+                    _itemlist_candidate(
+                        "itemlist_summary_url_off_domain", base, item_index=index, observed_url=_safe_url(item_url)
+                    )
+                )
     position_values = [position for _, position in positions]
     position_counts = Counter(position_values)
     if any(count > 1 for count in position_counts.values()):
@@ -316,7 +338,11 @@ def _itemlist_checks(row: Mapping[str, object], parsed: Mapping[str, object]) ->
         )
     declared_count = parsed.get("numberOfItems")
     if isinstance(declared_count, int) and declared_count != len(values):
-        findings.append(_itemlist_candidate("itemlist_declared_count_mismatch", base, declared_count=declared_count, actual_count=len(values)))
+        findings.append(
+            _itemlist_candidate(
+                "itemlist_declared_count_mismatch", base, declared_count=declared_count, actual_count=len(values)
+            )
+        )
     return findings
 
 
@@ -381,7 +407,11 @@ def _valid_http_url(value: str) -> bool:
 def _same_domain_or_subdomain(left: str, right: str) -> bool:
     left_host = (urlsplit(left).hostname or "").lower().rstrip(".")
     right_host = (urlsplit(right).hostname or "").lower().rstrip(".")
-    return bool(left_host and right_host and (left_host == right_host or left_host.endswith("." + right_host) or right_host.endswith("." + left_host)))
+    return bool(
+        left_host
+        and right_host
+        and (left_host == right_host or left_host.endswith("." + right_host) or right_host.endswith("." + left_host))
+    )
 
 
 def _safe_url(value: str | None) -> str | None:

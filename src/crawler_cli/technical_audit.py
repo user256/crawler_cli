@@ -798,9 +798,7 @@ def build_technical_audit(
                 indexability_conflicts.append({**row, "conflicts": conflicts})
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
     rendered_schema_rows = [
-        row
-        for row in rows["rendered-mobile-resources"]
-        if row.get("record_kind") == "structured_data_item"
+        row for row in rows["rendered-mobile-resources"] if row.get("record_kind") == "structured_data_item"
     ]
     structured_data_report = structured_data_inventory_report(
         rows["structured-data-inventory"], rendered_rows=rendered_schema_rows
@@ -831,11 +829,11 @@ def build_technical_audit(
             "qualification": "explicit_conditional_probe_not_requested",
         }
     )
-    conditional_findings = [
-        row
-        for row in conditional_input[1:]
-        if row.get("record_type") == "candidate"
-    ] if conditional_input and conditional_input[0].get("record_type") == "coverage" else []
+    conditional_findings = (
+        [row for row in conditional_input[1:] if row.get("record_type") == "candidate"]
+        if conditional_input and conditional_input[0].get("record_type") == "coverage"
+        else []
+    )
     similarity = rows["similarity-coverage"][0] if rows["similarity-coverage"] else {}
     similarity_complete = (
         source_coverage["similarity-coverage"]["available"] is True
@@ -893,9 +891,7 @@ def build_technical_audit(
         if row.get("record_type") == "candidate"
     ]
     parameterized_link_rows = parameterized_canonical_link_inventory(rows["internal-link-quality"])
-    parameterized_link_coverage = [
-        row for row in parameterized_link_rows if row.get("record_type") == "coverage"
-    ]
+    parameterized_link_coverage = [row for row in parameterized_link_rows if row.get("record_type") == "coverage"]
     parameterized_link_evidence = [
         {**row, "qualification": "analyst_only"}
         for row in parameterized_link_rows
@@ -905,9 +901,7 @@ def build_technical_audit(
     url_variant_coverage = (
         url_variant_rows[0] if url_variant_rows and url_variant_rows[0].get("record_type") == "coverage" else {}
     )
-    url_variant_evidence = [
-        row for row in url_variant_rows if row.get("record_type") == "candidate"
-    ]
+    url_variant_evidence = [row for row in url_variant_rows if row.get("record_type") == "candidate"]
     render_rows = rows["rendered-mobile-resources"]
     render_coverage = render_rows[0] if render_rows and render_rows[0].get("record_type") == "coverage" else {}
     render_evidence = [row for row in render_rows if row.get("record_type") == "candidate"]
@@ -1421,6 +1415,31 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 f"{affected} / {tested if tested is not None else 'unknown'} / {eligible if eligible is not None else 'unknown'}",
             ]
         )
+    structured_rules = audit.get("structured_data_rules", {})
+    if isinstance(structured_rules, Mapping):
+        overview.extend(
+            [
+                ["Structured-data ruleset", structured_rules.get("ruleset_version", "unknown")],
+                ["Structured-data rules verified", structured_rules.get("verified_on", "unknown")],
+            ]
+        )
+    performance_coverage = audit.get("performance_coverage", {})
+    if isinstance(performance_coverage, Mapping) and performance_coverage:
+        conditional_coverage = audit.get("conditional_get_coverage", {})
+        conditional_summary = conditional_coverage if isinstance(conditional_coverage, Mapping) else {}
+        overview.extend(
+            [
+                ["Timing source", performance_coverage.get("source", "unknown")],
+                [
+                    "Canonical indexable HTML timing population",
+                    performance_coverage.get("eligible_canonical_indexable_html_count", 0),
+                ],
+                ["Conditional GET state", conditional_summary.get("state", "not_requested")],
+                ["Conditional GET eligible validators", conditional_summary.get("validator_eligible_count", 0)],
+                ["Conditional GET 304 rate", conditional_summary.get("not_modified_304_rate", "not_testable")],
+                ["Field CWV source", performance_coverage.get("field_cwv", "unavailable")],
+            ]
+        )
     overview.extend(
         [
             ["Run scope", projection.get("scope", "unknown")],
@@ -1448,6 +1467,46 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 ["Current sitemap documents", current_files_coverage.get("sitemap_document_count", 0)],
                 ["Current file coverage complete", current_files_coverage.get("complete", False)],
                 ["Current live page samples", len(samples) if isinstance(samples, list) else 0],
+            ]
+        )
+    parameter_coverage = audit.get("parameterized_link_coverage", [])
+    parameter_coverage_rows = (
+        [dict(row) for row in parameter_coverage if isinstance(row, Mapping)]
+        if isinstance(parameter_coverage, list)
+        else []
+    )
+    if parameter_coverage_rows:
+        overview.extend(
+            [
+                [
+                    "Internal parameter link instances",
+                    sum((_optional_int(row.get("link_instances")) or 0) for row in parameter_coverage_rows),
+                ],
+                [
+                    "Internal parameter URL targets",
+                    sum((_optional_int(row.get("unique_targets")) or 0) for row in parameter_coverage_rows),
+                ],
+                [
+                    "Noncanonical parameter link instances",
+                    sum(
+                        (_optional_int(row.get("canonicalized_link_instances")) or 0) for row in parameter_coverage_rows
+                    ),
+                ],
+                [
+                    "Noncanonical parameter URL targets",
+                    sum(
+                        (_optional_int(row.get("canonicalized_unique_targets")) or 0) for row in parameter_coverage_rows
+                    ),
+                ],
+            ]
+        )
+    variant_coverage = audit.get("url_variant_coverage", {})
+    if isinstance(variant_coverage, Mapping) and variant_coverage:
+        overview.extend(
+            [
+                ["Current URL-variant probes", variant_coverage.get("variant_probe_count", 0)],
+                ["Synthetic 404 hosts", variant_coverage.get("soft404_host_count", 0)],
+                ["URL-variant probe coverage complete", variant_coverage.get("complete", False)],
             ]
         )
     rendered_coverage = audit.get("rendered_coverage", {})
@@ -1707,12 +1766,16 @@ def _aggregate_actions(actions: Sequence[Mapping[str, object]]) -> list[dict[str
         first["Finding Count"] = len(members)
         first["Affected URL Count"] = 1 if url else 0
         sources = {str(row.get("Source URL")) for row in members if row.get("Source URL")}
-        first["Unique Source Pages"] = len(sources) if sources else max(
-            (_optional_int(row.get("Unique Source Pages")) or 0 for row in members), default=0
+        first["Unique Source Pages"] = (
+            len(sources)
+            if sources
+            else max((_optional_int(row.get("Unique Source Pages")) or 0 for row in members), default=0)
         )
         first["Link Instances"] = sum(_optional_int(row.get("Link Instances")) or 1 for row in members)
         first["Evidence Reference"] = ";".join(sorted({str(row.get("Evidence Reference") or "") for row in members}))
-        first["Explanation"] = f"{len(members)} matching evidence records for this affected target. {first.get('Explanation', '')}"
+        first["Explanation"] = (
+            f"{len(members)} matching evidence records for this affected target. {first.get('Explanation', '')}"
+        )
         aggregated.append(first)
     return aggregated
 
@@ -1735,9 +1798,7 @@ def _evidence_index(checks: Sequence[Mapping[str, object]]) -> dict[str, dict[st
     return dict(sorted(index.items()))
 
 
-def _bundle_action_evidence(
-    actions: Sequence[dict[str, object]], evidence_index: dict[str, dict[str, object]]
-) -> None:
+def _bundle_action_evidence(actions: Sequence[dict[str, object]], evidence_index: dict[str, dict[str, object]]) -> None:
     """Replace long member-ID lists with one stable, resolvable group ID."""
     for action in actions:
         reference = str(action.get("Evidence Reference") or "")
@@ -1767,7 +1828,9 @@ def recipient_report_projection(
     check_map = {str(check.get("id")): check for check in checks}
     metadata_check = check_map.get("metadata-and-locale", {})
     metadata_rows = metadata_check.get("evidence", [])
-    metadata_rows = [row for row in metadata_rows if isinstance(row, Mapping)] if isinstance(metadata_rows, list) else []
+    metadata_rows = (
+        [row for row in metadata_rows if isinstance(row, Mapping)] if isinstance(metadata_rows, list) else []
+    )
     type_counts: dict[str, int] = {}
     for row in metadata_rows:
         candidate_type = str(row.get("candidate_type") or "")
@@ -1795,7 +1858,11 @@ def recipient_report_projection(
     ):
         check = check_map.get(check_id, {})
         status = check.get("status")
-        value = check.get("row_count", 0) if status in {"pass", "finding", "no_observations"} else "unknown (coverage incomplete)"
+        value = (
+            check.get("row_count", 0)
+            if status in {"pass", "finding", "no_observations"}
+            else "unknown (coverage incomplete)"
+        )
         metrics.append([label, value])
     for group in performance_report[1:]:
         if not isinstance(group, Mapping):
@@ -1822,24 +1889,31 @@ def recipient_report_projection(
         for check in checks
         if check.get("status") in {"partial", "unavailable", "error"}
     ]
-    coverage_caveats = (
-        "; ".join(incomplete_checks) if incomplete_checks else "No partial/unavailable check states"
-    )
+    coverage_caveats = "; ".join(incomplete_checks) if incomplete_checks else "No partial/unavailable check states"
     targets = []
     for action in actions:
         target = action.get("Affected URL")
         source_rows = [
-            row for row in internal_evidence
+            row
+            for row in internal_evidence
             if isinstance(row, Mapping) and redact_url_without_digest(str(row.get("target_url") or "")) == target
         ]
-        sources = sorted({redact_url_without_digest(str(row.get("source_url") or "")) for row in source_rows if row.get("source_url")})
+        sources = sorted(
+            {
+                redact_url_without_digest(str(row.get("source_url") or ""))
+                for row in source_rows
+                if row.get("source_url")
+            }
+        )
         link_samples = [
             {
                 "source_url": redact_url_without_digest(str(row.get("source_url") or "")),
                 "anchor_text": row.get("anchor_text"),
                 "xpath": row.get("xpath"),
             }
-            for row in sorted(source_rows, key=lambda row: (str(row.get("source_url") or ""), str(row.get("xpath") or "")))[:10]
+            for row in sorted(
+                source_rows, key=lambda row: (str(row.get("source_url") or ""), str(row.get("xpath") or ""))
+            )[:10]
         ]
         targets.append(
             {

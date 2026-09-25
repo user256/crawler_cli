@@ -371,9 +371,9 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
 def test_technical_audit_writes_optional_recipient_markdown(fake_reports, tmp_path, capsys):
     out = tmp_path / "technical-audit.json"
     markdown = tmp_path / "client-summary.md"
-    assert _run(
-        ["technical-audit", "--crawl-run-id", "run-42", "--out", str(out), "--markdown-out", str(markdown)]
-    ) == 0
+    assert (
+        _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out), "--markdown-out", str(markdown)]) == 0
+    )
 
     rendered = markdown.read_text()
     assert rendered.startswith("# Technical SEO audit")
