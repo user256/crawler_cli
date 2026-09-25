@@ -1,0 +1,4 @@
+interface:
+  display_name: "Technical SEO Audit"
+  short_description: "Run evidence-based technical SEO crawl audits"
+  default_prompt: "Use $technical-seo-audit to audit this site, recheck live failures, and produce an actionable report."
