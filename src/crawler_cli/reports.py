@@ -1094,6 +1094,7 @@ def _extractor_version() -> str:
             versions.append(f"{package}=unavailable")
     return ";".join(versions)
 
+
 def _build_link_graph(
     pages: list[dict[str, object]], *, known_urls: list[dict[str, str]] | None = None
 ) -> dict[str, Any]:
