@@ -55,10 +55,26 @@ class FakeReports:
                 "content_hash_simhash": True,
                 "indexability_evidence_json": True,
             },
+            "declared_allowed_hosts": ["example.com"],
+            "seed_hosts": ["example.com"],
         }
 
-    async def orphan_pages(self):
-        self.calls.append(("orphans", {}))
+    async def orphan_pages(self, *, known_urls=None):
+        self.calls.append(("orphans", {} if known_urls is None else {"known_urls": known_urls}))
+        if known_urls:
+            return [
+                {
+                    "url": row["url"],
+                    "candidate_type": "source_known_zero_observed_inlinks",
+                    "observed_inlink_count": 0,
+                    "graph_complete": True,
+                    "is_crawled": False,
+                    "source_labels": [row["source"]],
+                    "source_observations": [row],
+                    "live_validation_state": "not_requested",
+                }
+                for row in known_urls
+            ]
         return [{"url": "https://example.com/orphan"}]
 
     async def indexability_reasons(self):
@@ -163,6 +179,10 @@ class FakeReports:
     async def internal_link_quality(self):
         self.calls.append(("internal-link-quality", {}))
         return []
+
+    async def link_graph_metrics(self):
+        self.calls.append(("link-graph-metrics", {}))
+        return [{"graph_complete": True}]
 
     async def tracking_parameter_links(self):
         self.calls.append(("tracking-parameter-links", {}))
@@ -308,7 +328,25 @@ def test_json_out_writes_file(fake_reports, tmp_path):
 
 def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, capsys):
     out = tmp_path / "technical-audit.json"
-    assert _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out)]) == 0
+    known_urls = tmp_path / "known-urls.csv"
+    known_urls.write_text(
+        "url,source\nhttps://example.com/landing,search_console\n",
+        encoding="utf-8",
+    )
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--crawl-run-id",
+                "run-42",
+                "--known-url-inventory",
+                str(known_urls),
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
     payload = json.loads(out.read_text())
     assert payload["crawl_run_id"] == "run-42"
     assert payload["schema_version"] == "crawler-cli/technical-audit/1"
@@ -319,7 +357,10 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "orphan-candidates",
     }
     assert "Wrote deterministic technical audit" in capsys.readouterr().out
-    called = [name for name, _ in FakeReports.instances[-1].calls]
+    calls = FakeReports.instances[-1].calls
+    called = [name for name, _ in calls]
+    orphan_call = next(args for name, args in calls if name == "orphans")
+    assert orphan_call["known_urls"] == [{"url": "https://example.com/landing", "source": "search_console"}]
     assert called == [
         "orphans",
         "indexability",
@@ -327,6 +368,7 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "schema-compatibility",
         "image-issues",
         "internal-link-quality",
+        "link-graph-metrics",
         "tracking-parameter-links",
         "near-duplicates",
         "internal-authority",
@@ -348,6 +390,67 @@ def test_live_recheck_requires_explicit_scope_manifest(fake_reports, tmp_path, c
     assert _run(["technical-audit", "--recheck-live", "--out", str(out)]) == 2
     assert "--recheck-live requires --scope-manifest" in capsys.readouterr().err
     assert fake_reports.closed is True
+
+
+def test_live_recheck_includes_known_urls_with_scope_and_records_selection(fake_reports, tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from crawler_cli.authorisation import SCOPE_MANIFEST_SCHEMA_VERSION
+
+    now = datetime.now(UTC)
+    manifest = tmp_path / "scope.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": SCOPE_MANIFEST_SCHEMA_VERSION,
+                "authorization_reference": "CHANGE-1234",
+                "operator": "audit-test",
+                "valid_from": (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "valid_until": (now + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "allowed_origins": ["https://example.com"],
+                "allowed_path_prefixes": ["/"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    known_urls = tmp_path / "known.csv"
+    known_urls.write_text(
+        "url,source\nhttps://example.com/known,search_console\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    async def collect(targets, **kwargs):
+        selected = list(targets)
+        captured["targets"] = selected
+        captured["kwargs"] = kwargs
+        return {url: {"state": "responsive", "attempts": [{"status": 200}]} for url in selected}
+
+    monkeypatch.setattr("crawler_cli.__main__.collect_live_rechecks", collect)
+    out = tmp_path / "audit.json"
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--crawl-run-id",
+                "run-42",
+                "--known-url-inventory",
+                str(known_urls),
+                "--recheck-live",
+                "--scope-manifest",
+                str(manifest),
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(out.read_text())
+    assert captured["targets"] == ["https://example.com/known"]
+    assert captured["kwargs"]["allowed_hosts"] == ["example.com"]
+    assert payload["run_context"]["audit_options"]["known_url_recheck_selected_count"] == 1
+    assert payload["known_url_inventory"][0]["live_validation_state"] == "responsive"
 
 
 def test_csv_requires_out_directory(fake_reports, capsys):

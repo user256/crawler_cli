@@ -169,6 +169,7 @@ class DiscoveredLink:
     fragment: str | None = None
     url_parameters: str | None = None
     original_href: str | None = None
+    rel: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
