@@ -114,6 +114,7 @@ async def test_probe_spends_exactly_one_request_on_one_invented_path():
     # what was requested on their site.
     assert result.tested_url == engine.crawled[0]
     assert result.tested_url.startswith("https://example.com/__crawler-cli-404-")
+    assert (await soft_404_fingerprint(engine, "https://example.com")).tested_url == result.tested_url
 
 
 @pytest.mark.asyncio
