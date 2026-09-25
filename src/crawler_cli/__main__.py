@@ -2394,6 +2394,32 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
     if args.check_external_links and args.external_link_max_targets > 25:
         print("Error: --external-link-max-targets must be at most 25", file=sys.stderr)
         return EXIT_VALIDATION
+    if args.allow_network_cidrs and not args.allow_private_network:
+        print("Error: --allow-network-cidr requires --allow-private-network", file=sys.stderr)
+        return EXIT_VALIDATION
+    if args.allow_private_network or args.allow_network_cidrs:
+        if not args.check_external_links:
+            print("Error: private-network options require --check-external-links", file=sys.stderr)
+            return EXIT_VALIDATION
+        if not args.scope_manifest:
+            print("Error: private-network options require --scope-manifest", file=sys.stderr)
+            return EXIT_VALIDATION
+        try:
+            from .authorisation import load_scope_manifest
+
+            if not load_scope_manifest(args.scope_manifest).allow_private_network:
+                print("Error: scope manifest does not authorize private-network access", file=sys.stderr)
+                return EXIT_VALIDATION
+            CrawlConfig(
+                backend="aiohttp",
+                destination_guard="pinned",
+                challenge_escalate_to_browser=False,
+                allow_private_network=True,
+                allow_network_cidrs=tuple(args.allow_network_cidrs),
+            )
+        except (OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return EXIT_VALIDATION
     if args.resume_google_sheets and not args.publish_google_sheets:
         print("Error: --resume-google-sheets requires --publish-google-sheets", file=sys.stderr)
         return EXIT_VALIDATION
@@ -2937,6 +2963,8 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                         scope_predicate=scope_predicate,
                         max_targets=args.external_link_max_targets,
                         truncated_instance_count=external_link_truncated_count,
+                        allow_private_network=args.allow_private_network,
+                        allow_network_cidrs=args.allow_network_cidrs,
                     )
                     evidence["external-link-rechecks"] = external_link_checks
                     evidence["external-link-rechecks"][0]["device_count"] = len(device_specs)
@@ -4708,6 +4736,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Recheck saved failing link targets through the guarded crawler (requires an authorization manifest)",
     )
     audit_parser.add_argument("--scope-manifest", help="Authorization manifest required by --recheck-live")
+    audit_parser.add_argument(
+        "--allow-private-network",
+        action="store_true",
+        help="Permit private destinations for external-link checks only when also authorized by the scope manifest",
+    )
+    audit_parser.add_argument(
+        "--allow-network-cidr",
+        dest="allow_network_cidrs",
+        action="append",
+        default=[],
+        metavar="CIDR",
+        help="Permit this private CIDR for external-link checks (requires --allow-private-network)",
+    )
     audit_parser.add_argument(
         "--known-url-inventory",
         action="append",
