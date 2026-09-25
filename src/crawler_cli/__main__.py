@@ -2509,11 +2509,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             evidence["current-robots-sitemaps"] = [
                 coverage,
                 inventory,
-                *[
-                    dict(row, record_type="candidate")
-                    for row in validation_candidates
-                    if isinstance(row, Mapping)
-                ],
+                *[dict(row, record_type="candidate") for row in validation_candidates if isinstance(row, Mapping)],
             ]
         if args.probe_url_variants:
             if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
@@ -2576,10 +2572,18 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 await probe_engine.close()
             variant_rows = collected.get("variant_candidates", [])
             soft404_rows = collected.get("soft404_candidates", [])
-            variant_candidates = [row for row in variant_rows if isinstance(row, Mapping)] if isinstance(variant_rows, list) else []
-            soft404_candidates = [row for row in soft404_rows if isinstance(row, Mapping)] if isinstance(soft404_rows, list) else []
+            variant_candidates = (
+                [row for row in variant_rows if isinstance(row, Mapping)] if isinstance(variant_rows, list) else []
+            )
+            soft404_candidates = (
+                [row for row in soft404_rows if isinstance(row, Mapping)] if isinstance(soft404_rows, list) else []
+            )
             variant_evidence: list[dict[str, object]] = [
-                {key: value for key, value in collected.items() if key not in {"variant_candidates", "soft404_candidates"}}
+                {
+                    key: value
+                    for key, value in collected.items()
+                    if key not in {"variant_candidates", "soft404_candidates"}
+                }
             ]
             variant_evidence.extend(dict(row) for row in variant_candidates)
             variant_evidence.extend(dict(row) for row in soft404_candidates)
@@ -2643,13 +2647,13 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                         else None
                     )
                     if supplied_digest != stored_digest:
-                        print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
+                        print(
+                            "Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr
+                        )
                         return EXIT_VALIDATION
                 allowed = run_context.get("declared_allowed_hosts", [])
                 seeds = run_context.get("seed_origins", [])
-                allowed_hosts = {
-                    str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host
-                }
+                allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
                 seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
                 host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
                 initial_urls, strata, url_strata, _stratum_sources = _select_run_render_candidates(
@@ -2715,9 +2719,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                                 if len(expanded) >= args.render_expansion_pages:
                                     break
                         extra = (
-                            await compare_rendered_sample(render_engine, expanded, max_concurrent=1)
-                            if expanded
-                            else []
+                            await compare_rendered_sample(render_engine, expanded, max_concurrent=1) if expanded else []
                         )
                     finally:
                         await render_engine.close()
@@ -2738,11 +2740,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                     device_results.extend(records[1:])
                     if args.persist_render_comparisons:
                         persistence_rows: list[dict[str, object]] = []
-                        rendered_observations = [
-                            row
-                            for row in records[1:]
-                            if row.get("record_type") == "observation"
-                        ]
+                        rendered_observations = [row for row in records[1:] if row.get("record_type") == "observation"]
                         for comparison in comparisons:
                             persisted = comparison.as_dict()
                             persisted["url"] = comparison.url

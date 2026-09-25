@@ -841,9 +841,7 @@ def build_technical_audit(
         if row.get("record_type") == "candidate"
     ]
     parameterized_link_rows = parameterized_canonical_link_inventory(rows["internal-link-quality"])
-    parameterized_link_coverage = [
-        row for row in parameterized_link_rows if row.get("record_type") == "coverage"
-    ]
+    parameterized_link_coverage = [row for row in parameterized_link_rows if row.get("record_type") == "coverage"]
     parameterized_link_evidence = [
         {**row, "qualification": "analyst_only"}
         for row in parameterized_link_rows
@@ -853,9 +851,7 @@ def build_technical_audit(
     url_variant_coverage = (
         url_variant_rows[0] if url_variant_rows and url_variant_rows[0].get("record_type") == "coverage" else {}
     )
-    url_variant_evidence = [
-        row for row in url_variant_rows if row.get("record_type") == "candidate"
-    ]
+    url_variant_evidence = [row for row in url_variant_rows if row.get("record_type") == "candidate"]
     render_rows = rows["rendered-mobile-resources"]
     render_coverage = render_rows[0] if render_rows and render_rows[0].get("record_type") == "coverage" else {}
     render_evidence = [row for row in render_rows if row.get("record_type") == "candidate"]
@@ -1339,15 +1335,13 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 [
                     "Noncanonical parameter link instances",
                     sum(
-                        (_optional_int(row.get("canonicalized_link_instances")) or 0)
-                        for row in parameter_coverage_rows
+                        (_optional_int(row.get("canonicalized_link_instances")) or 0) for row in parameter_coverage_rows
                     ),
                 ],
                 [
                     "Noncanonical parameter URL targets",
                     sum(
-                        (_optional_int(row.get("canonicalized_unique_targets")) or 0)
-                        for row in parameter_coverage_rows
+                        (_optional_int(row.get("canonicalized_unique_targets")) or 0) for row in parameter_coverage_rows
                     ),
                 ],
             ]

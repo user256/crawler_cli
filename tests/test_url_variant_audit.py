@@ -92,8 +92,7 @@ async def test_variant_probes_are_bounded_scoped_and_synthetic_only_findings():
     assert all("www.example.com" not in url for url in engine.requested)
     assert any(row["candidate_type"] == "soft_404_risk_review" for row in evidence["soft404_candidates"])
     assert all(
-        row.get("qualification", "").endswith("review")
-        or row.get("qualification", "").endswith("confirmation")
+        row.get("qualification", "").endswith("review") or row.get("qualification", "").endswith("confirmation")
         for row in evidence["variant_candidates"]
     )
     assert all(engine.config.follow_redirects is True for _ in engine.requested)

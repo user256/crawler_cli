@@ -42,7 +42,11 @@ def test_generate_variants_flip_slash_scheme_host_and_query_order_deterministica
     url = "https://www.example.com/a?z=2&a=&b=3"
     variants = generate_variants(url)
 
-    assert [(item.kind, item.url) for item in variants if item.kind in {"trailing_slash", "scheme", "www_host", "query_order"}] == [
+    assert [
+        (item.kind, item.url)
+        for item in variants
+        if item.kind in {"trailing_slash", "scheme", "www_host", "query_order"}
+    ] == [
         ("trailing_slash", "https://www.example.com/a/?z=2&a=&b=3"),
         ("scheme", "http://www.example.com/a?z=2&a=&b=3"),
         ("www_host", "https://example.com/a?z=2&a=&b=3"),
