@@ -1,12 +1,76 @@
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+import re
+
 from crawler_cli.technical_audit import (
+    TECHNICAL_AUDIT_CHECK_REGISTRY,
+    TECHNICAL_AUDIT_REQUIREMENT_DENOMINATORS,
+    TECHNICAL_AUDIT_SKILL_REQUIREMENTS,
+    TECHNICAL_AUDIT_SKILL_SECTION_DIGESTS,
     audit_sheet_tables,
     build_technical_audit,
     canonical_hreflang_report,
     metadata_locale_report,
     render_technical_audit_markdown,
 )
+
+
+def test_skill_requirement_map_covers_every_skill_section_and_has_owners():
+    lines = Path("skills/technical-seo-audit/SKILL.md").read_text().splitlines()
+    sections = [
+        (line_number, len(match.group(1)), match.group(2))
+        for line_number, line in enumerate(lines)
+        if (match := re.match(r"^(#{2,3}) (.+)$", line)) and match.group(2) != "Technical SEO Audit"
+    ]
+    headings = {section for _, _, section in sections}
+    requirements = {item["id"]: item for item in TECHNICAL_AUDIT_SKILL_REQUIREMENTS}
+    registry_ids_in_order = [item["id"] for item in TECHNICAL_AUDIT_CHECK_REGISTRY]
+    registry_ids = set(registry_ids_in_order)
+    mapped_check_ids = {
+        check_id
+        for item in requirements.values()
+        for check_id in [item["check_id"], *item.get("related_check_ids", [])]
+    }
+
+    assert len(requirements) == len(TECHNICAL_AUDIT_SKILL_REQUIREMENTS)
+    assert len(registry_ids_in_order) == len(registry_ids), "Check registry IDs must be unique"
+    assert {item["section"] for item in requirements.values()} == headings
+    assert set(TECHNICAL_AUDIT_SKILL_SECTION_DIGESTS) == headings
+    assert {item["check_id"] for item in requirements.values()} <= set(TECHNICAL_AUDIT_REQUIREMENT_DENOMINATORS)
+    assert mapped_check_ids == registry_ids
+    for index, (start, level, title) in enumerate(sections):
+        end = len(lines)
+        direct_end = len(lines)
+        for next_start, next_level, _ in sections[index + 1 :]:
+            if direct_end == len(lines):
+                direct_end = next_start
+            if next_level <= level:
+                end = next_start
+                break
+        source = "\n".join(lines[start:end]).rstrip() + "\n"
+        digest = hashlib.sha256(source.encode()).hexdigest()
+        assert digest == TECHNICAL_AUDIT_SKILL_SECTION_DIGESTS[title], f"Review updated skill section: {title}"
+        item = next(row for row in requirements.values() if row["section"] == title)
+        source_bullets = sum(bool(re.match(r"^\s*(?:- |\d+\. )", line)) for line in lines[start + 1 : direct_end])
+        assert len(item["requirements"]) >= source_bullets, f"Map every listed control in: {title}"
+    for item in requirements.values():
+        assert item["requirements"]
+        assert item["check_id"] in registry_ids
+        assert item["state"] in {
+            "implemented",
+            "implemented_candidate",
+            "implemented_conditional",
+            "partial",
+            "conditional",
+            "analyst_judgement",
+            "not_implemented",
+        }
+        assert 183 <= item["owner_ticket"] <= 202
+        assert item["evidence"]
+        assert TECHNICAL_AUDIT_REQUIREMENT_DENOMINATORS[item["check_id"]]
+        assert Path(item["test"]).is_file()
 
 
 def test_metadata_inventory_excludes_ineligible_pages_and_keeps_denominators():
@@ -318,6 +382,7 @@ def test_audit_is_stable_and_never_calls_candidate_checks_healthy():
     assert statuses["near-duplicate-content"] == "no_observations"
     assert first["check_registry"]
     assert "canonical-targets" in {item["id"] for item in first["check_registry"]}
+    assert len(first["skill_requirements"]) == len(TECHNICAL_AUDIT_SKILL_REQUIREMENTS)
     assert len(first["audit_log"]) == 3
     evidence_reference = first["audit_log"][0]["Evidence Reference"]
     assert evidence_reference.startswith("sha256:")

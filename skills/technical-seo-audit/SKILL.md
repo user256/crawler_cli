@@ -47,6 +47,11 @@ current rich-result eligibility, and business severity/value remain dependent
 on supplied sources or analyst judgment. Missing or partial evidence is
 unknown/incomplete, not a clean pass.
 
+The output's `skill_requirements` inventory maps every skill section to its
+separate requirement controls, support state, evidence boundary, acceptance
+test, and owning ticket. It is a static traceability map, not proof that a
+check ran; use `checks` and their denominators for the selected audit run.
+
 The client `Audit Log` is a recipient-filtered action list, not a dump of every
 check. Historical link failures do not become client failures until eligible
 live rechecks confirm them; recovered and inconclusive targets stay out of
