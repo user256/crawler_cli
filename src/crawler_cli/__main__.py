@@ -2588,10 +2588,18 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 await probe_engine.close()
             variant_rows = collected.get("variant_candidates", [])
             soft404_rows = collected.get("soft404_candidates", [])
-            variant_candidates = [row for row in variant_rows if isinstance(row, Mapping)] if isinstance(variant_rows, list) else []
-            soft404_candidates = [row for row in soft404_rows if isinstance(row, Mapping)] if isinstance(soft404_rows, list) else []
+            variant_candidates = (
+                [row for row in variant_rows if isinstance(row, Mapping)] if isinstance(variant_rows, list) else []
+            )
+            soft404_candidates = (
+                [row for row in soft404_rows if isinstance(row, Mapping)] if isinstance(soft404_rows, list) else []
+            )
             variant_evidence: list[dict[str, object]] = [
-                {key: value for key, value in collected.items() if key not in {"variant_candidates", "soft404_candidates"}}
+                {
+                    key: value
+                    for key, value in collected.items()
+                    if key not in {"variant_candidates", "soft404_candidates"}
+                }
             ]
             variant_evidence.extend(dict(row) for row in variant_candidates)
             variant_evidence.extend(dict(row) for row in soft404_candidates)
