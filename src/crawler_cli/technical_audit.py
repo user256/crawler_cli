@@ -793,9 +793,7 @@ def build_technical_audit(
                 indexability_conflicts.append({**row, "conflicts": conflicts})
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
     rendered_schema_rows = [
-        row
-        for row in rows["rendered-mobile-resources"]
-        if row.get("record_kind") == "structured_data_item"
+        row for row in rows["rendered-mobile-resources"] if row.get("record_kind") == "structured_data_item"
     ]
     structured_data_report = structured_data_inventory_report(
         rows["structured-data-inventory"], rendered_rows=rendered_schema_rows
