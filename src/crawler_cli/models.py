@@ -51,6 +51,7 @@ class BrowserRequestObservation:
     resource_type: str
     outcome: BrowserRequestOutcome = "issued"
     status: int | None = None
+    content_type: str | None = None
     failure: str | None = None
     occurrence_count: int = 1
 
@@ -287,6 +288,8 @@ class CrawlResult:
     """Interaction to Next Paint in ms — lab metric, Playwright only (ticket 046)."""
     redirect_chain: list[dict[str, Any]] = field(default_factory=list)
     """Redirect hops carried through from :class:`FetchResponse` (ticket 122)."""
+    observed_requests: list[BrowserRequestObservation] = field(default_factory=list)
+    """Bounded browser subrequest observations retained for render audits."""
 
 
 @dataclass(slots=True)
