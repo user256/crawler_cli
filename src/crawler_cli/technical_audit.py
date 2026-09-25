@@ -847,11 +847,11 @@ def build_technical_audit(
             "qualification": "explicit_conditional_probe_not_requested",
         }
     )
-    conditional_findings = [
-        row
-        for row in conditional_input[1:]
-        if row.get("record_type") == "candidate"
-    ] if conditional_input and conditional_input[0].get("record_type") == "coverage" else []
+    conditional_findings = (
+        [row for row in conditional_input[1:] if row.get("record_type") == "candidate"]
+        if conditional_input and conditional_input[0].get("record_type") == "coverage"
+        else []
+    )
     similarity = rows["similarity-coverage"][0] if rows["similarity-coverage"] else {}
     similarity_complete = (
         source_coverage["similarity-coverage"]["available"] is True
@@ -1438,7 +1438,10 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
         overview.extend(
             [
                 ["Timing source", performance_coverage.get("source", "unknown")],
-                ["Canonical indexable HTML timing population", performance_coverage.get("eligible_canonical_indexable_html_count", 0)],
+                [
+                    "Canonical indexable HTML timing population",
+                    performance_coverage.get("eligible_canonical_indexable_html_count", 0),
+                ],
                 ["Conditional GET state", conditional_summary.get("state", "not_requested")],
                 ["Conditional GET eligible validators", conditional_summary.get("validator_eligible_count", 0)],
                 ["Conditional GET 304 rate", conditional_summary.get("not_modified_304_rate", "not_testable")],

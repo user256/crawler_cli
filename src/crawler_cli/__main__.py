@@ -2663,9 +2663,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                     return EXIT_VALIDATION
             allowed = run_context.get("declared_allowed_hosts", [])
             seeds = run_context.get("seed_origins", [])
-            allowed_hosts = {
-                str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host
-            }
+            allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
             seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
             performance_rows = evidence.get("performance-inventory", [])
             candidates = select_conditional_probe_candidates(
