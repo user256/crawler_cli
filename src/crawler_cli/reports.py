@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import importlib.metadata
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlparse
 
-from .hashing import hamming64
+from .compression import decompress_html
+from .hashing import hamming64, sha256_of_normalized, simhash64_of_normalized, simhash_to_signed
+from .intent_signature import extract_main_text, resolve_signal_confidence
 from .persistence import AsyncpgStore
 
 
@@ -30,6 +34,7 @@ class CrawlReports:
     def __init__(self, store: AsyncpgStore, *, run_id: str | None = None) -> None:
         self.store = store
         self.run_id = run_id
+        self._similarity_coverage: list[dict[str, object]] | None = None
 
     async def _run_id(self) -> str:
         """Resolve the selected report run without silently choosing one."""
@@ -545,83 +550,260 @@ class CrawlReports:
         return findings
 
     async def near_duplicates(self, threshold: int = 4, limit: int = 5000) -> list[dict[str, object]]:
-        """Near-duplicate indexable pages using persisted 64-bit SimHash."""
+        """Exact/near primary-content candidates from a deterministic bounded sample."""
         run_id = await self._run_id()
+        sample_limit = max(1, min(limit, 5000))
         rows = await self._fetch(
             """
-            SELECT u.url, s.content_hash_sha256, s.content_hash_simhash
+            SELECT u.url, u.kind, s.title, s.h1_tags AS h1, s.meta_description, s.html_lang,
+                   s.html_compressed, s.overall_indexable,
+                   s.canonical_urls_json ->> 0 AS canonical_url,
+                   sig.main_text_compressed, sig.extraction_method AS saved_extraction_method,
+                   sig.signal_confidence AS saved_signal_confidence,
+                   COUNT(*) OVER()::INT AS eligible_population
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
-            WHERE s.run_id = $1 AND s.overall_indexable = TRUE
-              AND s.content_hash_simhash IS NOT NULL
-            ORDER BY u.url LIMIT $2
+            LEFT JOIN run_intent_signatures sig ON sig.run_id = s.run_id AND sig.url_id = s.url_id
+            WHERE s.run_id = $1 AND s.overall_indexable = TRUE AND u.kind = 'html'
+              AND (jsonb_array_length(s.canonical_urls_json) = 0 OR s.canonical_urls_json ->> 0 = u.url)
+              AND u.variant_kind IS NULL
+            ORDER BY md5(u.url), u.url LIMIT $2
             """,
             run_id,
-            limit,
+            sample_limit,
         )
+        prepared: list[dict[str, object]] = []
+        methods: dict[str, int] = {}
+        for row in rows:
+            primary_text, method = _primary_content(row)
+            normalized = " ".join(primary_text.split()) if primary_text else ""
+            exact_hash = sha256_of_normalized(normalized) if normalized else None
+            simhash = simhash_to_signed(simhash64_of_normalized(normalized)) if normalized else None
+            methods[method] = methods.get(method, 0) + 1
+            prepared.append(
+                {
+                    "url": str(row["url"]),
+                    "locale": row.get("html_lang"),
+                    "indexable": row.get("overall_indexable") is True,
+                    "canonical_state": _canonical_state(str(row["url"]), row.get("canonical_url")),
+                    "exact_hash": exact_hash,
+                    "simhash": simhash,
+                    "extraction_method": method,
+                    "signal_confidence": row.get("saved_signal_confidence") or _confidence(normalized, method),
+                }
+            )
+
+        exact_groups: dict[str, list[str]] = {}
+        for row in prepared:
+            if row["exact_hash"] is not None:
+                exact_groups.setdefault(str(row["exact_hash"]), []).append(str(row["url"]))
+        prepared_by_url = {str(row["url"]): row for row in prepared}
         findings: list[dict[str, object]] = []
-        for index, left in enumerate(rows):
-            for right in rows[index + 1 :]:
-                if left["content_hash_sha256"] == right["content_hash_sha256"]:
+        finding_cap = 50000
+        total_candidate_findings = 0
+        for urls in exact_groups.values():
+            if len(urls) > 1:
+                for index, exact_left in enumerate(urls):
+                    for exact_right in urls[index + 1 :]:
+                        total_candidate_findings += 1
+                        if len(findings) < finding_cap:
+                            findings.append(
+                                {
+                                    "match_kind": "exact_primary_content",
+                                    "url": exact_left,
+                                    "near_duplicate_url": exact_right,
+                                    "simhash_distance": 0,
+                                    "url_locale": prepared_by_url[exact_left]["locale"],
+                                    "near_locale": prepared_by_url[exact_right]["locale"],
+                                    "url_canonical_state": prepared_by_url[exact_left]["canonical_state"],
+                                    "near_canonical_state": prepared_by_url[exact_right]["canonical_state"],
+                                    "url_indexable": prepared_by_url[exact_left]["indexable"],
+                                    "near_indexable": prepared_by_url[exact_right]["indexable"],
+                                    "template_context": "not_stored",
+                                    "url_extraction_method": prepared_by_url[exact_left]["extraction_method"],
+                                    "near_extraction_method": prepared_by_url[exact_right]["extraction_method"],
+                                    "url_signal_confidence": prepared_by_url[exact_left]["signal_confidence"],
+                                    "near_signal_confidence": prepared_by_url[exact_right]["signal_confidence"],
+                                }
+                            )
+        near_pair_count = 0
+        for index, left in enumerate(prepared):
+            if left["simhash"] is None:
+                continue
+            for near_right in prepared[index + 1 :]:
+                if near_right["simhash"] is None or left["exact_hash"] == near_right["exact_hash"]:
                     continue
-                distance = hamming64(
-                    int(cast(int, left["content_hash_simhash"])),
-                    int(cast(int, right["content_hash_simhash"])),
-                )
+                near_pair_count += 1
+                distance = hamming64(int(cast(int, left["simhash"])), int(cast(int, near_right["simhash"])))
                 if distance <= threshold:
-                    findings.append(
-                        {"url": left["url"], "near_duplicate_url": right["url"], "simhash_distance": distance}
-                    )
-        return sorted(findings, key=lambda row: (row["simhash_distance"], row["url"], row["near_duplicate_url"]))
+                    total_candidate_findings += 1
+                    if len(findings) < finding_cap:
+                        findings.append(
+                            {
+                                "match_kind": "near_primary_content",
+                                "url": left["url"],
+                                "near_duplicate_url": near_right["url"],
+                                "simhash_distance": distance,
+                                "url_locale": left["locale"],
+                                "near_locale": near_right["locale"],
+                                "url_canonical_state": left["canonical_state"],
+                                "near_canonical_state": near_right["canonical_state"],
+                                "url_indexable": left["indexable"],
+                                "near_indexable": near_right["indexable"],
+                                "template_context": "not_stored",
+                                "url_extraction_method": left["extraction_method"],
+                                "near_extraction_method": near_right["extraction_method"],
+                                "url_signal_confidence": left["signal_confidence"],
+                                "near_signal_confidence": near_right["signal_confidence"],
+                            }
+                        )
+        population = int(cast(int, rows[0]["eligible_population"])) if rows else 0
+        sample_urls = sorted(str(row["url"]) for row in rows)
+        sampled_count = len(rows)
+        self._similarity_coverage = [
+            {
+                "eligible_population": population,
+                "sampled_population": sampled_count,
+                "sample_limit": sample_limit,
+                "truncated": population > sampled_count,
+                "candidate_pair_count": total_candidate_findings,
+                "findings_truncated": total_candidate_findings > finding_cap,
+                "findings_limit": finding_cap,
+                "missing_primary_hashes": sum(row["exact_hash"] is None for row in prepared),
+                "compared_near_pairs": near_pair_count,
+                "pair_comparison_cap": sample_limit * max(0, sample_limit - 1) // 2,
+                "threshold_hamming_bits": threshold,
+                "selection_strategy": "stable md5(url) order; bounded sample; exact and pairwise near comparison",
+                "sample_url_set_sha256": hashlib.sha256("\n".join(sample_urls).encode()).hexdigest(),
+                "sample_page_sha256_refs": [hashlib.sha256(url.encode()).hexdigest() for url in sample_urls],
+                "extraction_method_counts": methods,
+                "extractor_version": _extractor_version(),
+                "inventory_basis": "canonical indexable HTML; explicit non-self canonicals and variants excluded",
+                "template_context": "not_stored_in_page_snapshot_schema",
+            }
+        ]
+        return sorted(
+            findings,
+            key=lambda row: (str(row["match_kind"]), row["simhash_distance"], row["url"], row["near_duplicate_url"]),
+        )
+
+    async def similarity_coverage(self, threshold: int = 4, limit: int = 5000) -> list[dict[str, object]]:
+        """Coverage summary paired with :meth:`near_duplicates` candidates."""
+        if self._similarity_coverage is None:
+            await self.near_duplicates(threshold=threshold, limit=limit)
+        return list(self._similarity_coverage or [])
 
     async def internal_authority(self) -> list[dict[str, object]]:
-        """PageRank-like relative authority over indexable run-scoped pages."""
+        """Relative authority over canonical indexable HTML in the selected run."""
         run_id = await self._run_id()
         pages = await self._fetch(
             """
-            SELECT u.url, s.links_json
+            SELECT u.url, u.kind, s.links_json, s.content_extracted,
+                   s.render_discovery_attempted, s.render_discovery_complete,
+                   s.overall_indexable, s.canonical_urls_json
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
-            WHERE s.run_id = $1 AND s.overall_indexable = TRUE
+            WHERE s.run_id = $1 AND u.kind = 'html'
             ORDER BY u.url
             """,
             run_id,
         )
-        urls = {str(row["url"]) for row in pages}
+        graph = _build_link_graph(pages)
+        run = await self.store.get_crawl_run(run_id)
+        graph_complete = graph["complete"] and bool(run and run.get("status") == "complete")
+        eligible = [
+            row
+            for row in pages
+            if row.get("kind") == "html"
+            and row.get("overall_indexable") is True
+            and _canonical_state(str(row["url"]), row.get("canonical_urls_json")) != "noncanonical"
+        ]
+        urls = {str(row["url"]) for row in eligible}
         if not urls:
             return []
         outgoing: dict[str, set[str]] = {}
-        for row in pages:
+        canonical_by_url = {str(row["url"]): row.get("canonical_urls_json") for row in eligible}
+        for row in eligible:
             raw_links = row["links_json"] or []
             if isinstance(raw_links, str):
                 raw_links = json.loads(raw_links)
             links = cast(list[dict[str, Any]], raw_links)
             outgoing[str(row["url"])] = {str(link["href"]) for link in links if link.get("href") in urls}
-        score = {url: 1.0 / len(urls) for url in urls}
+        ordered_urls = sorted(urls)
+        score = {url: 1.0 / len(urls) for url in ordered_urls}
         damping = 0.85
         for _ in range(50):
-            sink = sum(score[url] for url, targets in outgoing.items() if not targets)
-            updated = {url: (1.0 - damping) / len(urls) + damping * sink / len(urls) for url in urls}
-            for source, targets in outgoing.items():
+            sink = sum(score[url] for url in ordered_urls if not outgoing[url])
+            updated = {url: (1.0 - damping) / len(urls) + damping * sink / len(urls) for url in ordered_urls}
+            for source in ordered_urls:
+                targets = outgoing[source]
                 if targets:
                     contribution = damping * score[source] / len(targets)
-                    for target in targets:
+                    for target in sorted(targets):
                         updated[target] += contribution
-            if max(abs(updated[url] - score[url]) for url in urls) < 1e-10:
+            if max(abs(updated[url] - score[url]) for url in ordered_urls) < 1e-10:
                 score = updated
                 break
             score = updated
         inbound = {url: 0 for url in urls}
         for targets in outgoing.values():
-            for target in targets:
+            for target in sorted(targets):
                 inbound[target] += 1
         maximum = max(score.values()) or 1.0
+        ordered = sorted(urls, key=lambda value: (-score[value], value))
+        rank = {url: index + 1 for index, url in enumerate(ordered)}
         return [
             {
                 "url": url,
-                "authority_score": round(100.0 * score[url] / maximum, 4),
+                "authority_score": round(100.0 * score[url] / maximum, 4) if graph_complete else None,
                 "unique_inlinks": inbound[url],
                 "unique_outlinks": len(outgoing[url]),
+                "canonical_state": _canonical_state(
+                    url,
+                    canonical_by_url[url],
+                ),
+                "indexable": True,
+                "peer_population_count": len(urls),
+                "relative_rank": rank[url] if graph_complete else None,
+                "relative_percentile": round(100.0 * (len(urls) - rank[url] + 1) / len(urls), 2)
+                if graph_complete
+                else None,
+                "graph_complete": graph_complete,
             }
-            for url in sorted(urls, key=lambda value: (score[value], value))
+            for url in ordered
+        ]
+
+    async def authority_coverage(self) -> list[dict[str, object]]:
+        run_id = await self._run_id()
+        pages = await self._fetch(
+            """
+            SELECT u.url, u.kind, s.links_json, s.content_extracted,
+                   s.render_discovery_attempted, s.render_discovery_complete,
+                   s.overall_indexable, s.canonical_urls_json
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1 AND u.kind = 'html'
+            ORDER BY u.url
+            """,
+            run_id,
+        )
+        graph = _build_link_graph(pages)
+        run = await self.store.get_crawl_run(run_id)
+        eligible = [
+            row
+            for row in pages
+            if row.get("kind") == "html"
+            and row.get("overall_indexable") is True
+            and _canonical_state(str(row["url"]), row.get("canonical_urls_json")) != "noncanonical"
+        ]
+        return [
+            {
+                "html_population": len(pages),
+                "canonical_indexable_population": len(eligible),
+                "excluded_noncanonical_count": sum(
+                    _canonical_state(str(row["url"]), row.get("canonical_urls_json")) == "noncanonical" for row in pages
+                ),
+                "graph_complete": graph["complete"] and bool(run and run.get("status") == "complete"),
+                "edge_source": "same-run immutable page snapshots",
+                "relative_peer_context": "canonical indexable HTML pages in selected run",
+            }
         ]
 
     async def schema_compatibility(self) -> list[dict[str, object]]:
@@ -868,6 +1050,49 @@ def _json_list(value: object) -> list[object]:
 
 def _without_fragment(value: str) -> str:
     return urlparse(value)._replace(fragment="").geturl()
+
+
+def _canonical_state(url: str, value: object) -> str:
+    canonicals = _json_list(value)
+    if not canonicals and isinstance(value, str) and value and value != "[]":
+        canonicals = [value]
+    if not canonicals:
+        return "implicit_self"
+    return "declared_self" if _without_fragment(str(canonicals[0])) == _without_fragment(url) else "noncanonical"
+
+
+def _primary_content(row: dict[str, object]) -> tuple[str, str]:
+    saved_text = row.get("main_text_compressed")
+    method = str(row.get("saved_extraction_method") or "")
+    if isinstance(saved_text, (bytes, bytearray)):
+        try:
+            text = decompress_html(bytes(saved_text))
+        except (OSError, UnicodeDecodeError):
+            return "", "unavailable"
+        return text, method or "saved_signature"
+    raw_html = row.get("html_compressed")
+    if not isinstance(raw_html, (bytes, bytearray)):
+        return "", "unavailable"
+    try:
+        html = decompress_html(bytes(raw_html))
+    except (OSError, UnicodeDecodeError):
+        return "", "unavailable"
+    text, method = extract_main_text(html)
+    return text or "", method
+
+
+def _confidence(text: str, method: str) -> str:
+    return resolve_signal_confidence(len(text.split()), method)
+
+
+def _extractor_version() -> str:
+    versions = []
+    for package in ("trafilatura", "lxml"):
+        try:
+            versions.append(f"{package}={importlib.metadata.version(package)}")
+        except importlib.metadata.PackageNotFoundError:
+            versions.append(f"{package}=unavailable")
+    return ";".join(versions)
 
 
 def _build_link_graph(
