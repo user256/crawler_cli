@@ -505,6 +505,53 @@ def test_external_link_recheck_requires_render_and_scope_preflight(fake_reports,
     assert FakeReports.instances == []
 
 
+def test_external_link_private_network_requires_explicit_manifest_and_invocation(fake_reports, tmp_path, capsys):
+    assert _run(["technical-audit", "--allow-private-network", "--out", "audit.json"]) == 2
+    assert "require --check-external-links" in capsys.readouterr().err
+    assert FakeReports.instances == []
+
+    from datetime import UTC, datetime, timedelta
+
+    from crawler_cli.authorisation import SCOPE_MANIFEST_SCHEMA_VERSION
+
+    now = datetime.now(UTC)
+    manifest = tmp_path / "scope.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": SCOPE_MANIFEST_SCHEMA_VERSION,
+                "authorization_reference": "CHANGE-1234",
+                "operator": "audit-test",
+                "valid_from": (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "valid_until": (now + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "allowed_origins": ["https://example.com"],
+                "allowed_path_prefixes": ["/"],
+                "allow_private_network": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--check-external-links",
+                "--compare-current-renders",
+                "--scope-manifest",
+                str(manifest),
+                "--allow-private-network",
+                "--allow-network-cidr",
+                "127.0.0.0/8",
+                "--out",
+                "audit.json",
+            ]
+        )
+        == 2
+    )
+    assert "scope manifest does not authorize private-network access" in capsys.readouterr().err
+    assert FakeReports.instances == []
+
+
 def test_live_recheck_includes_known_urls_with_scope_and_records_selection(fake_reports, tmp_path, monkeypatch):
     from datetime import UTC, datetime, timedelta
 

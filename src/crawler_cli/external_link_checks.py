@@ -28,6 +28,10 @@ def _safe_attempt(result: Any) -> dict[str, object]:
     observation = _observation(result)
     observation["requested_url"] = _safe_url(str(result.requested_url))
     observation["final_url"] = _safe_url(str(result.final_url))
+    observation["wire_bytes"] = int(result.wire_bytes)
+    observation["decoded_bytes"] = int(result.decoded_bytes)
+    observation["accounted_bytes"] = int(result.accounted_bytes)
+    observation["body_truncated"] = bool(result.body_truncated)
     headers = observation.get("headers")
     if isinstance(headers, dict) and headers.get("location"):
         headers["location"] = _safe_url(str(headers["location"]))
@@ -59,6 +63,8 @@ async def collect_external_link_rechecks(
     scope_predicate: ScopePredicate,
     max_targets: int = MAX_EXTERNAL_LINK_TARGETS,
     truncated_instance_count: int = 0,
+    allow_private_network: bool = False,
+    allow_network_cidrs: Sequence[str] = (),
 ) -> list[dict[str, object]]:
     """Test a deterministic sample of external links under explicit scope.
 
@@ -68,6 +74,10 @@ async def collect_external_link_rechecks(
     """
     if not 1 <= max_targets <= MAX_EXTERNAL_LINK_TARGETS:
         raise ValueError(f"external link limit must be between 1 and {MAX_EXTERNAL_LINK_TARGETS}")
+    if allow_network_cidrs and not allow_private_network:
+        raise ValueError("private-network CIDRs require allow_private_network=True")
+    if allow_private_network and not scope_predicate.manifest.allow_private_network:
+        raise ValueError("scope manifest does not authorize private-network access")
     effective_truncated_count = truncated_instance_count + max(0, len(instances) - MAX_EXTERNAL_LINK_INSTANCES)
     grouped: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     invalid_count = 0
@@ -128,6 +138,8 @@ async def collect_external_link_rechecks(
                 same_host_only=False,
                 allowed_hosts=hosts,
                 destination_guard="pinned",
+                allow_private_network=allow_private_network,
+                allow_network_cidrs=tuple(allow_network_cidrs),
                 scope_predicate=scope_predicate,
             )
         )
