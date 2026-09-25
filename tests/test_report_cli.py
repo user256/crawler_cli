@@ -484,6 +484,27 @@ def test_live_recheck_requires_explicit_scope_manifest(fake_reports, tmp_path, c
     assert fake_reports.closed is True
 
 
+def test_external_link_recheck_requires_render_and_scope_preflight(fake_reports, capsys):
+    assert _run(["technical-audit", "--check-external-links", "--out", "audit.json"]) == 2
+    assert "requires --compare-current-renders" in capsys.readouterr().err
+    assert FakeReports.instances == []
+
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--check-external-links",
+                "--compare-current-renders",
+                "--out",
+                "audit.json",
+            ]
+        )
+        == 2
+    )
+    assert "requires --scope-manifest" in capsys.readouterr().err
+    assert FakeReports.instances == []
+
+
 def test_live_recheck_includes_known_urls_with_scope_and_records_selection(fake_reports, tmp_path, monkeypatch):
     from datetime import UTC, datetime, timedelta
 
