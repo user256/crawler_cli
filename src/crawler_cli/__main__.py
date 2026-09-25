@@ -75,7 +75,12 @@ from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
 from .reports import CrawlReports
 from .orphan_sources import load_known_url_inventory
-from .technical_audit import TECHNICAL_AUDIT_REPORTS, audit_sheet_tables, build_technical_audit
+from .technical_audit import (
+    TECHNICAL_AUDIT_REPORTS,
+    audit_sheet_tables,
+    build_technical_audit,
+    metadata_locale_report,
+)
 from .live_rechecks import candidate_targets, collect_live_rechecks
 from .validators import (
     non_negative_float,
@@ -2247,6 +2252,8 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.internal_authority()
     if name == "authority-coverage":
         return await reports.authority_coverage()
+    if name == "metadata-locale-inventory":
+        return metadata_locale_report(await reports.metadata_locale_inventory())
     raise ValueError(f"unknown report: {name}")
 
 
