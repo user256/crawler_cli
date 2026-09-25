@@ -104,6 +104,8 @@ _WEB_VITALS_SHIM = """
 _RENDER_LINK_SNAPSHOT_LIMIT = 2_000
 _RENDER_LINK_SCROLL_STEPS = 8
 _RENDER_LINK_SCROLL_SETTLE_MS = 100
+_RENDER_IMAGE_LAYOUT_LIMIT = 2_000
+_RENDER_IMAGE_DOM_SCAN_LIMIT = 10_000
 _RENDER_LINK_SNAPSHOT_SCRIPT = """
 limit => {
   const anchors = Array.from(document.querySelectorAll('a[href]'));
@@ -152,6 +154,127 @@ async def _capture_render_link_snapshot(page) -> tuple[list[dict[str, object]], 
     if not isinstance(links, list):
         return [], int(snapshot.get("total", 0) or 0)
     return [dict(row) for row in links if isinstance(row, dict)], int(snapshot.get("total", len(links)) or 0)
+
+
+_RENDER_IMAGE_LAYOUT_SCRIPT = r"""
+(limits) => {
+  const observations = [];
+  const domPath = (node) => {
+    const parts = [];
+    let current = node;
+    while (current && current.nodeType === Node.ELEMENT_NODE && parts.length < 8) {
+      const tag = current.tagName.toLowerCase();
+      const siblings = current.parentElement ? Array.from(current.parentElement.children) : [];
+      const position = siblings.filter((item) => item.tagName === current.tagName).indexOf(current) + 1;
+      parts.unshift(`${tag}:nth-of-type(${position})`);
+      current = current.parentElement;
+    }
+    return `/html/${parts.join('/')}`;
+  };
+  const inViewport = (rect) => rect.width > 0 && rect.height > 0 && rect.bottom > 0 &&
+    rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth;
+  const resourceTiming = (url) => {
+    const entries = performance.getEntriesByName(url).filter((entry) => entry.entryType === 'resource');
+    const entry = entries.length ? entries[entries.length - 1] : null;
+    return entry ? {
+      entry_count: entries.length,
+      transfer_size: entry.transferSize,
+      encoded_body_size: entry.encodedBodySize,
+      decoded_body_size: entry.decodedBodySize,
+      duration_ms: Math.round(entry.duration * 100) / 100,
+    } : null;
+  };
+  const append = (element, sourceKind, url, naturalWidth, naturalHeight, backgroundSize) => {
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    observations.push({
+      source_kind: sourceKind,
+      url,
+      dom_path: domPath(element),
+      natural_width: naturalWidth,
+      natural_height: naturalHeight,
+      display_width: Math.round(rect.width * 100) / 100,
+      display_height: Math.round(rect.height * 100) / 100,
+      width_attribute: element.getAttribute('width'),
+      height_attribute: element.getAttribute('height'),
+      object_fit: style.objectFit || null,
+      background_size: backgroundSize,
+      rendered_visible: element.getClientRects().length > 0 && style.display !== 'none' &&
+        style.visibility !== 'hidden' && Number(style.opacity || 1) > 0,
+      in_viewport: inViewport(rect),
+      resource_timing: resourceTiming(url),
+    });
+  };
+  const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
+  let backgroundUrlCount = 0;
+  let imageElementCount = 0;
+  let truncated = false;
+  const cssUrl = /url\((?:"([^"]*)"|'([^']*)'|([^)]*))\)/g;
+  let scannedNodeCount = 0;
+  let element = walker.nextNode();
+  while (element && scannedNodeCount < limits.nodeLimit && observations.length < limits.observationLimit) {
+    scannedNodeCount += 1;
+    if (element.tagName === 'IMG') {
+      imageElementCount += 1;
+      const url = element.currentSrc || element.src;
+      if (/^https?:/i.test(url)) {
+        append(element, 'img', url, element.naturalWidth || 0, element.naturalHeight || 0, null);
+      }
+    } else {
+      const style = window.getComputedStyle(element);
+      const background = style.backgroundImage || '';
+      if (background && background !== 'none') {
+        for (const match of background.matchAll(cssUrl)) {
+          let url;
+          try { url = new URL((match[1] || match[2] || match[3] || '').trim(), document.baseURI).href; }
+          catch (_) { continue; }
+          if (!/^https?:/i.test(url)) continue;
+          backgroundUrlCount += 1;
+          append(element, 'css_background', url, null, null, style.backgroundSize || null);
+          if (observations.length >= limits.observationLimit) {
+            truncated = true;
+            break;
+          }
+        }
+      }
+    }
+    element = walker.nextNode();
+  }
+  if (element) truncated = true;
+  return {
+    scanned_node_count: scannedNodeCount,
+    scanned_image_element_count: imageElementCount,
+    background_url_count: backgroundUrlCount,
+    truncated,
+    observations,
+  };
+}
+"""
+
+
+async def _capture_render_image_layout(page) -> tuple[list[dict[str, object]], dict[str, object]]:
+    snapshot = await page.evaluate(
+        _RENDER_IMAGE_LAYOUT_SCRIPT,
+        {"observationLimit": _RENDER_IMAGE_LAYOUT_LIMIT, "nodeLimit": _RENDER_IMAGE_DOM_SCAN_LIMIT},
+    )
+    if not isinstance(snapshot, dict):
+        return [], {"state": "unavailable", "reason": "invalid_browser_snapshot"}
+    raw = snapshot.get("observations")
+    rows = [dict(item) for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    scanned_node_count = int(snapshot.get("scanned_node_count", 0) or 0)
+    image_count = int(snapshot.get("scanned_image_element_count", 0) or 0)
+    truncated = snapshot.get("truncated") is True
+    return rows, {
+        "state": "partial" if truncated else "complete",
+        "scanned_node_count": scanned_node_count,
+        "scanned_image_element_count": image_count,
+        "background_url_count": int(snapshot.get("background_url_count", 0) or 0),
+        "observation_count": len(rows),
+        "observation_limit": _RENDER_IMAGE_LAYOUT_LIMIT,
+        "dom_scan_limit": _RENDER_IMAGE_DOM_SCAN_LIMIT,
+        "truncated": truncated,
+        "timing_size_qualification": "cross_origin_resource_timing_sizes_may_be_zero_without_timing_allow_origin",
+    }
 
 
 def _is_skippable_content_type(content_type: str | None) -> bool:
@@ -1756,6 +1879,13 @@ class PlaywrightBackend(FetchBackend):
                     "controls_activated": False,
                 }
                 await page.evaluate("() => window.scrollTo(0, 0)")
+            render_image_observations: list[dict[str, object]] = []
+            render_image_capture: dict[str, object] | None = None
+            if self.config.capture_render_image_layout:
+                render_image_observations, render_image_capture = await _capture_render_image_layout(page)
+                if not render_settled and render_image_capture.get("state") == "complete":
+                    render_image_capture["state"] = "partial"
+                    render_image_capture["reason"] = "render_not_settled"
             elapsed = time.monotonic() - started
             header_map = dict(response.headers) if response else {}
             body = html.encode("utf-8")[: self.config.max_response_bytes]
@@ -1779,6 +1909,8 @@ class PlaywrightBackend(FetchBackend):
                 render_settled=render_settled,
                 render_link_observations=render_link_observations,
                 render_link_capture=render_link_capture,
+                render_image_observations=render_image_observations,
+                render_image_capture=render_image_capture,
             )
         finally:
             if page is not None:
