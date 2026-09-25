@@ -2206,6 +2206,7 @@ _REPORT_NAMES = (
     "missing-analytics",
     "missing-expected-id",
     "schema-compatibility",
+    "structured-data-inventory",
     "image-issues",
     "internal-link-quality",
     "tracking-parameter-links",
@@ -2245,6 +2246,8 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.pages_missing_expected_id(args.expected_id)
     if name == "schema-compatibility":
         return await reports.schema_compatibility()
+    if name == "structured-data-inventory":
+        return await reports.structured_data_inventory()
     if name == "image-issues":
         return await reports.image_issues()
     if name == "internal-link-quality":

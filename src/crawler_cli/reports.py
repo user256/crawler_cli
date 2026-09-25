@@ -140,6 +140,7 @@ class CrawlReports:
                 "images_json": has_images,
                 "indexability_evidence_json": has_directive_evidence,
                 "links_json": "links_json" in snapshot_columns,
+                "schema_json": "schema_json" in snapshot_columns,
                 "content_hash_simhash": "content_hash_simhash" in snapshot_columns,
             },
             "frontier_queued": frontier[0],
@@ -866,6 +867,32 @@ class CrawlReports:
             ) AS diagnostics(diagnostic)
             WHERE s.run_id = $1
             ORDER BY u.url, script_position, diagnostic_code, json_pointer
+            """,
+            run_id,
+        )
+
+    async def structured_data_inventory(self) -> list[dict[str, object]]:
+        """Return every active structured-data item saved for the selected run."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT
+                u.url,
+                COALESCE(schema_item ->> 'format', 'unknown') AS format,
+                COALESCE(schema_item ->> 'type', 'Unknown') AS schema_type,
+                schema_item ->> 'position' AS position,
+                schema_item ->> 'parser_mode' AS parser_mode,
+                (schema_item ->> 'is_valid')::BOOLEAN AS is_valid,
+                schema_item -> 'validation_errors' AS validation_errors,
+                schema_item -> 'compatibility_diagnostics' AS compatibility_diagnostics,
+                schema_item ->> 'raw_data' AS raw_data,
+                schema_item ->> 'parsed_data' AS parsed_data
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.schema_json, '[]'::jsonb))
+                WITH ORDINALITY AS schema_rows(schema_item, schema_ordinal)
+            WHERE s.run_id = $1
+            ORDER BY u.url, schema_ordinal
             """,
             run_id,
         )

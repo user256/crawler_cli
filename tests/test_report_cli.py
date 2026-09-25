@@ -156,6 +156,10 @@ class FakeReports:
             }
         ]
 
+    async def structured_data_inventory(self):
+        self.calls.append(("structured-data-inventory", {}))
+        return []
+
     async def image_issues(self):
         self.calls.append(("image-issues", {}))
         return []
@@ -345,6 +349,7 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "indexability",
         "redirect-chains",
         "schema-compatibility",
+        "structured-data-inventory",
         "image-issues",
         "internal-link-quality",
         "link-graph-metrics",
