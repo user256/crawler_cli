@@ -103,6 +103,14 @@ def build_technical_audit(
     """
 
     rows = {name: [dict(row) for row in reports.get(name, ())] for name in TECHNICAL_AUDIT_REPORTS}
+    for row in rows["orphans"]:
+        url = str(row.get("url", ""))
+        recheck = _lookup_recheck(live_rechecks, url)
+        if isinstance(recheck, Mapping):
+            row["live_validation_state"] = str(recheck.get("state", "incomplete"))
+            row["live_validation"] = dict(recheck)
+        elif live_rechecks is not None and row.get("source_labels"):
+            row["live_validation_state"] = "not_selected_by_recheck_limit"
     source_coverage = {}
     for name in TECHNICAL_AUDIT_REPORTS:
         source_rows = rows[name]
@@ -120,6 +128,16 @@ def build_technical_audit(
     hashed_count = _optional_int(context.get("hashed_count"))
     completion_state = str(context.get("completion_state", "unavailable"))
     graph_complete = bool(rows["link-graph-metrics"] and rows["link-graph-metrics"][0].get("graph_complete") is True)
+    known_url_inventory = [row for row in rows["orphans"] if row.get("source_labels")]
+    orphan_candidates = [
+        row
+        for row in rows["orphans"]
+        if row.get("candidate_type")
+        in {
+            "crawled_html_zero_observed_inlinks",
+            "source_known_zero_observed_inlinks",
+        }
+    ]
 
     capabilities = context.get("schema_capabilities", {})
     if not isinstance(capabilities, Mapping):
@@ -203,7 +221,7 @@ def build_technical_audit(
             "orphan-candidates",
             "Orphan-page candidates",
             "Orphan candidates",
-            rows["orphans"] if graph_complete else [],
+            orphan_candidates if graph_complete else [],
             "finding",
             "Zero observed parent does not prove an orphan without graph-coverage evidence.",
             available=(
@@ -315,6 +333,7 @@ def build_technical_audit(
         "crawl_run_id": crawl_run_id,
         "run_context": context,
         "source_coverage": source_coverage,
+        "known_url_inventory": known_url_inventory,
         "status_vocabulary": [
             "tested",
             "pass",

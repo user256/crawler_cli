@@ -126,7 +126,7 @@ class CrawlReports:
             **stats,
         }
 
-    async def orphan_pages(self) -> list[dict[str, object]]:
+    async def orphan_pages(self, *, known_urls: list[dict[str, str]] | None = None) -> list[dict[str, object]]:
         run_id = await self._run_id()
         run = await self.store.get_crawl_run(run_id)
         pages = await self._fetch(
@@ -139,21 +139,67 @@ class CrawlReports:
             """,
             run_id,
         )
-        graph = _build_link_graph(pages)
+        graph = _build_link_graph(pages, known_urls=known_urls or [])
         inbound = graph["inbound"]
         complete = graph["complete"] and bool(run and run.get("status") == "complete")
         seeds = set(run.get("seed_urls", [])) if run and isinstance(run.get("seed_urls"), list) else set()
-        return [
+        page_urls = {str(page["url"]) for page in pages}
+        source_urls: dict[str, list[dict[str, str]]] = {}
+        for item in known_urls or []:
+            url = item.get("url", "").strip()
+            source = item.get("source", "").strip()
+            if url and source:
+                observation = {"source": source}
+                observed_at = item.get("observed_at", "").strip()
+                if observed_at:
+                    observation["observed_at"] = observed_at
+                source_urls.setdefault(url, []).append(observation)
+        candidates = [
             {
                 "url": str(page["url"]),
                 "candidate_type": "crawled_html_zero_observed_inlinks",
                 "observed_inlink_count": 0,
                 "graph_complete": complete,
                 "seed": str(page["url"]) in seeds,
+                "is_crawled": True,
+                "source_labels": sorted({item["source"] for item in source_urls.get(str(page["url"]), [])}),
+                "source_observations": sorted(
+                    source_urls.get(str(page["url"]), []),
+                    key=lambda item: (item["source"], item.get("observed_at", "")),
+                ),
+                "live_validation_state": "not_requested",
             }
             for page in pages
             if inbound.get(str(page["url"]), 0) == 0
         ]
+        for url, observations in sorted(source_urls.items()):
+            if url in page_urls and inbound.get(url, 0) == 0:
+                # The crawled-orphan row above already carries these source labels.
+                continue
+            sources = {item["source"] for item in observations}
+            in_scope = url in inbound
+            count = inbound.get(url)
+            candidates.append(
+                {
+                    "url": url,
+                    "candidate_type": (
+                        "source_inventory_out_of_scope"
+                        if not in_scope
+                        else (
+                            "source_known_zero_observed_inlinks" if count == 0 else "source_known_with_observed_inlinks"
+                        )
+                    ),
+                    "observed_inlink_count": count,
+                    "graph_complete": complete if in_scope else False,
+                    "is_crawled": url in page_urls,
+                    "source_labels": sorted(sources),
+                    "source_observations": sorted(
+                        observations, key=lambda item: (item["source"], item.get("observed_at", ""))
+                    ),
+                    "live_validation_state": "not_requested",
+                }
+            )
+        return candidates
 
     async def indexability_reasons(self) -> list[dict[str, object]]:
         run_id = await self._run_id()
@@ -824,11 +870,17 @@ def _without_fragment(value: str) -> str:
     return urlparse(value)._replace(fragment="").geturl()
 
 
-def _build_link_graph(pages: list[dict[str, object]]) -> dict[str, Any]:
+def _build_link_graph(
+    pages: list[dict[str, object]], *, known_urls: list[dict[str, str]] | None = None
+) -> dict[str, Any]:
     """Build edges only between same-run HTML snapshot nodes and in-scope hosts."""
     nodes = {str(page["url"]) for page in pages}
     hosts = {urlparse(url).hostname for url in nodes}
-    inbound = {url: 0 for url in nodes}
+    known_targets = {
+        item["url"] for item in (known_urls or []) if item.get("url") and urlparse(item["url"]).hostname in hosts
+    }
+    all_targets = nodes | known_targets
+    inbound = {url: 0 for url in all_targets}
     adjacency: dict[str, set[str]] = {url: set() for url in nodes}
     instances = 0
     sources: set[str] = set()
@@ -843,7 +895,7 @@ def _build_link_graph(pages: list[dict[str, object]]) -> dict[str, Any]:
         for raw_link in _json_list(page.get("links_json")):
             link = raw_link if isinstance(raw_link, dict) else {}
             target = str(link.get("href", ""))
-            if target not in nodes or urlparse(target).hostname not in hosts:
+            if target not in all_targets or urlparse(target).hostname not in hosts:
                 continue
             instances += 1
             sources.add(source)
