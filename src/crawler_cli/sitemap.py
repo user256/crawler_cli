@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+from io import BytesIO
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from urllib.parse import urljoin, urlparse
@@ -36,9 +37,19 @@ def discover_sitemap_paths(base_url: str) -> list[str]:
     return discovered
 
 
-def _inflate_if_gzip(body: bytes, url: str, content_type: str | None) -> bytes:
+def _inflate_if_gzip(
+    body: bytes,
+    url: str,
+    content_type: str | None,
+    *,
+    max_uncompressed_bytes: int,
+) -> bytes:
     if url.lower().endswith(".gz") or (content_type and "gzip" in content_type.lower()):
-        return gzip.decompress(body)
+        with gzip.GzipFile(fileobj=BytesIO(body)) as stream:
+            inflated = stream.read(max_uncompressed_bytes + 1)
+        if len(inflated) > max_uncompressed_bytes:
+            raise ValueError(f"compressed sitemap exceeds {max_uncompressed_bytes} uncompressed bytes")
+        return inflated
     return body
 
 
@@ -50,8 +61,19 @@ def _strip_namespace(tag: str) -> str:
 
 @dataclass(slots=True)
 class SitemapParser:
+    max_uncompressed_bytes: int = 50_000_000
+
+    def __post_init__(self) -> None:
+        if self.max_uncompressed_bytes <= 0:
+            raise ValueError("max_uncompressed_bytes must be positive")
+
     def parse(self, url: str, body: bytes, content_type: str | None = None) -> SitemapDocument:
-        inflated = _inflate_if_gzip(body, url, content_type)
+        inflated = _inflate_if_gzip(
+            body,
+            url,
+            content_type,
+            max_uncompressed_bytes=self.max_uncompressed_bytes,
+        )
         if url.lower().endswith(".txt") or (content_type and content_type.lower().startswith("text/plain")):
             return self._parse_text(url, inflated.decode("utf-8", errors="replace"))
         return self._parse_xml(url, inflated.decode("utf-8", errors="replace"))

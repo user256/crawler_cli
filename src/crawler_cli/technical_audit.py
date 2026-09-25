@@ -42,6 +42,7 @@ TECHNICAL_AUDIT_REPORTS = (
     "authority-coverage",
     "metadata-locale-inventory",
     "canonical-hreflang-inventory",
+    "current-robots-sitemaps",
 )
 
 # Registry is intentionally wider than the currently implemented report set.
@@ -87,7 +88,11 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
         "state": "implemented_conditional",
         "source": "run-scoped HTML and HTTP annotations; sitemap channel unavailable in current snapshots",
     },
-    {"id": "current-robots-and-sitemaps", "state": "not_implemented", "source": "live HTTP collection"},
+    {
+        "id": "current-robots-and-sitemaps",
+        "state": "implemented_conditional",
+        "source": "explicit bounded current fetch; RFC 9309 rules and current sitemap parser",
+    },
     {"id": "url-variants-and-soft-404", "state": "not_implemented", "source": "controlled live probes"},
     {
         "id": "rendered-mobile-and-resource-evidence",
@@ -759,6 +764,17 @@ def build_technical_audit(
         if canonical_hreflang_rows and canonical_hreflang_rows[0].get("record_type") == "coverage"
         else {}
     )
+    current_site_files_rows = rows["current-robots-sitemaps"]
+    current_site_files_coverage = (
+        current_site_files_rows[0]
+        if current_site_files_rows and current_site_files_rows[0].get("record_type") == "coverage"
+        else {}
+    )
+    current_site_files_evidence = [
+        {**row, "qualification": "analyst_only"}
+        for row in current_site_files_rows
+        if row.get("record_type") == "candidate"
+    ]
     canonical_evidence = [
         row
         for row in canonical_hreflang_rows
@@ -944,6 +960,21 @@ def build_technical_audit(
             completion_state=completion_state,
             qualification="analyst_only",
         ),
+        _check(
+            "current-robots-and-sitemaps",
+            "Current robots and sitemap evidence",
+            "Robots & sitemaps",
+            current_site_files_evidence,
+            "finding",
+            "Explicit current fetch; sitemap matches are compared with the selected historical run and remain analyst evidence.",
+            available=(
+                source_coverage["current-robots-sitemaps"]["available"] is True
+                and current_site_files_coverage.get("record_type") == "coverage"
+            ),
+            denominator=_optional_int(current_site_files_coverage.get("sitemap_entry_count")),
+            completion_state=completion_state,
+            qualification="analyst_only",
+        ),
     )
     for check in checks:
         if check["id"] == "near-duplicate-content" and not similarity_complete:
@@ -975,6 +1006,13 @@ def build_technical_audit(
                     "partial" if source_coverage["canonical-hreflang-inventory"]["available"] else "unavailable"
                 )
                 check["qualification"] = "saved_channels_or_targets_incomplete"
+        if check["id"] == "current-robots-and-sitemaps":
+            if current_site_files_coverage.get("record_type") != "coverage":
+                check["status"] = "unavailable"
+                check["qualification"] = "requires_explicit_current_fetch"
+            elif current_site_files_coverage.get("complete") is not True:
+                check["status"] = "partial"
+                check["qualification"] = "bounded_or_incomplete_current_fetch"
 
     audit_log = [
         *_indexability_actions(indexability_conflicts),
@@ -983,7 +1021,18 @@ def build_technical_audit(
     ]
     client_actions = _link_actions(confirmed_link_failures)
     unresolved_link_failures = [row for row in analyst_link_failures if row.get("recheck_state") not in {"recovered"}]
-    checks_complete = all(check["status"] not in {"partial", "unavailable", "error"} for check in checks)
+    checks_complete = all(
+        check["status"] not in {"partial", "unavailable", "error"}
+        for check in checks
+        # Current robots/sitemap fetching is an explicit opt-in. Its absence
+        # should remain visible in the coverage matrix without blocking
+        # unrelated, current-validated actions from other checks.
+        if not (
+            check["id"] == "current-robots-and-sitemaps"
+            and check["status"] == "unavailable"
+            and current_site_files_coverage.get("record_type") != "coverage"
+        )
+    )
     publication_ready = (
         completion_state == "complete"
         and live_rechecks is not None
@@ -1019,6 +1068,7 @@ def build_technical_audit(
         "known_url_inventory": known_url_inventory,
         "metadata_locale_coverage": dict(metadata_coverage),
         "canonical_hreflang_coverage": dict(canonical_hreflang_coverage),
+        "current_site_files_coverage": dict(current_site_files_coverage),
         "status_vocabulary": [
             "tested",
             "pass",
@@ -1104,6 +1154,17 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 ["Canonical targets not crawled", canonical_coverage.get("canonical_target_unknown_count", 0)],
                 ["Hreflang targets not crawled", canonical_coverage.get("hreflang_target_unknown_count", 0)],
                 ["Hreflang sitemap channel", canonical_coverage.get("sitemap_channel", "unknown")],
+            ]
+        )
+    current_files_coverage = audit.get("current_site_files_coverage", {})
+    if isinstance(current_files_coverage, Mapping) and current_files_coverage:
+        samples = current_files_coverage.get("live_samples", [])
+        overview.extend(
+            [
+                ["Current sitemap entries", current_files_coverage.get("sitemap_entry_count", 0)],
+                ["Current sitemap documents", current_files_coverage.get("sitemap_document_count", 0)],
+                ["Current file coverage complete", current_files_coverage.get("complete", False)],
+                ["Current live page samples", len(samples) if isinstance(samples, list) else 0],
             ]
         )
 
@@ -1322,7 +1383,7 @@ def _manual_checks() -> list[dict[str, str]]:
     return [
         {
             "id": "robots-and-sitemaps",
-            "reason": "Fetch current robots.txt and every current XML sitemap independently.",
+            "reason": "Use --fetch-current-robots-sitemaps for bounded live collection; fetches are not requested otherwise.",
         },
         {"id": "rendered-parity", "reason": "Raw and rendered DOM signals require representative browser evidence."},
         {
