@@ -12,11 +12,95 @@ from crawler_cli.google_sheets import (
     _validate_template,
     template_manifest,
 )
+from crawler_cli.technical_audit import audit_sheet_tables
+
+_AUDIT_HEADERS = template_manifest()["managed_tabs"]["Audit Log"]["headers"]
 
 
 def test_checked_in_template_fixture_matches_the_code_contract():
-    fixture = Path(__file__).parents[1] / "templates" / "technical-audit-sheets-v1.json"
+    fixture = Path(__file__).parents[1] / "templates" / "technical-audit-sheets-v2.json"
     assert json.loads(fixture.read_text(encoding="utf-8")) == template_manifest()
+
+
+def test_recipient_tables_match_the_managed_v2_template_headers():
+    action = {
+        "Problem": "Internal links target a repeatedly failing URL",
+        "Affected URL": "https://example.test/missing",
+        "Affected URL Count": 1,
+        "Finding Count": 3,
+        "Unique Source Pages": 3,
+        "Link Instances": 3,
+        "Severity": "Medium",
+        "Severity Rationale": "Three live-confirmed internal source pages.",
+        "Explanation": "The target repeatedly returned 404.",
+        "Fix": "Restore or replace the target.",
+        "SEO Impact": "Interrupts navigation.",
+        "Action Needed": "Yes",
+        "Responsible Team": "Engineering",
+        "Owner": "Unassigned",
+        "Acceptance Criteria": "Retest the target and each source-target pair.",
+        "Retest Status": "Live failure confirmed; remediation not retested",
+        "Retest Date": "",
+        "Resolution Evidence": "",
+        "Historical Status": "503",
+        "Live Status": "404",
+        "Evidence Reference": "sha256:" + "a" * 64,
+        "Resolved": "No",
+    }
+    audit = {
+        "schema_version": "crawler-cli/technical-audit/2",
+        "ruleset_version": "technical-audit-rules/3",
+        "crawl_run_id": "run-1",
+        "run_context": {"run_status": "complete", "completion_state": "complete"},
+        "checks": [
+            {
+                "id": "performance-and-conditional-requests",
+                "title": "Performance timing and conditional GETs",
+                "status": "finding",
+                "denominator": 1,
+                "tested_count": 1,
+                "affected_count": 1,
+                "evidence": [{"record_type": "candidate", "url": "https://example.test/page"}],
+            }
+        ],
+        "client_publication_gate": {"ready": True, "client_actions": [action]},
+        "recipient_projection": {
+            "scope": ["https://example.test/"],
+            "run_date": "2026-09-25",
+            "health_metrics": [],
+            "coverage_caveats": "None",
+            "failing_target_inventory": [
+                {
+                    "target_url": action["Affected URL"],
+                    "link_instances": 3,
+                    "unique_source_pages": 3,
+                    "source_page_samples": ["https://example.test/a"],
+                    "source_sample_count": 1,
+                    "source_sample_complete": True,
+                    "link_samples": [],
+                    "evidence_reference": action["Evidence Reference"],
+                }
+            ],
+        },
+        "conditional_get_coverage": {"state": "tested"},
+    }
+    tables = audit_sheet_tables(audit)
+    managed = template_manifest()["managed_tabs"]
+
+    assert set(tables) == {"Overview", "Audit Log", "Failing Link Targets", "304 Recheck"}
+    for name, table in tables.items():
+        assert table[0] == managed[name]["headers"]
+        assert name in template_manifest()["managed_tabs"]
+    normalized, _ = _validated_tables(tables)
+    assert normalized["Failing Link Targets"][1][3] == '["https://example.test/a"]'
+    source = {
+        "sheets": [
+            _tab("Template Contract", 1, ["technical-audit-template", TEMPLATE_VERSION]),
+            *[_tab(name, index + 2, list(managed[name]["headers"])) for index, name in enumerate(tables)],
+        ],
+        "merges": [],
+    }
+    _validate_template(source, tables)
 
 
 def _tab(title: str, sheet_id: int, headers: list[str] | None = None) -> dict[str, object]:
@@ -35,20 +119,7 @@ def _template() -> dict[str, object]:
             _tab(
                 "Audit Log",
                 3,
-                [
-                    "Problem",
-                    "URL",
-                    "Explanation",
-                    "Fix",
-                    "SEO Impact",
-                    "Action Needed",
-                    "Responsible Team",
-                    "Owner",
-                    "Acceptance Criteria",
-                    "Retest Status",
-                    "Evidence Reference",
-                    "Resolved",
-                ],
+                list(_AUDIT_HEADERS),
             ),
             _tab("Internal link failures", 4, ["URL", "Status"]),
             _tab("Notes", 5, ["Unmanaged", "Formula"]),
@@ -202,9 +273,9 @@ class _MemorySheets:
                     _template()["sheets"][2]["data"][0]["rowData"][0]["values"][index]["userEnteredValue"][
                         "stringValue"
                     ]
-                    for index in range(12)
+                    for index in range(len(_AUDIT_HEADERS))
                 ],
-                ["Old failed link", "https://old.test/", "example"] + [""] * 9,
+                ["Old failed link", "https://old.test/"] + [""] * (len(_AUDIT_HEADERS) - 2),
             ],
             "Internal link failures": [["URL", "Status"], ["https://old.test/", "example"]],
             "Template Contract": [["technical-audit-template", TEMPLATE_VERSION]],
@@ -477,31 +548,28 @@ def test_retry_resumes_the_receipted_copy_and_keeps_formula_like_text_literal(tm
     publisher = GoogleSheetsTemplatePublisher(drive, sheets)
     receipt = tmp_path / "publication.json"
     actions = [
-        [
-            "Problem",
-            "URL",
-            "Explanation",
-            "Fix",
-            "SEO Impact",
-            "Action Needed",
-            "Responsible Team",
-            "Owner",
-            "Acceptance Criteria",
-            "Retest Status",
-            "Evidence Reference",
-            "Resolved",
-        ],
+        list(_AUDIT_HEADERS),
         [
             '=IMPORTXML("https://bad.test")',
             "https://example.test/?q==SUM(1,1)",
+            1,
+            1,
+            3,
+            4,
+            "Medium",
+            "4 links from 3 sources",
             "e",
             "f",
             "i",
             "Yes",
-            "Eng",
-            "A",
-            "C",
+            "Engineering",
+            "Unassigned",
+            "Acceptance",
             "No",
+            "",
+            "",
+            "503",
+            "404",
             "ref",
             "No",
         ],

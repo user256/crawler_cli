@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-TEMPLATE_VERSION = "crawler-cli/technical-audit-sheets/1"
+TEMPLATE_VERSION = "crawler-cli/technical-audit-sheets/2"
 _SHEET_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,}$")
 _SHEET_URL_PATTERN = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
 _MANIFEST_TAB = "Template Contract"
@@ -23,7 +23,13 @@ _SUMMARY_HEADERS = {
     "Overview": ["Metric", "Value"],
     "Audit Log": [
         "Problem",
-        "URL",
+        "Affected URL",
+        "Affected URL Count",
+        "Finding Count",
+        "Unique Source Pages",
+        "Link Instances",
+        "Severity",
+        "Severity Rationale",
         "Explanation",
         "Fix",
         "SEO Impact",
@@ -32,8 +38,54 @@ _SUMMARY_HEADERS = {
         "Owner",
         "Acceptance Criteria",
         "Retest Status",
+        "Retest Date",
+        "Resolution Evidence",
+        "Historical Status",
+        "Live Status",
         "Evidence Reference",
         "Resolved",
+    ],
+}
+_FIXED_DETAIL_HEADERS = {
+    "Failing Link Targets": [
+        "target_url",
+        "link_instances",
+        "unique_source_pages",
+        "source_page_samples",
+        "source_sample_count",
+        "source_sample_complete",
+        "link_samples",
+        "evidence_reference",
+    ],
+    "304 Recheck": [
+        "record_type",
+        "url",
+        "url_digest_sha256",
+        "stratum",
+        "locale",
+        "template",
+        "ruleset_version",
+        "observed_at",
+        "ordinary_status",
+        "ordinary_headers",
+        "ordinary_ttfb_seconds",
+        "ordinary_duration_seconds",
+        "ordinary_wire_bytes",
+        "ordinary_decoded_bytes",
+        "ordinary_representation_sha256",
+        "ordinary_state",
+        "validator_kind",
+        "validator_digest_sha256",
+        "conditional_status",
+        "conditional_headers",
+        "conditional_ttfb_seconds",
+        "conditional_duration_seconds",
+        "conditional_wire_bytes",
+        "conditional_decoded_bytes",
+        "conditional_representation_sha256",
+        "representation_equal",
+        "outcome",
+        "qualification",
     ],
 }
 _DETAIL_TABS = (
@@ -46,6 +98,8 @@ _DETAIL_TABS = (
     "Schema diagnostics",
     "Image issues",
     "Internal authority",
+    "Failing Link Targets",
+    "304 Recheck",
 )
 _MANAGED_TABS = (*_SUMMARY_HEADERS, *_DETAIL_TABS)
 _MAX_ROWS = 50_000
@@ -89,7 +143,7 @@ def google_services(credentials_file: str | None = None) -> tuple[Any, Any]:
 
 
 def template_manifest() -> dict[str, object]:
-    """Return the code-owned v1 contract (also checked into templates/)."""
+    """Return the code-owned v2 contract (also checked into templates/)."""
     return {
         "version": TEMPLATE_VERSION,
         "manifest_tab": _MANIFEST_TAB,
@@ -108,8 +162,15 @@ def template_manifest() -> dict[str, object]:
         }
         | {
             name: {
-                "range": f"A1:AZ{_MAX_ROWS}",
-                "header_identity": "exact ordered evidence keys",
+                "range": _managed_range(name),
+                **(
+                    {
+                        "headers": _FIXED_DETAIL_HEADERS[name],
+                        "header_identity": "exact ordered evidence keys",
+                    }
+                    if name in _FIXED_DETAIL_HEADERS
+                    else {"header_identity": "exact ordered evidence keys"}
+                ),
                 "formulas_allowed": False,
             }
             for name in _DETAIL_TABS
@@ -119,11 +180,20 @@ def template_manifest() -> dict[str, object]:
 
 
 def _managed_range(name: str) -> str:
-    if name == "Overview":
-        return f"A1:B{_MAX_ROWS}"
-    if name == "Audit Log":
-        return f"A1:L{_MAX_ROWS}"
-    return f"A1:AZ{_MAX_ROWS}"
+    width = _managed_width(name)
+    return f"A1:{_column_label(width)}{_MAX_ROWS}"
+
+
+def _managed_width(name: str) -> int:
+    if name in _SUMMARY_HEADERS:
+        return len(_SUMMARY_HEADERS[name])
+    if name in _FIXED_DETAIL_HEADERS:
+        return len(_FIXED_DETAIL_HEADERS[name])
+    return _MAX_COLUMNS
+
+
+def _body_width(name: str) -> int:
+    return 2 if name == "Overview" else _managed_width(name)
 
 
 def _column_index(label: str) -> int:
@@ -267,7 +337,7 @@ def _grid_targets(
         columns = int(grid.get("columnCount", 26))
         if title in _MANAGED_TABS:
             rows = max(rows, len(tables.get(title, [])))
-            columns = max(columns, 2 if title == "Overview" else 12 if title == "Audit Log" else _MAX_COLUMNS)
+            columns = max(columns, _managed_width(title))
             if rows > _MAX_ROWS:
                 raise ValueError(f"Managed grid '{title}' exceeds the {_MAX_ROWS}-row contract")
             targets[title] = (rows, columns)
@@ -291,7 +361,7 @@ def _validated_tables(tables: Mapping[str, list[list[object]]]) -> tuple[dict[st
         if not rows or not rows[0]:
             raise ValueError(f"Tab '{name}' must contain a header row")
         width = len(rows[0])
-        allowed_width = 2 if name == "Overview" else 12 if name == "Audit Log" else _MAX_COLUMNS
+        allowed_width = _managed_width(name)
         if width > allowed_width or any(len(row) != width for row in rows):
             raise ValueError(f"Tab '{name}' has inconsistent or unsupported column widths")
         for row in rows:
@@ -468,7 +538,7 @@ def _validate_template(metadata: Mapping[str, object], tables: Mapping[str, list
         properties = sheet["properties"]
         ids[title] = int(properties["sheetId"])
         bounds = _range_bounds(_managed_range(title))
-        spec_headers = _SUMMARY_HEADERS.get(title)
+        spec_headers = _SUMMARY_HEADERS.get(title) or _FIXED_DETAIL_HEADERS.get(title)
         values = tables.get(title)
         expected_headers = spec_headers or (values[0] if values else None)
         if expected_headers is not None:
@@ -568,7 +638,7 @@ class GoogleSheetsTemplatePublisher:
         for name in _MANAGED_TABS:
             if name not in grid_targets:
                 continue
-            width = 2 if name == "Overview" else 12 if name == "Audit Log" else _MAX_COLUMNS
+            width = _body_width(name)
             original = _read_grid(self.sheets, template_id, name, width, 2, grid_targets[name][0])
             source_baselines[name] = _digest(original)
             source_content_baselines[name] = _managed_body_digest(source, name)
@@ -750,7 +820,7 @@ class GoogleSheetsTemplatePublisher:
         for name in _MANAGED_TABS:
             if name not in sheet_ids:
                 continue
-            width = 2 if name == "Overview" else 12 if name == "Audit Log" else _MAX_COLUMNS
+            width = _body_width(name)
             if name not in preclear_digests:
                 original = _read_grid(self.sheets, spreadsheet_id, name, width, 2, grid_targets[name][0])
                 if resume and any(cell not in (None, "") for row in original for cell in row):
@@ -765,7 +835,7 @@ class GoogleSheetsTemplatePublisher:
             for name in _MANAGED_TABS:
                 if name not in sheet_ids:
                     continue
-                width = 2 if name == "Overview" else 12 if name == "Audit Log" else _MAX_COLUMNS
+                width = _body_width(name)
                 grid_rows = grid_targets[name][0]
                 if not clear_receipts.get(name):
                     current = _read_grid(self.sheets, spreadsheet_id, name, width, 2, grid_rows)
@@ -1041,7 +1111,7 @@ class GoogleSheetsTemplatePublisher:
             for name in set(_MANAGED_TABS) - set(normalized_tables):
                 if name not in sheet_ids:
                     continue
-                width = 2 if name == "Overview" else 12 if name == "Audit Log" else _MAX_COLUMNS
+                width = _body_width(name)
                 stale_rows = _read_grid(self.sheets, spreadsheet_id, name, width, 2, grid_targets[name][0])
                 if any(cell not in (None, "") for row in stale_rows for cell in row):
                     raise ValueError(f"Read-back found stale or edited data on empty managed tab '{name}'")

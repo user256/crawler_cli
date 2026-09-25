@@ -1,0 +1,44 @@
+{
+  "version": "crawler-cli/technical-audit-sheets/2",
+  "manifest_tab": "Template Contract",
+  "marker_cells": {
+    "A1": "technical-audit-template",
+    "B1": "crawler-cli/technical-audit-sheets/2"
+  },
+  "managed_tabs": {
+    "Overview": {
+      "range": "A1:B50000",
+      "headers": ["Metric", "Value"],
+      "header_identity": "exact ordered display labels",
+      "formulas_allowed": false
+    },
+    "Audit Log": {
+      "range": "A1:V50000",
+      "headers": ["Problem", "Affected URL", "Affected URL Count", "Finding Count", "Unique Source Pages", "Link Instances", "Severity", "Severity Rationale", "Explanation", "Fix", "SEO Impact", "Action Needed", "Responsible Team", "Owner", "Acceptance Criteria", "Retest Status", "Retest Date", "Resolution Evidence", "Historical Status", "Live Status", "Evidence Reference", "Resolved"],
+      "header_identity": "exact ordered display labels",
+      "formulas_allowed": false
+    },
+    "Index conflicts": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Internal link failures": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Tracking parameters": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Orphan candidates": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Redirect chains": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Near duplicates": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Schema diagnostics": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Image issues": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Internal authority": {"range": "A1:AZ50000", "header_identity": "exact ordered evidence keys", "formulas_allowed": false},
+    "Failing Link Targets": {
+      "range": "A1:H50000",
+      "headers": ["target_url", "link_instances", "unique_source_pages", "source_page_samples", "source_sample_count", "source_sample_complete", "link_samples", "evidence_reference"],
+      "header_identity": "exact ordered evidence keys",
+      "formulas_allowed": false
+    },
+    "304 Recheck": {
+      "range": "A1:AB50000",
+      "headers": ["record_type", "url", "url_digest_sha256", "stratum", "locale", "template", "ruleset_version", "observed_at", "ordinary_status", "ordinary_headers", "ordinary_ttfb_seconds", "ordinary_duration_seconds", "ordinary_wire_bytes", "ordinary_decoded_bytes", "ordinary_representation_sha256", "ordinary_state", "validator_kind", "validator_digest_sha256", "conditional_status", "conditional_headers", "conditional_ttfb_seconds", "conditional_duration_seconds", "conditional_wire_bytes", "conditional_decoded_bytes", "conditional_representation_sha256", "representation_equal", "outcome", "qualification"],
+      "header_identity": "exact ordered evidence keys",
+      "formulas_allowed": false
+    }
+  },
+  "unmanaged_content": "Preserve all cells, formulas, notes, and formatting outside the managed ranges."
+}

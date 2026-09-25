@@ -621,6 +621,10 @@ crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
   --out ./audit-evidence/technical-audit.json
 ```
 
+Use `--markdown-out PATH` to write a concise recipient-facing projection. The
+JSON remains the source evidence bundle; the projection does not replace the
+manual, conditional, or analyst-judgement checks listed in its registry.
+
 Saved link failures remain analyst-only until explicitly rechecked. To collect
 two live attempts for up to 25 in-scope failed targets, add
 `--recheck-live --scope-manifest ./authorized-scope.json`. The recheck honours
@@ -653,7 +657,7 @@ path to validate supplied URLs; rechecks share the 25-URL audit limit with
 saved failures, prioritize saved failures, and record any known URLs not
 selected. Robots and scope denials are not bypassed.
 
-To explicitly copy a compatible Google Sheets v1 template after writing the
+To explicitly copy a compatible Google Sheets v2 template after writing the
 JSON artifact, add `--publish-google-sheets --google-sheets-template SHEET_URL`.
 The default durable receipt is written beside `--out`; retain it to recover a
 partial copy. Retry with `--resume-google-sheets --google-sheets-receipt PATH`

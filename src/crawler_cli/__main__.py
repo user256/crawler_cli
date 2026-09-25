@@ -4638,9 +4638,9 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument(
         "--publish-google-sheets",
         action="store_true",
-        help="Explicitly copy and populate the selected v1 Google Sheets template",
+        help="Explicitly copy and populate the selected compatible v2 Google Sheets template",
     )
-    audit_parser.add_argument("--google-sheets-template", help="Google Sheets URL or ID for a compatible v1 template")
+    audit_parser.add_argument("--google-sheets-template", help="Google Sheets URL or ID for a compatible v2 template")
     audit_parser.add_argument("--google-sheets-title", help="Title for the copied audit workbook")
     audit_parser.add_argument("--google-sheets-folder", help="Destination Google Drive folder ID")
     audit_parser.add_argument("--google-sheets-credentials", help="Optional service-account JSON credentials file")
