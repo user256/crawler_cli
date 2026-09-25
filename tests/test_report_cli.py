@@ -54,6 +54,19 @@ class FakeReports:
                 "links_json": True,
                 "content_hash_simhash": True,
                 "indexability_evidence_json": True,
+                "content_extracted": True,
+                "canonical_urls_json": True,
+                "canonical_evidence_json": True,
+                "redirect_chain_json": True,
+                "variant_kind": True,
+                "render_discovery_attempted": True,
+                "render_discovery_complete": True,
+                "schema_json": True,
+                "ttfb_seconds": True,
+                "total_duration_seconds": True,
+                "lcp_ms": True,
+                "cls": True,
+                "inp_ms": True,
             },
             "declared_allowed_hosts": ["example.com"],
             "seed_hosts": ["example.com"],
@@ -403,6 +416,47 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "canonical-hreflang-inventory",
         "performance-inventory",
     ]
+
+
+def test_technical_audit_skips_reports_requiring_absent_legacy_columns(fake_reports, tmp_path, monkeypatch):
+    original = FakeReports.technical_audit_context
+
+    async def legacy_context(self):
+        context = await original(self)
+        context["schema_capabilities"].update(
+            {
+                "content_extracted": False,
+                "canonical_evidence_json": False,
+                "redirect_chain_json": False,
+            }
+        )
+        return context
+
+    monkeypatch.setattr(FakeReports, "technical_audit_context", legacy_context)
+    out = tmp_path / "legacy-technical-audit.json"
+    assert _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out)]) == 0
+
+    payload = json.loads(out.read_text())
+    checks = {check["id"]: check for check in payload["checks"]}
+    for check_id in (
+        "orphan-candidates",
+        "redirect-chains",
+        "metadata-and-locale",
+        "canonical-consistency",
+        "hreflang-consistency",
+        "performance-and-conditional-requests",
+        "internal-authority-inventory",
+    ):
+        assert checks[check_id]["status"] in {"partial", "unavailable"}
+
+    called = {name for name, _ in FakeReports.instances[-1].calls}
+    assert "orphans" not in called
+    assert "redirect-chains" not in called
+    assert "metadata-locale-inventory" not in called
+    assert "canonical-hreflang-inventory" not in called
+    assert "performance-inventory" not in called
+    assert "internal-authority" not in called
+    assert "authority-coverage" not in called
 
 
 def test_technical_audit_writes_optional_recipient_markdown(fake_reports, tmp_path, capsys):
