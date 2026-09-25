@@ -75,7 +75,7 @@ from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
 from .reports import CrawlReports
 from .orphan_sources import load_known_url_inventory
-from .technical_audit import TECHNICAL_AUDIT_REPORTS, build_technical_audit
+from .technical_audit import TECHNICAL_AUDIT_REPORTS, audit_sheet_tables, build_technical_audit
 from .live_rechecks import candidate_targets, collect_live_rechecks
 from .validators import (
     non_negative_float,
@@ -2353,6 +2353,24 @@ async def _run_report(args: argparse.Namespace) -> int:
 
 async def _run_technical_audit(args: argparse.Namespace) -> int:
     """Build one deterministic evidence bundle from a stored crawl run."""
+    if args.resume_google_sheets and not args.publish_google_sheets:
+        print("Error: --resume-google-sheets requires --publish-google-sheets", file=sys.stderr)
+        return EXIT_VALIDATION
+    if args.publish_google_sheets and not args.google_sheets_template:
+        print("Error: --publish-google-sheets requires --google-sheets-template", file=sys.stderr)
+        return EXIT_VALIDATION
+    if not args.publish_google_sheets and any(
+        (
+            args.google_sheets_template,
+            args.google_sheets_folder,
+            args.google_sheets_credentials,
+            args.google_sheets_receipt,
+            args.google_sheets_title,
+        )
+    ):
+        print("Error: Google Sheets options require --publish-google-sheets", file=sys.stderr)
+        return EXIT_VALIDATION
+
     import asyncpg
 
     try:
@@ -2475,6 +2493,35 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(audit, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     print(f"Wrote deterministic technical audit to {output}")
+
+    if args.publish_google_sheets:
+        from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services
+
+        try:
+            credentials = credential_path(args.google_sheets_credentials)
+            drive, sheets = google_services(credentials)
+            receipt_path = args.google_sheets_receipt or f"{args.out}.sheets-receipt.json"
+            sheet_url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
+                template=args.google_sheets_template,
+                title=args.google_sheets_title or f"Technical SEO audit {run_id}",
+                folder_id=args.google_sheets_folder,
+                tables=audit_sheet_tables(audit),
+                receipt_path=receipt_path,
+                resume=args.resume_google_sheets,
+            )
+        except (ValueError, RuntimeError, OSError) as exc:
+            print(f"Google Sheets publication failed: {exc}", file=sys.stderr)
+            return EXIT_VALIDATION
+        except Exception as exc:
+            status = getattr(getattr(exc, "resp", None), "status", None)
+            status_text = f" (HTTP {status})" if status else ""
+            print(
+                f"Google Sheets publication failed: {type(exc).__name__}{status_text}; receipt: {receipt_path}",
+                file=sys.stderr,
+            )
+            return EXIT_VALIDATION
+        print(f"Published technical audit to {sheet_url}")
+        print(f"Publication receipt: {receipt_path}")
 
     return EXIT_SUCCESS
 
@@ -4114,6 +4161,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Build a deterministic technical-audit evidence bundle from one stored crawl run",
     )
     audit_parser.add_argument("--out", required=True, help="Write the deterministic audit JSON to this path")
+    audit_parser.add_argument(
+        "--publish-google-sheets",
+        action="store_true",
+        help="Explicitly copy and populate the selected v1 Google Sheets template",
+    )
+    audit_parser.add_argument("--google-sheets-template", help="Google Sheets URL or ID for a compatible v1 template")
+    audit_parser.add_argument("--google-sheets-title", help="Title for the copied audit workbook")
+    audit_parser.add_argument("--google-sheets-folder", help="Destination Google Drive folder ID")
+    audit_parser.add_argument("--google-sheets-credentials", help="Optional service-account JSON credentials file")
+    audit_parser.add_argument("--google-sheets-receipt", help="Local publication receipt path (defaults beside --out)")
+    audit_parser.add_argument(
+        "--resume-google-sheets",
+        action="store_true",
+        help="Resume or reconcile the exact copy recorded in --google-sheets-receipt",
+    )
     audit_parser.add_argument(
         "--recheck-live",
         action="store_true",
