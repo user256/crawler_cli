@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass, field
+import os
 
 import pytest
 import pytest_asyncio
@@ -90,6 +91,18 @@ async def playwright_smoke_site(unused_tcp_port: int) -> SmokeSite:
         });
       })();
     </script>
+    <div aria-hidden="true" style="height: 1800px"></div>
+    <div id="lazy-sentinel"></div>
+    <script>
+      new IntersectionObserver((entries, observer) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        const link = document.createElement('a');
+        link.href = '/scroll-revealed';
+        link.textContent = 'Scroll revealed link';
+        document.body.appendChild(link);
+        observer.disconnect();
+      }).observe(document.getElementById('lazy-sentinel'));
+    </script>
   </body>
 </html>
 """
@@ -149,6 +162,8 @@ async def test_crawl_engine_real_playwright_smoke(playwright_smoke_site: SmokeSi
         collect_web_vitals=True,
         discover_render_urls=True,
         capture_render_baseline=True,
+        capture_render_link_states=True,
+        playwright_executable_path=os.environ.get("CRAWLER_CLI_TEST_CHROMIUM_EXECUTABLE", ""),
         auth=AuthConfig(
             auth_type="basic",
             username=_BASIC_USERNAME,
@@ -202,6 +217,15 @@ async def test_crawl_engine_real_playwright_smoke(playwright_smoke_site: SmokeSi
     assert parity.rendered is not None and parity.rendered.title == "Ticket 097 ready"
     assert any(finding.code == "metadata_render_dependency" for finding in parity.findings)
     assert any(finding.code == "internal_links_added_after_render" for finding in parity.findings)
+    assert first.render_link_capture is not None
+    assert first.render_link_capture["state"] == "complete"
+    assert first.render_link_capture["controls_activated"] is False
+    assert any(
+        row.get("href") == playwright_smoke_site.url("/scroll-revealed")
+        and row.get("capture_phase") == "after_bounded_scroll"
+        and row.get("reveal_state") == "scroll_revealed"
+        for row in first.render_link_observations
+    )
     assert any(
         candidate.source_kind == "render_network"
         and candidate.url == playwright_smoke_site.url("/api/data")
@@ -235,6 +259,7 @@ async def test_playwright_backend_recovers_after_timeout_and_cleans_up(playwrigh
             destination_guard="off",
             timeout_seconds=0.2,
             playwright_network_idle_timeout_seconds=0.0,
+            playwright_executable_path=os.environ.get("CRAWLER_CLI_TEST_CHROMIUM_EXECUTABLE", ""),
         )
     )
 

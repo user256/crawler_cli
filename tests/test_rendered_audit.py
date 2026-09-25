@@ -114,3 +114,46 @@ def test_empty_hydrated_page_is_inconclusive_not_complete_parity():
     assert records[1]["state"] == "inconclusive"
     assert records[1]["state_reason"] == "empty_rendered_primary_content"
     assert not [row for row in records if row.get("record_type") == "candidate"]
+
+
+def test_scroll_link_observations_keep_reveal_state_device_and_redaction():
+    comparison = _comparison()
+    comparison.crawl_result.render_link_observations = [
+        {
+            "capture_phase": "pre_interaction",
+            "href": "https://example.test/initial?token=secret",
+            "anchor_text": "Initial link",
+            "dom_path": "/html/body/a[1]",
+            "rendered_visible": True,
+            "in_viewport": True,
+        },
+        {
+            "capture_phase": "after_bounded_scroll",
+            "reveal_state": "scroll_revealed",
+            "href": "https://example.test/revealed?token=secret",
+            "anchor_text": "Revealed link",
+            "dom_path": "/html/body/a[2]",
+            "rendered_visible": True,
+            "in_viewport": True,
+        },
+    ]
+    comparison.crawl_result.render_link_capture = {
+        "state": "complete",
+        "scroll_revealed_link_count": 1,
+        "controls_activated": False,
+    }
+
+    records = render_audit_records([comparison], device="mobile_viewport", viewport=(390, 844))
+    coverage = records[0]
+    links = [row for row in records if row.get("record_kind") == "rendered_link"]
+
+    assert coverage["scroll_link_state_capture"] == "complete"
+    assert coverage["interaction_state"] == "bounded_scroll_only"
+    assert coverage["controls_activated"] == "not_tested"
+    assert coverage["scroll_revealed_link_count"] == 1
+    assert len(links) == 2
+    revealed = next(row for row in links if row["reveal_state"] == "scroll_revealed")
+    assert revealed["device"] == "mobile_viewport"
+    assert revealed["same_host"] is True
+    assert "token" in revealed["target_url"]
+    assert "secret" not in str(records)

@@ -286,6 +286,12 @@ class CrawlConfig:
     """Retain the bounded pre-hydration main-document HTML on an in-memory
     result. Used by the render-parity audit; ordinary crawl artifacts do not
     serialize this second document body."""
+    capture_render_link_states: bool = False
+    """Capture bounded pre-scroll and after-scroll rendered anchor states.
+
+    Scroll only; no links or controls are clicked. Intended for explicit audit
+    samples, not ordinary crawls.
+    """
     follow_rendered_links: bool = False
     """Follow hydrated-only anchor deltas in open crawls."""
     render_discovery_max_raw_links: int = 4

@@ -27,6 +27,7 @@ def render_audit_records(
     observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     observations: list[dict[str, object]] = []
     candidates: list[dict[str, object]] = []
+    link_capture_summaries: list[Mapping[str, object]] = []
     complete = True
     incomplete_count = 0
     for comparison in comparisons:
@@ -35,6 +36,9 @@ def render_audit_records(
         result = comparison.crawl_result
         context = _safe_value(dict((page_context or {}).get(page_url, {})))
         context_fields = context if isinstance(context, dict) else {}
+        result_link_capture = getattr(result, "render_link_capture", None) if result is not None else None
+        if isinstance(result_link_capture, Mapping):
+            link_capture_summaries.append(result_link_capture)
         state = comparison.state
         state_reason = comparison.state_reason
         rendered_text = comparison.rendered_main_text or ""
@@ -72,7 +76,7 @@ def render_audit_records(
                 "elapsed_seconds": getattr(result, "total_duration_seconds", None) if result is not None else None,
                 "primary_summary": comparison.primary_summary if state == "complete" else "inconclusive",
                 "signals": safe_signals,
-                "raw_rendered_links_basis": "same_navigation_post_load_dom; interactions_not_tested",
+                "raw_rendered_links_basis": "same_navigation_pre_hydration_and_pre_interaction_dom",
             }
         )
         if state == "complete":
@@ -97,6 +101,32 @@ def render_audit_records(
                 )
         if result is None:
             continue
+        source_host = (urlsplit(comparison.final_url).hostname or "").casefold()
+        for link in getattr(result, "render_link_observations", []) or []:
+            if not isinstance(link, Mapping):
+                continue
+            target_url = str(link.get("href") or "")
+            target_host = (urlsplit(target_url).hostname or "").casefold()
+            observations.append(
+                {
+                    "record_type": "observation",
+                    "record_kind": "rendered_link",
+                    "source_url": _safe_url(page_url),
+                    "url_digest_sha256": digest,
+                    **context_fields,
+                    "device": device,
+                    "observed_at": observed_at,
+                    "target_url": _safe_url(target_url),
+                    "capture_phase": link.get("capture_phase"),
+                    "reveal_state": link.get("reveal_state"),
+                    "anchor_text": scrub_text(str(link.get("anchor_text") or "")),
+                    "dom_path": scrub_text(str(link.get("dom_path") or "")),
+                    "rendered_visible": link.get("rendered_visible"),
+                    "in_initial_viewport": link.get("in_viewport"),
+                    "same_host": bool(source_host and source_host == target_host),
+                    "qualification": "scroll_only_capture; controls_not_activated; interpret_with_link_and_robots_checks",
+                }
+            )
         missing_alt_images: dict[tuple[str, str, str], list[str]] = {}
         for image_state, extracted in (("raw", comparison.raw), ("rendered", comparison.rendered)):
             if extracted is None:
@@ -206,7 +236,23 @@ def render_audit_records(
             "raw_only_link_count": sum(len(item.only_in_raw) for item in comparisons),
             "image_reference_observation_count": sum(item["record_kind"] == "image_reference" for item in observations),
             "browser_request_observation_count": sum(item["record_kind"] == "browser_request" for item in observations),
-            "interaction_state": "not_tested",
+            "scroll_link_state_capture": (
+                "not_tested"
+                if not link_capture_summaries
+                else "complete"
+                if len(link_capture_summaries) == len(comparisons)
+                and all(item.get("state") == "complete" for item in link_capture_summaries)
+                else "partial"
+            ),
+            "interaction_state": "bounded_scroll_only" if link_capture_summaries else "not_tested",
+            "controls_activated": "not_tested",
+            "rendered_link_observation_count": sum(item.get("record_kind") == "rendered_link" for item in observations),
+            "scroll_revealed_link_count": sum(
+                count
+                for item in link_capture_summaries
+                for count in [item.get("scroll_revealed_link_count")]
+                if isinstance(count, int) and not isinstance(count, bool)
+            ),
             "external_link_rechecks": "not_tested",
             "measured_image_layout_impact": "not_tested",
             "geo_evidence": {
