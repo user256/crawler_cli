@@ -101,6 +101,58 @@ _WEB_VITALS_SHIM = """
 })();
 """
 
+_RENDER_LINK_SNAPSHOT_LIMIT = 2_000
+_RENDER_LINK_SCROLL_STEPS = 8
+_RENDER_LINK_SCROLL_SETTLE_MS = 100
+_RENDER_LINK_SNAPSHOT_SCRIPT = """
+limit => {
+  const anchors = Array.from(document.querySelectorAll('a[href]'));
+  const domPath = (node) => {
+    const parts = [];
+    let current = node;
+    while (current && current.nodeType === Node.ELEMENT_NODE && current.tagName !== 'HTML') {
+      const tag = current.tagName.toLowerCase();
+      const siblings = current.parentElement
+        ? Array.from(current.parentElement.children).filter((item) => item.tagName === current.tagName)
+        : [];
+      parts.unshift(`${tag}:nth-of-type(${siblings.indexOf(current) + 1})`);
+      current = current.parentElement;
+    }
+    return `/html/${parts.join('/')}`;
+  };
+  const links = [];
+  for (const anchor of anchors.slice(0, limit)) {
+    let href;
+    try { href = new URL(anchor.getAttribute('href'), document.baseURI).href; }
+    catch (_) { continue; }
+    if (!/^https?:/i.test(href)) continue;
+    const style = window.getComputedStyle(anchor);
+    const rect = anchor.getBoundingClientRect();
+    const inViewport = rect.width > 0 && rect.height > 0 && rect.bottom > 0 &&
+      rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth;
+    links.push({
+      href,
+      anchor_text: (anchor.innerText || anchor.getAttribute('aria-label') || anchor.title || '').trim().slice(0, 250),
+      dom_path: domPath(anchor),
+      rendered_visible: anchor.getClientRects().length > 0 && style.display !== 'none' &&
+        style.visibility !== 'hidden' && Number(style.opacity || 1) > 0,
+      in_viewport: inViewport,
+    });
+  }
+  return { total: anchors.length, links };
+}
+"""
+
+
+async def _capture_render_link_snapshot(page) -> tuple[list[dict[str, object]], int]:
+    snapshot = await page.evaluate(_RENDER_LINK_SNAPSHOT_SCRIPT, _RENDER_LINK_SNAPSHOT_LIMIT)
+    if not isinstance(snapshot, dict):
+        return [], 0
+    links = snapshot.get("links")
+    if not isinstance(links, list):
+        return [], int(snapshot.get("total", 0) or 0)
+    return [dict(row) for row in links if isinstance(row, dict)], int(snapshot.get("total", len(links)) or 0)
+
 
 def _is_skippable_content_type(content_type: str | None) -> bool:
     """Return True if the content-type is clearly non-HTML/XML and need not be fully read."""
@@ -1643,6 +1695,67 @@ class PlaywrightBackend(FetchBackend):
             lcp_ms = cls = inp_ms = None
             if self.config.collect_web_vitals:
                 lcp_ms, cls, inp_ms = await self._read_web_vitals(page)
+            render_link_observations: list[dict[str, object]] = []
+            render_link_capture: dict[str, object] | None = None
+            if self.config.capture_render_link_states:
+                before_links, before_total = await _capture_render_link_snapshot(page)
+                viewport_height = max(1, self.config.playwright_viewport_height)
+                scroll_height = int(
+                    await page.evaluate("() => document.documentElement.scrollHeight") or viewport_height
+                )
+                scroll_steps = 0
+                last_scroll_y = 0
+                for step in range(1, _RENDER_LINK_SCROLL_STEPS + 1):
+                    target_y = min(step * viewport_height, max(0, scroll_height - viewport_height))
+                    if target_y <= last_scroll_y:
+                        break
+                    await page.evaluate("y => window.scrollTo(0, y)", target_y)
+                    await page.wait_for_timeout(_RENDER_LINK_SCROLL_SETTLE_MS)
+                    scroll_steps += 1
+                    last_scroll_y = target_y
+                    scroll_height = int(
+                        await page.evaluate("() => document.documentElement.scrollHeight") or scroll_height
+                    )
+                after_links, after_total = await _capture_render_link_snapshot(page)
+                before_signatures = {
+                    (str(item.get("href") or ""), str(item.get("anchor_text") or ""), str(item.get("dom_path") or ""))
+                    for item in before_links
+                }
+                for item in before_links:
+                    render_link_observations.append({"capture_phase": "pre_interaction", **item})
+                newly_revealed_count = 0
+                for item in after_links:
+                    signature = (
+                        str(item.get("href") or ""),
+                        str(item.get("anchor_text") or ""),
+                        str(item.get("dom_path") or ""),
+                    )
+                    reveal_state = "present_before_scroll" if signature in before_signatures else "scroll_revealed"
+                    newly_revealed_count += reveal_state == "scroll_revealed"
+                    render_link_observations.append(
+                        {"capture_phase": "after_bounded_scroll", "reveal_state": reveal_state, **item}
+                    )
+                reached_document_end = last_scroll_y + viewport_height >= scroll_height
+                render_link_capture = {
+                    "state": "complete"
+                    if render_settled
+                    and before_total <= _RENDER_LINK_SNAPSHOT_LIMIT
+                    and after_total <= _RENDER_LINK_SNAPSHOT_LIMIT
+                    and reached_document_end
+                    else "partial",
+                    "render_settled": render_settled,
+                    "pre_interaction_link_count": before_total,
+                    "after_scroll_link_count": after_total,
+                    "scroll_revealed_link_count": newly_revealed_count,
+                    "scroll_steps": scroll_steps,
+                    "scroll_step_limit": _RENDER_LINK_SCROLL_STEPS,
+                    "snapshot_link_limit": _RENDER_LINK_SNAPSHOT_LIMIT,
+                    "snapshot_truncated": before_total > _RENDER_LINK_SNAPSHOT_LIMIT
+                    or after_total > _RENDER_LINK_SNAPSHOT_LIMIT,
+                    "reached_document_end": reached_document_end,
+                    "controls_activated": False,
+                }
+                await page.evaluate("() => window.scrollTo(0, 0)")
             elapsed = time.monotonic() - started
             header_map = dict(response.headers) if response else {}
             body = html.encode("utf-8")[: self.config.max_response_bytes]
@@ -1664,6 +1777,8 @@ class PlaywrightBackend(FetchBackend):
                 raw_text_truncated=raw_text_truncated,
                 observed_requests=list(observed.values()),
                 render_settled=render_settled,
+                render_link_observations=render_link_observations,
+                render_link_capture=render_link_capture,
             )
         finally:
             if page is not None:

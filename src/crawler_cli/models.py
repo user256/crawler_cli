@@ -96,6 +96,10 @@ class FetchResponse:
     """Whether the captured pre-hydration body exceeded its configured cap."""
     observed_requests: list[BrowserRequestObservation] = field(default_factory=list)
     """Bounded browser network observations, populated only when explicitly enabled."""
+    render_link_observations: list[dict[str, object]] = field(default_factory=list)
+    """Bounded pre-scroll and after-scroll rendered anchor evidence."""
+    render_link_capture: dict[str, object] | None = None
+    """Coverage counters for the optional, non-clicking scroll-link capture."""
     render_settled: bool | None = None
     """Whether configured Playwright settle/selector waits completed."""
 
@@ -290,6 +294,8 @@ class CrawlResult:
     """Redirect hops carried through from :class:`FetchResponse` (ticket 122)."""
     observed_requests: list[BrowserRequestObservation] = field(default_factory=list)
     """Bounded browser subrequest observations retained for render audits."""
+    render_link_observations: list[dict[str, object]] = field(default_factory=list)
+    render_link_capture: dict[str, object] | None = None
 
 
 @dataclass(slots=True)

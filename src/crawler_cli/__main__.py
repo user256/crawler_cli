@@ -2779,6 +2779,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                         per_host_concurrency=1,
                         max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
                         capture_render_baseline=True,
+                        capture_render_link_states=True,
                         discover_render_urls=True,
                         max_render_requests_per_page=args.render_max_requests_per_page,
                         max_render_links_per_page=args.render_max_links_per_page,
