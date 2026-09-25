@@ -2385,6 +2385,15 @@ async def _run_report(args: argparse.Namespace) -> int:
 
 async def _run_technical_audit(args: argparse.Namespace) -> int:
     """Build one deterministic evidence bundle from a stored crawl run."""
+    if args.check_external_links and not args.compare_current_renders:
+        print("Error: --check-external-links requires --compare-current-renders", file=sys.stderr)
+        return EXIT_VALIDATION
+    if args.check_external_links and not args.scope_manifest:
+        print("Error: --check-external-links requires --scope-manifest", file=sys.stderr)
+        return EXIT_VALIDATION
+    if args.check_external_links and args.external_link_max_targets > 25:
+        print("Error: --external-link-max-targets must be at most 25", file=sys.stderr)
+        return EXIT_VALIDATION
     if args.resume_google_sheets and not args.publish_google_sheets:
         print("Error: --resume-google-sheets requires --publish-google-sheets", file=sys.stderr)
         return EXIT_VALIDATION
@@ -2714,6 +2723,24 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 if not isinstance(canonicals, list) or url not in [str(value) for value in canonicals]:
                     continue
                 valid_candidates.append({**dict(candidate), "template": page.get("template")})
+            scope_predicate = None
+            if args.scope_manifest:
+                from .authorisation import compile_scope_predicate, load_scope_manifest
+
+                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
+            stored_digest = run_context.get("authorization_scope_digest")
+            if stored_digest:
+                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
+                supplied_digest = (
+                    hashlib.sha256(
+                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+                    if supplied_snapshot is not None
+                    else None
+                )
+                if supplied_digest != stored_digest:
+                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
+                    return EXIT_VALIDATION
             if not valid_candidates:
                 evidence["rendered-mobile-resources"] = [
                     {
@@ -2725,27 +2752,14 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                         "devices": [],
                     }
                 ]
-            else:
-                scope_predicate = None
-                if args.scope_manifest:
-                    from .authorisation import compile_scope_predicate, load_scope_manifest
+                if args.check_external_links:
+                    from .external_link_checks import collect_external_link_rechecks
 
-                    scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
-                stored_digest = run_context.get("authorization_scope_digest")
-                if stored_digest:
-                    supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
-                    supplied_digest = (
-                        hashlib.sha256(
-                            json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
-                        ).hexdigest()
-                        if supplied_snapshot is not None
-                        else None
+                    assert scope_predicate is not None
+                    evidence["external-link-rechecks"] = await collect_external_link_rechecks(
+                        [], scope_predicate=scope_predicate, max_targets=args.external_link_max_targets
                     )
-                    if supplied_digest != stored_digest:
-                        print(
-                            "Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr
-                        )
-                        return EXIT_VALIDATION
+            else:
                 allowed = run_context.get("declared_allowed_hosts", [])
                 seeds = run_context.get("seed_origins", [])
                 allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
@@ -2764,6 +2778,8 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                     for candidate in valid_candidates
                 }
                 selected_urls = list(initial_urls)
+                external_link_instances: list[dict[str, object]] = []
+                external_link_truncated_count = 0
                 device_coverages: list[dict[str, object]] = []
                 device_results: list[dict[str, object]] = []
                 device_specs = [("desktop_viewport", 1280, 720)]
@@ -2821,6 +2837,26 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                     finally:
                         await render_engine.close()
                     comparisons = [*initial, *extra]
+                    if args.check_external_links:
+                        for comparison in comparisons:
+                            crawl_result = comparison.crawl_result
+                            for link in getattr(crawl_result, "render_link_observations", []) or []:
+                                if not isinstance(link, Mapping) or link.get("capture_phase") != "after_bounded_scroll":
+                                    continue
+                                if len(external_link_instances) >= 10_000:
+                                    external_link_truncated_count += 1
+                                    continue
+                                external_link_instances.append(
+                                    {
+                                        "source_url": comparison.url,
+                                        "target_url": link.get("href"),
+                                        "device": device,
+                                        "anchor_text": link.get("anchor_text"),
+                                        "dom_path": link.get("dom_path"),
+                                        "capture_phase": link.get("capture_phase"),
+                                        "reveal_state": link.get("reveal_state"),
+                                    }
+                                )
                     selected_urls = [*initial_urls, *expanded]
                     records = render_audit_records(
                         comparisons,
@@ -2890,6 +2926,20 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                     },
                     *device_results,
                 ]
+                if args.check_external_links:
+                    from .external_link_checks import collect_external_link_rechecks
+
+                    if scope_predicate is None:
+                        print("Error: --check-external-links requires a valid --scope-manifest", file=sys.stderr)
+                        return EXIT_VALIDATION
+                    external_link_checks = await collect_external_link_rechecks(
+                        external_link_instances,
+                        scope_predicate=scope_predicate,
+                        max_targets=args.external_link_max_targets,
+                        truncated_instance_count=external_link_truncated_count,
+                    )
+                    evidence["external-link-rechecks"] = external_link_checks
+                    evidence["external-link-rechecks"][0]["device_count"] = len(device_specs)
         if args.recheck_live:
             if not args.scope_manifest:
                 print("Error: --recheck-live requires --scope-manifest", file=sys.stderr)
@@ -4699,6 +4749,12 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument("--render-max-pages", type=positive_int, default=10)
     audit_parser.add_argument("--render-expansion-pages", type=non_negative_int, default=5)
     audit_parser.add_argument("--render-mobile-viewport", action="store_true")
+    audit_parser.add_argument(
+        "--check-external-links",
+        action="store_true",
+        help="Recheck a bounded sample of rendered external links (requires render comparison and scope manifest)",
+    )
+    audit_parser.add_argument("--external-link-max-targets", type=positive_int, default=25)
     audit_parser.add_argument("--render-ready-selector", default="")
     audit_parser.add_argument("--render-ready-timeout", type=positive_float, default=5.0)
     audit_parser.add_argument("--render-max-requests-per-page", type=positive_int, default=200)

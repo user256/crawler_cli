@@ -73,6 +73,11 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
         "state": "implemented_conditional",
         "source": "guarded crawler and authorization manifest",
     },
+    {
+        "id": "rendered-external-link-rechecks",
+        "state": "implemented_conditional_evidence_only",
+        "source": "bounded rendered-link sample, explicit authorization manifest, robots and destination guard",
+    },
     {"id": "tracking-parameter-links", "state": "implemented", "source": "link graph report"},
     {"id": "orphan-candidates", "state": "implemented_candidate", "source": "orphan report"},
     {"id": "redirect-observations", "state": "implemented_candidate", "source": "redirect report"},
@@ -764,6 +769,7 @@ def build_technical_audit(
     """
 
     rows = {name: [dict(row) for row in reports.get(name, ())] for name in TECHNICAL_AUDIT_REPORTS}
+    external_link_rechecks = [dict(row) for row in reports.get("external-link-rechecks", ())]
     for row in rows["orphans"]:
         url = str(row.get("url", ""))
         recheck = _lookup_recheck(live_rechecks, url)
@@ -1347,6 +1353,12 @@ def build_technical_audit(
         "performance_coverage": dict(performance_coverage),
         "performance_report": performance_report,
         "conditional_get_coverage": conditional_coverage,
+        "external_link_recheck_coverage": (
+            dict(external_link_rechecks[0])
+            if external_link_rechecks and external_link_rechecks[0].get("record_type") == "coverage"
+            else {}
+        ),
+        "external_link_rechecks": [row for row in external_link_rechecks if row.get("record_type") == "observation"],
         "status_vocabulary": [
             "tested",
             "pass",
@@ -1407,6 +1419,8 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     context = raw_context if isinstance(raw_context, Mapping) else {}
     raw_gate = audit.get("client_publication_gate", {})
     gate = raw_gate if isinstance(raw_gate, Mapping) else {}
+    external_link_coverage = audit.get("external_link_recheck_coverage", {})
+    external_link_coverage = external_link_coverage if isinstance(external_link_coverage, Mapping) else {}
     overview = [
         ["Metric", "Value"],
         ["Crawl run", str(audit["crawl_run_id"])],
@@ -1466,6 +1480,17 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
             ["Coverage caveats", projection.get("coverage_caveats", "unknown")],
         ]
     )
+    if external_link_coverage:
+        overview.extend(
+            [
+                ["Rendered external-link coverage", external_link_coverage.get("state", "unknown")],
+                ["Rendered external-link targets attempted", external_link_coverage.get("attempted_target_count", 0)],
+                [
+                    "Rendered external-link targets out of scope",
+                    external_link_coverage.get("out_of_scope_target_count", 0),
+                ],
+            ]
+        )
 
     canonical_coverage = audit.get("canonical_hreflang_coverage", {})
     if isinstance(canonical_coverage, Mapping) and canonical_coverage:
@@ -1615,6 +1640,9 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 "qualification",
             ),
         )
+    external_link_rows = audit.get("external_link_rechecks", [])
+    if isinstance(external_link_rows, list) and external_link_rows:
+        tables["External Link Rechecks"] = _table(external_link_rows)
     return tables
 
 

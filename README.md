@@ -634,6 +634,15 @@ tabs. Robots refusals, challenges, access denials, rate limits, DNS/TLS and
 other transport errors remain distinct. The JSON publication gate stays closed for incomplete coverage or
 unvalidated candidates.
 
+For a separately reported, evidence-only sample of rendered external links,
+combine `--check-external-links` with `--compare-current-renders` and an
+explicit `--scope-manifest`. The command tests up to 25 sorted unique targets
+by default (adjust with `--external-link-max-targets`, capped at 25), honours
+the manifest, robots.txt and destination pinning, and only repeats a target
+after a transport or HTTP failure. Out-of-scope links are recorded without a
+request; results are not automatically promoted to client actions. Rendered
+links are observed after bounded scrolling only—controls are not activated.
+
 To include externally known URLs in orphan review, pass one or more CSVs with
 `url,source` columns; `source` must be `search_console` or `analytics`. An
 optional `observed_at` column retains the export date/period label. URL identity
