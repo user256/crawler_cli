@@ -339,7 +339,7 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
     assert _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out)]) == 0
     payload = json.loads(out.read_text())
     assert payload["crawl_run_id"] == "run-42"
-    assert payload["schema_version"] == "crawler-cli/technical-audit/1"
+    assert payload["schema_version"] == "crawler-cli/technical-audit/2"
     assert payload["run_context"]["snapshot_consistency"] == "stable"
     assert {check["id"] for check in payload["checks"]} >= {
         "tracking-parameter-links",
@@ -366,6 +366,20 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "canonical-hreflang-inventory",
         "performance-inventory",
     ]
+
+
+def test_technical_audit_writes_optional_recipient_markdown(fake_reports, tmp_path, capsys):
+    out = tmp_path / "technical-audit.json"
+    markdown = tmp_path / "client-summary.md"
+    assert _run(
+        ["technical-audit", "--crawl-run-id", "run-42", "--out", str(out), "--markdown-out", str(markdown)]
+    ) == 0
+
+    rendered = markdown.read_text()
+    assert rendered.startswith("# Technical SEO audit")
+    assert "Evidence summary" in rendered
+    assert "No live-confirmed client actions" in rendered
+    assert "unknown" in rendered
 
 
 def test_technical_audit_sheets_publishing_is_explicit_and_requires_template(fake_reports, tmp_path, capsys):

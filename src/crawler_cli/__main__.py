@@ -89,6 +89,7 @@ from .technical_audit import (
     build_technical_audit,
     canonical_hreflang_report,
     metadata_locale_report,
+    render_technical_audit_markdown,
 )
 from .performance_audit import (
     collect_conditional_get_evidence,
@@ -2925,6 +2926,11 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(audit, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     print(f"Wrote deterministic technical audit to {output}")
+    if args.markdown_out:
+        markdown_output = Path(args.markdown_out)
+        markdown_output.parent.mkdir(parents=True, exist_ok=True)
+        markdown_output.write_text(render_technical_audit_markdown(audit), encoding="utf-8")
+        print(f"Wrote technical-audit Markdown projection to {markdown_output}")
 
     if args.publish_google_sheets:
         from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services
@@ -4593,6 +4599,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Build a deterministic technical-audit evidence bundle from one stored crawl run",
     )
     audit_parser.add_argument("--out", required=True, help="Write the deterministic audit JSON to this path")
+    audit_parser.add_argument("--markdown-out", help="Optionally write the concise recipient-facing Markdown projection")
     audit_parser.add_argument(
         "--publish-google-sheets",
         action="store_true",
