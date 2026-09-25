@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from crawler_cli.technical_audit import audit_sheet_tables, build_technical_audit, metadata_locale_report
+from crawler_cli.technical_audit import (
+    audit_sheet_tables,
+    build_technical_audit,
+    canonical_hreflang_report,
+    metadata_locale_report,
+)
 
 
 def test_metadata_inventory_excludes_ineligible_pages_and_keeps_denominators():
@@ -124,6 +129,122 @@ def test_complete_metadata_inventory_reports_zero_findings_and_keeps_sheet_denom
     coverage_tab = audit_sheet_tables(audit)["Metadata Coverage"]
     assert ["eligible_indexable_count", 12] in coverage_tab
     assert ["excluded_by_reason", '{"challenged": 2}'] in coverage_tab
+
+
+def test_canonical_report_preserves_channels_and_keeps_uncrawled_target_unknown():
+    rows = canonical_hreflang_report(
+        [
+            {
+                "url": "https://e.test/en/page",
+                "kind": "html",
+                "final_status_code": 200,
+                "content_extracted": True,
+                "overall_indexable": True,
+                "canonical_evidence_json": [
+                    {"href": "https://e.test/en/page", "source": "html_head", "well_formed_http_url": True},
+                    {"href": "https://other.test/page", "source": "http_header_link", "well_formed_http_url": True},
+                ],
+                "canonical_urls_json": [],
+                "hreflang_json": [
+                    {"href": "https://e.test/en/page", "hreflang": "en", "source": "html_head"},
+                    {"href": "https://e.test/fr/page?user=private", "hreflang": "fr", "source": "html_head"},
+                ],
+                "html_lang": "en",
+            }
+        ]
+    )
+    types = {row.get("candidate_type") for row in rows[1:]}
+    assert "canonical_channel_disagreement" in types
+    assert "non_self_canonical_candidate" in types
+    assert "hreflang_target_unknown_not_crawled" in types
+    unknown = next(row for row in rows if row.get("candidate_type") == "hreflang_target_unknown_not_crawled")
+    assert unknown["qualification"] == "not_a_confirmed_defect"
+    assert "private" not in unknown["alternate_url"]
+    assert rows[0]["sitemap_channel"] == "unavailable_not_in_run_snapshot"
+
+
+def test_canonical_targets_distinguish_http_error_noindex_and_canonical_chain():
+    def page(url, *, status=200, indexable=True, canonicals=None):
+        return {
+            "url": url,
+            "kind": "html",
+            "final_status_code": status,
+            "content_extracted": status == 200,
+            "overall_indexable": indexable,
+            "canonical_evidence_json": canonicals or [],
+            "canonical_urls_json": [],
+            "hreflang_json": [],
+            "html_lang": "en",
+        }
+
+    targets = ["https://e.test/gone", "https://e.test/noindex", "https://e.test/chain"]
+    sources = [
+        page(f"https://e.test/source-{i}", canonicals=[{"href": target, "source": "html_head"}])
+        for i, target in enumerate(targets)
+    ]
+    rows = canonical_hreflang_report(
+        [
+            *sources,
+            page(targets[0], status=404, indexable=None),
+            page(targets[1], indexable=False),
+            page(targets[2], canonicals=[{"href": "https://e.test/final", "source": "html_head"}]),
+        ]
+    )
+    target_states = {
+        row["canonical_url"]: row["canonical_target_state"]
+        for row in rows
+        if row.get("candidate_type") == "non_self_canonical_candidate"
+    }
+    assert target_states[targets[0]] == "status_404"
+    assert target_states[targets[1]] == "noindex_or_unknown"
+    assert target_states[targets[2]] == "canonicalized_elsewhere"
+
+
+def test_hreflang_valid_reciprocal_cluster_passes_and_noindex_source_only_gets_guidance():
+    def page(url, locale, links, indexable=True):
+        return {
+            "url": url,
+            "kind": "html",
+            "final_status_code": 200,
+            "content_extracted": True,
+            "overall_indexable": indexable,
+            "canonical_evidence_json": [{"href": url, "source": "html_head", "well_formed_http_url": True}],
+            "canonical_urls_json": [],
+            "hreflang_json": links,
+            "html_lang": locale,
+        }
+
+    en = "https://e.test/en/page"
+    fr = "https://e.test/fr/page"
+    result = canonical_hreflang_report(
+        [
+            page(
+                en,
+                "en",
+                [
+                    {"href": en, "hreflang": "en", "source": "html_head"},
+                    {"href": fr, "hreflang": "fr", "source": "html_head"},
+                ],
+            ),
+            page(
+                fr,
+                "fr",
+                [
+                    {"href": fr, "hreflang": "fr", "source": "html_head"},
+                    {"href": en, "hreflang": "en", "source": "html_head"},
+                ],
+            ),
+            page(
+                "https://e.test/noindex",
+                "en",
+                [{"href": "https://e.test/noindex", "hreflang": "bad!", "source": "html_head"}],
+                False,
+            ),
+        ]
+    )
+    issues = result[1:]
+    assert not any(row.get("candidate_type", "").startswith("hreflang_") for row in issues)
+    assert [row["candidate_type"] for row in issues] == ["noindex_source_hreflang_guidance"]
 
 
 def test_audit_is_stable_and_never_calls_candidate_checks_healthy():

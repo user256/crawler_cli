@@ -107,6 +107,37 @@ def _positive_int(value: object) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _split_link_header(value: str, separator: str) -> list[str]:
+    """Split an RFC 8288 Link field outside URI references and quoted values."""
+    parts: list[str] = []
+    start = 0
+    in_uri = False
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if in_uri:
+            if char == ">":
+                in_uri = False
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {'"', "'"}:
+            quote = char
+        elif char == "<":
+            in_uri = True
+        elif char == separator and not in_uri:
+            parts.append(value[start:index].strip())
+            start = index + 1
+    parts.append(value[start:].strip())
+    return [part for part in parts if part]
+
+
 def _srcset_urls(value: object) -> list[str]:
     urls: list[str] = []
     for candidate in str(value or "").split(","):
@@ -183,8 +214,8 @@ def _extract_header_hreflang(headers: dict[str, str], base_url: str) -> list[Hre
         return []
 
     hreflangs: list[HreflangLink] = []
-    for chunk in link_header.split(","):
-        parts = [part.strip() for part in chunk.split(";") if part.strip()]
+    for chunk in _split_link_header(link_header, ","):
+        parts = _split_link_header(chunk, ";")
         if not parts or not parts[0].startswith("<") or not parts[0].endswith(">"):
             continue
         href = parts[0][1:-1]
@@ -205,6 +236,46 @@ def _extract_header_hreflang(headers: dict[str, str], base_url: str) -> list[Hre
                 )
             )
     return hreflangs
+
+
+def _extract_canonical_evidence(soup: BeautifulSoup, headers: dict[str, str], base_url: str) -> list[dict[str, object]]:
+    evidence: list[dict[str, object]] = []
+
+    def add(raw_href: object, source: str) -> None:
+        raw = str(raw_href or "").strip()
+        resolved = urljoin(base_url, raw) if raw else ""
+        parsed = urlparse(resolved)
+        evidence.append(
+            {
+                "href": resolved,
+                "raw_href": raw,
+                "source": source,
+                "well_formed_http_url": parsed.scheme in {"http", "https"} and bool(parsed.netloc),
+            }
+        )
+
+    for tag in soup.find_all("link"):
+        if "canonical" in _rel_tokens(tag.get("rel")):
+            add(tag.get("href"), "html_head")
+
+    # RFC 8288 Link fields can contain multiple comma-separated link-values.
+    link_header = _header_map(headers).get("link", "")
+    for chunk in _split_link_header(link_header, ","):
+        parts = _split_link_header(chunk, ";")
+        if not parts or not (parts[0].startswith("<") and parts[0].endswith(">")):
+            continue
+        attrs: dict[str, str] = {}
+        for part in parts[1:]:
+            key, separator, value = part.partition("=")
+            if separator:
+                attrs[key.strip().lower()] = value.strip().strip('"')
+        if "canonical" in _rel_tokens(attrs.get("rel", "")):
+            add(parts[0][1:-1], "http_header_link")
+
+    x_canonical = _header_map(headers).get("x-canonical")
+    if x_canonical:
+        add(x_canonical, "http_header_x_canonical")
+    return evidence
 
 
 def extract_page_data(
@@ -244,10 +315,9 @@ def extract_page_data(
         token for item in declaration_evidence if item.channel == "http_header" for token in item.directives
     ]
 
-    canonical = None
-    canonical_tag = soup.find("link", attrs={"rel": lambda value: "canonical" in _rel_tokens(value)})
-    if canonical_tag and canonical_tag.get("href"):
-        canonical = urljoin(base_url, canonical_tag["href"].strip())
+    canonical_evidence = _extract_canonical_evidence(soup, headers, base_url)
+    html_canonicals = [item["href"] for item in canonical_evidence if item["source"] == "html_head" and item["href"]]
+    canonical = str(html_canonicals[0]) if html_canonicals else None
 
     x_canonical = header_values.get("x-canonical")
     if x_canonical:
@@ -303,6 +373,7 @@ def extract_page_data(
         },
         image_references=extract_image_references(soup, base_url),
         robots_directive_evidence=declaration_evidence,
+        canonical_evidence=canonical_evidence,
         schema_data=extract_schema_data(html, base_url, soup=soup),
     )
 
