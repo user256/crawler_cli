@@ -91,6 +91,12 @@ from .technical_audit import (
     canonical_hreflang_report,
     metadata_locale_report,
 )
+from .performance_audit import (
+    collect_conditional_get_evidence,
+    conditional_get_report,
+    conditional_probe_candidate_population,
+    select_conditional_probe_candidates,
+)
 from .live_rechecks import candidate_targets, collect_live_rechecks
 from .validators import (
     non_negative_float,
@@ -2208,6 +2214,7 @@ _REPORT_NAMES = (
     "missing-expected-id",
     "schema-compatibility",
     "structured-data-inventory",
+    "performance-inventory",
     "image-issues",
     "internal-link-quality",
     "tracking-parameter-links",
@@ -2249,6 +2256,8 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.schema_compatibility()
     if name == "structured-data-inventory":
         return await reports.structured_data_inventory()
+    if name == "performance-inventory":
+        return await reports.technical_audit_performance_inventory()
     if name == "image-issues":
         return await reports.image_issues()
     if name == "internal-link-quality":
@@ -2420,10 +2429,13 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         audit_options: dict[str, object] = {
             "simhash_threshold": args.simhash_threshold,
             "similarity_limit": args.similarity_limit,
-            "similarity_selection": "indexable pages ordered by URL; first N pages",
+            "similarity_selection": "canonical indexable HTML ordered by stable MD5(url); bounded sample",
             "known_url_inventory_count": len(known_url_inventory),
             "known_url_inventory_url_count": len({row["url"] for row in known_url_inventory}),
             "known_url_inventory_sources": sorted({row["source"] for row in known_url_inventory}),
+            "conditional_get_probe_requested": args.probe_conditional_gets,
+            "conditional_get_sample_limit": args.conditional_max_pages,
+            "conditional_get_timeout_seconds": args.conditional_timeout,
         }
         run_context["audit_options"] = audit_options
         capabilities = run_context.get("schema_capabilities", {})
@@ -2437,7 +2449,12 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         }
         evidence = {}
         for name in TECHNICAL_AUDIT_REPORTS:
-            if name in {"current-robots-sitemaps", "url-variant-soft404", "rendered-mobile-resources"}:
+            if name in {
+                "current-robots-sitemaps",
+                "url-variant-soft404",
+                "rendered-mobile-resources",
+                "conditional-get-probes",
+            }:
                 continue
             capability = capability_by_report.get(name)
             if capability and capabilities.get(capability) is not True:
@@ -2613,6 +2630,60 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             variant_evidence.extend(dict(row) for row in variant_candidates)
             variant_evidence.extend(dict(row) for row in soft404_candidates)
             evidence["url-variant-soft404"] = variant_evidence
+        if args.probe_conditional_gets:
+            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
+                print(
+                    "Error: this crawl run used an authorization scope; conditional GET probes require --scope-manifest",
+                    file=sys.stderr,
+                )
+                return EXIT_VALIDATION
+            if run_context.get("portal_connection_policy_active") is True:
+                print(
+                    "Error: conditional GET probes do not reuse the crawl's Portal connection policy",
+                    file=sys.stderr,
+                )
+                return EXIT_VALIDATION
+            scope_predicate = None
+            if args.scope_manifest:
+                from .authorisation import compile_scope_predicate, load_scope_manifest
+
+                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
+            stored_digest = run_context.get("authorization_scope_digest")
+            if stored_digest:
+                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
+                supplied_digest = (
+                    hashlib.sha256(
+                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+                    if supplied_snapshot is not None
+                    else None
+                )
+                if supplied_digest != stored_digest:
+                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
+                    return EXIT_VALIDATION
+            allowed = run_context.get("declared_allowed_hosts", [])
+            seeds = run_context.get("seed_origins", [])
+            allowed_hosts = {
+                str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host
+            }
+            seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
+            performance_rows = evidence.get("performance-inventory", [])
+            candidates = select_conditional_probe_candidates(
+                performance_rows,
+                max_pages=args.conditional_max_pages,
+            )
+            host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
+            observations = await collect_conditional_get_evidence(
+                candidates,
+                allowed_hosts=sorted(allowed_hosts),
+                scope_predicate=cast(Any, host_scope),
+                timeout_seconds=args.conditional_timeout,
+            )
+            evidence["conditional-get-probes"] = conditional_get_report(
+                observations,
+                candidate_population=conditional_probe_candidate_population(performance_rows),
+                sample_size=len(candidates),
+            )
         if args.compare_current_renders:
             if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
                 print(
@@ -4604,6 +4675,13 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument("--variant-max-control-pages", type=positive_int, default=10)
     audit_parser.add_argument("--variant-max-probes", type=positive_int, default=50)
     audit_parser.add_argument("--soft404-max-hosts", type=positive_int, default=10)
+    audit_parser.add_argument(
+        "--probe-conditional-gets",
+        action="store_true",
+        help="Explicitly sample ordinary and validator-based conditional GETs for public self-canonical HTML",
+    )
+    audit_parser.add_argument("--conditional-max-pages", type=positive_int, default=10)
+    audit_parser.add_argument("--conditional-timeout", type=positive_float, default=10.0)
     audit_parser.add_argument(
         "--compare-current-renders",
         action="store_true",

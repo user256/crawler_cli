@@ -332,6 +332,78 @@ def test_sheet_tables_only_include_detail_tabs_with_evidence():
     assert ["Client publication ready", False] in tables["Overview"]
 
 
+def test_timing_and_not_testable_conditional_probes_are_separate_from_client_actions():
+    timing = {
+        "url": "https://example.test/page",
+        "kind": "html",
+        "final_status_code": 200,
+        "content_extracted": True,
+        "overall_indexable": True,
+        "canonical_urls_json": [],
+        "html_lang": "en",
+        "template": "article",
+        "headers_json": {"Cache-Control": "public, max-age=300"},
+        "ttfb_seconds": 0.2,
+        "total_duration_seconds": 0.5,
+    }
+    conditional = {
+        "record_type": "coverage",
+        "state": "not_testable",
+        "conditional_requests_attempted": 0,
+        "validator_eligible_count": 0,
+        "not_modified_304_rate": None,
+    }
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "performance-inventory": [timing],
+            "conditional-get-probes": [conditional],
+        },
+        run_context={"completion_state": "complete", "parsed_html_count": 1},
+    )
+
+    tables = audit_sheet_tables(audit)
+    check = next(row for row in audit["checks"] if row["id"] == "performance-and-conditional-requests")
+    assert check["status"] == "unavailable"
+    assert "Performance" in tables
+    assert "Conditional GET" not in tables
+    assert audit["performance_coverage"]["field_cwv"] == "unavailable_not_supplied"
+    assert audit["client_publication_gate"]["client_actions"] == []
+
+
+def test_unchanged_200_validator_warning_is_analyst_only_not_client_action():
+    candidate = {
+        "record_type": "candidate",
+        "target_url": "https://example.test/page",
+        "url_digest_sha256": "a" * 64,
+        "outcome": "validator_not_honored_unchanged_200",
+        "representation_equal": True,
+    }
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "performance-inventory": [],
+            "conditional-get-probes": [
+                {
+                    "record_type": "coverage",
+                    "state": "tested",
+                    "conditional_requests_attempted": 1,
+                    "validator_eligible_count": 1,
+                    "not_modified_304_rate": 0,
+                },
+                candidate,
+            ],
+        },
+        run_context={"completion_state": "complete", "parsed_html_count": 1},
+    )
+
+    check = next(row for row in audit["checks"] if row["id"] == "performance-and-conditional-requests")
+    assert check["status"] == "finding"
+    assert check["evidence"] == [candidate]
+    assert audit["client_publication_gate"]["client_actions"] == []
+    assert "Conditional GET" in audit_sheet_tables(audit)
+
+
 def test_parameter_url_family_sheet_includes_reconcilable_counts_and_link_instances():
     audit = build_technical_audit(
         crawl_run_id="run-1",

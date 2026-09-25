@@ -176,6 +176,10 @@ class FakeReports:
         self.calls.append(("structured-data-inventory", {}))
         return []
 
+    async def technical_audit_performance_inventory(self):
+        self.calls.append(("performance-inventory", {}))
+        return []
+
     async def image_issues(self):
         self.calls.append(("image-issues", {}))
         return []
@@ -397,6 +401,7 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "authority-coverage",
         "metadata-locale-inventory",
         "canonical-hreflang-inventory",
+        "performance-inventory",
     ]
 
 
