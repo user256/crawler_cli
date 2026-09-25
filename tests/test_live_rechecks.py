@@ -115,6 +115,15 @@ def _reports():
                 "eligible_indexable_count": 1,
             }
         ],
+        "canonical-hreflang-inventory": [
+            {
+                "record_type": "coverage",
+                "indexable_count": 1,
+                "sitemap_channel": "available",
+                "canonical_target_unknown_count": 0,
+                "hreflang_target_unknown_count": 0,
+            }
+        ],
         "link-graph-metrics": [{"graph_complete": True}],
         "similarity-coverage": [
             {
