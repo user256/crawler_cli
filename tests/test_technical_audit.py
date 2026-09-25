@@ -463,8 +463,8 @@ def test_recipient_markdown_uses_healthy_denominators_and_keeps_unknown_unknown(
     assert "No live-confirmed client actions" in markdown
 
 
-def test_link_actions_aggregate_duplicate_instances_by_target():
-    from crawler_cli.technical_audit import _evidence_id, _link_actions
+def test_link_actions_aggregate_thousands_of_instances_into_one_resolvable_action():
+    from crawler_cli.technical_audit import _bundle_action_evidence, _evidence_id, _evidence_index, _link_actions
 
     rows = [
         {
@@ -475,16 +475,22 @@ def test_link_actions_aggregate_duplicate_instances_by_target():
             "xpath": f"/html/body/a[{index}]",
             "live_recheck": {"state": "persistent_http_failure", "status": 404},
         }
-        for index in range(3)
+        for index in range(2_000)
     ]
     actions = _link_actions(rows)
+    evidence_index = _evidence_index([{"id": "internal-link-failures", "evidence": rows}])
+    _bundle_action_evidence(actions, evidence_index)
 
     assert len(actions) == 1
-    assert actions[0]["Link Instances"] == 3
-    assert actions[0]["Unique Source Pages"] == 3
+    assert actions[0]["Link Instances"] == 2_000
+    assert actions[0]["Unique Source Pages"] == 2_000
     assert actions[0]["Severity"] == "Medium"
-    assert "3 unique internal source pages" in actions[0]["Severity Rationale"]
-    assert set(actions[0]["Evidence Reference"].split(";")) == {
+    assert "2000 unique internal source pages" in actions[0]["Severity Rationale"]
+    evidence_reference = actions[0]["Evidence Reference"]
+    assert evidence_reference in evidence_index
+    assert evidence_index[evidence_reference]["evidence_count"] == 2_000
+    assert len(str(evidence_reference)) == len("sha256:") + 64
+    assert set(evidence_index[evidence_reference]["evidence_ids"]) == {
         _evidence_id("internal-link-failures", row) for row in rows
     }
 
