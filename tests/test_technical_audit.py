@@ -513,6 +513,37 @@ def test_candidate_inventories_stay_out_of_recipient_detail_tabs():
     assert any(row["id"] == "orphan-candidates" and row["evidence"] for row in audit["checks"])
 
 
+def test_recipient_projection_preserves_known_url_sources_without_query_values():
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "orphans": [
+                {
+                    "url": "https://e.test/page?email=private@example.test",
+                    "candidate_type": "source_known_zero_observed_inlinks",
+                    "source_labels": ["analytics", "sitemap"],
+                    "source_sitemaps": ["https://e.test/sitemap.xml?token=secret"],
+                    "source_observations": [
+                        {"source": "sitemap", "source_sitemap": "https://e.test/sitemap.xml?token=secret"}
+                    ],
+                    "graph_complete": True,
+                    "live_validation_state": "not_requested",
+                }
+            ],
+            "link-graph-metrics": [{"graph_complete": True}],
+        },
+        run_context={"completion_state": "complete", "parsed_html_count": 1},
+    )
+
+    projection = audit["recipient_projection"]
+    inventory = projection["known_url_inventory"]
+    assert inventory[0]["source_labels"] == ["analytics", "sitemap"]
+    assert inventory[0]["source_sitemaps"][0].startswith("https://e.test/sitemap.xml?token=")
+    assert "secret" not in inventory[0]["source_sitemaps"][0]
+    assert "private@example.test" not in inventory[0]["url"]
+    assert "secret" not in inventory[0]["source_observations"][0]["source_sitemap"]
+
+
 def test_missing_run_context_and_missing_source_are_not_reported_as_passes():
     audit = build_technical_audit(crawl_run_id="run-1", reports={"indexability": []})
     checks = {check["id"]: check for check in audit["checks"]}
