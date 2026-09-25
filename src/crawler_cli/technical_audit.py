@@ -9,6 +9,7 @@ is healthy.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import asdict
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
@@ -19,10 +20,16 @@ from .schema import JSON_LD_PARSER_MODE, _PARSER
 from .indexability import directive_conflicts
 from .models import RobotsDirectiveEvidence
 from .redaction import redact_url_without_digest
+from .structured_data_audit import (
+    GOOGLE_FEATURE_RULES,
+    GOOGLE_RULES_VERIFIED_ON,
+    GOOGLE_STRUCTURED_DATA_RULESET_VERSION,
+    structured_data_inventory_report,
+)
 
 
 TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/1"
-TECHNICAL_AUDIT_RULESET_VERSION = "technical-audit-rules/1"
+TECHNICAL_AUDIT_RULESET_VERSION = "technical-audit-rules/2"
 
 # The report names are run-scoped and have no dependency on a changing live
 # endpoint.  Keep this list explicit so additions are intentional and appear
@@ -32,6 +39,7 @@ TECHNICAL_AUDIT_REPORTS = (
     "indexability",
     "redirect-chains",
     "schema-compatibility",
+    "structured-data-inventory",
     "image-issues",
     "internal-link-quality",
     "link-graph-metrics",
@@ -107,8 +115,8 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
     },
     {
         "id": "feature-specific-structured-data",
-        "state": "not_implemented",
-        "source": "versioned feature rules and live markup",
+        "state": "implemented_conditional",
+        "source": "versioned Google Search Central property rules and saved active markup",
     },
     {
         "id": "performance-and-conditional-requests",
@@ -802,6 +810,24 @@ def build_technical_audit(
             if conflicts:
                 indexability_conflicts.append({**row, "conflicts": conflicts})
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
+    rendered_schema_rows = [
+        row
+        for row in rows["rendered-mobile-resources"]
+        if row.get("record_kind") == "structured_data_item"
+    ]
+    structured_data_report = structured_data_inventory_report(
+        rows["structured-data-inventory"], rendered_rows=rendered_schema_rows
+    )
+    structured_data_coverage = structured_data_report[0] if structured_data_report else {}
+    structured_data_items = [
+        row for row in structured_data_report[1:] if row.get("record_kind") == "structured_data_item"
+    ]
+    structured_data_candidates = [
+        row
+        for row in structured_data_report[1:]
+        if row.get("record_type") == "candidate"
+        and row.get("candidate_type") != "google_feature_eligibility_not_evaluated"
+    ]
     similarity = rows["similarity-coverage"][0] if rows["similarity-coverage"] else {}
     similarity_complete = (
         source_coverage["similarity-coverage"]["available"] is True
@@ -1003,6 +1029,24 @@ def build_technical_audit(
             completion_state=completion_state,
         ),
         _check(
+            "feature-specific-structured-data",
+            "Structured-data feature candidates",
+            "Structured Data",
+            structured_data_candidates,
+            "finding",
+            "Property completeness and ItemList shape are static candidates; feature eligibility needs live Google tooling and content review.",
+            available=(
+                source_coverage["structured-data-inventory"]["available"] is True
+                and capabilities.get("schema_json") is True
+            ),
+            denominator=sum(
+                row.get("schema_type") in {"Recipe", "Event", "Product", "BreadcrumbList", "ItemList"}
+                for row in structured_data_items
+            ),
+            completion_state=completion_state,
+            qualification="analyst_only",
+        ),
+        _check(
             "image-markup-candidates",
             "Image markup candidates",
             "Image issues",
@@ -1167,6 +1211,9 @@ def build_technical_audit(
             elif render_coverage.get("complete") is not True:
                 check["status"] = "partial"
                 check["qualification"] = "unsettled_or_incomplete_render_sample"
+        if check["id"] == "feature-specific-structured-data" and capabilities.get("schema_json") is not True:
+            check["status"] = "unavailable"
+            check["qualification"] = "structured_data_snapshot_capability_unavailable"
 
     audit_log = [
         *_indexability_actions(indexability_conflicts),
@@ -1195,6 +1242,11 @@ def build_technical_audit(
             check["id"] == "rendered-mobile-and-resource-evidence"
             and check["status"] == "unavailable"
             and render_coverage.get("record_type") != "coverage"
+        )
+        and not (
+            check["id"] == "feature-specific-structured-data"
+            and check["status"] == "unavailable"
+            and capabilities.get("schema_json") is not True
         )
     )
     publication_ready = (
@@ -1236,6 +1288,14 @@ def build_technical_audit(
         "parameterized_link_coverage": parameterized_link_coverage,
         "url_variant_coverage": dict(url_variant_coverage),
         "rendered_coverage": dict(render_coverage),
+        "structured_data_coverage": dict(structured_data_coverage),
+        "structured_data_report": structured_data_report,
+        "structured_data_rules": {
+            "ruleset_version": GOOGLE_STRUCTURED_DATA_RULESET_VERSION,
+            "verified_on": GOOGLE_RULES_VERIFIED_ON,
+            "features": [asdict(rule) for rule in GOOGLE_FEATURE_RULES],
+            "source_policy": "Google Search Central feature docs are authoritative for Google-specific requirements.",
+        },
         "status_vocabulary": [
             "tested",
             "pass",
@@ -1312,6 +1372,14 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     for check in checks:
         assert isinstance(check, Mapping)
         overview.append([str(check["title"]), str(check["status"])])
+    structured_rules = audit.get("structured_data_rules", {})
+    if isinstance(structured_rules, Mapping):
+        overview.extend(
+            [
+                ["Structured-data ruleset", structured_rules.get("ruleset_version", "unknown")],
+                ["Structured-data rules verified", structured_rules.get("verified_on", "unknown")],
+            ]
+        )
 
     canonical_coverage = audit.get("canonical_hreflang_coverage", {})
     if isinstance(canonical_coverage, Mapping) and canonical_coverage:
@@ -1427,6 +1495,18 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                     *detail_evidence,
                 ]
             tables[str(check["detail_sheet"])] = _table(detail_evidence)
+    structured_report = audit.get("structured_data_report", [])
+    if isinstance(structured_report, list) and len(structured_report) > 1:
+        structured_rows = []
+        for source_row in structured_report[1:]:
+            if not isinstance(source_row, Mapping):
+                continue
+            export_row = dict(source_row)
+            # Keep exact raw evidence in the local JSON bundle with a digest,
+            # but avoid copying arbitrary page markup into a shared Sheet.
+            export_row.pop("raw_evidence_excerpt", None)
+            structured_rows.append(export_row)
+        tables["Structured Data"] = _table(structured_rows)
     return tables
 
 
@@ -1622,7 +1702,7 @@ def _manual_checks() -> list[dict[str, str]]:
         },
         {
             "id": "rich-result-eligibility",
-            "reason": "Google feature requirements and site intent need current, contextual validation.",
+            "reason": "Static required-property checks are not final eligibility: confirm current Google policy, page-content equivalence, indexability, and Rich Results Test/Search Console evidence.",
         },
         {
             "id": "severity-and-priority",
