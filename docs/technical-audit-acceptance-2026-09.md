@@ -11,6 +11,7 @@ From the `crawler_cli` repository root:
 | Command | Outcome |
 |---|---|
 | `uv tool run --from ruff==0.16.6 ruff check src/crawler_cli` | Pass |
+| `uv tool run --from ruff==0.16.6 ruff format --check src/ tests/` | Pass; 159 files already formatted |
 | `uv tool run --from mypy==2.3.1 mypy src/crawler_cli` | Pass; 63 source files |
 | `uv run --frozen --extra test pytest -q tests/test_google_sheets.py tests/test_technical_audit.py tests/test_report_cli.py tests/test_persistence_integration.py` | 58 passed, 36 skipped |
 | `uv run --frozen --extra test pytest -q` | 1,488 passed, 58 skipped, 6 deprecation warnings; exit 0 |

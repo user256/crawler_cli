@@ -96,10 +96,7 @@ def test_recipient_tables_match_the_managed_v2_template_headers():
     source = {
         "sheets": [
             _tab("Template Contract", 1, ["technical-audit-template", TEMPLATE_VERSION]),
-            *[
-                _tab(name, index + 2, list(managed[name]["headers"]))
-                for index, name in enumerate(tables)
-            ],
+            *[_tab(name, index + 2, list(managed[name]["headers"])) for index, name in enumerate(tables)],
         ],
         "merges": [],
     }

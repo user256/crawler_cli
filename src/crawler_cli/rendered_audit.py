@@ -204,12 +204,8 @@ def render_audit_records(
             "incomplete_count": incomplete_count,
             "rendered_only_link_count": sum(len(item.only_in_rendered) for item in comparisons),
             "raw_only_link_count": sum(len(item.only_in_raw) for item in comparisons),
-            "image_reference_observation_count": sum(
-                item["record_kind"] == "image_reference" for item in observations
-            ),
-            "browser_request_observation_count": sum(
-                item["record_kind"] == "browser_request" for item in observations
-            ),
+            "image_reference_observation_count": sum(item["record_kind"] == "image_reference" for item in observations),
+            "browser_request_observation_count": sum(item["record_kind"] == "browser_request" for item in observations),
             "interaction_state": "not_tested",
             "external_link_rechecks": "not_tested",
             "measured_image_layout_impact": "not_tested",
