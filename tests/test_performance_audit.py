@@ -62,10 +62,9 @@ def test_timing_population_excludes_noncanonical_nonindexable_and_challenged_row
 
 
 def test_conditional_candidate_sampling_is_repeatable_and_balanced_by_locale_template():
-    rows = [
-        _page(f"https://example.test/product/{index}", 0.1, 0.2, template="product")
-        for index in range(4)
-    ] + [_page("https://example.test/article/1", 0.1, 0.2, template="article", locale="fr")]
+    rows = [_page(f"https://example.test/product/{index}", 0.1, 0.2, template="product") for index in range(4)] + [
+        _page("https://example.test/article/1", 0.1, 0.2, template="article", locale="fr")
+    ]
     first = audit.select_conditional_probe_candidates(rows, max_pages=3)
     second = audit.select_conditional_probe_candidates(rows, max_pages=3)
     assert [row["url"] for row in first] == [row["url"] for row in second]
