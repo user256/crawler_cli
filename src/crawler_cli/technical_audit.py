@@ -26,6 +26,9 @@ from .structured_data_audit import (
     GOOGLE_STRUCTURED_DATA_RULESET_VERSION,
     structured_data_inventory_report,
 )
+from .performance_audit import (
+    performance_inventory_report,
+)
 
 
 TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/1"
@@ -53,6 +56,8 @@ TECHNICAL_AUDIT_REPORTS = (
     "current-robots-sitemaps",
     "url-variant-soft404",
     "rendered-mobile-resources",
+    "performance-inventory",
+    "conditional-get-probes",
 )
 
 # Registry is intentionally wider than the currently implemented report set.
@@ -120,8 +125,8 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
     },
     {
         "id": "performance-and-conditional-requests",
-        "state": "not_implemented",
-        "source": "timings and conditional GET observations",
+        "state": "implemented_conditional",
+        "source": "run-scoped HTTP timing distributions and explicit validator probes",
     },
     {"id": "verified-search-bot-logs", "state": "conditional", "source": "validated operator-supplied access logs"},
     {"id": "geo-dependent-behaviour", "state": "conditional", "source": "configured regional proxy observations"},
@@ -810,6 +815,27 @@ def build_technical_audit(
         if row.get("record_type") == "candidate"
         and row.get("candidate_type") != "google_feature_eligibility_not_evaluated"
     ]
+    performance_report = performance_inventory_report(rows["performance-inventory"])
+    performance_coverage = performance_report[0] if performance_report else {}
+    conditional_input = rows["conditional-get-probes"]
+    conditional_coverage = (
+        dict(conditional_input[0])
+        if conditional_input and conditional_input[0].get("record_type") == "coverage"
+        else {
+            "record_type": "coverage",
+            "state": "not_requested",
+            "conditional_requests_attempted": 0,
+            "not_modified_304_count": 0,
+            "not_modified_304_rate": None,
+            "efficiency_warning_count": 0,
+            "qualification": "explicit_conditional_probe_not_requested",
+        }
+    )
+    conditional_findings = [
+        row
+        for row in conditional_input[1:]
+        if row.get("record_type") == "candidate"
+    ] if conditional_input and conditional_input[0].get("record_type") == "coverage" else []
     similarity = rows["similarity-coverage"][0] if rows["similarity-coverage"] else {}
     similarity_complete = (
         source_coverage["similarity-coverage"]["available"] is True
@@ -1033,6 +1059,18 @@ def build_technical_audit(
             qualification="analyst_only",
         ),
         _check(
+            "performance-and-conditional-requests",
+            "Performance timing and conditional GETs",
+            "Conditional GET",
+            conditional_findings,
+            "finding",
+            "Timing distributions are crawler-lab evidence. Unchanged 200 responses after real validators are efficiency candidates; changed 200 content is not a defect.",
+            available=source_coverage["performance-inventory"]["available"] is True,
+            denominator=_optional_int(performance_coverage.get("eligible_canonical_indexable_html_count")),
+            completion_state=completion_state,
+            qualification="analyst_only",
+        ),
+        _check(
             "image-markup-candidates",
             "Image markup candidates",
             "Image issues",
@@ -1200,6 +1238,13 @@ def build_technical_audit(
         if check["id"] == "feature-specific-structured-data" and capabilities.get("schema_json") is not True:
             check["status"] = "unavailable"
             check["qualification"] = "structured_data_snapshot_capability_unavailable"
+        if check["id"] == "performance-and-conditional-requests":
+            if conditional_coverage.get("state") == "not_requested":
+                check["status"] = "partial"
+                check["qualification"] = "conditional_get_probe_not_requested; stored timing evidence is separate"
+            elif conditional_coverage.get("state") == "not_testable":
+                check["status"] = "unavailable"
+                check["qualification"] = "no_validator_eligible_conditional_request"
 
     audit_log = [
         *_indexability_actions(indexability_conflicts),
@@ -1233,6 +1278,11 @@ def build_technical_audit(
             check["id"] == "feature-specific-structured-data"
             and check["status"] == "unavailable"
             and capabilities.get("schema_json") is not True
+        )
+        and not (
+            check["id"] == "performance-and-conditional-requests"
+            and check["status"] in {"partial", "unavailable"}
+            and conditional_coverage.get("state") in {"not_requested", "not_testable"}
         )
     )
     publication_ready = (
@@ -1281,6 +1331,9 @@ def build_technical_audit(
             "features": [asdict(rule) for rule in GOOGLE_FEATURE_RULES],
             "source_policy": "Google Search Central feature docs are authoritative for Google-specific requirements.",
         },
+        "performance_coverage": dict(performance_coverage),
+        "performance_report": performance_report,
+        "conditional_get_coverage": conditional_coverage,
         "status_vocabulary": [
             "tested",
             "pass",
@@ -1363,6 +1416,20 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
             [
                 ["Structured-data ruleset", structured_rules.get("ruleset_version", "unknown")],
                 ["Structured-data rules verified", structured_rules.get("verified_on", "unknown")],
+            ]
+        )
+    performance_coverage = audit.get("performance_coverage", {})
+    if isinstance(performance_coverage, Mapping) and performance_coverage:
+        conditional_coverage = audit.get("conditional_get_coverage", {})
+        conditional_summary = conditional_coverage if isinstance(conditional_coverage, Mapping) else {}
+        overview.extend(
+            [
+                ["Timing source", performance_coverage.get("source", "unknown")],
+                ["Canonical indexable HTML timing population", performance_coverage.get("eligible_canonical_indexable_html_count", 0)],
+                ["Conditional GET state", conditional_summary.get("state", "not_requested")],
+                ["Conditional GET eligible validators", conditional_summary.get("validator_eligible_count", 0)],
+                ["Conditional GET 304 rate", conditional_summary.get("not_modified_304_rate", "not_testable")],
+                ["Field CWV source", performance_coverage.get("field_cwv", "unavailable")],
             ]
         )
 
@@ -1494,6 +1561,11 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
             export_row.pop("raw_evidence_excerpt", None)
             structured_rows.append(export_row)
         tables["Structured Data"] = _table(structured_rows)
+    performance_report = audit.get("performance_report", [])
+    if isinstance(performance_report, list) and any(
+        isinstance(row, Mapping) and row.get("record_type") != "coverage" for row in performance_report
+    ):
+        tables["Performance"] = _table([row for row in performance_report if isinstance(row, Mapping)])
     return tables
 
 
@@ -1690,6 +1762,14 @@ def _manual_checks() -> list[dict[str, str]]:
         {
             "id": "rich-result-eligibility",
             "reason": "Static required-property checks are not final eligibility: confirm current Google policy, page-content equivalence, indexability, and Rich Results Test/Search Console evidence.",
+        },
+        {
+            "id": "performance-and-conditional-requests",
+            "reason": "Timing and crawler CWV are lab evidence, not field performance. Use --probe-conditional-gets for bounded validator requests; field CWV, independent browser traces, and access-log verification are unavailable unless separately supplied.",
+        },
+        {
+            "id": "search-bot-log-verification",
+            "reason": "No access logs were supplied. A spoofable User-Agent alone is never treated as verified Googlebot evidence; identity requires source-IP reverse/forward DNS or Google's published IP ranges and an operator-validated complete log source.",
         },
         {
             "id": "severity-and-priority",
