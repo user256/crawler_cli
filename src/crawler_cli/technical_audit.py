@@ -2071,10 +2071,7 @@ def _table(rows: object, columns: tuple[str, ...] | None = None) -> list[list[ob
         columns = tuple(dict.fromkeys(key for row in materialised for key in row))
     return [
         list(columns),
-        *[
-            [_sheet_value(row.get(column, "")) for column in columns]
-            for row in materialised
-        ],
+        *[[_sheet_value(row.get(column, "")) for column in columns] for row in materialised],
     ]
 
 

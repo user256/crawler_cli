@@ -161,17 +161,17 @@ def template_manifest() -> dict[str, object]:
             for name, headers in _SUMMARY_HEADERS.items()
         }
         | {
-                name: {
-                    "range": _managed_range(name),
-                    **(
-                        {
-                            "headers": _FIXED_DETAIL_HEADERS[name],
-                            "header_identity": "exact ordered evidence keys",
-                        }
-                        if name in _FIXED_DETAIL_HEADERS
-                        else {"header_identity": "exact ordered evidence keys"}
-                    ),
-                    "formulas_allowed": False,
+            name: {
+                "range": _managed_range(name),
+                **(
+                    {
+                        "headers": _FIXED_DETAIL_HEADERS[name],
+                        "header_identity": "exact ordered evidence keys",
+                    }
+                    if name in _FIXED_DETAIL_HEADERS
+                    else {"header_identity": "exact ordered evidence keys"}
+                ),
+                "formulas_allowed": False,
             }
             for name in _DETAIL_TABS
         },
