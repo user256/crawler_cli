@@ -1266,17 +1266,7 @@ def build_technical_audit(
     audit_log = _aggregate_actions(audit_log)
     client_actions = _link_actions(confirmed_link_failures)
     evidence_index = _evidence_index(checks)
-    for action in [*audit_log, *client_actions]:
-        reference = str(action.get("Evidence Reference") or "")
-        if ";" in reference:
-            members = sorted(set(reference.split(";")))
-            grouped_reference = _evidence_id("grouped-action", {"members": members})
-            evidence_index[grouped_reference] = {
-                "record_type": "grouped_action_evidence",
-                "evidence_ids": members,
-                "evidence_count": len(members),
-            }
-            action["Evidence Reference"] = grouped_reference
+    _bundle_action_evidence([*audit_log, *client_actions], evidence_index)
     unresolved_link_failures = [row for row in analyst_link_failures if row.get("recheck_state") not in {"recovered"}]
     checks_complete = all(
         check["status"] not in {"partial", "unavailable", "error"}
@@ -1821,6 +1811,24 @@ def _evidence_index(checks: Sequence[Mapping[str, object]]) -> dict[str, dict[st
                 reference = _evidence_id(str(check.get("id") or "unknown"), row)
                 index[reference] = {"check_id": check.get("id"), "evidence": dict(row)}
     return dict(sorted(index.items()))
+
+
+def _bundle_action_evidence(
+    actions: Sequence[dict[str, object]], evidence_index: dict[str, dict[str, object]]
+) -> None:
+    """Replace long member-ID lists with one stable, resolvable group ID."""
+    for action in actions:
+        reference = str(action.get("Evidence Reference") or "")
+        if ";" not in reference:
+            continue
+        members = sorted(set(reference.split(";")))
+        grouped_reference = _evidence_id("grouped-action", {"members": members})
+        evidence_index[grouped_reference] = {
+            "record_type": "grouped_action_evidence",
+            "evidence_ids": members,
+            "evidence_count": len(members),
+        }
+        action["Evidence Reference"] = grouped_reference
 
 
 def recipient_report_projection(
