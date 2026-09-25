@@ -4632,7 +4632,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Build a deterministic technical-audit evidence bundle from one stored crawl run",
     )
     audit_parser.add_argument("--out", required=True, help="Write the deterministic audit JSON to this path")
-    audit_parser.add_argument("--markdown-out", help="Optionally write the concise recipient-facing Markdown projection")
+    audit_parser.add_argument(
+        "--markdown-out", help="Optionally write the concise recipient-facing Markdown projection"
+    )
     audit_parser.add_argument(
         "--publish-google-sheets",
         action="store_true",

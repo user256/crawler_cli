@@ -1785,12 +1785,16 @@ def _aggregate_actions(actions: Sequence[Mapping[str, object]]) -> list[dict[str
         first["Finding Count"] = len(members)
         first["Affected URL Count"] = 1 if url else 0
         sources = {str(row.get("Source URL")) for row in members if row.get("Source URL")}
-        first["Unique Source Pages"] = len(sources) if sources else max(
-            (_optional_int(row.get("Unique Source Pages")) or 0 for row in members), default=0
+        first["Unique Source Pages"] = (
+            len(sources)
+            if sources
+            else max((_optional_int(row.get("Unique Source Pages")) or 0 for row in members), default=0)
         )
         first["Link Instances"] = sum(_optional_int(row.get("Link Instances")) or 1 for row in members)
         first["Evidence Reference"] = ";".join(sorted({str(row.get("Evidence Reference") or "") for row in members}))
-        first["Explanation"] = f"{len(members)} matching evidence records for this affected target. {first.get('Explanation', '')}"
+        first["Explanation"] = (
+            f"{len(members)} matching evidence records for this affected target. {first.get('Explanation', '')}"
+        )
         aggregated.append(first)
     return aggregated
 
@@ -1813,9 +1817,7 @@ def _evidence_index(checks: Sequence[Mapping[str, object]]) -> dict[str, dict[st
     return dict(sorted(index.items()))
 
 
-def _bundle_action_evidence(
-    actions: Sequence[dict[str, object]], evidence_index: dict[str, dict[str, object]]
-) -> None:
+def _bundle_action_evidence(actions: Sequence[dict[str, object]], evidence_index: dict[str, dict[str, object]]) -> None:
     """Replace long member-ID lists with one stable, resolvable group ID."""
     for action in actions:
         reference = str(action.get("Evidence Reference") or "")
@@ -1845,7 +1847,9 @@ def recipient_report_projection(
     check_map = {str(check.get("id")): check for check in checks}
     metadata_check = check_map.get("metadata-and-locale", {})
     metadata_rows = metadata_check.get("evidence", [])
-    metadata_rows = [row for row in metadata_rows if isinstance(row, Mapping)] if isinstance(metadata_rows, list) else []
+    metadata_rows = (
+        [row for row in metadata_rows if isinstance(row, Mapping)] if isinstance(metadata_rows, list) else []
+    )
     type_counts: dict[str, int] = {}
     for row in metadata_rows:
         candidate_type = str(row.get("candidate_type") or "")
@@ -1873,7 +1877,11 @@ def recipient_report_projection(
     ):
         check = check_map.get(check_id, {})
         status = check.get("status")
-        value = check.get("row_count", 0) if status in {"pass", "finding", "no_observations"} else "unknown (coverage incomplete)"
+        value = (
+            check.get("row_count", 0)
+            if status in {"pass", "finding", "no_observations"}
+            else "unknown (coverage incomplete)"
+        )
         metrics.append([label, value])
     for group in performance_report[1:]:
         if not isinstance(group, Mapping):
@@ -1900,24 +1908,31 @@ def recipient_report_projection(
         for check in checks
         if check.get("status") in {"partial", "unavailable", "error"}
     ]
-    coverage_caveats = (
-        "; ".join(incomplete_checks) if incomplete_checks else "No partial/unavailable check states"
-    )
+    coverage_caveats = "; ".join(incomplete_checks) if incomplete_checks else "No partial/unavailable check states"
     targets = []
     for action in actions:
         target = action.get("Affected URL")
         source_rows = [
-            row for row in internal_evidence
+            row
+            for row in internal_evidence
             if isinstance(row, Mapping) and redact_url_without_digest(str(row.get("target_url") or "")) == target
         ]
-        sources = sorted({redact_url_without_digest(str(row.get("source_url") or "")) for row in source_rows if row.get("source_url")})
+        sources = sorted(
+            {
+                redact_url_without_digest(str(row.get("source_url") or ""))
+                for row in source_rows
+                if row.get("source_url")
+            }
+        )
         link_samples = [
             {
                 "source_url": redact_url_without_digest(str(row.get("source_url") or "")),
                 "anchor_text": row.get("anchor_text"),
                 "xpath": row.get("xpath"),
             }
-            for row in sorted(source_rows, key=lambda row: (str(row.get("source_url") or ""), str(row.get("xpath") or "")))[:10]
+            for row in sorted(
+                source_rows, key=lambda row: (str(row.get("source_url") or ""), str(row.get("xpath") or ""))
+            )[:10]
         ]
         targets.append(
             {

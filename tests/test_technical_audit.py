@@ -499,7 +499,7 @@ def test_candidate_inventories_stay_out_of_recipient_detail_tabs():
     audit = build_technical_audit(
         crawl_run_id="run-1",
         reports={
-            "orphans": [{"url": "https://e.test/orphan", "candidate_type": "orphan_candidate"}],
+            "orphans": [{"url": "https://e.test/orphan", "candidate_type": "crawled_html_zero_observed_inlinks"}],
             "link-graph-metrics": [{"graph_complete": True}],
             "internal-authority": [{"url": "https://e.test/authority", "score": 0.1}],
             "structured-data-inventory": [{"url": "https://e.test/schema", "record_kind": "structured_data_item"}],
