@@ -44,6 +44,7 @@ TECHNICAL_AUDIT_REPORTS = (
     "canonical-hreflang-inventory",
     "current-robots-sitemaps",
     "url-variant-soft404",
+    "rendered-mobile-resources",
 )
 
 # Registry is intentionally wider than the currently implemented report set.
@@ -101,8 +102,8 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
     },
     {
         "id": "rendered-mobile-and-resource-evidence",
-        "state": "not_implemented",
-        "source": "browser collection and resource fetches",
+        "state": "implemented_conditional",
+        "source": "explicit same-navigation desktop/mobile viewport captures and bounded browser requests",
     },
     {
         "id": "feature-specific-structured-data",
@@ -855,6 +856,9 @@ def build_technical_audit(
     url_variant_evidence = [
         row for row in url_variant_rows if row.get("record_type") == "candidate"
     ]
+    render_rows = rows["rendered-mobile-resources"]
+    render_coverage = render_rows[0] if render_rows and render_rows[0].get("record_type") == "coverage" else {}
+    render_evidence = [row for row in render_rows if row.get("record_type") == "candidate"]
     canonical_evidence = [
         row
         for row in canonical_hreflang_rows
@@ -1082,6 +1086,21 @@ def build_technical_audit(
             completion_state=completion_state,
             qualification="analyst_only",
         ),
+        _check(
+            "rendered-mobile-and-resource-evidence",
+            "Rendered, mobile, and resource observations",
+            "Rendered & Resources",
+            [{**row, "qualification": "analyst_only"} for row in render_evidence],
+            "finding",
+            "Same-navigation browser evidence is a candidate; incomplete readiness and unmeasured resource impact are not defects.",
+            available=(
+                source_coverage["rendered-mobile-resources"]["available"] is True
+                and render_coverage.get("record_type") == "coverage"
+            ),
+            denominator=_optional_int(render_coverage.get("sample_size")),
+            completion_state=completion_state,
+            qualification="analyst_only",
+        ),
     )
     for check in checks:
         if check["id"] == "near-duplicate-content" and not similarity_complete:
@@ -1127,6 +1146,13 @@ def build_technical_audit(
             elif url_variant_coverage.get("complete") is not True:
                 check["status"] = "partial"
                 check["qualification"] = "bounded_or_incomplete_current_probe"
+        if check["id"] == "rendered-mobile-and-resource-evidence":
+            if render_coverage.get("record_type") != "coverage":
+                check["status"] = "unavailable"
+                check["qualification"] = "requires_explicit_browser_collection"
+            elif render_coverage.get("complete") is not True:
+                check["status"] = "partial"
+                check["qualification"] = "unsettled_or_incomplete_render_sample"
 
     audit_log = [
         *_indexability_actions(indexability_conflicts),
@@ -1150,6 +1176,11 @@ def build_technical_audit(
             check["id"] == "url-variants-and-soft-404"
             and check["status"] == "unavailable"
             and url_variant_coverage.get("record_type") != "coverage"
+        )
+        and not (
+            check["id"] == "rendered-mobile-and-resource-evidence"
+            and check["status"] == "unavailable"
+            and render_coverage.get("record_type") != "coverage"
         )
     )
     publication_ready = (
@@ -1189,6 +1220,7 @@ def build_technical_audit(
         "current_site_files_coverage": dict(current_site_files_coverage),
         "parameterized_link_coverage": parameterized_link_coverage,
         "url_variant_coverage": dict(url_variant_coverage),
+        "rendered_coverage": dict(render_coverage),
         "status_vocabulary": [
             "tested",
             "pass",
@@ -1327,6 +1359,16 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 ["Current URL-variant probes", variant_coverage.get("variant_probe_count", 0)],
                 ["Synthetic 404 hosts", variant_coverage.get("soft404_host_count", 0)],
                 ["URL-variant probe coverage complete", variant_coverage.get("complete", False)],
+            ]
+        )
+    rendered_coverage = audit.get("rendered_coverage", {})
+    if isinstance(rendered_coverage, Mapping) and rendered_coverage:
+        overview.extend(
+            [
+                ["Rendered same-navigation samples", rendered_coverage.get("sample_size", 0)],
+                ["Rendered sample complete", rendered_coverage.get("complete", False)],
+                ["Rendered-only links", rendered_coverage.get("rendered_only_link_count", 0)],
+                ["Raw-only links", rendered_coverage.get("raw_only_link_count", 0)],
             ]
         )
 
@@ -1557,10 +1599,13 @@ def _manual_checks() -> list[dict[str, str]]:
             "id": "url-variants-and-soft-404",
             "reason": "Use --probe-url-variants for bounded probes; synthetic-only results remain analyst candidates pending route-demand and rendered validation.",
         },
-        {"id": "rendered-parity", "reason": "Raw and rendered DOM signals require representative browser evidence."},
+        {
+            "id": "rendered-parity",
+            "reason": "Use --compare-current-renders for bounded same-navigation desktop and optional mobile-viewport evidence; interactions, geo, screenshots, and primary-content impact still require review.",
+        },
         {
             "id": "geo-and-language",
-            "reason": "Locale redirects require the relevant proxy regions and request headers.",
+            "reason": "Geo/locale checks are unavailable without a matching regional proxy; a local request is not substituted.",
         },
         {
             "id": "rich-result-eligibility",
