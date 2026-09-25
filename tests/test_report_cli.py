@@ -192,6 +192,10 @@ class FakeReports:
         self.calls.append(("metadata-locale-inventory", {}))
         return []
 
+    async def canonical_hreflang_inventory(self):
+        self.calls.append(("canonical-hreflang-inventory", {}))
+        return []
+
 
 @pytest.fixture
 def fake_reports(monkeypatch):
@@ -350,6 +354,7 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "internal-authority",
         "authority-coverage",
         "metadata-locale-inventory",
+        "canonical-hreflang-inventory",
     ]
 
 

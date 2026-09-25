@@ -41,6 +41,7 @@ TECHNICAL_AUDIT_REPORTS = (
     "internal-authority",
     "authority-coverage",
     "metadata-locale-inventory",
+    "canonical-hreflang-inventory",
 )
 
 # Registry is intentionally wider than the currently implemented report set.
@@ -76,8 +77,16 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
         "state": "implemented_candidate",
         "source": "run-scoped parsed HTML snapshots; sitemap membership unavailable",
     },
-    {"id": "canonical-targets", "state": "not_implemented", "source": "canonical and live response evidence"},
-    {"id": "hreflang-clusters", "state": "not_implemented", "source": "HTML, header and sitemap annotations"},
+    {
+        "id": "canonical-targets",
+        "state": "implemented_candidate",
+        "source": "run snapshots with separate HTML/HTTP declaration evidence; uncrawled target state unknown",
+    },
+    {
+        "id": "hreflang-clusters",
+        "state": "implemented_conditional",
+        "source": "run-scoped HTML and HTTP annotations; sitemap channel unavailable in current snapshots",
+    },
     {"id": "current-robots-and-sitemaps", "state": "not_implemented", "source": "live HTTP collection"},
     {"id": "url-variants-and-soft-404", "state": "not_implemented", "source": "controlled live probes"},
     {
@@ -303,6 +312,342 @@ def _canonical_state(value: object, url: str) -> str:
     return "declared_self" if canonicals[0].split("#", 1)[0] == url.split("#", 1)[0] else "declared_nonself"
 
 
+def canonical_hreflang_report(source_rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """Check saved canonical and hreflang declarations without guessing at uncrawled targets."""
+    pages: dict[str, dict[str, object]] = {}
+    excluded: dict[str, int] = {}
+    canonical_rows: list[dict[str, object]] = []
+    hreflang_rows: list[dict[str, object]] = []
+    for source in source_rows:
+        row = dict(source)
+        url = str(row.get("url") or "")
+        if url:
+            pages[url] = row
+        if row.get("kind") != "html":
+            excluded["non_html"] = excluded.get("non_html", 0) + 1
+            continue
+        if row.get("challenge"):
+            excluded["challenged"] = excluded.get("challenged", 0) + 1
+            continue
+        if row.get("final_status_code") != 200:
+            excluded["status_not_200"] = excluded.get("status_not_200", 0) + 1
+            continue
+        if row.get("content_extracted") is not True:
+            excluded["content_not_extracted_or_unknown"] = excluded.get("content_not_extracted_or_unknown", 0) + 1
+            continue
+    eligible_urls = {
+        url
+        for url, row in pages.items()
+        if row.get("kind") == "html"
+        and not row.get("challenge")
+        and row.get("final_status_code") == 200
+        and row.get("content_extracted") is True
+    }
+    for url, row in pages.items():
+        if url not in eligible_urls:
+            continue
+        indexable = row.get("overall_indexable")
+        canonical_values = _json_items(row.get("canonical_evidence_json"))
+        if not canonical_values:
+            legacy = _json_values(row.get("canonical_urls_json"))
+            canonical_values = [
+                {
+                    "href": str(value),
+                    "source": "legacy_channel_unknown",
+                    "well_formed_http_url": _valid_http_url(str(value)),
+                }
+                for value in legacy
+                if value
+            ]
+        if indexable is True:
+            if not canonical_values:
+                canonical_rows.append(_audit_url_context(url, row) | {"candidate_type": "missing_canonical"})
+            by_channel: dict[str, list[str]] = {}
+            for declaration in canonical_values:
+                href = str(declaration.get("href") or "")
+                channel = str(declaration.get("source") or "unknown_channel")
+                by_channel.setdefault(channel, []).append(href)
+                context = _audit_url_context(url, row)
+                if declaration.get("well_formed_http_url") is False or not _valid_http_url(href):
+                    canonical_rows.append(context | {"candidate_type": "malformed_canonical", "channel": channel})
+                    continue
+                parsed_target = urlsplit(href)
+                parsed_source_url = urlsplit(url)
+                if parsed_target.scheme.lower() != "https":
+                    canonical_rows.append(
+                        context
+                        | {
+                            "candidate_type": "non_https_canonical",
+                            "channel": channel,
+                            "canonical_url": _metadata_url(href),
+                        }
+                    )
+                if parsed_target.netloc.lower() != parsed_source_url.netloc.lower():
+                    canonical_rows.append(
+                        context
+                        | {
+                            "candidate_type": "cross_host_canonical_review",
+                            "channel": channel,
+                            "canonical_url": _metadata_url(href),
+                            "qualification": "intentional_consolidation_must_be_reviewed",
+                        }
+                    )
+                if parsed_target.query:
+                    canonical_rows.append(
+                        context
+                        | {
+                            "candidate_type": "parameterized_canonical_review",
+                            "channel": channel,
+                            "canonical_url": _metadata_url(href),
+                        }
+                    )
+                if _same_url(href, url):
+                    continue
+                canonical_rows.append(
+                    context
+                    | {
+                        "candidate_type": "non_self_canonical_candidate",
+                        "channel": channel,
+                        "canonical_url": _metadata_url(href),
+                        "canonical_target_state": _canonical_target_state(href, pages),
+                    }
+                )
+            for channel, declarations in by_channel.items():
+                if len(declarations) > 1:
+                    canonical_rows.append(
+                        _audit_url_context(url, row)
+                        | {
+                            "candidate_type": "multiple_canonicals",
+                            "channel": channel,
+                            "declaration_count": len(declarations),
+                        }
+                    )
+            if len({target for values in by_channel.values() for target in values}) > 1:
+                canonical_rows.append(
+                    _audit_url_context(url, row)
+                    | {
+                        "candidate_type": "canonical_channel_disagreement",
+                        "channels": sorted(by_channel),
+                        "qualification": "compare_html_and_http_declarations",
+                    }
+                )
+
+        links = [item for item in _json_items(row.get("hreflang_json")) if item.get("href")]
+        if indexable is not True:
+            if indexable is False and links:
+                hreflang_rows.append(
+                    _audit_url_context(url, row)
+                    | {
+                        "candidate_type": "noindex_source_hreflang_guidance",
+                        "qualification": "advisory_remove_hreflang_from_noindex_source",
+                    }
+                )
+            continue
+        channel_sets: dict[str, set[tuple[str, str]]] = {}
+        seen_codes: dict[str, set[str]] = {}
+        x_default_counts: dict[str, int] = {}
+        for link in links:
+            code = str(link.get("hreflang") or "").strip().lower()
+            href = str(link.get("href") or "")
+            channel = str(link.get("source") or "unknown_channel")
+            channel_sets.setdefault(channel, set()).add((code, href))
+            context = _audit_url_context(url, row)
+            if not _valid_hreflang(code):
+                hreflang_rows.append(
+                    context | {"candidate_type": "invalid_hreflang_syntax", "hreflang": code, "channel": channel}
+                )
+            if code == "x-default":
+                x_default_counts[channel] = x_default_counts.get(channel, 0) + 1
+            channel_codes = seen_codes.setdefault(channel, set())
+            if code in channel_codes:
+                hreflang_rows.append(
+                    context | {"candidate_type": "duplicate_hreflang_language", "hreflang": code, "channel": channel}
+                )
+            channel_codes.add(code)
+            if not _valid_http_url(href):
+                hreflang_rows.append(
+                    context | {"candidate_type": "malformed_hreflang_target", "hreflang": code, "channel": channel}
+                )
+            elif urlsplit(url).scheme.lower() == "https" and urlsplit(href).scheme.lower() != "https":
+                hreflang_rows.append(
+                    context
+                    | {
+                        "candidate_type": "non_https_hreflang_target",
+                        "hreflang": code,
+                        "channel": channel,
+                        "alternate_url": _metadata_url(href),
+                    }
+                )
+            if _same_url(href, url) and code not in {"", "x-default"}:
+                continue
+            alternate_page = _find_target(href, pages)
+            if alternate_page is None:
+                hreflang_rows.append(
+                    context
+                    | {
+                        "candidate_type": "hreflang_target_unknown_not_crawled",
+                        "hreflang": code,
+                        "channel": channel,
+                        "alternate_url": _metadata_url(href),
+                        "qualification": "not_a_confirmed_defect",
+                    }
+                )
+                continue
+            if alternate_page.get("final_status_code") != 200 or alternate_page.get("overall_indexable") is not True:
+                hreflang_rows.append(
+                    context
+                    | {
+                        "candidate_type": "hreflang_target_not_indexable_200",
+                        "hreflang": code,
+                        "channel": channel,
+                        "alternate_url": _metadata_url(href),
+                        "target_status": alternate_page.get("final_status_code"),
+                        "target_indexable": alternate_page.get("overall_indexable"),
+                    }
+                )
+            target_canonical_state = _canonical_target_state(href, pages)
+            if target_canonical_state == "canonicalized_elsewhere":
+                hreflang_rows.append(
+                    context
+                    | {
+                        "candidate_type": "hreflang_target_canonicalized_elsewhere",
+                        "hreflang": code,
+                        "channel": channel,
+                        "alternate_url": _metadata_url(href),
+                        "target_canonical_state": target_canonical_state,
+                    }
+                )
+            reciprocal = [
+                item for item in _json_items(alternate_page.get("hreflang_json")) if str(item.get("href") or "") == url
+            ]
+            if not reciprocal:
+                hreflang_rows.append(
+                    context
+                    | {
+                        "candidate_type": "hreflang_reciprocity_candidate",
+                        "hreflang": code,
+                        "channel": channel,
+                        "alternate_url": _metadata_url(href),
+                        "qualification": "target_crawled_but_no_saved_return_annotation",
+                    }
+                )
+        for channel, x_default_count in x_default_counts.items():
+            if x_default_count > 1:
+                hreflang_rows.append(
+                    _audit_url_context(url, row)
+                    | {"candidate_type": "multiple_x_default", "channel": channel, "declaration_count": x_default_count}
+                )
+        self_references = [item for item in links if _same_url(str(item.get("href") or ""), url)]
+        if links and not self_references:
+            hreflang_rows.append(_audit_url_context(url, row) | {"candidate_type": "missing_hreflang_self_reference"})
+        if len(channel_sets) > 1 and len({tuple(sorted(items)) for items in channel_sets.values()}) > 1:
+            hreflang_rows.append(
+                _audit_url_context(url, row)
+                | {
+                    "candidate_type": "hreflang_channel_disagreement",
+                    "channels": sorted(channel_sets),
+                    "sitemap_channel": "not_available_in_run_snapshot",
+                }
+            )
+
+    coverage = {
+        "record_type": "coverage",
+        "snapshot_count": len(source_rows),
+        "parsed_html_count": len(eligible_urls),
+        "indexable_count": sum(pages[url].get("overall_indexable") is True for url in eligible_urls),
+        "noindex_count": sum(pages[url].get("overall_indexable") is False for url in eligible_urls),
+        "unknown_indexability_count": sum(pages[url].get("overall_indexable") is None for url in eligible_urls),
+        "excluded_by_reason": excluded,
+        "canonical_target_unknown_count": sum(
+            row.get("candidate_type") == "non_self_canonical_candidate"
+            and row.get("canonical_target_state") == "unknown_not_crawled"
+            for row in canonical_rows
+        ),
+        "hreflang_target_unknown_count": sum(
+            row.get("candidate_type") == "hreflang_target_unknown_not_crawled" for row in hreflang_rows
+        ),
+        "canonical_channel_coverage": "html_and_http_header_link_on_new_snapshots; legacy_values_unattributed",
+        "hreflang_channels": ["html_head", "http_header"],
+        "sitemap_channel": "unavailable_not_in_run_snapshot",
+        "uncrawled_target_policy": "unknown_not_a_pass_or_finding",
+    }
+    return [coverage, *canonical_rows, *hreflang_rows]
+
+
+def _json_items(value: object) -> list[dict[str, object]]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+def _json_values(value: object) -> list[object]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+    return value if isinstance(value, list) else []
+
+
+def _valid_http_url(value: str) -> bool:
+    parsed = urlsplit(value)
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+def _valid_hreflang(value: str) -> bool:
+    return value == "x-default" or bool(re.fullmatch(r"(?:[a-z]{2,3}|[a-z]{4}|[a-z]{5,8})(?:-[a-z0-9]{1,8})*", value))
+
+
+def _same_url(left: str, right: str) -> bool:
+    left_parts = urlsplit(left)
+    right_parts = urlsplit(right)
+    return (
+        left_parts.scheme.lower() == right_parts.scheme.lower()
+        and left_parts.netloc.lower() == right_parts.netloc.lower()
+        and (left_parts.path or "/") == (right_parts.path or "/")
+        and left_parts.query == right_parts.query
+    )
+
+
+def _audit_url_context(url: str, row: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "url": _metadata_url(url),
+        "url_digest_sha256": hashlib.sha256(url.encode()).hexdigest(),
+        "locale": _clean_metadata(row.get("html_lang")),
+        "indexable": row.get("overall_indexable"),
+    }
+
+
+def _canonical_target_state(target: str, pages: Mapping[str, Mapping[str, object]]) -> str:
+    row = _find_target(target, pages)
+    if row is None:
+        return "unknown_not_crawled"
+    if row.get("final_status_code") != 200:
+        return f"status_{row.get('final_status_code')}"
+    if row.get("overall_indexable") is not True:
+        return "noindex_or_unknown"
+    canonicals = _json_items(row.get("canonical_evidence_json"))
+    if not canonicals:
+        canonicals = [{"href": value} for value in _json_values(row.get("canonical_urls_json")) if value]
+    if not canonicals:
+        return "canonical_missing_or_unavailable"
+    if not any(_same_url(str(item.get("href") or ""), target) for item in canonicals):
+        return "canonicalized_elsewhere"
+    return "indexable_200_in_selected_run"
+
+
+def _find_target(target: str, pages: Mapping[str, Mapping[str, object]]) -> Mapping[str, object] | None:
+    direct = pages.get(target)
+    if direct is not None:
+        return direct
+    return next((row for row in pages.values() if row.get("final_url") == target), None)
+
+
 def build_technical_audit(
     *,
     crawl_run_id: str,
@@ -390,6 +735,40 @@ def build_technical_audit(
     metadata_rows = rows["metadata-locale-inventory"]
     metadata_coverage = metadata_rows[0] if metadata_rows and metadata_rows[0].get("record_type") == "coverage" else {}
     metadata_evidence = [row for row in metadata_rows if row.get("record_type") == "candidate"]
+    canonical_hreflang_rows = rows["canonical-hreflang-inventory"]
+    canonical_hreflang_coverage = (
+        canonical_hreflang_rows[0]
+        if canonical_hreflang_rows and canonical_hreflang_rows[0].get("record_type") == "coverage"
+        else {}
+    )
+    canonical_evidence = [
+        row
+        for row in canonical_hreflang_rows
+        if str(row.get("candidate_type", "")).startswith("canonical_")
+        or row.get("candidate_type")
+        in {
+            "missing_canonical",
+            "multiple_canonicals",
+            "malformed_canonical",
+            "non_https_canonical",
+            "cross_host_canonical_review",
+            "parameterized_canonical_review",
+            "non_self_canonical_candidate",
+        }
+    ]
+    hreflang_evidence = [
+        row
+        for row in canonical_hreflang_rows
+        if str(row.get("candidate_type", "")).startswith("hreflang_")
+        or row.get("candidate_type")
+        in {
+            "invalid_hreflang_syntax",
+            "duplicate_hreflang_language",
+            "multiple_x_default",
+            "missing_hreflang_self_reference",
+            "noindex_source_hreflang_guidance",
+        }
+    ]
 
     checks = (
         _check(
@@ -517,6 +896,36 @@ def build_technical_audit(
             completion_state=completion_state,
             qualification="analyst_only",
         ),
+        _check(
+            "canonical-consistency",
+            "Canonical consistency candidates",
+            "Canonical checks",
+            canonical_evidence,
+            "finding",
+            "Saved declarations are compared with this run; uncrawled targets and intentional cross-host consolidation require review.",
+            available=(
+                source_coverage["canonical-hreflang-inventory"]["available"] is True
+                and canonical_hreflang_coverage.get("record_type") == "coverage"
+            ),
+            denominator=_optional_int(canonical_hreflang_coverage.get("indexable_count")),
+            completion_state=completion_state,
+            qualification="analyst_only",
+        ),
+        _check(
+            "hreflang-consistency",
+            "Hreflang consistency candidates",
+            "Hreflang checks",
+            hreflang_evidence,
+            "finding",
+            "Only parsed indexable sources are checked for cluster defects; unknown targets/channels and noindex guidance are not defect claims.",
+            available=(
+                source_coverage["canonical-hreflang-inventory"]["available"] is True
+                and canonical_hreflang_coverage.get("record_type") == "coverage"
+            ),
+            denominator=_optional_int(canonical_hreflang_coverage.get("indexable_count")),
+            completion_state=completion_state,
+            qualification="analyst_only",
+        ),
     )
     for check in checks:
         if check["id"] == "near-duplicate-content" and not similarity_complete:
@@ -529,6 +938,25 @@ def build_technical_audit(
         if check["id"] == "metadata-and-locale" and metadata_coverage.get("inventory_complete") is not True:
             check["status"] = "partial" if source_coverage["metadata-locale-inventory"]["available"] else "unavailable"
             check["qualification"] = "incomplete_or_unknown_population"
+        if check["id"] in {"canonical-consistency", "hreflang-consistency"}:
+            unknown_key = (
+                "canonical_target_unknown_count"
+                if check["id"] == "canonical-consistency"
+                else "hreflang_target_unknown_count"
+            )
+            channel_unavailable = (
+                check["id"] == "hreflang-consistency"
+                and canonical_hreflang_coverage.get("sitemap_channel") != "available"
+            )
+            if (
+                not canonical_hreflang_coverage
+                or channel_unavailable
+                or _optional_int(canonical_hreflang_coverage.get(unknown_key))
+            ):
+                check["status"] = (
+                    "partial" if source_coverage["canonical-hreflang-inventory"]["available"] else "unavailable"
+                )
+                check["qualification"] = "saved_channels_or_targets_incomplete"
 
     audit_log = [
         *_indexability_actions(indexability_conflicts),
@@ -571,6 +999,7 @@ def build_technical_audit(
         "run_context": context,
         "source_coverage": source_coverage,
         "metadata_locale_coverage": dict(metadata_coverage),
+        "canonical_hreflang_coverage": dict(canonical_hreflang_coverage),
         "status_vocabulary": [
             "tested",
             "pass",
@@ -647,6 +1076,17 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     for check in checks:
         assert isinstance(check, Mapping)
         overview.append([str(check["title"]), str(check["status"])])
+
+    canonical_coverage = audit.get("canonical_hreflang_coverage", {})
+    if isinstance(canonical_coverage, Mapping) and canonical_coverage:
+        overview.extend(
+            [
+                ["Canonical/hreflang indexable denominator", canonical_coverage.get("indexable_count", "unknown")],
+                ["Canonical targets not crawled", canonical_coverage.get("canonical_target_unknown_count", 0)],
+                ["Hreflang targets not crawled", canonical_coverage.get("hreflang_target_unknown_count", 0)],
+                ["Hreflang sitemap channel", canonical_coverage.get("sitemap_channel", "unknown")],
+            ]
+        )
 
     tables: dict[str, list[list[object]]] = {"Overview": overview}
     raw_metadata_coverage = audit.get("metadata_locale_coverage", {})
