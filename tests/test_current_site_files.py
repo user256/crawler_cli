@@ -112,12 +112,7 @@ async def test_malformed_declaration_unavailable_child_and_host_boundary_are_ret
     malformed = f"{BASE}/stray.xml"
     unavailable = f"{BASE}/missing.xml"
     outside = "https://outside.example/sitemap.xml"
-    robots_text = (
-        f"User-agent: *\n"
-        f"{malformed}\n"
-        f"Sitemap: {unavailable}\n"
-        f"Sitemap: {outside}\n"
-    )
+    robots_text = f"User-agent: *\n{malformed}\nSitemap: {unavailable}\nSitemap: {outside}\n"
     rules = _RobotsRules("example.com", robots_text, status=200)
     engine = _Engine(
         {
@@ -146,8 +141,7 @@ async def test_malformed_declaration_unavailable_child_and_host_boundary_are_ret
     assert unavailable in engine.fetched
     assert outside not in engine.fetched
     assert any(
-        row.get("candidate_type") == "malformed_bare_sitemap_declaration"
-        for row in result["validation_candidates"]
+        row.get("candidate_type") == "malformed_bare_sitemap_declaration" for row in result["validation_candidates"]
     )
     assert any(row.get("reason") == "host_out_of_scope" for row in result["rejected_sitemaps"])
     assert any(row.get("state") == "http_error" for row in result["documents"])

@@ -798,9 +798,7 @@ def build_technical_audit(
                 indexability_conflicts.append({**row, "conflicts": conflicts})
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
     rendered_schema_rows = [
-        row
-        for row in rows["rendered-mobile-resources"]
-        if row.get("record_kind") == "structured_data_item"
+        row for row in rows["rendered-mobile-resources"] if row.get("record_kind") == "structured_data_item"
     ]
     structured_data_report = structured_data_inventory_report(
         rows["structured-data-inventory"], rendered_rows=rendered_schema_rows
@@ -831,11 +829,11 @@ def build_technical_audit(
             "qualification": "explicit_conditional_probe_not_requested",
         }
     )
-    conditional_findings = [
-        row
-        for row in conditional_input[1:]
-        if row.get("record_type") == "candidate"
-    ] if conditional_input and conditional_input[0].get("record_type") == "coverage" else []
+    conditional_findings = (
+        [row for row in conditional_input[1:] if row.get("record_type") == "candidate"]
+        if conditional_input and conditional_input[0].get("record_type") == "coverage"
+        else []
+    )
     similarity = rows["similarity-coverage"][0] if rows["similarity-coverage"] else {}
     similarity_complete = (
         source_coverage["similarity-coverage"]["available"] is True
@@ -893,9 +891,7 @@ def build_technical_audit(
         if row.get("record_type") == "candidate"
     ]
     parameterized_link_rows = parameterized_canonical_link_inventory(rows["internal-link-quality"])
-    parameterized_link_coverage = [
-        row for row in parameterized_link_rows if row.get("record_type") == "coverage"
-    ]
+    parameterized_link_coverage = [row for row in parameterized_link_rows if row.get("record_type") == "coverage"]
     parameterized_link_evidence = [
         {**row, "qualification": "analyst_only"}
         for row in parameterized_link_rows
@@ -905,9 +901,7 @@ def build_technical_audit(
     url_variant_coverage = (
         url_variant_rows[0] if url_variant_rows and url_variant_rows[0].get("record_type") == "coverage" else {}
     )
-    url_variant_evidence = [
-        row for row in url_variant_rows if row.get("record_type") == "candidate"
-    ]
+    url_variant_evidence = [row for row in url_variant_rows if row.get("record_type") == "candidate"]
     render_rows = rows["rendered-mobile-resources"]
     render_coverage = render_rows[0] if render_rows and render_rows[0].get("record_type") == "coverage" else {}
     render_evidence = [row for row in render_rows if row.get("record_type") == "candidate"]
@@ -1425,7 +1419,10 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
         overview.extend(
             [
                 ["Timing source", performance_coverage.get("source", "unknown")],
-                ["Canonical indexable HTML timing population", performance_coverage.get("eligible_canonical_indexable_html_count", 0)],
+                [
+                    "Canonical indexable HTML timing population",
+                    performance_coverage.get("eligible_canonical_indexable_html_count", 0),
+                ],
                 ["Conditional GET state", conditional_summary.get("state", "not_requested")],
                 ["Conditional GET eligible validators", conditional_summary.get("validator_eligible_count", 0)],
                 ["Conditional GET 304 rate", conditional_summary.get("not_modified_304_rate", "not_testable")],
@@ -1474,15 +1471,13 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 [
                     "Noncanonical parameter link instances",
                     sum(
-                        (_optional_int(row.get("canonicalized_link_instances")) or 0)
-                        for row in parameter_coverage_rows
+                        (_optional_int(row.get("canonicalized_link_instances")) or 0) for row in parameter_coverage_rows
                     ),
                 ],
                 [
                     "Noncanonical parameter URL targets",
                     sum(
-                        (_optional_int(row.get("canonicalized_unique_targets")) or 0)
-                        for row in parameter_coverage_rows
+                        (_optional_int(row.get("canonicalized_unique_targets")) or 0) for row in parameter_coverage_rows
                     ),
                 ],
             ]
