@@ -2,8 +2,10 @@
 
 Publishing is optional and creates a new copy; it never writes to the source
 template. The selected workbook must implement the checked-in
-[`technical-audit-sheets-v1.json`](../templates/technical-audit-sheets-v1.json)
+[`technical-audit-sheets-v2.json`](../templates/technical-audit-sheets-v2.json)
 contract. This is not a compatibility promise for arbitrary spreadsheets.
+The v1 contract is intentionally not accepted by this publisher; use the
+checked-in v2 manifest as the template source of truth.
 
 ## Access setup
 
