@@ -73,7 +73,7 @@ from .exposure_inventory import (
 )
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
-from .current_site_files import build_site_file_scope, collect_current_site_files
+from .current_site_files import build_site_file_scope, collect_current_site_files, project_current_site_files
 from .rendered_audit import render_audit_records
 from .url_variant_audit import collect_url_variant_evidence
 from .exit_codes import EXIT_FAILURE, EXIT_FINDINGS, EXIT_SUCCESS, EXIT_VALIDATION, resolve_crawl_exit_code
@@ -2383,6 +2383,16 @@ async def _run_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def _deduplicate_known_urls(rows: Sequence[Mapping[str, object]]) -> list[dict[str, str]]:
+    normalized = [
+        {str(key): str(value) for key, value in row.items() if value is not None}
+        for row in rows
+        if row.get("url") and row.get("source")
+    ]
+    unique = {tuple(sorted(row.items())): row for row in normalized}
+    return [unique[key] for key in sorted(unique)]
+
+
 async def _run_technical_audit(args: argparse.Namespace) -> int:
     """Build one deterministic evidence bundle from a stored crawl run."""
     if args.resume_google_sheets and not args.publish_google_sheets:
@@ -2409,12 +2419,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         known_url_inventory = [
             row for path in (args.known_url_inventory or []) for row in load_known_url_inventory(path)
         ]
-        known_url_inventory = [
-            {"url": url, "source": source, **({"observed_at": observed_at} if observed_at else {})}
-            for url, source, observed_at in sorted(
-                {(row["url"], row["source"], row.get("observed_at", "")) for row in known_url_inventory}
-            )
-        ]
+        known_url_inventory = _deduplicate_known_urls(known_url_inventory)
     except (OSError, UnicodeError, ValueError, csv.Error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
@@ -2525,35 +2530,19 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 )
             finally:
                 await current_engine.close()
-            coverage_keys = {
-                "record_type",
-                "observed_at",
-                "complete",
-                "seed_origins",
-                "allowed_host_count",
-                "sitemap_document_count",
-                "sitemap_entry_count",
-                "unique_sitemap_url_count",
-                "duplicate_sitemap_url_count",
-                "sampling",
-            }
-            coverage = {key: value for key, value in collected.items() if key in coverage_keys}
-            inventory = {
-                "record_type": "inventory",
-                **{
-                    key: value
-                    for key, value in collected.items()
-                    if key not in coverage_keys and key != "validation_candidates"
-                },
-            }
-            validation_candidates = collected.get("validation_candidates", [])
-            if not isinstance(validation_candidates, list):
-                validation_candidates = []
-            evidence["current-robots-sitemaps"] = [
-                coverage,
-                inventory,
-                *[dict(row, record_type="candidate") for row in validation_candidates if isinstance(row, Mapping)],
-            ]
+            current_site_records, sitemap_graph_urls = project_current_site_files(collected)
+            evidence["current-robots-sitemaps"] = current_site_records
+            if sitemap_graph_urls:
+                known_url_inventory = _deduplicate_known_urls([*known_url_inventory, *sitemap_graph_urls])
+                audit_options.update(
+                    {
+                        "known_url_inventory_count": len(known_url_inventory),
+                        "known_url_inventory_url_count": len({row["url"] for row in known_url_inventory}),
+                        "known_url_inventory_sources": sorted({row["source"] for row in known_url_inventory}),
+                        "sitemap_orphan_graph_url_count": len(sitemap_graph_urls),
+                    }
+                )
+                evidence["orphans"] = await reports.orphan_pages(known_urls=known_url_inventory)
         if args.probe_url_variants:
             if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
                 print(
