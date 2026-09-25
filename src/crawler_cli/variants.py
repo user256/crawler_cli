@@ -96,7 +96,9 @@ def generate_variants(url: str, *, kinds: set[VariantKind] | None = None) -> lis
         elif kind == "scheme":
             if parsed.scheme.lower() in {"http", "https"}:
                 scheme = "http" if parsed.scheme.lower() == "https" else "https"
-                variants.append(UrlVariant(urlunsplit((scheme, parsed.netloc, path, parsed.query, parsed.fragment)), kind))
+                variants.append(
+                    UrlVariant(urlunsplit((scheme, parsed.netloc, path, parsed.query, parsed.fragment)), kind)
+                )
         elif kind == "www_host":
             host = parsed.hostname or ""
             if "." in host and not host.replace(".", "").isdigit() and "@" not in parsed.netloc:
@@ -110,7 +112,9 @@ def generate_variants(url: str, *, kinds: set[VariantKind] | None = None) -> lis
             reordered = sorted(pairs, key=lambda pair: (pair[0], pair[1]))
             query = urlencode(reordered, doseq=True)
             if len(pairs) > 1 and query != parsed.query:
-                variants.append(UrlVariant(urlunsplit((parsed.scheme, parsed.netloc, path, query, parsed.fragment)), kind))
+                variants.append(
+                    UrlVariant(urlunsplit((parsed.scheme, parsed.netloc, path, query, parsed.fragment)), kind)
+                )
 
     return variants
 
