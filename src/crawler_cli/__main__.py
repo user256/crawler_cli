@@ -2423,11 +2423,53 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         capabilities = run_context.get("schema_capabilities", {})
         if not isinstance(capabilities, dict):
             capabilities = {}
-        capability_by_report = {
-            "image-issues": "images_json",
-            "internal-link-quality": "links_json",
-            "link-graph-metrics": "links_json",
-            "tracking-parameter-links": "links_json",
+        capabilities_by_report = {
+            "redirect-chains": ("redirect_chain_json",),
+            "structured-data-inventory": ("schema_json",),
+            "image-issues": ("images_json",),
+            "internal-link-quality": ("links_json",),
+            "link-graph-metrics": (
+                "links_json",
+                "content_extracted",
+                "render_discovery_attempted",
+                "render_discovery_complete",
+            ),
+            "tracking-parameter-links": ("links_json",),
+            "orphans": (
+                "links_json",
+                "content_extracted",
+                "render_discovery_attempted",
+                "render_discovery_complete",
+            ),
+            "internal-authority": (
+                "links_json",
+                "content_extracted",
+                "render_discovery_attempted",
+                "render_discovery_complete",
+                "canonical_urls_json",
+            ),
+            "authority-coverage": (
+                "links_json",
+                "content_extracted",
+                "render_discovery_attempted",
+                "render_discovery_complete",
+                "canonical_urls_json",
+            ),
+            "metadata-locale-inventory": ("content_extracted", "canonical_urls_json", "variant_kind"),
+            "canonical-hreflang-inventory": (
+                "content_extracted",
+                "canonical_urls_json",
+                "canonical_evidence_json",
+            ),
+            "performance-inventory": (
+                "content_extracted",
+                "canonical_urls_json",
+                "ttfb_seconds",
+                "total_duration_seconds",
+                "lcp_ms",
+                "cls",
+                "inp_ms",
+            ),
         }
         evidence = {}
         for name in TECHNICAL_AUDIT_REPORTS:
@@ -2438,8 +2480,8 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 "conditional-get-probes",
             }:
                 continue
-            capability = capability_by_report.get(name)
-            if capability and capabilities.get(capability) is not True:
+            required_capabilities = capabilities_by_report.get(name, ())
+            if any(capabilities.get(capability) is not True for capability in required_capabilities):
                 continue
             evidence[name] = await _fetch_report(reports, name, args)
         if args.fetch_current_robots_sitemaps:
