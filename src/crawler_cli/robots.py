@@ -116,9 +116,18 @@ class _RobotsRules:
     combined when evaluating rules (RFC 9309 §2.2.1).
     """
 
-    def __init__(self, domain: str, content: str, *, scheme: str = "https") -> None:
+    def __init__(
+        self,
+        domain: str,
+        content: str,
+        *,
+        scheme: str = "https",
+        status: int | None = None,
+    ) -> None:
         self.domain = domain
         self.source_url = f"{scheme}://{domain}/robots.txt"
+        self.raw_content = content
+        self.http_status = status
         self._groups: dict[str, list[tuple[str, str]]] = {}
         self._crawl_delays: dict[str, float] = {}
         self._sitemaps: list[str] = []
@@ -473,7 +482,7 @@ class RobotsPolicyCache:
                 self.cache.mark_failed(domain)
             # 4xx (including 404): allow-all per RFC 9309 §2.3.1.3.
             elif 400 <= status < 500:
-                rules = _RobotsRules(domain, "")
+                rules = _RobotsRules(domain, "", scheme=urlparse(url).scheme, status=status)
                 # Do not cache CDN max-age=0 headers on a missing robots.txt —
                 # they are not robots policy and must not force per-URL refetch.
                 self.cache.set_rules(domain, rules, {})
@@ -481,7 +490,7 @@ class RobotsPolicyCache:
             return None
 
         try:
-            rules = _RobotsRules(domain, robots_content, scheme=parsed.scheme)
+            rules = _RobotsRules(domain, robots_content, scheme=parsed.scheme, status=status)
             self.cache.set_rules(domain, rules, headers)
             return rules
         except Exception:
