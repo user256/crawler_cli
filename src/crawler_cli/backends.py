@@ -1177,6 +1177,10 @@ class PlaywrightBackend(FetchBackend):
             "user_agent": self.config.user_agent,
             "ignore_https_errors": not self.config.verify_ssl,
             "extra_http_headers": extra_headers,
+            "viewport": {
+                "width": self.config.playwright_viewport_width,
+                "height": self.config.playwright_viewport_height,
+            },
         }
         # Obscura handles its own proxy via the obscura binary's --proxy flag;
         # only apply the generic proxy to plain Playwright contexts (ticket 027).
@@ -1528,6 +1532,7 @@ class PlaywrightBackend(FetchBackend):
                     if key is None or key not in observed:
                         return
                     observed[key].status = int(browser_response.status)
+                    observed[key].content_type = browser_response.headers.get("content-type")
                     observed[key].outcome = "response"
 
                 def _on_request_finished(request) -> None:
