@@ -26,6 +26,7 @@ def test_recheck_states_do_not_conflate_access_problems_with_http_failures():
     assert _aggregate([{"state": "responsive", "status": 200}] * 2) == "recovered"
     for state in (
         "challenge",
+        "incomplete",
         "robots_disallowed",
         "transport_error",
         "tls_error",
@@ -35,6 +36,11 @@ def test_recheck_states_do_not_conflate_access_problems_with_http_failures():
         "rate_limited",
     ):
         assert _aggregate([{"state": state}] * 2) == state
+
+
+def test_incomplete_observation_prevents_a_fluctuation_or_persistent_failure_claim():
+    assert _aggregate([{"state": "incomplete"}] * 2) == "incomplete"
+    assert _aggregate([{"state": "http_failure", "status": 503}, {"state": "incomplete"}]) == "incomplete"
 
 
 def test_http_access_and_transport_outcomes_keep_distinct_states():
