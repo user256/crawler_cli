@@ -78,6 +78,27 @@ write and must be explicitly requested. See
 read-back, and recovery behavior. Local contract/mocked tests do not replace a
 live publication check against a disposable copy.
 
+## Default remediation-ticket template
+
+For technical audits that produce remediation tickets, use this Google Sheets
+workbook as the standard starting point:
+
+<https://docs.google.com/spreadsheets/d/1T9BRLgaFDZ99Lx3q53Av75eZZM32BIJc0nahVPQpGmU/edit?gid=0#gid=0>
+
+Make a new copy for each audit and never write findings into the linked source.
+Use its ticket-register fields: `Label`, `Description`, `Suggested Solution`,
+`Acceptance Criteria`, `Ticket Classification`, `Priority`, `How to Replicate`,
+and `Notes / Documentation`. Add validated, actionable remediation items;
+keep healthy checks and underlying evidence in the evidence bundle rather than
+turning every check into a ticket. Adapt the ticket content to the audited site
+while retaining the template's fields and layout. If the sheet cannot be copied
+or edited, state that limitation and provide the same structured ticket rows in
+the agreed local deliverable.
+
+This human-facing ticket register is distinct from the optional `crawler-cli`
+evidence publisher above. The supplied ticket sheet does not implement the
+publisher's v2 evidence contract and must not be passed to that publisher.
+
 The bundle does **not** replace any conditional check that could not run,
 Search Console or validated access-log evidence, business intent/severity, or
 recipient-value review. Use the per-check registry and qualifications to see
