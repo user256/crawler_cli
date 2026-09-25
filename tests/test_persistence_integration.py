@@ -36,6 +36,7 @@ from crawler_cli import CrawlConfig, CrawlEngine
 from crawler_cli.intent_overlap import compute_exclusion
 from crawler_cli.persistence import AsyncpgStore, CRAWL_TABLES, SCHEMA_STATEMENTS
 from crawler_cli.reports import CrawlReports
+from crawler_cli.performance_audit import performance_inventory_report
 
 
 _DSN = os.environ.get("CRAWLER_CLI_TEST_DSN", "")
@@ -1297,6 +1298,76 @@ async def test_run_snapshots_keep_historical_analysis_values(store: AsyncpgStore
         await CrawlReports(store).indexability_reasons()
     a_report_rows = await CrawlReports(store, run_id="snapshot-a").indexability_reasons()
     assert [row["url"] for row in a_report_rows] == [url]
+
+
+@pytest.mark.asyncio
+async def test_technical_audit_timing_inventory_isolated_across_sites_runs_and_partial_pages(
+    store: AsyncpgStore,
+) -> None:
+    """The audit timing source uses only the selected immutable run snapshots."""
+    site_a_url = "https://audit-site-a.example/page"
+    site_b_url = "https://audit-site-b.example/page"
+    partial_url = "https://audit-site-b.example/not-decoded"
+
+    def extracted_page(url: str, title: str) -> CrawlResult:
+        return CrawlResult(
+            requested_url=url,
+            final_url=url,
+            status=200,
+            headers={
+                "content-type": "text/html",
+                "cache-control": "public, max-age=600",
+                "etag": f'"{title}"',
+            },
+            content_type="text/html",
+            fetch_backend="aiohttp",
+            extracted=ExtractedContent(
+                title=title,
+                meta_description=None,
+                meta_robots=RobotsDirectives(),
+                x_robots_tag=RobotsDirectives(),
+                canonical=url,
+                x_canonical=None,
+                hreflang_links=[],
+                html_lang="en",
+                headings={"h1": [title], "h2": []},
+                text=title,
+                word_count=1,
+                metadata={},
+            ),
+            raw_html=f"<html><title>{title}</title><body><h1>{title}</h1></body></html>",
+            ttfb_seconds=0.1 if title == "A" else 0.4,
+            total_duration_seconds=0.2 if title == "A" else 0.8,
+        )
+
+    await store.create_crawl_run("audit-site-a-run", seed_urls=[site_a_url], config_hash="a", config={})
+    await store.persist(extracted_page(site_a_url, "A"))
+    await store.create_crawl_run("audit-site-b-run", seed_urls=[site_b_url], config_hash="b", config={})
+    await store.persist(extracted_page(site_b_url, "B"))
+    await store.persist(
+        CrawlResult(
+            requested_url=partial_url,
+            final_url=partial_url,
+            status=200,
+            headers={"content-type": "text/html"},
+            content_type="text/html",
+            fetch_backend="aiohttp",
+            extracted=None,
+            raw_html=None,
+            ttfb_seconds=0.3,
+            total_duration_seconds=0.5,
+        )
+    )
+
+    a_rows = await CrawlReports(store, run_id="audit-site-a-run").technical_audit_performance_inventory()
+    b_rows = await CrawlReports(store, run_id="audit-site-b-run").technical_audit_performance_inventory()
+    assert [row["url"] for row in a_rows] == [site_a_url]
+    assert {row["url"] for row in b_rows} == {site_b_url, partial_url}
+    b_coverage, *_ = performance_inventory_report(b_rows)
+    assert b_coverage["eligible_canonical_indexable_html_count"] == 1
+    assert b_coverage["excluded_by_reason"] == {"content_not_extracted": 1}
+    with pytest.raises(ValueError, match="multiple crawl runs"):
+        await CrawlReports(store).technical_audit_performance_inventory()
 
 
 @pytest.mark.asyncio
