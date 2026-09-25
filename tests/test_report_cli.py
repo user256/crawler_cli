@@ -433,6 +433,36 @@ def test_technical_audit_publisher_is_invoked_only_after_json_is_written(fake_re
     assert "Published technical audit" in capsys.readouterr().out
 
 
+def test_technical_audit_reports_auth_initialization_failure_without_masking_it(
+    fake_reports, tmp_path, monkeypatch, capsys
+):
+    from crawler_cli import google_sheets
+
+    out = tmp_path / "technical-audit.json"
+
+    def raise_refresh_error(_credentials):
+        raise LookupError("refresh token rejected")
+
+    monkeypatch.setattr(google_sheets, "google_services", raise_refresh_error)
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--out",
+                str(out),
+                "--publish-google-sheets",
+                "--google-sheets-template",
+                "a" * 20,
+            ]
+        )
+        == 2
+    )
+    error = capsys.readouterr().err
+    assert "Google Sheets publication failed: LookupError" in error
+    assert f"receipt: {out}.sheets-receipt.json" in error
+    assert "UnboundLocalError" not in error
+
+
 def test_technical_audit_downgrades_a_run_changed_during_collection(fake_reports, tmp_path):
     fake_reports.updated_at = 124
     out = tmp_path / "technical-audit.json"

@@ -2497,10 +2497,10 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
     if args.publish_google_sheets:
         from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services
 
+        receipt_path = args.google_sheets_receipt or f"{args.out}.sheets-receipt.json"
         try:
             credentials = credential_path(args.google_sheets_credentials)
             drive, sheets = google_services(credentials)
-            receipt_path = args.google_sheets_receipt or f"{args.out}.sheets-receipt.json"
             sheet_url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
                 template=args.google_sheets_template,
                 title=args.google_sheets_title or f"Technical SEO audit {run_id}",
