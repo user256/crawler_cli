@@ -292,6 +292,8 @@ class CrawlConfig:
     Scroll only; no links or controls are clicked. Intended for explicit audit
     samples, not ordinary crawls.
     """
+    capture_render_image_layout: bool = False
+    """Capture bounded rendered image and CSS-background box measurements."""
     follow_rendered_links: bool = False
     """Follow hydrated-only anchor deltas in open crawls."""
     render_discovery_max_raw_links: int = 4
