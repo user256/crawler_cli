@@ -127,11 +127,14 @@ def test_parameter_family_inventory_reconciles_instances_targets_and_sources():
     ]
 
     inventory = parameterized_canonical_link_inventory(rows)
-    coverage = inventory[0]
+    coverage_by_family = {row["parameter_family"]: row for row in inventory if row["record_type"] == "coverage"}
+    coverage = coverage_by_family["ui_state_or_search_review"]
 
     assert coverage["parameter_family"] == "ui_state_or_search_review"
     assert coverage["link_instances"] == 2
     assert coverage["unique_targets"] == 1
     assert coverage["unique_sources"] == 2
-    assert inventory[1]["parameter_keys"] == ["sort"]
+    assert coverage["canonicalized_link_instances"] == 2
+    assert coverage["canonicalized_unique_targets"] == 1
+    assert next(row for row in inventory if row.get("record_type") == "candidate")["parameter_keys"] == ["sort"]
     assert "https://example.com/list?page=2" not in {row.get("target_url") for row in inventory[1:]}

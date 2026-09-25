@@ -269,6 +269,12 @@ def parameterized_canonical_link_inventory(
 ) -> list[dict[str, object]]:
     """Group internally linked parameter URLs with saved non-self canonicals."""
     findings: list[dict[str, object]] = []
+    counts: dict[str, int] = {}
+    targets: dict[str, set[str]] = {}
+    sources: dict[str, set[str]] = {}
+    keys_by_family: dict[str, set[str]] = {}
+    canonicalized_instances: dict[str, int] = {}
+    canonicalized_targets: dict[str, set[str]] = {}
     for source in source_rows:
         issues = source.get("issues", [])
         if isinstance(issues, str):
@@ -276,7 +282,7 @@ def parameterized_canonical_link_inventory(
                 issues = json.loads(issues)
             except ValueError:
                 issues = []
-        if not isinstance(issues, list) or "parameter_target" not in issues or "noncanonical_target" not in issues:
+        if not isinstance(issues, list) or "parameter_target" not in issues:
             continue
         target = str(source.get("target_url") or "")
         query = urlsplit(target).query
@@ -292,6 +298,16 @@ def parameterized_canonical_link_inventory(
             family = "tracking"
         else:
             family = "content_or_unknown_parameter"
+        target_digest = hashlib.sha256(target.encode()).hexdigest()
+        source_url = str(source.get("source_url") or "")
+        counts[family] = counts.get(family, 0) + 1
+        targets.setdefault(family, set()).add(target_digest)
+        sources.setdefault(family, set()).add(hashlib.sha256(source_url.encode()).hexdigest())
+        keys_by_family.setdefault(family, set()).update(keys)
+        if "noncanonical_target" not in issues:
+            continue
+        canonicalized_instances[family] = canonicalized_instances.get(family, 0) + 1
+        canonicalized_targets.setdefault(family, set()).add(target_digest)
         findings.append(
             {
                 "record_type": "candidate",
@@ -299,24 +315,16 @@ def parameterized_canonical_link_inventory(
                 "parameter_family": family,
                 "parameter_keys": keys,
                 "source_url": _metadata_url(str(source.get("source_url") or "")),
-                "source_url_digest_sha256": hashlib.sha256(str(source.get("source_url") or "").encode()).hexdigest(),
+                "source_url_digest_sha256": hashlib.sha256(source_url.encode()).hexdigest(),
                 "source_indexable": source.get("source_indexable"),
                 "target_url": _metadata_url(target),
-                "target_url_digest_sha256": hashlib.sha256(target.encode()).hexdigest(),
+                "target_url_digest_sha256": target_digest,
                 "canonical_url": _metadata_url(str(source.get("target_canonical_url") or "")),
                 "anchor_text": _clean_metadata(source.get("anchor_text")),
                 "xpath": _clean_metadata(source.get("xpath")),
                 "qualification": "saved_link_and_canonical_evidence; parameter_purpose_requires_review",
             }
         )
-    counts: dict[str, int] = {}
-    targets: dict[str, set[str]] = {}
-    sources: dict[str, set[str]] = {}
-    for finding in findings:
-        family = str(finding["parameter_family"])
-        counts[family] = counts.get(family, 0) + 1
-        targets.setdefault(family, set()).add(str(finding["target_url_digest_sha256"]))
-        sources.setdefault(family, set()).add(str(finding["source_url_digest_sha256"]))
     coverage = [
         {
             "record_type": "coverage",
@@ -324,6 +332,9 @@ def parameterized_canonical_link_inventory(
             "link_instances": count,
             "unique_targets": len(targets[family]),
             "unique_sources": len(sources[family]),
+            "parameter_keys": sorted(keys_by_family[family]),
+            "canonicalized_link_instances": canonicalized_instances.get(family, 0),
+            "canonicalized_unique_targets": len(canonicalized_targets.get(family, set())),
         }
         for family, count in sorted(counts.items())
     ]
@@ -1286,12 +1297,26 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
         overview.extend(
             [
                 [
-                    "Canonicalized parameter link instances",
+                    "Internal parameter link instances",
                     sum((_optional_int(row.get("link_instances")) or 0) for row in parameter_coverage_rows),
                 ],
                 [
-                    "Canonicalized parameter URL targets",
+                    "Internal parameter URL targets",
                     sum((_optional_int(row.get("unique_targets")) or 0) for row in parameter_coverage_rows),
+                ],
+                [
+                    "Noncanonical parameter link instances",
+                    sum(
+                        (_optional_int(row.get("canonicalized_link_instances")) or 0)
+                        for row in parameter_coverage_rows
+                    ),
+                ],
+                [
+                    "Noncanonical parameter URL targets",
+                    sum(
+                        (_optional_int(row.get("canonicalized_unique_targets")) or 0)
+                        for row in parameter_coverage_rows
+                    ),
                 ],
             ]
         )
