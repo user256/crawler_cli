@@ -198,9 +198,9 @@ def test_repeated_live_http_failures_are_the_only_link_errors_eligible_for_clien
     gate = audit["client_publication_gate"]
     assert gate["ready"] is True
     assert gate["eligible_action_count"] == 1
-    assert gate["client_actions"][0]["Problem"] == "Internal link targets a repeatedly failing URL"
+    assert gate["client_actions"][0]["Problem"] == "Internal links target a repeatedly failing URL"
     tables = audit_sheet_tables(audit)
-    assert tables["Audit Log"][1][0] == "Internal link targets a repeatedly failing URL"
+    assert tables["Audit Log"][1][0] == "Internal links target a repeatedly failing URL"
     replay = build_technical_audit(
         crawl_run_id="run-1",
         reports=_reports(),

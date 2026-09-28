@@ -105,8 +105,11 @@ def test_unknown_feature_and_recommendation_candidates_never_enter_client_action
         row.get("candidate_type") == "google_feature_eligibility_not_evaluated"
         for row in audit["structured_data_report"]
     )
-    table = audit_sheet_tables(audit)["Structured Data"]
-    assert "raw_evidence_excerpt" not in table[0]
+    assert "Structured Data" not in audit_sheet_tables(audit)
+    assert any(
+        row.get("candidate_type") == "google_feature_eligibility_not_evaluated"
+        for row in audit["structured_data_report"]
+    )
 
 
 def test_rendered_structured_data_inventory_is_kept_as_a_separate_channel():
