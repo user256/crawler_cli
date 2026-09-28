@@ -154,6 +154,7 @@ def _aggregate(samples: list[dict[str, object]]) -> str:
             else "persistent_http_failure"
         )
     exceptional = {
+        "incomplete",
         "robots_disallowed",
         "scope_denied",
         "out_of_scope",
