@@ -70,6 +70,7 @@ from .exposure_inventory import (
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
 from .current_site_files import build_site_file_scope, collect_current_site_files
+from .url_variant_audit import collect_url_variant_evidence
 from .exit_codes import EXIT_FAILURE, EXIT_FINDINGS, EXIT_SUCCESS, EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
@@ -2427,7 +2428,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         }
         evidence = {}
         for name in TECHNICAL_AUDIT_REPORTS:
-            if name == "current-robots-sitemaps":
+            if name in {"current-robots-sitemaps", "url-variant-soft404"}:
                 continue
             capability = capability_by_report.get(name)
             if capability and capabilities.get(capability) is not True:
@@ -2526,6 +2527,83 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 inventory,
                 *[dict(row, record_type="candidate") for row in validation_candidates if isinstance(row, Mapping)],
             ]
+        if args.probe_url_variants:
+            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
+                print(
+                    "Error: this crawl run used an authorization scope; URL-variant probes require --scope-manifest",
+                    file=sys.stderr,
+                )
+                return EXIT_VALIDATION
+            if run_context.get("portal_connection_policy_active") is True:
+                print(
+                    "Error: URL-variant probes do not reuse the crawl's Portal connection policy",
+                    file=sys.stderr,
+                )
+                return EXIT_VALIDATION
+            historical_rows = await reports.current_site_join_inventory()
+            allowed = run_context.get("declared_allowed_hosts", [])
+            seeds = run_context.get("seed_origins", [])
+            allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
+            seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
+            scope_predicate = None
+            if args.scope_manifest:
+                from .authorisation import compile_scope_predicate, load_scope_manifest
+
+                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
+            stored_digest = run_context.get("authorization_scope_digest")
+            if stored_digest:
+                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
+                supplied_digest = (
+                    hashlib.sha256(
+                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+                    if supplied_snapshot is not None
+                    else None
+                )
+                if supplied_digest != stored_digest:
+                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
+                    return EXIT_VALIDATION
+            host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
+            probe_engine = CrawlEngine(
+                CrawlConfig(
+                    same_host_only=True,
+                    allowed_hosts=sorted(allowed_hosts),
+                    respect_robots_txt=True,
+                    max_concurrency=1,
+                    per_host_concurrency=1,
+                    max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
+                    destination_guard="pinned",
+                    scope_predicate=cast(Any, host_scope),
+                )
+            )
+            try:
+                collected = await collect_url_variant_evidence(
+                    probe_engine,
+                    historical_rows,
+                    max_control_pages=args.variant_max_control_pages,
+                    max_variant_probes=args.variant_max_probes,
+                    max_soft404_hosts=args.soft404_max_hosts,
+                )
+            finally:
+                await probe_engine.close()
+            variant_rows = collected.get("variant_candidates", [])
+            soft404_rows = collected.get("soft404_candidates", [])
+            variant_candidates = (
+                [row for row in variant_rows if isinstance(row, Mapping)] if isinstance(variant_rows, list) else []
+            )
+            soft404_candidates = (
+                [row for row in soft404_rows if isinstance(row, Mapping)] if isinstance(soft404_rows, list) else []
+            )
+            variant_evidence: list[dict[str, object]] = [
+                {
+                    key: value
+                    for key, value in collected.items()
+                    if key not in {"variant_candidates", "soft404_candidates"}
+                }
+            ]
+            variant_evidence.extend(dict(row) for row in variant_candidates)
+            variant_evidence.extend(dict(row) for row in soft404_candidates)
+            evidence["url-variant-soft404"] = variant_evidence
         if args.recheck_live:
             if not args.scope_manifest:
                 print("Error: --recheck-live requires --scope-manifest", file=sys.stderr)
@@ -4304,6 +4382,14 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument("--current-max-sitemaps", type=positive_int, default=100)
     audit_parser.add_argument("--current-max-sitemap-urls", type=positive_int, default=100_000)
     audit_parser.add_argument("--current-max-live-samples", type=non_negative_int, default=25)
+    audit_parser.add_argument(
+        "--probe-url-variants",
+        action="store_true",
+        help="Explicitly probe a bounded set of current URL variants and one synthetic 404 path per host",
+    )
+    audit_parser.add_argument("--variant-max-control-pages", type=positive_int, default=10)
+    audit_parser.add_argument("--variant-max-probes", type=positive_int, default=50)
+    audit_parser.add_argument("--soft404-max-hosts", type=positive_int, default=10)
     audit_parser.add_argument("--recheck-limit", type=positive_int, default=25)
     audit_parser.add_argument("--recheck-attempts", type=positive_int, default=2)
     audit_parser.add_argument("--recheck-timeout", type=positive_float, default=10.0)

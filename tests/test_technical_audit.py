@@ -332,6 +332,32 @@ def test_sheet_tables_only_include_detail_tabs_with_evidence():
     assert ["Client publication ready", False] in tables["Overview"]
 
 
+def test_parameter_url_family_sheet_includes_reconcilable_counts_and_link_instances():
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "internal-link-quality": [
+                {
+                    "issues": ["parameter_target", "noncanonical_target"],
+                    "source_url": "https://example.test/a",
+                    "source_indexable": True,
+                    "target_url": "https://example.test/list?filter=",
+                    "target_canonical_url": "https://example.test/list",
+                    "anchor_text": "Filter",
+                    "xpath": "/html/body/a[1]",
+                }
+            ]
+        },
+        run_context={"completion_state": "complete", "parsed_html_count": 1},
+    )
+
+    table = audit_sheet_tables(audit)["Parameter URL Families"]
+
+    assert table[1][table[0].index("link_instances")] == 1
+    assert table[1][table[0].index("unique_targets")] == 1
+    assert table[2][table[0].index("target_url")] == "https://example.test/list?filter"
+
+
 def test_missing_run_context_and_missing_source_are_not_reported_as_passes():
     audit = build_technical_audit(crawl_run_id="run-1", reports={"indexability": []})
     checks = {check["id"]: check for check in audit["checks"]}
