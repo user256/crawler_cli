@@ -47,6 +47,11 @@ current rich-result eligibility, and business severity/value remain dependent
 on supplied sources or analyst judgment. Missing or partial evidence is
 unknown/incomplete, not a clean pass.
 
+The output's `skill_requirements` inventory maps every skill section to its
+separate requirement controls, support state, evidence boundary, acceptance
+test, and owning ticket. It is a static traceability map, not proof that a
+check ran; use `checks` and their denominators for the selected audit run.
+
 The client `Audit Log` is a recipient-filtered action list, not a dump of every
 check. Historical link failures do not become client failures until eligible
 live rechecks confirm them; recovered and inconclusive targets stay out of
@@ -77,6 +82,27 @@ write and must be explicitly requested. See
 `crawler_cli/docs/technical-audit-google-sheets.md` for access, receipts,
 read-back, and recovery behavior. Local contract/mocked tests do not replace a
 live publication check against a disposable copy.
+
+## Default remediation-ticket template
+
+For technical audits that produce remediation tickets, use this Google Sheets
+workbook as the standard starting point:
+
+<https://docs.google.com/spreadsheets/d/1T9BRLgaFDZ99Lx3q53Av75eZZM32BIJc0nahVPQpGmU/edit?gid=0#gid=0>
+
+Make a new copy for each audit and never write findings into the linked source.
+Use its ticket-register fields: `Label`, `Description`, `Suggested Solution`,
+`Acceptance Criteria`, `Ticket Classification`, `Priority`, `How to Replicate`,
+and `Notes / Documentation`. Add validated, actionable remediation items;
+keep healthy checks and underlying evidence in the evidence bundle rather than
+turning every check into a ticket. Adapt the ticket content to the audited site
+while retaining the template's fields and layout. If the sheet cannot be copied
+or edited, state that limitation and provide the same structured ticket rows in
+the agreed local deliverable.
+
+This human-facing ticket register is distinct from the optional `crawler-cli`
+evidence publisher above. The supplied ticket sheet does not implement the
+publisher's v2 evidence contract and must not be passed to that publisher.
 
 The bundle does **not** replace any conditional check that could not run,
 Search Console or validated access-log evidence, business intent/severity, or

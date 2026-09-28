@@ -92,6 +92,65 @@ async def test_initialize_is_idempotent(store: AsyncpgStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_technical_audit_marks_legacy_snapshot_reports_unavailable(store: AsyncpgStore, tmp_path: Path) -> None:
+    """Older run snapshots omit newer fields; audit coverage must degrade safely."""
+    from crawler_cli.__main__ import _build_parser, _dispatch
+
+    run_id = "legacy-technical-audit"
+    url = "https://legacy-audit.example/"
+    await store.create_crawl_run(run_id, seed_urls=[url], config_hash="legacy", config={})
+    await store.persist(
+        CrawlResult(
+            requested_url=url,
+            final_url=url,
+            status=200,
+            headers={"content-type": "text/html"},
+            content_type="text/html",
+            fetch_backend="test",
+            extracted=None,
+            raw_html="<html><body>legacy snapshot</body></html>",
+        )
+    )
+    await store.update_crawl_run_status(run_id, "complete")
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        await conn.execute(
+            """ALTER TABLE page_run_snapshots
+               DROP COLUMN content_extracted,
+               DROP COLUMN indexability_evidence_json,
+               DROP COLUMN redirect_chain_json,
+               DROP COLUMN canonical_evidence_json"""
+        )
+
+    out = tmp_path / "legacy-technical-audit.json"
+    args = _build_parser().parse_args(
+        ["technical-audit", "--postgres-dsn", store.dsn, "--crawl-run-id", run_id, "--out", str(out)]
+    )
+    try:
+        assert await _dispatch(args) == 0
+        payload = json.loads(out.read_text())
+        checks = {check["id"]: check for check in payload["checks"]}
+        for check_id in (
+            "orphan-candidates",
+            "redirect-chains",
+            "metadata-and-locale",
+            "canonical-consistency",
+            "hreflang-consistency",
+            "performance-and-conditional-requests",
+            "internal-authority-inventory",
+        ):
+            assert checks[check_id]["status"] in {"partial", "unavailable"}
+
+        reports = CrawlReports(store, run_id=run_id)
+        history = await reports.current_site_join_inventory()
+        assert len(history) == 1
+        assert history[0]["content_extracted"] is None
+    finally:
+        # Restore the shared integration schema even when an assertion fails.
+        await store.initialize()
+
+
+@pytest.mark.asyncio
 async def test_initialize_does_not_add_legacy_run_to_run_scoped_database(store: AsyncpgStore) -> None:
     """A later crawl setup must not mirror the first real run into ``legacy``."""
     url = "https://run-scoped.example/"

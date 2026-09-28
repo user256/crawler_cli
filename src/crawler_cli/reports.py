@@ -142,6 +142,17 @@ class CrawlReports:
                 "links_json": "links_json" in snapshot_columns,
                 "schema_json": "schema_json" in snapshot_columns,
                 "content_hash_simhash": "content_hash_simhash" in snapshot_columns,
+                "canonical_urls_json": "canonical_urls_json" in snapshot_columns,
+                "canonical_evidence_json": "canonical_evidence_json" in snapshot_columns,
+                "redirect_chain_json": "redirect_chain_json" in snapshot_columns,
+                "variant_kind": "variant_kind" in snapshot_columns,
+                "render_discovery_attempted": "render_discovery_attempted" in snapshot_columns,
+                "render_discovery_complete": "render_discovery_complete" in snapshot_columns,
+                "ttfb_seconds": "ttfb_seconds" in snapshot_columns,
+                "total_duration_seconds": "total_duration_seconds" in snapshot_columns,
+                "lcp_ms": "lcp_ms" in snapshot_columns,
+                "cls": "cls" in snapshot_columns,
+                "inp_ms": "inp_ms" in snapshot_columns,
             },
             "frontier_queued": frontier[0],
             "frontier_pending": frontier[1],
@@ -197,10 +208,18 @@ class CrawlReports:
     async def current_site_join_inventory(self) -> list[dict[str, object]]:
         """Return safe run-scoped facts used to join current sitemaps to history."""
         run_id = await self._run_id()
+        column_rows = await self._fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_schema = current_schema()
+                 AND table_name = 'page_run_snapshots'"""
+        )
+        snapshot_columns = {str(row["column_name"]) for row in column_rows}
+        extraction_field = "s.content_extracted" if "content_extracted" in snapshot_columns else "NULL::BOOLEAN"
         rows = await self._fetch(
-            """
+            f"""
             SELECT u.url, u.kind, s.final_status_code, s.overall_indexable,
-                   s.content_extracted, s.html_lang, s.custom_data ->> 'template' AS template,
+                   {extraction_field} AS content_extracted,
+                   s.html_lang, s.custom_data ->> 'template' AS template,
                    s.canonical_urls_json, s.links_json
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
             WHERE s.run_id = $1
@@ -216,7 +235,8 @@ class CrawlReports:
         pages = await self._fetch(
             """
             SELECT u.url, u.kind, s.links_json, s.content_extracted,
-                   s.render_discovery_attempted, s.render_discovery_complete
+                   s.render_discovery_attempted, s.render_discovery_complete,
+                   s.final_status_code, s.overall_indexable, s.canonical_urls_json
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
             WHERE s.run_id = $1 AND u.kind = 'html'
             ORDER BY u.url
@@ -237,6 +257,15 @@ class CrawlReports:
                 observed_at = item.get("observed_at", "").strip()
                 if observed_at:
                     observation["observed_at"] = observed_at
+                for field in (
+                    "source_sitemap",
+                    "historical_status",
+                    "historical_indexable",
+                    "historical_canonical_state",
+                ):
+                    value = item.get(field, "").strip()
+                    if value:
+                        observation[field] = value
                 source_urls.setdefault(url, []).append(observation)
         candidates = [
             {
@@ -246,6 +275,9 @@ class CrawlReports:
                 "graph_complete": complete,
                 "seed": str(page["url"]) in seeds,
                 "is_crawled": True,
+                "http_status": page.get("final_status_code"),
+                "overall_indexable": page.get("overall_indexable"),
+                "canonical_state": _canonical_state(str(page["url"]), page.get("canonical_urls_json")),
                 "source_labels": sorted({item["source"] for item in source_urls.get(str(page["url"]), [])}),
                 "source_observations": sorted(
                     source_urls.get(str(page["url"]), []),
@@ -276,6 +308,12 @@ class CrawlReports:
                     "observed_inlink_count": count,
                     "graph_complete": complete if in_scope else False,
                     "is_crawled": url in page_urls,
+                    "http_status": self._source_int(observations, "historical_status"),
+                    "overall_indexable": self._source_bool(observations, "historical_indexable"),
+                    "canonical_state": self._source_value(observations, "historical_canonical_state") or "unknown",
+                    "source_sitemaps": sorted(
+                        {item["source_sitemap"] for item in observations if item.get("source_sitemap")}
+                    ),
                     "source_labels": sorted(sources),
                     "source_observations": sorted(
                         observations, key=lambda item: (item["source"], item.get("observed_at", ""))
@@ -284,6 +322,27 @@ class CrawlReports:
                 }
             )
         return candidates
+
+    @staticmethod
+    def _source_value(observations: list[dict[str, str]], field: str) -> str | None:
+        return next((item[field] for item in observations if item.get(field)), None)
+
+    @staticmethod
+    def _source_bool(observations: list[dict[str, str]], field: str) -> bool | None:
+        value = next((item[field].lower() for item in observations if item.get(field)), None)
+        if value in {"true", "1", "yes"}:
+            return True
+        if value in {"false", "0", "no"}:
+            return False
+        return None
+
+    @staticmethod
+    def _source_int(observations: list[dict[str, str]], field: str) -> int | None:
+        value = next((item[field] for item in observations if item.get(field)), None)
+        try:
+            return int(value) if value is not None else None
+        except ValueError:
+            return None
 
     async def indexability_reasons(self) -> list[dict[str, object]]:
         run_id = await self._run_id()

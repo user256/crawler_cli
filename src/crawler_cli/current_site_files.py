@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import re
 from typing import TYPE_CHECKING, Mapping, Sequence
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
@@ -251,6 +252,9 @@ async def collect_current_site_files(
                     "historical_crawl": "crawled" if item.loc in historical_pages else "not_crawled_in_selected_run",
                     "historical_status": historical_pages.get(item.loc, {}).get("final_status_code"),
                     "historical_indexable": historical_pages.get(item.loc, {}).get("overall_indexable"),
+                    "historical_canonical_state": _canonical_state(
+                        item.loc, historical_pages.get(item.loc, {}).get("canonical_urls_json")
+                    ),
                     "admission_state": "in_scope" if url_reason is None else "not_admitted",
                     **({"admission_reason": url_reason} if url_reason else {}),
                 }
@@ -360,9 +364,25 @@ async def collect_current_site_files(
                     )
     if len(sitemap_entries) >= max_urls:
         complete = False
+    observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    graph_join_urls = [
+        {
+            "url": str(entry["_raw_url"]),
+            "source": "sitemap",
+            "observed_at": observed_at,
+            "source_sitemap": str(entry["source_sitemap"]),
+            "historical_status": str(entry["historical_status"]) if entry.get("historical_status") is not None else "",
+            "historical_indexable": str(entry["historical_indexable"])
+            if entry.get("historical_indexable") is not None
+            else "",
+            "historical_canonical_state": str(entry.get("historical_canonical_state") or "unknown"),
+        }
+        for entry in sitemap_entries
+        if entry.get("admission_state") == "in_scope"
+    ]
     return {
         "record_type": "coverage",
-        "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "observed_at": observed_at,
         "complete": complete,
         "seed_origins": [_safe_url(origin) for origin in seed_origins],
         "allowed_host_count": len(allowed_hosts),
@@ -374,10 +394,47 @@ async def collect_current_site_files(
         "rejected_sitemaps": rejected_sitemaps,
         "documents": documents,
         "entries": [{key: value for key, value in entry.items() if key != "_raw_url"} for entry in sitemap_entries],
+        "_graph_join_urls": graph_join_urls,
         "live_samples": live_samples,
         "validation_candidates": validation,
         "sampling": "deterministic round-robin by crawl state, locale and path-template proxy",
     }
+
+
+def project_current_site_files(collected: Mapping[str, object]) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
+    """Separate public sitemap evidence from private raw URL graph-join inputs."""
+    coverage_keys = {
+        "record_type",
+        "observed_at",
+        "complete",
+        "seed_origins",
+        "allowed_host_count",
+        "sitemap_document_count",
+        "sitemap_entry_count",
+        "unique_sitemap_url_count",
+        "duplicate_sitemap_url_count",
+        "sampling",
+    }
+    coverage = {key: value for key, value in collected.items() if key in coverage_keys}
+    inventory = {
+        "record_type": "inventory",
+        **{
+            key: value
+            for key, value in collected.items()
+            if key not in coverage_keys and key not in {"validation_candidates", "_graph_join_urls"}
+        },
+    }
+    validation = collected.get("validation_candidates", [])
+    validation_rows = validation if isinstance(validation, list) else []
+    candidates = [dict(row, record_type="candidate") for row in validation_rows if isinstance(row, Mapping)]
+    graph_urls = collected.get("_graph_join_urls", [])
+    graph_rows = graph_urls if isinstance(graph_urls, list) else []
+    safe_graph_urls = [
+        {str(key): str(value) for key, value in row.items() if value is not None}
+        for row in graph_rows
+        if isinstance(row, Mapping) and row.get("url") and row.get("source")
+    ]
+    return [coverage, inventory, *candidates], safe_graph_urls
 
 
 async def _fetch_live_samples(engine, entries, *, historical_pages, max_samples, get_rules):
@@ -470,6 +527,20 @@ async def _fetch_live_samples(engine, entries, *, historical_pages, max_samples,
                 )
         samples.append(sample)
     return samples
+
+
+def _canonical_state(url: str, value: object) -> str:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = [value]
+    if not isinstance(value, list):
+        return "unknown"
+    if not value:
+        return "implicit_self"
+    canonical = str(value[0])
+    return "declared_self" if canonical == url else "noncanonical"
 
 
 def _robots_controls(rules, origin: str, user_agent: str) -> list[dict[str, object]]:

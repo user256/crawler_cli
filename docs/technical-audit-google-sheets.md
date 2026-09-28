@@ -1,5 +1,11 @@
 # Technical audit Google Sheets publication
 
+The standard human-facing remediation-ticket template is
+[Technical Audit Tickets](https://docs.google.com/spreadsheets/d/1T9BRLgaFDZ99Lx3q53Av75eZZM32BIJc0nahVPQpGmU/edit?gid=0#gid=0).
+Make a copy for each audit and keep the source unchanged. It is not the
+machine-readable evidence template described below; its columns do not
+implement the v2 publisher contract.
+
 Publishing is optional and creates a new copy; it never writes to the source
 template. The selected workbook must implement the checked-in
 [`technical-audit-sheets-v2.json`](../templates/technical-audit-sheets-v2.json)

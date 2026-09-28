@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crawler_cli.current_site_files import build_site_file_scope, collect_current_site_files
+from crawler_cli.current_site_files import build_site_file_scope, collect_current_site_files, project_current_site_files
 from crawler_cli.models import FetchResponse
 from crawler_cli.robots import _RobotsRules
 
@@ -56,6 +56,26 @@ def _response(url: str, body: bytes, content_type: str, status: int = 200) -> Fe
     )
 
 
+def test_current_sitemap_projection_keeps_raw_join_urls_out_of_public_evidence():
+    records, graph_urls = project_current_site_files(
+        {
+            "record_type": "coverage",
+            "observed_at": "2026-09-25T12:00:00+00:00",
+            "entries": [{"url": "https://example.com/private?token"}],
+            "_graph_join_urls": [
+                {"url": "https://example.com/private?token=secret", "source": "sitemap"},
+            ],
+            "validation_candidates": [{"candidate_type": "fixture"}],
+        }
+    )
+
+    assert records[0]["record_type"] == "coverage"
+    assert records[1]["record_type"] == "inventory"
+    assert "_graph_join_urls" not in records[1]
+    assert records[2] == {"candidate_type": "fixture", "record_type": "candidate"}
+    assert graph_urls == [{"url": "https://example.com/private?token=secret", "source": "sitemap"}]
+
+
 @pytest.mark.asyncio
 async def test_collects_nested_sitemaps_and_never_fetches_robots_blocked_documents():
     root = f"{BASE}/sitemap-index.xml"
@@ -69,6 +89,7 @@ async def test_collects_nested_sitemaps_and_never_fetches_robots_blocked_documen
       <url><loc>{BASE}/en/a</loc><lastmod>2026-01-01</lastmod></url>
       <url><loc>{BASE}/en/a</loc></url>
       <url><loc>{BASE}/fr/b</loc><lastmod>not-a-date</lastmod></url>
+      <url><loc>https://outside.example/page</loc></url>
     </urlset>""".encode()
     responses = {
         root: _response(root, root_xml, "application/xml"),
@@ -99,9 +120,17 @@ async def test_collects_nested_sitemaps_and_never_fetches_robots_blocked_documen
     assert blocked not in engine.fetched
     assert any(row.get("state") == "robots_disallowed_not_fetched" for row in result["documents"])
     entries = result["entries"]
-    assert len(entries) == 3
+    assert len(entries) == 4
     assert entries[0]["historical_crawl"] == "crawled"
     assert entries[2]["historical_crawl"] == "not_crawled_in_selected_run"
+    assert entries[3]["admission_state"] == "not_admitted"
+    graph_urls = result["_graph_join_urls"]
+    assert isinstance(graph_urls, list)
+    assert sum(row["url"] == f"{BASE}/en/a" for row in graph_urls) == 2
+    assert {row["source"] for row in graph_urls} == {"sitemap"}
+    assert not any(row["url"].startswith("https://outside.example/") for row in graph_urls)
+    assert all("_raw_url" not in row for row in entries)
+    assert not any(url.endswith("/en/a") or url.endswith("/fr/b") for url in engine.fetched)
     assert result["duplicate_sitemap_url_count"] == 1
     assert any(item["candidate_type"] == "duplicate_sitemap_url" for item in result["validation_candidates"])
     assert any(item["candidate_type"] == "sitemap_lastmod_review" for item in result["validation_candidates"])

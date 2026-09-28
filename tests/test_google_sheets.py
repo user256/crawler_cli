@@ -69,6 +69,14 @@ def test_recipient_tables_match_the_managed_v2_template_headers():
             "run_date": "2026-09-25",
             "health_metrics": [],
             "coverage_caveats": "None",
+            "known_url_inventory": [
+                {
+                    "url": "https://example.test/orphan",
+                    "candidate_type": "source_known_zero_observed_inlinks",
+                    "source_labels": ["sitemap"],
+                    "source_observations": [{"source": "sitemap"}],
+                }
+            ],
             "failing_target_inventory": [
                 {
                     "target_url": action["Affected URL"],
@@ -87,16 +95,19 @@ def test_recipient_tables_match_the_managed_v2_template_headers():
     tables = audit_sheet_tables(audit)
     managed = template_manifest()["managed_tabs"]
 
-    assert set(tables) == {"Overview", "Audit Log", "Failing Link Targets", "304 Recheck"}
+    assert set(tables) == {"Overview", "Audit Log", "Orphan candidates", "Failing Link Targets", "304 Recheck"}
     for name, table in tables.items():
-        assert table[0] == managed[name]["headers"]
+        if "headers" in managed[name]:
+            assert table[0] == managed[name]["headers"]
+        else:
+            assert table[0] == ["url", "candidate_type", "source_labels", "source_observations"]
         assert name in template_manifest()["managed_tabs"]
     normalized, _ = _validated_tables(tables)
     assert normalized["Failing Link Targets"][1][3] == '["https://example.test/a"]'
     source = {
         "sheets": [
             _tab("Template Contract", 1, ["technical-audit-template", TEMPLATE_VERSION]),
-            *[_tab(name, index + 2, list(managed[name]["headers"])) for index, name in enumerate(tables)],
+            *[_tab(name, index + 2, list(table[0])) for index, (name, table) in enumerate(tables.items())],
         ],
         "merges": [],
     }
