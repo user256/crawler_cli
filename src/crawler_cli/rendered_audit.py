@@ -101,6 +101,30 @@ def render_audit_records(
         for image_state, extracted in (("raw", comparison.raw), ("rendered", comparison.rendered)):
             if extracted is None:
                 continue
+            for item in extracted.schema_data:
+                raw_data = str(item.get("raw_data") or "")
+                observations.append(
+                    {
+                        "record_type": "observation",
+                        "record_kind": "structured_data_item",
+                        "url": _safe_url(page_url),
+                        "url_digest_sha256": digest,
+                        **context_fields,
+                        "source_channel": "raw_html" if image_state == "raw" else "rendered_dom",
+                        "format": item.get("format"),
+                        "extraction_state": image_state,
+                        "schema_type": item.get("type"),
+                        "position": item.get("position"),
+                        "is_valid": item.get("is_valid"),
+                        "validation_errors": _safe_value(item.get("validation_errors", [])),
+                        "compatibility_diagnostics": _safe_value(item.get("compatibility_diagnostics", [])),
+                        "parser_mode": item.get("parser_mode"),
+                        "raw_data": raw_data,
+                        "parsed_data": item.get("parsed_data"),
+                        "device": device,
+                        "state": state,
+                    }
+                )
             for image in extracted.image_references:
                 observations.append(
                     {

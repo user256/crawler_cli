@@ -216,12 +216,19 @@ def extract_schema_data(
 def _parse_json_ld_scripts(soup: BeautifulSoup) -> list[JsonLdParseResult]:
     results: list[JsonLdParseResult] = []
     for position, script in enumerate(soup.find_all("script", type="application/ld+json")):
+        if _is_inside_template(script):
+            continue
         raw_data = str(script.string).strip() if script.string else ""
         if raw_data:
             results.append(parse_json_ld_block(raw_data, script_position=position))
         else:
             results.append(JsonLdParseResult(raw_data="", parsed_data=None, compatibility_diagnostics=[]))
     return results
+
+
+def _is_inside_template(element: Tag) -> bool:
+    """Return whether an element is under an inert HTML template subtree."""
+    return any(parent.name == "template" for parent in element.parents)
 
 
 def _diagnostics_for_pointer(
@@ -414,7 +421,7 @@ def extract_microdata(soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]
     schema_data = []
 
     # Find all elements with itemscope
-    items = soup.find_all(attrs={"itemscope": True})
+    items = [item for item in soup.find_all(attrs={"itemscope": True}) if not _is_inside_template(item)]
 
     for i, item in enumerate(items):
         try:
@@ -468,7 +475,7 @@ def extract_microdata_properties(item: Tag, base_url: str) -> dict[str, Any]:
     properties = {}
 
     # Find all itemprop elements within this item
-    prop_elements = item.find_all(attrs={"itemprop": True})
+    prop_elements = [prop for prop in item.find_all(attrs={"itemprop": True}) if not _is_inside_template(prop)]
 
     for prop in prop_elements:
         prop_name = prop.get("itemprop", "")
@@ -512,7 +519,7 @@ def extract_rdfa(soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]]:
     schema_data = []
 
     # Find all elements with typeof
-    items = soup.find_all(attrs={"typeof": True})
+    items = [item for item in soup.find_all(attrs={"typeof": True}) if not _is_inside_template(item)]
 
     for i, item in enumerate(items):
         try:
@@ -566,7 +573,7 @@ def extract_rdfa_properties(item: Tag, base_url: str) -> dict[str, Any]:
     properties = {}
 
     # Find all elements with property within this item
-    prop_elements = item.find_all(attrs={"property": True})
+    prop_elements = [prop for prop in item.find_all(attrs={"property": True}) if not _is_inside_template(prop)]
 
     for prop in prop_elements:
         prop_name = prop.get("property", "")
@@ -836,7 +843,7 @@ def detect_broken_schema(
 
     # 1. Check for malformed microdata
     # Look for itemscope without proper itemtype
-    items_with_scope = soup.find_all(attrs={"itemscope": True})
+    items_with_scope = [item for item in soup.find_all(attrs={"itemscope": True}) if not _is_inside_template(item)]
     for i, item in enumerate(items_with_scope):
         itemtype = item.get("itemtype", "")
         if not itemtype or "schema.org" not in itemtype:
@@ -855,7 +862,7 @@ def detect_broken_schema(
 
     # 2. Check for malformed RDFa
     # Look for typeof without proper vocab or malformed structure
-    items_with_typeof = soup.find_all(attrs={"typeof": True})
+    items_with_typeof = [item for item in soup.find_all(attrs={"typeof": True}) if not _is_inside_template(item)]
     for i, item in enumerate(items_with_typeof):
         typeof = item.get("typeof", "")
         vocab = item.get("vocab", "")
@@ -879,7 +886,7 @@ def detect_broken_schema(
     schema_url_pattern = re.compile(r"https?://schema\.org/[A-Za-z]+", re.IGNORECASE)
 
     # Check in meta tags
-    meta_tags = soup.find_all("meta")
+    meta_tags = [meta for meta in soup.find_all("meta") if not _is_inside_template(meta)]
     for i, meta in enumerate(meta_tags):
         content = meta.get("content", "") or meta.get("property", "") or meta.get("name", "")
         if schema_url_pattern.search(str(content)):
@@ -896,25 +903,11 @@ def detect_broken_schema(
                 }
             )
 
-    # Check in comments
-    comments = soup.find_all(string=lambda text: isinstance(text, str) and "schema.org" in text)
-    for i, comment in enumerate(comments):
-        if schema_url_pattern.search(comment):
-            broken_schema.append(
-                {
-                    "format": "comment",
-                    "type": "BrokenCommentSchema",
-                    "raw_data": comment[:200],  # Limit size
-                    "parsed_data": None,
-                    "position": i,
-                    "is_valid": False,
-                    "validation_errors": ["Schema.org reference in comment without proper structure"],
-                }
-            )
+    # Comments and template contents are inert, not active structured data.
 
     # 4. Check for incomplete JSON-LD blocks
     # Look for script tags that contain partial JSON-LD
-    all_scripts = soup.find_all("script")
+    all_scripts = [script for script in soup.find_all("script") if not _is_inside_template(script)]
     for i, script in enumerate(all_scripts):
         content = script.get_text(strip=True)
         if ("@context" in content or "@type" in content) and "application/ld+json" not in script.get("type", ""):
