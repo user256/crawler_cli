@@ -642,6 +642,9 @@ the manifest, robots.txt and destination pinning, and only repeats a target
 after a transport or HTTP failure. Out-of-scope links are recorded without a
 request; results are not automatically promoted to client actions. Rendered
 links are observed after bounded scrolling only—controls are not activated.
+Private destinations remain denied unless the manifest itself permits private
+network access and the invocation also opts in with `--allow-private-network`
+and, preferably, a narrow `--allow-network-cidr`.
 
 To include externally known URLs in orphan review, pass one or more CSVs with
 `url,source` columns; `source` must be `search_console` or `analytics`. An

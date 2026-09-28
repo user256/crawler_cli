@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+from aiohttp import web
+
 from crawler_cli import external_link_checks as checks
-from crawler_cli.authorisation import ScopeDecision
+from crawler_cli.authorisation import SCOPE_MANIFEST_SCHEMA_VERSION, ScopeDecision, ScopePredicate, parse_scope_manifest
 
 
 class _Predicate:
     class _Manifest:
         allowed_origins = ["https://allowed.example"]
+        allow_private_network = False
 
     manifest = _Manifest()
 
@@ -41,10 +46,91 @@ class _Engine:
             challenge=None,
             redirect_chain=[{"status": status, "url": url}],
             content_type="text/html",
+            wire_bytes=0,
+            decoded_bytes=0,
+            accounted_bytes=0,
+            body_truncated=False,
         )
 
     async def close(self):
         return None
+
+
+@pytest.mark.asyncio
+async def test_real_guarded_external_recheck_honours_robots_and_bounds_response():
+    requests: list[str] = []
+    base_url = ""
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        requests.append(request.path)
+        if request.path == "/robots.txt":
+            return web.Response(text="User-agent: *\nDisallow: /blocked\n")
+        if request.path == "/redirect":
+            raise web.HTTPFound(f"{base_url}/ok?token=fixture-secret")
+        if request.path == "/ok":
+            return web.Response(body=b"x" * 70_000)
+        if request.path == "/blocked":
+            return web.Response(text="must not be requested")
+        return web.Response(status=404)
+
+    app = web.Application()
+    app.router.add_route("GET", "/{tail:.*}", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    try:
+        assert site._server is not None and site._server.sockets
+        port = site._server.sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        now = datetime.now(UTC)
+        predicate = ScopePredicate(
+            parse_scope_manifest(
+                {
+                    "schema_version": SCOPE_MANIFEST_SCHEMA_VERSION,
+                    "authorization_reference": "TEST-LOOPBACK-212",
+                    "operator": "isolated-test",
+                    "valid_from": (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "valid_until": (now + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "allowed_origins": [base_url],
+                    "allowed_path_prefixes": ["/"],
+                    "allowed_methods": ["GET", "HEAD"],
+                    "allow_private_network": True,
+                }
+            )
+        )
+
+        records = await checks.collect_external_link_rechecks(
+            [
+                {"source_url": "https://source.example/", "target_url": f"{base_url}/blocked"},
+                {"source_url": "https://source.example/", "target_url": f"{base_url}/redirect?token=fixture-secret"},
+            ],
+            scope_predicate=predicate,
+            allow_private_network=True,
+            allow_network_cidrs=("127.0.0.0/8",),
+        )
+
+        rows = {row["state"]: row for row in records[1:]}
+        assert rows["robots_disallowed"]["attempts"]
+        assert rows["responsive"]["attempts"][0]["body_truncated"] is True
+        assert rows["responsive"]["attempts"][0]["accounted_bytes"] <= 65_536
+        assert any(
+            hop["url"].endswith("/redirect?token") for hop in rows["responsive"]["attempts"][0]["redirect_chain"]
+        )
+        assert "/robots.txt" in requests
+        assert "/redirect" in requests and "/ok" in requests
+        assert "/blocked" not in requests
+        assert "fixture-secret" not in str(records)
+
+        requests.clear()
+        denied_by_destination_guard = await checks.collect_external_link_rechecks(
+            [{"source_url": "https://source.example/", "target_url": f"{base_url}/ok"}],
+            scope_predicate=predicate,
+        )
+        assert denied_by_destination_guard[1]["state"] in {"destination_denied", "robots_disallowed"}
+        assert requests == []
+    finally:
+        await runner.cleanup()
 
 
 def test_external_rechecks_are_bounded_scoped_and_retry_only_failures(monkeypatch):
@@ -108,3 +194,15 @@ def test_external_rechecks_cap_target_selection_deterministically(monkeypatch):
         "https://allowed.example/m",
     ]
     assert _Engine.calls == ["https://allowed.example/a", "https://allowed.example/m"]
+
+
+def test_private_network_permission_cannot_exceed_manifest():
+    with pytest.raises(ValueError, match="scope manifest does not authorize private-network access"):
+        asyncio.run(
+            checks.collect_external_link_rechecks(
+                [],
+                scope_predicate=_Predicate(),
+                allow_private_network=True,
+                allow_network_cidrs=("127.0.0.0/8",),
+            )
+        )
