@@ -30,6 +30,7 @@ def render_audit_records(
     link_capture_summaries: list[Mapping[str, object]] = []
     complete = True
     incomplete_count = 0
+    image_layout_captures: list[Mapping[str, object]] = []
     for comparison in comparisons:
         page_url = comparison.url
         digest = hashlib.sha256(page_url.encode()).hexdigest()
@@ -39,6 +40,9 @@ def render_audit_records(
         result_link_capture = getattr(result, "render_link_capture", None) if result is not None else None
         if isinstance(result_link_capture, Mapping):
             link_capture_summaries.append(result_link_capture)
+        result_image_capture = getattr(result, "render_image_capture", None) if result is not None else None
+        if isinstance(result_image_capture, Mapping):
+            image_layout_captures.append(result_image_capture)
         state = comparison.state
         state_reason = comparison.state_reason
         rendered_text = comparison.rendered_main_text or ""
@@ -69,6 +73,7 @@ def render_audit_records(
                 "observed_at": observed_at,
                 "state": state,
                 "state_reason": state_reason,
+                "image_layout_capture": _safe_value(result_image_capture),
                 "http_status": comparison.status,
                 "final_url": _safe_url(comparison.final_url),
                 "response_headers": redact_headers(getattr(result, "headers", {})) if result is not None else {},
@@ -101,6 +106,35 @@ def render_audit_records(
                 )
         if result is None:
             continue
+        for image in getattr(result, "render_image_observations", []) or []:
+            if not isinstance(image, Mapping):
+                continue
+            observations.append(
+                {
+                    "record_type": "observation",
+                    "record_kind": "rendered_image_layout",
+                    "source_url": _safe_url(page_url),
+                    "url_digest_sha256": digest,
+                    **context_fields,
+                    "device": device,
+                    "observed_at": observed_at,
+                    "image_url": _safe_url(str(image.get("url") or "")),
+                    "source_kind": image.get("source_kind"),
+                    "dom_path": scrub_text(str(image.get("dom_path") or "")),
+                    "natural_width": image.get("natural_width"),
+                    "natural_height": image.get("natural_height"),
+                    "display_width": image.get("display_width"),
+                    "display_height": image.get("display_height"),
+                    "width_attribute": image.get("width_attribute"),
+                    "height_attribute": image.get("height_attribute"),
+                    "object_fit": image.get("object_fit"),
+                    "background_size": image.get("background_size"),
+                    "rendered_visible": image.get("rendered_visible"),
+                    "in_initial_viewport": image.get("in_viewport"),
+                    "resource_timing": _safe_value(image.get("resource_timing")),
+                    "qualification": "measurement_only; resource_timing_sizes_may_be_zero_cross_origin; no_layout_impact_claim",
+                }
+            )
         source_host = (urlsplit(comparison.final_url).hostname or "").casefold()
         for link in getattr(result, "render_link_observations", []) or []:
             if not isinstance(link, Mapping):
@@ -236,6 +270,28 @@ def render_audit_records(
             "raw_only_link_count": sum(len(item.only_in_raw) for item in comparisons),
             "image_reference_observation_count": sum(item["record_kind"] == "image_reference" for item in observations),
             "browser_request_observation_count": sum(item["record_kind"] == "browser_request" for item in observations),
+            "rendered_image_layout_observation_count": sum(
+                item["record_kind"] == "rendered_image_layout" for item in observations
+            ),
+            "image_layout_capture": {
+                "state": (
+                    "not_tested"
+                    if not image_layout_captures
+                    else "partial"
+                    if len(image_layout_captures) != len(comparisons)
+                    or any(item.get("state") != "complete" for item in image_layout_captures)
+                    else "complete"
+                ),
+                "eligible_page_count": len(comparisons),
+                "page_capture_count": len(image_layout_captures),
+                "uncaptured_page_count": len(comparisons) - len(image_layout_captures),
+                "truncated_page_count": sum(item.get("truncated") is True for item in image_layout_captures),
+                "limits_per_page": {
+                    "observations": 2_000,
+                    "dom_nodes_scanned": 10_000,
+                },
+                "layout_impact_classified": False,
+            },
             "scroll_link_state_capture": (
                 "not_tested"
                 if not link_capture_summaries
@@ -254,7 +310,9 @@ def render_audit_records(
                 if isinstance(count, int) and not isinstance(count, bool)
             ),
             "external_link_rechecks": "not_tested",
-            "measured_image_layout_impact": "not_tested",
+            "measured_image_layout_impact": "measurements_collected_impact_not_classified"
+            if image_layout_captures
+            else "not_tested",
             "geo_evidence": {
                 "state": "unavailable",
                 "reason": "no regional proxy was selected; local requests are not a substitute",

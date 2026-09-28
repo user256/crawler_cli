@@ -60,9 +60,14 @@ async def playwright_smoke_site(unused_tcp_port: int) -> SmokeSite:
   <head>
     <meta charset="utf-8" />
     <title>Ticket 097 smoke</title>
+    <style>
+      #background-image { width: 80px; height: 40px; background-image: url('/hero.svg?source=background'); }
+    </style>
   </head>
   <body>
     <main id="root">loading</main>
+    <img id="hero-image" src="/hero.svg?source=img" width="32" height="16" style="width:96px;height:48px" />
+    <div id="background-image"></div>
     <script>
       (async () => {
         const root = document.getElementById('root');
@@ -127,6 +132,12 @@ async def playwright_smoke_site(unused_tcp_port: int) -> SmokeSite:
     async def ok_page(_request: web.Request) -> web.Response:
         return web.Response(text="<html><body><h1>Recovered</h1></body></html>", content_type="text/html")
 
+    async def hero_image(_request: web.Request) -> web.Response:
+        return web.Response(
+            text='<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"></svg>',
+            content_type="image/svg+xml",
+        )
+
     async def hang(_request: web.Request) -> web.Response:
         await asyncio.sleep(2.0)
         return web.Response(text="<html><body>too late</body></html>", content_type="text/html")
@@ -135,6 +146,7 @@ async def playwright_smoke_site(unused_tcp_port: int) -> SmokeSite:
     app.router.add_get("/redirect-auth", redirect_auth)
     app.router.add_get("/spa", spa)
     app.router.add_get("/api/data", api_data)
+    app.router.add_get("/hero.svg", hero_image)
     app.router.add_get("/ok", ok_page)
     app.router.add_get("/hang", hang)
 
@@ -163,6 +175,7 @@ async def test_crawl_engine_real_playwright_smoke(playwright_smoke_site: SmokeSi
         discover_render_urls=True,
         capture_render_baseline=True,
         capture_render_link_states=True,
+        capture_render_image_layout=True,
         playwright_executable_path=os.environ.get("CRAWLER_CLI_TEST_CHROMIUM_EXECUTABLE", ""),
         auth=AuthConfig(
             auth_type="basic",
@@ -226,6 +239,13 @@ async def test_crawl_engine_real_playwright_smoke(playwright_smoke_site: SmokeSi
         and row.get("reveal_state") == "scroll_revealed"
         for row in first.render_link_observations
     )
+    assert first.render_image_capture is not None
+    assert first.render_image_capture["state"] == "complete"
+    hero_image = next(row for row in first.render_image_observations if row.get("source_kind") == "img")
+    assert (hero_image["natural_width"], hero_image["natural_height"]) == (32, 16)
+    assert (hero_image["display_width"], hero_image["display_height"]) == (96, 48)
+    assert hero_image["width_attribute"] == "32"
+    assert any(row.get("source_kind") == "css_background" for row in first.render_image_observations)
     assert any(
         candidate.source_kind == "render_network"
         and candidate.url == playwright_smoke_site.url("/api/data")

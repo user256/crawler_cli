@@ -145,6 +145,7 @@ def _crawl_run_config_snapshot(config: CrawlConfig, seeds: list[str]) -> dict[st
         "max_outstanding_speculative_per_host": config.max_outstanding_speculative_per_host,
         "discover_render_urls": config.discover_render_urls,
         "capture_render_baseline": config.capture_render_baseline,
+        "capture_render_image_layout": config.capture_render_image_layout,
         "follow_rendered_links": config.follow_rendered_links,
         "render_discovery_max_raw_links": config.render_discovery_max_raw_links,
         "render_discovery_min_scripts": config.render_discovery_min_scripts,
@@ -1099,6 +1100,10 @@ class CrawlEngine:
                     observed_requests=list(response.observed_requests),
                     render_link_observations=list(response.render_link_observations),
                     render_link_capture=(dict(response.render_link_capture) if response.render_link_capture else None),
+                    render_image_observations=list(response.render_image_observations),
+                    render_image_capture=(
+                        dict(response.render_image_capture) if response.render_image_capture else None
+                    ),
                 )
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)

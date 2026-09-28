@@ -100,6 +100,9 @@ class FetchResponse:
     """Bounded pre-scroll and after-scroll rendered anchor evidence."""
     render_link_capture: dict[str, object] | None = None
     """Coverage counters for the optional, non-clicking scroll-link capture."""
+    render_image_observations: list[dict[str, object]] = field(default_factory=list)
+    render_image_capture: dict[str, object] | None = None
+    """Bounded rendered image/background measurements and their coverage."""
     render_settled: bool | None = None
     """Whether configured Playwright settle/selector waits completed."""
 
@@ -296,6 +299,8 @@ class CrawlResult:
     """Bounded browser subrequest observations retained for render audits."""
     render_link_observations: list[dict[str, object]] = field(default_factory=list)
     render_link_capture: dict[str, object] | None = None
+    render_image_observations: list[dict[str, object]] = field(default_factory=list)
+    render_image_capture: dict[str, object] | None = None
 
 
 @dataclass(slots=True)

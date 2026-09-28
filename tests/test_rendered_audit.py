@@ -157,3 +157,54 @@ def test_scroll_link_observations_keep_reveal_state_device_and_redaction():
     assert revealed["same_host"] is True
     assert "token" in revealed["target_url"]
     assert "secret" not in str(records)
+
+
+def test_rendered_image_layout_measurements_are_redacted_and_never_claim_impact():
+    comparison = _comparison()
+    comparison.crawl_result.render_image_observations = [
+        {
+            "source_kind": "img",
+            "url": "https://example.test/hero.jpg?token=secret",
+            "dom_path": "/html/body/img:nth-of-type(1)",
+            "natural_width": 640,
+            "natural_height": 320,
+            "display_width": 320.0,
+            "display_height": 160.0,
+            "width_attribute": "320",
+            "height_attribute": "160",
+            "resource_timing": {"transfer_size": 1000, "encoded_body_size": 900},
+        }
+    ]
+    comparison.crawl_result.render_image_capture = {
+        "state": "complete",
+        "truncated": False,
+        "observation_count": 1,
+    }
+
+    records = render_audit_records([comparison], device="desktop_viewport", viewport=(1280, 720))
+    coverage = records[0]
+    image = next(row for row in records if row.get("record_kind") == "rendered_image_layout")
+
+    assert coverage["image_layout_capture"]["state"] == "complete"
+    assert coverage["measured_image_layout_impact"] == "measurements_collected_impact_not_classified"
+    assert image["natural_width"] == 640
+    assert image["display_width"] == 320.0
+    assert "token" in image["image_url"] and "secret" not in image["image_url"]
+    assert image["qualification"].startswith("measurement_only")
+    assert not [row for row in records if row.get("candidate_type") == "image_layout_defect"]
+
+
+def test_image_layout_coverage_is_partial_when_a_sample_page_has_no_capture():
+    captured = _comparison()
+    captured.crawl_result.render_image_capture = {"state": "complete", "truncated": False}
+
+    records = render_audit_records(
+        [captured, _comparison()],
+        device="desktop_viewport",
+        viewport=(1280, 720),
+    )
+
+    assert records[0]["image_layout_capture"]["state"] == "partial"
+    assert records[0]["image_layout_capture"]["eligible_page_count"] == 2
+    assert records[0]["image_layout_capture"]["page_capture_count"] == 1
+    assert records[0]["image_layout_capture"]["uncaptured_page_count"] == 1
