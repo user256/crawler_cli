@@ -112,6 +112,7 @@ def test_same_navigation_comparison_reports_multiple_indexing_findings():
         "internal_links_added_after_render",
         "internal_links_removed_after_render",
     }
+    assert "header_dom_conflict" not in {finding.code for finding in comparison.findings}
     assert comparison.only_in_rendered == {"https://example.com/new"}
     assert comparison.only_in_raw == {"https://example.com/old"}
 

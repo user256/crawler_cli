@@ -6,7 +6,14 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
-from .models import DiscoveredLink, ExtractedContent, HreflangLink, ImageReference, RobotsDirectives
+from .models import (
+    DiscoveredLink,
+    ExtractedContent,
+    HreflangLink,
+    ImageReference,
+    RobotsDirectiveEvidence,
+    RobotsDirectives,
+)
 from .schema import _PARSER, extract_schema_data
 
 
@@ -34,10 +41,54 @@ def _parse_directives(raw_values: Iterable[str]) -> RobotsDirectives:
             if normalized:
                 directives.append(normalized)
     return RobotsDirectives(
-        noindex="noindex" in directives,
-        nofollow="nofollow" in directives,
+        noindex="noindex" in directives or "none" in directives,
+        nofollow="nofollow" in directives or "none" in directives,
         raw=directives,
     )
+
+
+_HEADER_ROBOT_NAMES = {
+    "baiduspider",
+    "bingbot",
+    "duckduckbot",
+    "googlebot",
+    "googlebot-image",
+    "googlebot-news",
+    "googlebot-video",
+    "slurp",
+    "yandex",
+}
+
+
+def _directive_tokens(value: str) -> list[str]:
+    return [token.strip().lower() for token in value.split(",") if token.strip()]
+
+
+def _robots_declaration_evidence(soup: BeautifulSoup, headers: dict[str, str]) -> list[RobotsDirectiveEvidence]:
+    evidence: list[RobotsDirectiveEvidence] = []
+    for tag in soup.find_all("meta", attrs={"name": True, "content": True}):
+        name = str(tag.get("name", "")).strip().lower()
+        raw = str(tag.get("content", ""))
+        is_robot_name = name == "robots" or any(token in name for token in ("bot", "spider", "crawler", "slurp"))
+        if is_robot_name and raw.strip():
+            evidence.append(
+                RobotsDirectiveEvidence("html_meta", "*" if name == "robots" else name, raw, _directive_tokens(raw))
+            )
+    header = headers.get("x-robots-tag", "")
+    if header.strip():
+        grouped: dict[str, list[str]] = {}
+        active_agent = "*"
+        for segment in header.split(","):
+            prefix, separator, rest = segment.partition(":")
+            if separator and prefix.strip().lower() in _HEADER_ROBOT_NAMES:
+                active_agent = prefix.strip().lower()
+                segment = rest.strip()
+            if segment.strip():
+                grouped.setdefault(active_agent, []).append(segment.strip())
+        for agent, segments in grouped.items():
+            raw = ", ".join(segments)
+            evidence.append(RobotsDirectiveEvidence("http_header", agent, raw, _directive_tokens(raw)))
+    return evidence
 
 
 def _rel_tokens(value: object) -> list[str]:
@@ -185,7 +236,13 @@ def extract_page_data(
         )
     ]
     meta_robots = _parse_directives(meta_robots_values)
-    x_robots_tag = _parse_directives([header_values.get("x-robots-tag", "")])
+    declaration_evidence = _robots_declaration_evidence(soup, header_values)
+    x_robots_tag = _parse_directives([item.raw_value for item in declaration_evidence if item.channel == "http_header"])
+    # The user-agent-qualified header form is ``googlebot: noindex``; its
+    # prefix is metadata, not a directive token.
+    x_robots_tag.raw = [
+        token for item in declaration_evidence if item.channel == "http_header" for token in item.directives
+    ]
 
     canonical = None
     canonical_tag = soup.find("link", attrs={"rel": lambda value: "canonical" in _rel_tokens(value)})
@@ -245,6 +302,7 @@ def extract_page_data(
             ),
         },
         image_references=extract_image_references(soup, base_url),
+        robots_directive_evidence=declaration_evidence,
         schema_data=extract_schema_data(html, base_url, soup=soup),
     )
 

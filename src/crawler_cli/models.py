@@ -128,6 +128,16 @@ class RobotsDirectives:
 
 
 @dataclass(slots=True)
+class RobotsDirectiveEvidence:
+    """One robots directive declaration with channel and crawler scope."""
+
+    channel: Literal["html_meta", "http_header"]
+    user_agent: str
+    raw_value: str
+    directives: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ExtractedContent:
     title: str | None
     meta_description: str | None
@@ -142,6 +152,7 @@ class ExtractedContent:
     word_count: int
     metadata: dict[str, Any]
     image_references: list[ImageReference] = field(default_factory=list)
+    robots_directive_evidence: list[RobotsDirectiveEvidence] = field(default_factory=list)
     amphtml: str | None = None
     """Absolute URL from ``<link rel="amphtml" href=...>`` — the page's declared
     AMP variant.  Captured so AMP variants get a first-class page<->AMP pairing
