@@ -228,7 +228,9 @@ class _TicketSheets:
     def __init__(self):
         self.clear_calls = []
         self.update_calls = []
+        self.batch_calls = []
         self.written_rows = []
+        self.written_by_range = {}
 
     def spreadsheets(self):
         return self
@@ -243,11 +245,18 @@ class _TicketSheets:
     def update(self, **kwargs):
         self.update_calls.append(kwargs)
         self.written_rows = kwargs["body"]["values"]
+        self.written_by_range[kwargs["range"]] = self.written_rows
+        return _Request({})
+
+    def batchUpdate(self, **kwargs):
+        self.batch_calls.append(kwargs)
         return _Request({})
 
     def get(self, **kwargs):
+        if kwargs.get("fields") == "sheets.properties.title":
+            return _Request({"sheets": []})
         if kwargs["spreadsheetId"] == "copied-sheet":
-            return _Request({"values": self.written_rows})
+            return _Request({"values": self.written_by_range.get(kwargs.get("range"), self.written_rows)})
         return _Request({"values": [list(TICKET_TEMPLATE_COLUMNS)]})
 
 
@@ -267,6 +276,10 @@ def test_ticket_register_publisher_copies_the_source_template_and_readbacks_writ
     assert sheets.clear_calls[0]["range"] == "'Tickets'!B7:I"
     assert sheets.update_calls[0]["range"] == "'Tickets'!B7:I10"
     assert sheets.update_calls[0]["valueInputOption"] == "RAW"
+    assert [request["addSheet"]["properties"]["title"] for request in sheets.batch_calls[0]["body"]["requests"]] == [
+        "Audit Controls",
+        "Manual Review",
+    ]
     published_receipt = json.loads(receipt.read_text())
     assert published_receipt["state"] == "verified"
     assert published_receipt["ticket_count"] == 4

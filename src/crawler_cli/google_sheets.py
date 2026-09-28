@@ -133,6 +133,8 @@ def ticket_register_payload(audit: Mapping[str, object]) -> dict[str, object]:
         raise ValueError("Ticket language mapping has invalid target-template metadata")
     rows = build_technical_audit_ticket_rows(audit, language)
     overview = technical_audit_ticket_overview(audit, language)
+    manual_review = audit.get("manual_review_answers", [])
+    manual_rows = [dict(row) for row in manual_review if isinstance(row, Mapping)] if isinstance(manual_review, list) else []
     start_row = int(template["first_data_row"])
     start_column = str(template["start_column"])
     end_column = _column_label(_column_index(start_column) + len(TICKET_TEMPLATE_COLUMNS) - 1)
@@ -143,6 +145,7 @@ def ticket_register_payload(audit: Mapping[str, object]) -> dict[str, object]:
         "ticket_rows": [[row[column] for column in TICKET_TEMPLATE_COLUMNS] for row in rows],
         "ticket_range": f"'{template['tab']}'!{start_column}{start_row}:{end_column}{end_row}" if rows else None,
         "overview_rows": overview,
+        "manual_review_rows": manual_rows,
     }
 
 
@@ -199,7 +202,14 @@ class GoogleSheetsTicketRegisterPublisher:
             )
 
         receipt_file = Path(receipt_path)
-        payload_digest = _digest({"ticket_rows": payload["ticket_rows"], "ticket_range": payload["ticket_range"]})
+        payload_digest = _digest(
+            {
+                "ticket_rows": payload["ticket_rows"],
+                "ticket_range": payload["ticket_range"],
+                "overview_rows": payload["overview_rows"],
+                "manual_review_rows": payload["manual_review_rows"],
+            }
+        )
         if receipt_file.exists():
             if not resume:
                 raise ValueError(
@@ -300,10 +310,94 @@ class GoogleSheetsTicketRegisterPublisher:
             )
             if readback != rows:
                 raise ValueError("Ticket-register readback did not match the ticket rows written")
+        self._write_audit_register_tabs(spreadsheet_id, payload)
         receipt["state"] = "verified"
         receipt["ticket_count"] = len(rows) if isinstance(rows, list) else 0
         _write_receipt(receipt_file, receipt)
         return sheet_url
+
+    def _write_audit_register_tabs(self, spreadsheet_id: str, payload: Mapping[str, object]) -> None:
+        """Append deterministic controls and all manual-review answers to the copy.
+
+        The source Tickets tab is left intact.  These two audit-owned tabs make
+        every checked control and every manual-review question visible even
+        when it correctly produces no remediation ticket.
+        """
+
+        tab_specs = (
+            (
+                "Audit Controls",
+                [
+                    "Control",
+                    "State",
+                    "Affected",
+                    "Tested",
+                    "Population",
+                    "Evidence tab",
+                    "Ticket eligible",
+                    "Ticket decision",
+                    "Qualification",
+                ],
+                [
+                    [
+                        row.get("id", ""), row.get("status", ""), row.get("affected_count", ""),
+                        row.get("tested_count", ""), row.get("denominator", ""), row.get("detail_sheet", ""),
+                        row.get("ticket_eligible", ""), row.get("ticket_decision", ""), row.get("qualification", ""),
+                    ]
+                    for row in payload.get("overview_rows", [])
+                    if isinstance(row, Mapping)
+                ],
+            ),
+            (
+                "Manual Review",
+                ["Question", "Question text", "State", "Controls", "Additional evidence required", "Evidence available"],
+                [
+                    [
+                        row.get("id", ""), row.get("question", ""), row.get("status", ""),
+                        ", ".join(str(value) for value in row.get("control_ids", []) if value),
+                        row.get("additional_evidence_required", "") or "",
+                        row.get("additional_evidence_available", ""),
+                    ]
+                    for row in payload.get("manual_review_rows", [])
+                    if isinstance(row, Mapping)
+                ],
+            ),
+        )
+        metadata = (
+            self.sheets.spreadsheets()
+            .get(spreadsheetId=spreadsheet_id, fields="sheets.properties.title")
+            .execute()
+        )
+        existing = {
+            str(sheet.get("properties", {}).get("title"))
+            for sheet in metadata.get("sheets", [])
+            if isinstance(sheet, Mapping) and isinstance(sheet.get("properties"), Mapping)
+        }
+        requests = [
+            {"addSheet": {"properties": {"title": title}}}
+            for title, _headers, _rows in tab_specs
+            if title not in existing
+        ]
+        if requests:
+            self.sheets.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
+        for title, headers, rows in tab_specs:
+            values = [headers, *rows]
+            tab_range = f"'{title}'!A1"
+            self.sheets.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=tab_range,
+                valueInputOption="RAW",
+                body={"values": values},
+            ).execute()
+            readback = (
+                self.sheets.spreadsheets()
+                .values()
+                .get(spreadsheetId=spreadsheet_id, range=tab_range, valueRenderOption="UNFORMATTED_VALUE")
+                .execute()
+                .get("values", [])
+            )
+            if readback != values:
+                raise ValueError(f"Ticket-register readback did not match the {title} tab")
 
     def _ticket_headers(self, spreadsheet_id: str, template: Mapping[str, object]) -> list[object]:
         start_column = str(template["start_column"])
