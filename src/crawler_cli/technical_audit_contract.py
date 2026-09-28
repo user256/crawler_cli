@@ -396,6 +396,153 @@ CONTROL_DETECTORS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Evidence scoping (ticket 241)
+#
+# A detector row may support a v3 control only with the evidence that belongs
+# to that control.  Several detectors feed more than one control, so the
+# projection scopes each detector's evidence rows by their row type
+# (``candidate_type``, falling back to ``issue``) before merging:
+#
+# * ``None`` means the detector's rows belong wholly to the control (the
+#   detector examines exactly this control's population).
+# * A frozenset lists the row types the control accepts from that detector.
+#   An empty frozenset means the detector is required supporting evidence (it
+#   must be present and passing for a pass) but contributes no rows.
+#
+# A detector row whose type is not declared for any control fed by that
+# detector (and not listed in ``DETECTOR_ROWS_OUTSIDE_V3``) is unscoped: every
+# control fed by the detector gets the blocking ``unscoped_detector_evidence``
+# qualification and cannot pass.  A ``finding`` detector with no rows scoped to
+# a control makes that control ``partial`` (``detector_finding_outside_control_scope``),
+# never ``finding`` and never ``pass``: the detector's pass/fail state for the
+# control's own subset was not recorded separately.
+# ---------------------------------------------------------------------------
+
+_Scope = frozenset[str] | None
+
+CONTROL_EVIDENCE_SCOPES: Final[dict[str, dict[str, _Scope]]] = {
+    "response-status-and-redirect-history": {"redirect-chains": None},
+    "internal-link-targets": {"internal-link-failures": None},
+    "external-link-integrity": {"external-link-rechecks": None},
+    "orphan-candidates": {"orphan-candidates": None},
+    "internal-authority": {"internal-authority-inventory": None},
+    "image-markup": {"image-markup-candidates": None},
+    "url-host-and-variants": {
+        "url-variants-and-soft-404": frozenset({"url_variant_observation", "url_variant_probe_not_admitted"}),
+    },
+    "soft404-error-routes": {"url-variants-and-soft-404": frozenset({"soft_404_risk_review"})},
+    "robots-controls": {
+        "current-robots-and-sitemaps": frozenset({"robots_controls_incomplete", "malformed_bare_sitemap_declaration"}),
+    },
+    "sitemap-integrity": {
+        "current-robots-and-sitemaps": frozenset(
+            {
+                "duplicate_sitemap_url",
+                "sitemap_protocol_mismatch_review",
+                "sitemap_host_mismatch_review",
+                "sitemap_lastmod_review",
+            }
+        ),
+    },
+    "indexability-segmentation": {"indexability-directive-conflicts": None},
+    "parameter-and-faceted-controls": {"tracking-parameter-links": None, "parameterized-canonical-links": None},
+    "metadata-basics": {
+        "metadata-and-locale": frozenset({"missing_title", "missing_description", "missing_h1", "multiple_h1_markup"}),
+    },
+    "metadata-duplicates-aliases": {
+        "metadata-and-locale": frozenset({"duplicate_title_same_locale", "duplicate_description_same_locale"}),
+    },
+    "locale-html-lang": {"metadata-and-locale": frozenset({"missing_html_lang"})},
+    "near-duplicate-content": {"near-duplicate-content": None},
+    "canonical-declarations": {
+        "canonical-consistency": frozenset(
+            {
+                "missing_canonical",
+                "multiple_canonicals",
+                "malformed_canonical",
+                "non_https_canonical",
+                "cross_host_canonical_review",
+                "parameterized_canonical_review",
+                "canonical_channel_disagreement",
+            }
+        ),
+    },
+    "canonical-target-validation": {"canonical-consistency": frozenset({"non_self_canonical_candidate"})},
+    "hreflang-html-http": {
+        "hreflang-consistency": frozenset(
+            {
+                "invalid_hreflang_syntax",
+                "duplicate_hreflang_language",
+                "malformed_hreflang_target",
+                "non_https_hreflang_target",
+                "hreflang_target_unknown_not_crawled",
+                "hreflang_reciprocity_candidate",
+                "multiple_x_default",
+                "missing_hreflang_self_reference",
+                "hreflang_channel_disagreement",
+            }
+        ),
+    },
+    "hreflang-sitemap": {
+        "hreflang-consistency": frozenset(),
+        "current-robots-and-sitemaps": frozenset(
+            {
+                "duplicate_sitemap_hreflang_language",
+                "invalid_sitemap_hreflang_syntax",
+                "sitemap_hreflang_path_locale_review",
+            }
+        ),
+    },
+    "hreflang-noindex": {
+        "hreflang-consistency": frozenset(
+            {
+                "hreflang_target_not_indexable_200",
+                "hreflang_target_canonicalized_elsewhere",
+                "noindex_source_hreflang_guidance",
+            }
+        ),
+        "indexability-directive-conflicts": frozenset(),
+    },
+    "schema-parser-diagnostics": {"schema-parser-defects": None},
+    "structured-data-feature-rules": {"feature-specific-structured-data": None},
+    "rendered-indexing-parity": {
+        "rendered-mobile-and-resource-evidence": frozenset({"render_divergence_review"}),
+    },
+    "conditional-cache-behaviour": {"performance-and-conditional-requests": None},
+}
+
+# Row types a shared detector emits that belong to no v3 control it feeds.
+# They are known (so they do not block sibling controls) but never projected.
+DETECTOR_ROWS_OUTSIDE_V3: Final[dict[str, frozenset[str]]] = {
+    # Rendered missing-alt candidates are image markup evidence; the v3
+    # image-markup control is fed by the image-markup-candidates detector.
+    "rendered-mobile-and-resource-evidence": frozenset({"image_missing_alt_attribute_review"}),
+}
+
+# Controls whose contract evidence no mapped detector collects.  They are
+# never ``pass`` (or ``finding``) from the nearby detector: the projection
+# reports them ``unavailable`` with ``contract_evidence_not_collected`` until
+# a collector for the contract evidence exists.
+CONTROL_EVIDENCE_GAPS: Final[dict[str, str]] = {
+    "crawl-depth-distribution": "authority inventory records no root set or shortest-path depth per page",
+    "image-resource-delivery": "rendered candidates carry no image resource status, size or format evidence",
+    "rendered-robots-links": "no detector evaluates rendered links against the fetched robots rules",
+    "crawl-waste-url-families": "parameter detectors do not produce URL-family growth analysis with denominators",
+    "content-quality": "metadata inventory has no extracted-content word counts or declared thresholds",
+    "locale-redirects": "URL-variant probes are not authorised geo/locale probes",
+    "mobile-rendering-parity": "rendered detector evidence does not prove a paired mobile render",
+    "critical-resource-impact": "rendered candidates carry no render-trace resource impact evidence",
+    "performance-distribution": "detector evidence is conditional-request candidates, not timing percentiles",
+}
+
+# Merge rule for ``tested_count`` and ``denominator``: detectors merged
+# into one control examine the same (or an overlapping) population, so the
+# control reports the largest contributing value, never the sum.
+
+_NOT_PASSING = frozenset({"partial", "unavailable", "error", "no_observations"})
+
+
 def project_v3_controls(
     detector_checks: Sequence[Mapping[str, object]],
     *,
@@ -403,10 +550,12 @@ def project_v3_controls(
 ) -> list[dict[str, object]]:
     """Project detector rows into the ordered client/skill v3 control contract.
 
-    A control is only ``pass`` when every detector required for it passed.  A
-    missing collector remains ``unavailable`` with the contract's exact
-    required-evidence text.  Detector rows stay in the audit as
-    ``detector_checks`` for diagnostic detail and backwards-compatible sheets.
+    A control is only ``pass`` when every detector required for it is present
+    and passed, and only ``finding`` when rows scoped to that control exist.
+    Controls without contract evidence (``CONTROL_EVIDENCE_GAPS``) and
+    controls whose detectors are all missing are ``unavailable``.  Detector
+    rows stay in the audit as ``detector_checks`` for diagnostic detail and
+    backwards-compatible sheets.
     """
 
     by_id = {str(row.get("id")): row for row in detector_checks}
@@ -415,16 +564,11 @@ def project_v3_controls(
     for contract in TECHNICAL_AUDIT_CHECK_CONTRACT:
         identifier = contract["id"]
         detector_ids = CONTROL_DETECTORS.get(identifier, ())
-        sources = [by_id[source] for source in detector_ids if source in by_id]
         if identifier == "audit-run-integrity":
-            result.append(
-                _context_control(contract, run_context, "completion_state", "complete")
-            )
+            result.append(_context_control(contract, run_context, "completion_state", "complete"))
             continue
         if identifier == "artifact-validation":
-            result.append(
-                _context_control(contract, run_context, "snapshot_consistency", "stable")
-            )
+            result.append(_context_control(contract, run_context, "snapshot_consistency", "stable"))
             continue
         if identifier == "healthy-overview":
             # This is calculated after the substantive controls below.
@@ -432,10 +576,16 @@ def project_v3_controls(
         if identifier == "recipient-action-eligibility":
             result.append(_unavailable_control(contract, "recipient action requires evidenced control results"))
             continue
-        if not sources:
+        if identifier in CONTROL_EVIDENCE_GAPS:
+            row = _unavailable_control(contract, "contract_evidence_not_collected")
+            row["detector_ids"] = list(detector_ids)
+            row["evidence_gap"] = CONTROL_EVIDENCE_GAPS[identifier]
+            result.append(row)
+            continue
+        if not any(source in by_id for source in detector_ids):
             result.append(_unavailable_control(contract))
             continue
-        result.append(_merge_detector_controls(contract, sources, detector_ids))
+        result.append(_merge_detector_controls(contract, by_id, detector_ids))
 
     substantive = [row for row in result if row["id"] not in {"healthy-overview"}]
     healthy = contract_by_id["healthy-overview"]
@@ -480,9 +630,7 @@ def _context_control(
     }
 
 
-def _unavailable_control(
-    contract: TechnicalAuditCheck, qualification: str | None = None
-) -> dict[str, object]:
+def _unavailable_control(contract: TechnicalAuditCheck, qualification: str | None = None) -> dict[str, object]:
     return {
         **contract,
         "status": "unavailable",
@@ -494,36 +642,102 @@ def _unavailable_control(
     }
 
 
+def _row_type(row: Mapping[str, object]) -> str | None:
+    for field in ("candidate_type", "issue"):
+        value = row.get(field)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _detector_known_types(detector_id: str) -> frozenset[str] | None:
+    """Every row type some v3 control (or the outside list) claims; ``None`` = all rows claimed."""
+
+    known: set[str] = set(DETECTOR_ROWS_OUTSIDE_V3.get(detector_id, frozenset()))
+    for scopes in CONTROL_EVIDENCE_SCOPES.values():
+        if detector_id not in scopes:
+            continue
+        scope = scopes[detector_id]
+        if scope is None:
+            return None
+        known.update(scope)
+    return frozenset(known)
+
+
+def _evidence_rows(source: Mapping[str, object]) -> list[Mapping[str, object]]:
+    rows = source.get("evidence")
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, Mapping)]
+
+
 def _merge_detector_controls(
     contract: TechnicalAuditCheck,
-    sources: Sequence[Mapping[str, object]],
+    by_id: Mapping[str, Mapping[str, object]],
     detector_ids: Sequence[str],
 ) -> dict[str, object]:
-    statuses = [str(row.get("status") or "unavailable") for row in sources]
+    identifier = contract["id"]
+    scopes = CONTROL_EVIDENCE_SCOPES.get(identifier, {})
+    statuses: list[str] = []
+    evidence: list[dict[str, object]] = []
+    qualifications: list[str] = []
+    tested: list[int] = []
+    denominators: list[int] = []
+    missing: list[str] = []
+    contributing: list[str] = []
+    for detector_id in detector_ids:
+        source = by_id.get(detector_id)
+        if source is None:
+            # A missing required detector is unavailable evidence, not a
+            # detector that can be skipped.
+            missing.append(detector_id)
+            statuses.append("unavailable")
+            continue
+        detector_status = str(source.get("status") or "unavailable")
+        # Unknown controls (no declared scope) fall back to the whole detector.
+        scope = scopes.get(detector_id) if detector_id in scopes else None
+        rows = _evidence_rows(source)
+        known = _detector_known_types(detector_id)
+        unscoped = [row for row in rows if known is not None and _row_type(row) not in known]
+        scoped = [row for row in rows if scope is None or _row_type(row) in scope]
+        if source.get("qualification"):
+            qualifications.append(str(source["qualification"]))
+        if unscoped:
+            qualifications.append("unscoped_detector_evidence")
+        if detector_status == "finding":
+            if scoped:
+                statuses.append("finding")
+            else:
+                statuses.append("partial")
+                qualifications.append("detector_finding_outside_control_scope")
+        else:
+            statuses.append(detector_status)
+        if scoped:
+            contributing.append(detector_id)
+        evidence.extend({"detector_id": detector_id, **dict(row)} for row in scoped)
+        for key, bucket in (("tested_count", tested), ("denominator", denominators)):
+            value = source.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                bucket.append(value)
+
     if "finding" in statuses:
         status = "finding"
-    elif any(value in {"partial", "unavailable", "error", "no_observations"} for value in statuses):
+    elif any(value in _NOT_PASSING for value in statuses):
         status = "partial" if any(value != "unavailable" for value in statuses) else "unavailable"
-    elif all(value == "pass" for value in statuses):
+    elif statuses and all(value == "pass" for value in statuses):
         status = "pass"
     else:
         status = "partial"
-    evidence: list[dict[str, object]] = []
-    for source in sources:
-        source_id = str(source.get("id") or "")
-        rows = source.get("evidence")
-        if not isinstance(rows, list):
-            continue
-        evidence.extend({"detector_id": source_id, **dict(row)} for row in rows if isinstance(row, Mapping))
-    tested = [value for value in (row.get("tested_count") for row in sources) if isinstance(value, int)]
-    denominators = [value for value in (row.get("denominator") for row in sources) if isinstance(value, int)]
-    qualifications = [str(row.get("qualification")) for row in sources if row.get("qualification")]
+    if missing:
+        qualifications.append("required_detector_missing:" + ",".join(missing))
+    if len(contributing) > 1:
+        qualifications.append("combined_v2_detectors")
     return {
         **contract,
         "status": status,
-        "affected_count": sum(int(row.get("affected_count") or 0) for row in sources),
-        "tested_count": sum(tested) if tested else None,
-        "denominator": sum(denominators) if denominators else None,
+        "affected_count": len(evidence),
+        "tested_count": max(tested) if tested else None,
+        "denominator": max(denominators) if denominators else None,
         "qualification": "; ".join(dict.fromkeys(qualifications)) or None,
         "evidence": evidence,
         "detector_ids": list(detector_ids),

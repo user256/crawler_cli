@@ -584,3 +584,10 @@ Deferred lanes remain below.
 
 12. **deferred** `035` [Redis frontier](./ticket-035-redis-frontier-queue.md) — architectural/infra
 13. **proposed** `075` [Casino Guru review ingestion](./ticket-075-casino-guru-review-ingestion.md) — blocked on reliable authorised fetch path
+
+### Manual-review controls remediation (2026-09-28, review of 6496fba)
+
+- `240` `proposed` [ticket-240-audit-tabs-readback-and-resume.md](./ticket-240-audit-tabs-readback-and-resume.md) — **P0:** audit-tab readback uses a one-cell range and compares nulls, so every real publish fails; resume then marks the workbook verified without the tabs
+- `241` `proposed` [ticket-241-v3-control-projection-evidence-scoping.md](./ticket-241-v3-control-projection-evidence-scoping.md) — **P0:** one detector finding fans out into several client tickets; controls pass without contract evidence; denominators double-counted
+- `242` `proposed` [ticket-242-manual-review-evidence-keys.md](./ticket-242-manual-review-evidence-keys.md) — **P1:** stable evidence keys instead of prose, evidence references instead of booleans, status-rule tests
+- `243` `proposed` [ticket-243-restore-detector-check-tests.md](./ticket-243-restore-detector-check-tests.md) — **P1:** repair five tests broken by the v3 `checks` projection

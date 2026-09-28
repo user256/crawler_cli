@@ -202,6 +202,8 @@ class GoogleSheetsTicketRegisterPublisher:
             )
 
         receipt_file = Path(receipt_path)
+        expected_ticket_rows = _sheet_values(payload["ticket_rows"])
+        tickets_verified = False
         payload_digest = _digest(
             {
                 "ticket_rows": payload["ticket_rows"],
@@ -235,7 +237,7 @@ class GoogleSheetsTicketRegisterPublisher:
                 return sheet_url
             previous_range = payload["ticket_range"]
             if receipt.get("state") == "writing" and previous_range:
-                previous_values = (
+                previous_values = _padded_readback(
                     self.sheets.spreadsheets()
                     .values()
                     .get(
@@ -244,14 +246,16 @@ class GoogleSheetsTicketRegisterPublisher:
                         valueRenderOption="UNFORMATTED_VALUE",
                     )
                     .execute()
-                    .get("values", [])
+                    .get("values", []),
+                    len(TICKET_TEMPLATE_COLUMNS),
+                    len(expected_ticket_rows),
                 )
-                if previous_values == payload["ticket_rows"]:
-                    receipt["state"] = "verified"
-                    receipt["ticket_count"] = len(payload["ticket_rows"])
-                    _write_receipt(receipt_file, receipt)
-                    return sheet_url
-                if previous_values:
+                # Matching ticket rows only prove the first step finished; the
+                # interruption may have hit the audit tabs, so those are still
+                # rewritten and verified below before the receipt is verified.
+                if previous_values == expected_ticket_rows:
+                    tickets_verified = True
+                elif any(cell != "" for row in previous_values for cell in row):
                     raise ValueError(
                         "Ticket-register rows changed during the interrupted publication; refusing to overwrite them"
                     )
@@ -287,29 +291,34 @@ class GoogleSheetsTicketRegisterPublisher:
 
         receipt["state"] = "writing"
         _write_receipt(receipt_file, receipt)
-        self.sheets.spreadsheets().values().clear(
-            spreadsheetId=spreadsheet_id,
-            range=f"'{template['tab']}'!{template['start_column']}{template['first_data_row']}:{_column_label(_column_index(str(template['start_column'])) + len(TICKET_TEMPLATE_COLUMNS) - 1)}",
-            body={},
-        ).execute()
-        rows = payload["ticket_rows"]
+        rows = expected_ticket_rows
         ticket_range = payload["ticket_range"]
-        if rows and ticket_range:
+        if not tickets_verified:
+            self.sheets.spreadsheets().values().clear(
+                spreadsheetId=spreadsheet_id,
+                range=f"'{template['tab']}'!{template['start_column']}{template['first_data_row']}:{_column_label(_column_index(str(template['start_column'])) + len(TICKET_TEMPLATE_COLUMNS) - 1)}",
+                body={},
+            ).execute()
+        if rows and ticket_range and not tickets_verified:
             self.sheets.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id,
                 range=str(ticket_range),
                 valueInputOption="RAW",
                 body={"values": rows},
             ).execute()
-            readback = (
+            readback = _padded_readback(
                 self.sheets.spreadsheets()
                 .values()
                 .get(spreadsheetId=spreadsheet_id, range=str(ticket_range), valueRenderOption="UNFORMATTED_VALUE")
                 .execute()
-                .get("values", [])
+                .get("values", []),
+                len(TICKET_TEMPLATE_COLUMNS),
+                len(rows),
             )
             if readback != rows:
                 raise ValueError("Ticket-register readback did not match the ticket rows written")
+        # The receipt stays "writing" until both audit tabs are verified, so a
+        # failure here is retried in full by the next resume.
         self._write_audit_register_tabs(spreadsheet_id, payload)
         receipt["state"] = "verified"
         receipt["ticket_count"] = len(rows) if isinstance(rows, list) else 0
@@ -381,20 +390,29 @@ class GoogleSheetsTicketRegisterPublisher:
         if requests:
             self.sheets.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
         for title, headers, rows in tab_specs:
-            values = [headers, *rows]
-            tab_range = f"'{title}'!A1"
+            # Sheets skips nulls on write and "A1" alone reads back one cell,
+            # so write blanks into an explicit block and compare it padded.
+            values = _sheet_values([headers, *rows])
+            tab_range = f"'{title}'!A1:{_column_label(len(headers))}{len(values)}"
+            # These tabs are audit-owned: clear the whole tab so a shorter
+            # rerun cannot leave stale rows below the new block.
+            self.sheets.spreadsheets().values().clear(
+                spreadsheetId=spreadsheet_id, range=f"'{title}'", body={}
+            ).execute()
             self.sheets.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id,
                 range=tab_range,
                 valueInputOption="RAW",
                 body={"values": values},
             ).execute()
-            readback = (
+            readback = _padded_readback(
                 self.sheets.spreadsheets()
                 .values()
                 .get(spreadsheetId=spreadsheet_id, range=tab_range, valueRenderOption="UNFORMATTED_VALUE")
                 .execute()
-                .get("values", [])
+                .get("values", []),
+                len(headers),
+                len(values),
             )
             if readback != values:
                 raise ValueError(f"Ticket-register readback did not match the {title} tab")
@@ -756,6 +774,26 @@ def _read_links(
                             uri = str(direct_link["uri"])
                     result[(row_base + row_offset, column_base + column_offset)] = uri
     return result
+
+
+def _sheet_values(rows: object) -> list[list[object]]:
+    """Return rows as Sheets stores them: a null cell is written as a blank."""
+
+    if not isinstance(rows, list):
+        return []
+    return [["" if cell is None else cell for cell in row] for row in rows if isinstance(row, list)]
+
+
+def _padded_readback(values: object, width: int, height: int) -> list[list[object]]:
+    """Pad a ``values.get`` block back to ``height`` rows of ``width`` cells.
+
+    The API omits trailing empty rows and cells and returns blanks as ``""``,
+    so a faithful write only compares equal after this normalisation.
+    """
+
+    rows = [list(row) for row in values if isinstance(row, list)] if isinstance(values, list) else []
+    rows.extend([] for _ in range(height - len(rows)))
+    return [["" if cell is None else cell for cell in row] + [""] * (width - len(row)) for row in rows]
 
 
 def _grid_matches(actual: list[list[object]], expected: list[list[object]]) -> bool:

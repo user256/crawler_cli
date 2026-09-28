@@ -3,6 +3,9 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import re
+
+import pytest
 
 from crawler_cli.google_sheets import GoogleSheetsTicketRegisterPublisher, ticket_register_payload
 from crawler_cli.technical_audit_contract import TECHNICAL_AUDIT_CHECK_CONTRACT
@@ -224,13 +227,34 @@ class _TicketDrive:
         )
 
 
+_A1_RANGE = re.compile(r"^'(?P<tab>[^']+)'(?:!(?P<c1>[A-Z]+)(?P<r1>\d+)(?::(?P<c2>[A-Z]+)(?P<r2>\d+)?)?)?$")
+
+
+def _column_number(label: str) -> int:
+    number = 0
+    for character in label:
+        number = number * 26 + ord(character) - 64
+    return number
+
+
 class _TicketSheets:
-    def __init__(self):
+    """Cell-level stand-in for the Sheets values API.
+
+    Like the real API it stores cells by position, skips ``None`` on write,
+    returns only the requested range from ``values.get`` and drops trailing
+    empty cells and rows from the response.
+    """
+
+    def __init__(self, *, fail_readback_once: str | None = None, receipt_path: Path | None = None):
         self.clear_calls = []
         self.update_calls = []
         self.batch_calls = []
-        self.written_rows = []
-        self.written_by_range = {}
+        self.get_ranges = []
+        self.tabs = {"Tickets"}
+        self.cells: dict[str, dict[tuple[int, int], object]] = {}
+        self.fail_readback_once = fail_readback_once
+        self.receipt_path = receipt_path
+        self.receipt_state_at_tab_readback = {}
 
     def spreadsheets(self):
         return self
@@ -238,26 +262,78 @@ class _TicketSheets:
     def values(self):
         return self
 
+    @staticmethod
+    def _bounds(a1_range: str) -> tuple[str, int, int, int | None, int | None]:
+        match = _A1_RANGE.match(a1_range)
+        assert match, a1_range
+        if not match["c1"]:
+            return match["tab"], 1, 1, None, None
+        first_row, first_column = int(match["r1"]), _column_number(match["c1"])
+        if not match["c2"]:
+            return match["tab"], first_row, first_column, first_row, first_column
+        last_row = int(match["r2"]) if match["r2"] else None
+        return match["tab"], first_row, first_column, last_row, _column_number(match["c2"])
+
     def clear(self, **kwargs):
         self.clear_calls.append(kwargs)
+        tab, first_row, first_column, last_row, last_column = self._bounds(kwargs["range"])
+        grid = self.cells.setdefault(tab, {})
+        for row, column in list(grid):
+            if (
+                first_row <= row <= (last_row or row)
+                and first_column <= column <= (last_column or column)
+            ):
+                del grid[(row, column)]
         return _Request({})
 
     def update(self, **kwargs):
         self.update_calls.append(kwargs)
-        self.written_rows = kwargs["body"]["values"]
-        self.written_by_range[kwargs["range"]] = self.written_rows
+        tab, first_row, first_column, _last_row, _last_column = self._bounds(kwargs["range"])
+        grid = self.cells.setdefault(tab, {})
+        for row_offset, row in enumerate(kwargs["body"]["values"]):
+            for column_offset, value in enumerate(row):
+                if value is None:  # The API leaves the cell untouched.
+                    continue
+                grid[(first_row + row_offset, first_column + column_offset)] = value
         return _Request({})
 
     def batchUpdate(self, **kwargs):
         self.batch_calls.append(kwargs)
+        for request in kwargs["body"]["requests"]:
+            self.tabs.add(request["addSheet"]["properties"]["title"])
         return _Request({})
+
+    def read(self, a1_range: str) -> list[list[object]]:
+        tab, first_row, first_column, last_row, last_column = self._bounds(a1_range)
+        grid = self.cells.get(tab, {})
+        last_row = last_row or max((row for row, _column in grid), default=first_row)
+        last_column = last_column or max((column for _row, column in grid), default=first_column)
+        rows = []
+        for row in range(first_row, last_row + 1):
+            values = [grid.get((row, column), "") for column in range(first_column, last_column + 1)]
+            while values and values[-1] == "":
+                values.pop()
+            rows.append(values)
+        while rows and not rows[-1]:
+            rows.pop()
+        return rows
 
     def get(self, **kwargs):
         if kwargs.get("fields") == "sheets.properties.title":
-            return _Request({"sheets": []})
-        if kwargs["spreadsheetId"] == "copied-sheet":
-            return _Request({"values": self.written_by_range.get(kwargs.get("range"), self.written_rows)})
-        return _Request({"values": [list(TICKET_TEMPLATE_COLUMNS)]})
+            return _Request({"sheets": [{"properties": {"title": title}} for title in sorted(self.tabs)]})
+        if kwargs["spreadsheetId"] != "copied-sheet":
+            return _Request({"values": [list(TICKET_TEMPLATE_COLUMNS)]})
+        a1_range = kwargs["range"]
+        self.get_ranges.append(a1_range)
+        tab = self._bounds(a1_range)[0]
+        if tab != "Tickets" and self.receipt_path is not None:
+            state = json.loads(self.receipt_path.read_text())["state"]
+            self.receipt_state_at_tab_readback.setdefault(tab, []).append(state)
+        if tab == self.fail_readback_once:
+            self.fail_readback_once = None
+            raise RuntimeError(f"transient failure reading {tab}")
+        values = self.read(a1_range)
+        return _Request({"values": values} if values else {})
 
 
 def test_ticket_register_publisher_copies_the_source_template_and_readbacks_written_rows(tmp_path: Path):
@@ -295,3 +371,80 @@ def test_ticket_register_publisher_copies_the_source_template_and_readbacks_writ
     )
     assert resumed_url == url
     assert len(drive.copy_calls) == 1
+
+
+def _manual_review_row(index: int) -> dict[str, object]:
+    return {
+        "id": f"MR-{index}",
+        "question": f"Question {index}?",
+        "status": "needs_evidence",
+        "control_ids": ["metadata-basics"],
+        "additional_evidence_required": None,
+        "additional_evidence_available": None,
+    }
+
+
+def test_audit_tabs_write_bounded_blocks_that_read_back_through_the_real_api_shape(tmp_path: Path):
+    sheets = _TicketSheets()
+    receipt = tmp_path / "ticket-register-receipt.json"
+
+    GoogleSheetsTicketRegisterPublisher(_TicketDrive(), sheets).publish(
+        audit=_audit(), title="Example tickets", receipt_path=receipt
+    )
+
+    assert json.loads(receipt.read_text())["state"] == "verified"
+    tab_updates = {call["range"]: call["body"]["values"] for call in sheets.update_calls}
+    assert set(tab_updates) == {"'Tickets'!B7:I10", "'Audit Controls'!A1:I45", "'Manual Review'!A1:F1"}
+    assert "'Audit Controls'!A1:I45" in sheets.get_ranges
+    assert "'Manual Review'!A1:F1" in sheets.get_ranges
+    # Unavailable controls carry null counts; they are written as blanks.
+    assert all(cell is not None for row in tab_updates["'Audit Controls'!A1:I45"] for cell in row)
+    assert tab_updates["'Audit Controls'!A1:I45"][1][3:5] == ["", ""]
+    # The previous "'<Tab>'!A1" readback is a single cell against the real API,
+    # and even the full block comes back with the blank cells trimmed.
+    assert sheets.read("'Audit Controls'!A1") == [["Control"]]
+    assert sheets.read("'Audit Controls'!A1") != tab_updates["'Audit Controls'!A1:I45"]
+    assert sheets.read("'Audit Controls'!A1:I45")[1][3] == ""
+
+
+def test_resume_after_an_audit_tab_failure_verifies_both_tabs_before_the_receipt(tmp_path: Path):
+    receipt = tmp_path / "ticket-register-receipt.json"
+    drive = _TicketDrive()
+    sheets = _TicketSheets(fail_readback_once="Manual Review", receipt_path=receipt)
+    audit = {**_audit(), "manual_review_answers": [_manual_review_row(1)]}
+
+    with pytest.raises(RuntimeError, match="Manual Review"):
+        GoogleSheetsTicketRegisterPublisher(drive, sheets).publish(
+            audit=audit, title="Example tickets", receipt_path=receipt
+        )
+    assert json.loads(receipt.read_text())["state"] == "writing"
+
+    sheets.update_calls.clear()
+    sheets.receipt_state_at_tab_readback.clear()
+    GoogleSheetsTicketRegisterPublisher(drive, sheets).publish(
+        audit=audit, title="Example tickets", receipt_path=receipt, resume=True
+    )
+
+    assert len(drive.copy_calls) == 1
+    # Ticket rows already matched, so only the audit tabs are rewritten.
+    assert [call["range"] for call in sheets.update_calls] == ["'Audit Controls'!A1:I45", "'Manual Review'!A1:F2"]
+    assert sheets.receipt_state_at_tab_readback == {"Audit Controls": ["writing"], "Manual Review": ["writing"]}
+    assert json.loads(receipt.read_text())["state"] == "verified"
+    assert sheets.read("'Manual Review'!A1:F2")[1] == ["MR-1", "Question 1?", "needs_evidence", "metadata-basics"]
+
+
+def test_rerun_with_fewer_manual_review_rows_leaves_no_stale_rows():
+    sheets = _TicketSheets()
+    publisher = GoogleSheetsTicketRegisterPublisher(_TicketDrive(), sheets)
+    payload = ticket_register_payload(_audit())
+
+    publisher._write_audit_register_tabs(
+        "copied-sheet", {**payload, "manual_review_rows": [_manual_review_row(index) for index in range(1, 4)]}
+    )
+    assert len(sheets.read("'Manual Review'")) == 4
+    publisher._write_audit_register_tabs(
+        "copied-sheet", {**payload, "manual_review_rows": [_manual_review_row(1)]}
+    )
+
+    assert [row[0] for row in sheets.read("'Manual Review'")] == ["Question", "MR-1"]
+    assert {"range": "'Manual Review'", "spreadsheetId": "copied-sheet", "body": {}} in sheets.clear_calls

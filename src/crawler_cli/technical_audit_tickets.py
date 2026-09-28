@@ -146,6 +146,10 @@ def ticket_eligibility(
         prerequisite = str(language_entry.get("client_ticket_prerequisite") or "not configured for client tickets")
         return False, prerequisite
     if status == "unavailable":
+        # No client-supplied input can close a gap that our own collectors do
+        # not yet measure, so a "provide input" ticket would be misleading.
+        if "contract_evidence_not_collected" in _qualification_codes(check.get("qualification")):
+            return False, "collector not built"
         return (
             bool(language_entry.get("unavailable_ticket")),
             "missing input" if language_entry.get("unavailable_ticket") else "not tested",

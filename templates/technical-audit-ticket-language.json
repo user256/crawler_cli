@@ -55,7 +55,9 @@
       "bounded_or_incomplete_coverage",
       "bounded_or_incomplete_current_probe",
       "recheck_partial",
-      "combined_v2_detectors"
+      "combined_v2_detectors",
+      "unscoped_detector_evidence",
+      "required_detector_missing"
     ],
     "rule": "A client ticket needs a finding state, affected evidence, and no blocking qualification. Partial and analyst-only rows remain in the evidence workbook until a detector or reviewer provides the missing proof."
   },
@@ -86,7 +88,11 @@
     "saved_channels_or_targets_incomplete": "The available evidence does not cover every channel or target needed for this control, so it is reported as not tested rather than healthy.",
     "conditional_get_probe_not_requested": "Not tested: no conditional-request evidence is available.",
     "combined_v2_detectors": "This row combines two earlier detectors (tracking-parameter links and parameterised canonical links).",
-    "recheck_partial": "Only part of the saved failures could be rechecked live within the audit limit."
+    "recheck_partial": "Only part of the saved failures could be rechecked live within the audit limit.",
+    "unscoped_detector_evidence": "The source detector recorded evidence that could not be attributed to one control, so this row stays in the evidence workbook until it is separated.",
+    "required_detector_missing": "One of the detectors this control requires was not available in this run, so the result is incomplete.",
+    "detector_finding_outside_control_scope": "The source detector reported evidence for a related control only; this control's own result was not recorded separately.",
+    "contract_evidence_not_collected": "Not tested: this run did not collect the evidence this control requires."
   },
   "priority_rules": [
     "Start from the check's default priority.",
