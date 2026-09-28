@@ -1,9 +1,9 @@
 """Deterministic technical-audit projection over a stored crawl run.
 
 This module deliberately separates facts that can be derived from one saved
-``crawler_cli`` run from live checks and SEO judgement.  A no-row result is
-therefore reported as ``no_observations`` rather than as a claim that a check
-is healthy.
+``crawler_cli`` run from live checks and SEO judgement. A control without its
+required evidence is therefore reported as ``unavailable`` rather than as a
+claim that a check is healthy.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import json
 from .schema import JSON_LD_PARSER_MODE, _PARSER
 
 
-TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/1"
+TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/2"
 TECHNICAL_AUDIT_RULESET_VERSION = "technical-audit-rules/1"
 
 # The report names are run-scoped and have no dependency on a changing live
@@ -34,48 +34,351 @@ TECHNICAL_AUDIT_REPORTS = (
     "internal-authority",
 )
 
-# Registry is intentionally wider than the currently implemented report set.
-# A fixed count of SQL reports must never be presented as coverage of the full
-# analyst skill. Implemented reports stay candidates until their prerequisites
-# and population denominator are known.
-TECHNICAL_AUDIT_CHECK_REGISTRY = (
-    {"id": "crawl-integrity", "state": "partial", "source": "crawl run and snapshots"},
-    {"id": "indexability-directive-conflicts", "state": "implemented", "source": "indexability report"},
-    {"id": "internal-link-quality", "state": "implemented", "source": "link graph report"},
-    {"id": "tracking-parameter-links", "state": "implemented", "source": "link graph report"},
-    {"id": "orphan-candidates", "state": "implemented_candidate", "source": "orphan report"},
-    {"id": "redirect-observations", "state": "implemented_candidate", "source": "redirect report"},
-    {"id": "near-duplicate-content", "state": "implemented_candidate", "source": "content hash report"},
-    {"id": "schema-parser-diagnostics", "state": "implemented_candidate", "source": "schema report"},
-    {"id": "image-markup", "state": "implemented_candidate", "source": "image report"},
-    {"id": "internal-authority", "state": "implemented_candidate", "source": "internal graph report"},
-    {"id": "metadata-and-locale", "state": "not_implemented", "source": "stored page snapshots"},
-    {"id": "canonical-targets", "state": "not_implemented", "source": "canonical and live response evidence"},
-    {"id": "hreflang-clusters", "state": "not_implemented", "source": "HTML, header and sitemap annotations"},
-    {"id": "current-robots-and-sitemaps", "state": "not_implemented", "source": "live HTTP collection"},
-    {"id": "url-variants-and-soft-404", "state": "not_implemented", "source": "controlled live probes"},
+# This is the code representation of the table in
+# skills/technical-seo-audit/SKILL.md. Every invocation emits these IDs in this
+# order. Static support metadata is deliberately separate from the per-run
+# result: an unimplemented collector still produces an explicit unavailable
+# row instead of vanishing from checks[].
+TECHNICAL_AUDIT_CHECK_CONTRACT = (
     {
-        "id": "rendered-mobile-and-resource-evidence",
-        "state": "not_implemented",
-        "source": "browser collection and resource fetches",
+        "id": "audit-run-integrity",
+        "title": "Audit run integrity",
+        "detail_sheet": "Run integrity",
+        "required_evidence": "crawl/job metadata, run ID, timestamps, scope and counts",
+        "owner_ticket": "183",
     },
     {
-        "id": "feature-specific-structured-data",
-        "state": "not_implemented",
-        "source": "versioned feature rules and live markup",
+        "id": "audit-collection-safeguards",
+        "title": "Collection safeguards",
+        "detail_sheet": "Collection safeguards",
+        "required_evidence": "collection configuration and event evidence",
+        "owner_ticket": "224",
     },
     {
-        "id": "performance-and-conditional-requests",
-        "state": "not_implemented",
-        "source": "timings and conditional GET observations",
+        "id": "discovery-source-provenance",
+        "title": "Discovery-source provenance",
+        "detail_sheet": "Discovery sources",
+        "required_evidence": "run-scoped discovery-source evidence",
+        "owner_ticket": "228",
     },
-    {"id": "verified-search-bot-logs", "state": "conditional", "source": "validated operator-supplied access logs"},
-    {"id": "geo-dependent-behaviour", "state": "conditional", "source": "configured regional proxy observations"},
     {
-        "id": "severity-content-intent-and-priority",
-        "state": "analyst_judgement",
-        "source": "site purpose and business evidence",
+        "id": "response-status-and-redirect-history",
+        "title": "Response status and redirects",
+        "detail_sheet": "Response and redirects",
+        "required_evidence": "response and redirect evidence",
+        "owner_ticket": "218",
     },
+    {
+        "id": "internal-link-targets",
+        "title": "Internal link targets",
+        "detail_sheet": "Internal link failures",
+        "required_evidence": "run-scoped link graph and destination evidence",
+        "owner_ticket": "186",
+    },
+    {
+        "id": "external-link-integrity",
+        "title": "External link integrity",
+        "detail_sheet": "External link rechecks",
+        "required_evidence": "explicit external-link recheck evidence",
+        "owner_ticket": "211",
+    },
+    {
+        "id": "orphan-candidates",
+        "title": "Orphan-page candidates",
+        "detail_sheet": "Orphan candidates",
+        "required_evidence": "run-scoped link and discovery evidence",
+        "owner_ticket": "222",
+    },
+    {
+        "id": "crawl-depth-distribution",
+        "title": "Crawl-depth distribution",
+        "detail_sheet": "Crawl depth",
+        "required_evidence": "root set and run-scoped graph",
+        "owner_ticket": "228",
+    },
+    {
+        "id": "internal-authority",
+        "title": "Internal authority",
+        "detail_sheet": "Internal authority",
+        "required_evidence": "run-scoped internal graph and declared calculation",
+        "owner_ticket": "187",
+    },
+    {
+        "id": "image-markup",
+        "title": "Image markup",
+        "detail_sheet": "Image issues",
+        "required_evidence": "raw or rendered image markup",
+        "owner_ticket": "210",
+    },
+    {
+        "id": "image-resource-delivery",
+        "title": "Image resource delivery",
+        "detail_sheet": "Image resources",
+        "required_evidence": "resource and performance evidence",
+        "owner_ticket": "210",
+    },
+    {
+        "id": "url-host-and-variants",
+        "title": "URL host and variants",
+        "detail_sheet": "URL variants",
+        "required_evidence": "crawl URLs, redirects, canonicals and link targets",
+        "owner_ticket": "193",
+    },
+    {
+        "id": "nonproduction-https",
+        "title": "Non-production and HTTPS",
+        "detail_sheet": "Host and HTTPS",
+        "required_evidence": "host, response, robots and indexability evidence",
+        "owner_ticket": "202",
+    },
+    {
+        "id": "robots-controls",
+        "title": "Robots controls",
+        "detail_sheet": "Robots",
+        "required_evidence": "current robots fetch and crawl evidence",
+        "owner_ticket": "192",
+    },
+    {
+        "id": "sitemap-integrity",
+        "title": "Sitemap integrity",
+        "detail_sheet": "Sitemaps",
+        "required_evidence": "current sitemap fetches and crawl evidence",
+        "owner_ticket": "192",
+    },
+    {
+        "id": "rendered-robots-links",
+        "title": "Rendered robots links",
+        "detail_sheet": "Rendered robots links",
+        "required_evidence": "raw/rendered links and robots evaluation",
+        "owner_ticket": "205",
+    },
+    {
+        "id": "indexability-segmentation",
+        "title": "Indexability segmentation",
+        "detail_sheet": "Index conflicts",
+        "required_evidence": "stored page directives and responses",
+        "owner_ticket": "184",
+    },
+    {
+        "id": "crawl-waste-url-families",
+        "title": "Crawl-waste URL families",
+        "detail_sheet": "URL families",
+        "required_evidence": "URL-family analysis with denominators",
+        "owner_ticket": "220",
+    },
+    {
+        "id": "parameter-and-faceted-controls",
+        "title": "Parameter and faceted controls",
+        "detail_sheet": "Tracking parameters",
+        "required_evidence": "link, canonical, indexability and URL-family evidence",
+        "owner_ticket": "193",
+    },
+    {
+        "id": "soft404-error-routes",
+        "title": "Soft 404 and error routes",
+        "detail_sheet": "Soft 404s",
+        "required_evidence": "response, title/body and template evidence",
+        "owner_ticket": "193",
+    },
+    {
+        "id": "metadata-basics",
+        "title": "Metadata basics",
+        "detail_sheet": "Metadata",
+        "required_evidence": "metadata inventory",
+        "owner_ticket": "190",
+    },
+    {
+        "id": "metadata-duplicates-aliases",
+        "title": "Metadata duplicates and aliases",
+        "detail_sheet": "Duplicate metadata",
+        "required_evidence": "metadata, canonical and alias evidence",
+        "owner_ticket": "229",
+    },
+    {
+        "id": "content-quality",
+        "title": "Content quality",
+        "detail_sheet": "Content quality",
+        "required_evidence": "extracted-content evidence and declared thresholds",
+        "owner_ticket": "190",
+    },
+    {
+        "id": "locale-html-lang",
+        "title": "Locale HTML language",
+        "detail_sheet": "Locale language",
+        "required_evidence": "HTML attributes and declared locale rules",
+        "owner_ticket": "221",
+    },
+    {
+        "id": "near-duplicate-content",
+        "title": "Near-duplicate content",
+        "detail_sheet": "Near duplicates",
+        "required_evidence": "content hashes, similarity evidence and comparison population",
+        "owner_ticket": "229",
+    },
+    {
+        "id": "canonical-declarations",
+        "title": "Canonical declarations",
+        "detail_sheet": "Canonicals",
+        "required_evidence": "raw HTML canonical inventory",
+        "owner_ticket": "191",
+    },
+    {
+        "id": "canonical-target-validation",
+        "title": "Canonical target validation",
+        "detail_sheet": "Canonical targets",
+        "required_evidence": "canonical target and response/indexability evidence",
+        "owner_ticket": "231",
+    },
+    {
+        "id": "hreflang-html-http",
+        "title": "HTML and HTTP hreflang",
+        "detail_sheet": "Hreflang",
+        "required_evidence": "hreflang inventory and target evidence",
+        "owner_ticket": "191",
+    },
+    {
+        "id": "hreflang-sitemap",
+        "title": "Sitemap hreflang",
+        "detail_sheet": "Sitemap hreflang",
+        "required_evidence": "sitemap extension inventory and target evidence",
+        "owner_ticket": "164",
+    },
+    {
+        "id": "hreflang-noindex",
+        "title": "Hreflang noindex conflicts",
+        "detail_sheet": "Hreflang noindex",
+        "required_evidence": "hreflang, canonical and indexability evidence",
+        "owner_ticket": "206",
+    },
+    {
+        "id": "locale-redirects",
+        "title": "Locale redirects",
+        "detail_sheet": "Locale redirects",
+        "required_evidence": "authorised geo/locale probe evidence",
+        "owner_ticket": "194",
+    },
+    {
+        "id": "schema-parser-diagnostics",
+        "title": "Schema parser diagnostics",
+        "detail_sheet": "Schema diagnostics",
+        "required_evidence": "structured-data parser evidence",
+        "owner_ticket": "214",
+    },
+    {
+        "id": "structured-data-feature-rules",
+        "title": "Structured-data feature rules",
+        "detail_sheet": "Structured data",
+        "required_evidence": "typed structured-data evidence and documented rule set",
+        "owner_ticket": "232",
+    },
+    {
+        "id": "rendered-indexing-parity",
+        "title": "Rendered indexing parity",
+        "detail_sheet": "Rendered parity",
+        "required_evidence": "paired raw/rendered evidence",
+        "owner_ticket": "194",
+    },
+    {
+        "id": "mobile-rendering-parity",
+        "title": "Mobile rendering parity",
+        "detail_sheet": "Mobile rendering",
+        "required_evidence": "explicit mobile render evidence",
+        "owner_ticket": "233",
+    },
+    {
+        "id": "critical-resource-impact",
+        "title": "Critical resource impact",
+        "detail_sheet": "Critical resources",
+        "required_evidence": "render trace and resource evidence",
+        "owner_ticket": "233",
+    },
+    {
+        "id": "nonhtml-search-assets",
+        "title": "Non-HTML search assets",
+        "detail_sheet": "Non-HTML assets",
+        "required_evidence": "supplied or collected asset inventory",
+        "owner_ticket": "194",
+    },
+    {
+        "id": "performance-distribution",
+        "title": "Performance distribution",
+        "detail_sheet": "Performance",
+        "required_evidence": "performance samples, percentiles and denominators",
+        "owner_ticket": "196",
+    },
+    {
+        "id": "conditional-cache-behaviour",
+        "title": "Conditional cache behaviour",
+        "detail_sheet": "Conditional requests",
+        "required_evidence": "ETag/Last-Modified and conditional-request evidence",
+        "owner_ticket": "235",
+    },
+    {
+        "id": "validated-bot-log-analysis",
+        "title": "Validated bot-log analysis",
+        "detail_sheet": "Bot logs",
+        "required_evidence": "supplied logs with verified bot identity",
+        "owner_ticket": "196",
+    },
+    {
+        "id": "supplied-search-evidence",
+        "title": "Supplied search evidence",
+        "detail_sheet": "Supplied search evidence",
+        "required_evidence": "supplied Search Console, URL Inspection, CDN, origin or analytics evidence",
+        "owner_ticket": "204",
+    },
+    {
+        "id": "recipient-action-eligibility",
+        "title": "Recipient action eligibility",
+        "detail_sheet": "Recipient actions",
+        "required_evidence": "audit finding records and supplied context",
+        "owner_ticket": "227",
+    },
+    {
+        "id": "healthy-overview",
+        "title": "Healthy overview",
+        "detail_sheet": "Healthy controls",
+        "required_evidence": "qualified pass or not-applicable rows",
+        "owner_ticket": "227",
+    },
+    {
+        "id": "artifact-validation",
+        "title": "Artifact validation",
+        "detail_sheet": "Artifact validation",
+        "required_evidence": "artifact validation evidence",
+        "owner_ticket": "198",
+    },
+)
+
+_IMPLEMENTED_CHECK_REPORTS = {
+    "indexability-segmentation": ("indexability",),
+    "internal-link-targets": ("internal-link-quality",),
+    "orphan-candidates": ("orphans",),
+    "response-status-and-redirect-history": ("redirect-chains",),
+    "parameter-and-faceted-controls": ("tracking-parameter-links",),
+    "near-duplicate-content": ("near-duplicates",),
+    "schema-parser-diagnostics": ("schema-compatibility",),
+    "image-markup": ("image-issues",),
+    "internal-authority": ("internal-authority",),
+}
+
+TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES = {
+    "indexability-directive-conflicts": "indexability-segmentation",
+    "internal-link-failures": "internal-link-targets",
+    "tracking-parameter-links": "parameter-and-faceted-controls",
+    "redirect-chains": "response-status-and-redirect-history",
+    "schema-parser-defects": "schema-parser-diagnostics",
+    "image-markup-candidates": "image-markup",
+    "internal-authority-inventory": "internal-authority",
+}
+
+TECHNICAL_AUDIT_CHECK_REGISTRY = tuple(
+    {
+        **item,
+        "support_state": "implemented" if item["id"] in _IMPLEMENTED_CHECK_REPORTS else "not_implemented",
+        "source": item["required_evidence"],
+    }
+    for item in TECHNICAL_AUDIT_CHECK_CONTRACT
 )
 
 
@@ -121,10 +424,10 @@ def build_technical_audit(
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
     link_failures = [row for row in rows["internal-link-quality"] if row.get("issue") == "error_target"]
 
-    checks = (
+    detector_checks = (
         _check(
-            "indexability-directive-conflicts",
-            "Indexability directive conflicts",
+            "indexability-segmentation",
+            "Indexability segmentation",
             "Index conflicts",
             indexability_conflicts,
             "finding",
@@ -134,7 +437,7 @@ def build_technical_audit(
             completion_state=completion_state,
         ),
         _check(
-            "internal-link-failures",
+            "internal-link-targets",
             "Internal links to failed targets",
             "Internal link failures",
             link_failures,
@@ -146,8 +449,8 @@ def build_technical_audit(
             qualification="recheck_required",
         ),
         _check(
-            "tracking-parameter-links",
-            "Internal tracking-parameter links",
+            "parameter-and-faceted-controls",
+            "Parameter and faceted controls",
             "Tracking parameters",
             rows["tracking-parameter-links"],
             "finding",
@@ -169,8 +472,8 @@ def build_technical_audit(
             qualification="coverage_required",
         ),
         _check(
-            "redirect-chains",
-            "Redirect observations",
+            "response-status-and-redirect-history",
+            "Response status and redirects",
             "Redirect chains",
             rows["redirect-chains"],
             "finding",
@@ -193,8 +496,8 @@ def build_technical_audit(
             qualification="review_required",
         ),
         _check(
-            "schema-parser-defects",
-            "Structured-data parser defects",
+            "schema-parser-diagnostics",
+            "Schema parser diagnostics",
             "Schema diagnostics",
             schema_defects,
             "finding",
@@ -204,8 +507,8 @@ def build_technical_audit(
             completion_state=completion_state,
         ),
         _check(
-            "image-markup-candidates",
-            "Image markup candidates",
+            "image-markup",
+            "Image markup",
             "Image issues",
             rows["image-issues"],
             "finding",
@@ -216,17 +519,19 @@ def build_technical_audit(
             qualification="review_required",
         ),
         _check(
-            "internal-authority-inventory",
-            "Internal authority inventory",
+            "internal-authority",
+            "Internal authority",
             "Internal authority",
             rows["internal-authority"],
-            "inventory",
+            "partial",
             "Relative scores require template and business-priority comparison.",
             available=source_coverage["internal-authority"]["available"] is True,
             denominator=parsed_html_count,
             completion_state=completion_state,
         ),
     )
+
+    checks = _complete_contract_checks(detector_checks, source_coverage)
 
     audit_log = [
         *_indexability_actions(indexability_conflicts),
@@ -243,16 +548,15 @@ def build_technical_audit(
         "run_context": context,
         "source_coverage": source_coverage,
         "status_vocabulary": [
-            "tested",
             "pass",
             "finding",
             "partial",
             "unavailable",
             "not_applicable",
-            "error",
-            "no_observations",
         ],
+        "check_contract": [dict(item) for item in TECHNICAL_AUDIT_CHECK_CONTRACT],
         "check_registry": [dict(item) for item in TECHNICAL_AUDIT_CHECK_REGISTRY],
+        "check_id_aliases": dict(TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES),
         "checks": list(checks),
         "audit_log": audit_log,
         "manual_checks": _manual_checks(),
@@ -340,7 +644,7 @@ def _check(
     elif not available or denominator is None or completion_state != "complete":
         status = "partial" if available else "unavailable"
     elif denominator == 0:
-        status = "no_observations"
+        status = "not_applicable"
     else:
         status = "pass"
     return {
@@ -360,6 +664,76 @@ def _check(
         "qualification": qualification,
         "evidence": evidence,
     }
+
+
+def _complete_contract_checks(
+    detector_checks: Sequence[Mapping[str, object]],
+    source_coverage: Mapping[str, Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Return exactly one result per contract control in contract order."""
+
+    by_id = {str(check["id"]): dict(check) for check in detector_checks}
+    unexpected_ids = set(by_id).difference(item["id"] for item in TECHNICAL_AUDIT_CHECK_CONTRACT)
+    if unexpected_ids:
+        raise ValueError(f"detector checks outside contract: {sorted(unexpected_ids)}")
+    if len(by_id) != len(detector_checks):
+        raise ValueError("duplicate detector check IDs")
+
+    aliases_by_contract_id: dict[str, list[str]] = {}
+    for legacy_id, contract_id in TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES.items():
+        aliases_by_contract_id.setdefault(contract_id, []).append(legacy_id)
+
+    completed: list[dict[str, object]] = []
+    for contract in TECHNICAL_AUDIT_CHECK_CONTRACT:
+        identifier = contract["id"]
+        check = by_id.get(identifier)
+        if check is None:
+            check = _unavailable_contract_check(contract)
+        check["title"] = contract["title"]
+        check["detail_sheet"] = contract["detail_sheet"]
+        check["required_evidence"] = contract["required_evidence"]
+        check["owner_ticket"] = contract["owner_ticket"]
+        check["input_provenance"] = _input_provenance(identifier, source_coverage)
+        legacy_ids = aliases_by_contract_id.get(identifier)
+        if legacy_ids:
+            check["legacy_check_ids"] = legacy_ids
+        completed.append(check)
+    return completed
+
+
+def _unavailable_contract_check(contract: Mapping[str, str]) -> dict[str, object]:
+    """Describe absent collection without replacing it with an empty pass."""
+
+    return _check(
+        contract["id"],
+        contract["title"],
+        contract["detail_sheet"],
+        [],
+        "finding",
+        "The deterministic collector for this control did not run.",
+        available=False,
+        denominator=None,
+        completion_state="unavailable",
+        qualification=f"missing_required_evidence: {contract['required_evidence']}",
+    )
+
+
+def _input_provenance(
+    identifier: str,
+    source_coverage: Mapping[str, Mapping[str, object]],
+) -> list[dict[str, object]]:
+    report_names = _IMPLEMENTED_CHECK_REPORTS.get(identifier, ())
+    if not report_names:
+        return []
+    return [
+        {
+            "kind": "saved_run_report",
+            "report": report_name,
+            "available": source_coverage[report_name]["available"],
+            "source_digest_sha256": source_coverage[report_name]["source_digest_sha256"],
+        }
+        for report_name in report_names
+    ]
 
 
 def _optional_int(value: object) -> int | None:
@@ -401,7 +775,7 @@ def _indexability_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str
             explanation="The saved HTML meta and HTTP header directives disagree.",
             fix="Choose one intended indexability state and make header and HTML directives agree.",
             impact="Conflicting signals can lead to unintended indexation handling.",
-            evidence="indexability-directive-conflicts",
+            evidence="indexability-segmentation",
         )
         for row in rows
     ]
@@ -415,7 +789,7 @@ def _tracking_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, ob
             explanation=f"Source: {row.get('source_url', '')}; parameters: {row.get('tracking_parameters', '')}.",
             fix="Change the internal link to the clean canonical URL.",
             impact="Crawlable tracking variants waste crawl paths and can overwrite attribution.",
-            evidence="tracking-parameter-links",
+            evidence="parameter-and-faceted-controls",
         )
         for row in rows
     ]
@@ -429,7 +803,7 @@ def _schema_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, obje
             explanation=f"{row.get('diagnostic_code', 'Unknown parser diagnostic')}: {row.get('evidence', '')}",
             fix=str(row.get("remediation", "Correct the structured-data markup and validate it again.")),
             impact="Invalid markup can prevent eligible structured-data features from being understood.",
-            evidence="schema-parser-defects",
+            evidence="schema-parser-diagnostics",
         )
         for row in rows
     ]
@@ -445,24 +819,31 @@ def _table(rows: object, columns: tuple[str, ...] | None = None) -> list[list[ob
 def _manual_checks() -> list[dict[str, str]]:
     return [
         {
-            "id": "live-rechecks",
+            "id": "internal-link-targets",
             "reason": "Current status, redirect paths, and intermittent failures change after a crawl.",
         },
         {
-            "id": "robots-and-sitemaps",
-            "reason": "Fetch current robots.txt and every current XML sitemap independently.",
+            "id": "robots-controls",
+            "reason": "Fetch current robots.txt independently from the saved crawl.",
         },
-        {"id": "rendered-parity", "reason": "Raw and rendered DOM signals require representative browser evidence."},
         {
-            "id": "geo-and-language",
+            "id": "sitemap-integrity",
+            "reason": "Fetch every current XML sitemap independently from the saved crawl.",
+        },
+        {
+            "id": "rendered-indexing-parity",
+            "reason": "Raw and rendered DOM signals require representative browser evidence.",
+        },
+        {
+            "id": "locale-redirects",
             "reason": "Locale redirects require the relevant proxy regions and request headers.",
         },
         {
-            "id": "rich-result-eligibility",
+            "id": "structured-data-feature-rules",
             "reason": "Google feature requirements and site intent need current, contextual validation.",
         },
         {
-            "id": "severity-and-priority",
+            "id": "recipient-action-eligibility",
             "reason": "Business value, template purpose, and recipient-value filtering remain analyst decisions.",
         },
     ]
