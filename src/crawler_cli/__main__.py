@@ -77,6 +77,11 @@ from .current_site_files import build_site_file_scope, collect_current_site_file
 from .rendered_audit import render_audit_records
 from .url_variant_audit import collect_url_variant_evidence
 from .ai_governance import collect_ai_governance, project_ai_governance
+from .accept_language_audit import (
+    MAX_ACCEPT_LANGUAGE_TARGETS,
+    collect_accept_language_evidence,
+    select_accept_language_targets,
+)
 from .exit_codes import EXIT_FAILURE, EXIT_FINDINGS, EXIT_SUCCESS, EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
@@ -2540,6 +2545,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 "rendered-mobile-resources",
                 "conditional-get-probes",
                 "ai-governance",
+                "accept-language-probes",
             }:
                 continue
             required_capabilities = capabilities_by_report.get(name, ())
@@ -2704,32 +2710,19 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             evidence["url-variant-soft404"] = variant_evidence
         if args.audit_ai_governance:
             if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
-                print(
-                    "Error: this crawl run used an authorization scope; AI governance probes require --scope-manifest",
-                    file=sys.stderr,
-                )
+                print("Error: this crawl run used an authorization scope; AI governance probes require --scope-manifest", file=sys.stderr)
                 return EXIT_VALIDATION
             if run_context.get("portal_connection_policy_active") is True:
-                print(
-                    "Error: AI governance probes do not reuse the crawl's Portal connection policy",
-                    file=sys.stderr,
-                )
+                print("Error: AI governance probes do not reuse the crawl's Portal connection policy", file=sys.stderr)
                 return EXIT_VALIDATION
             scope_predicate = None
             if args.scope_manifest:
                 from .authorisation import compile_scope_predicate, load_scope_manifest
-
                 scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
             stored_digest = run_context.get("authorization_scope_digest")
             if stored_digest:
                 supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
-                supplied_digest = (
-                    hashlib.sha256(
-                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
-                    ).hexdigest()
-                    if supplied_snapshot is not None
-                    else None
-                )
+                supplied_digest = hashlib.sha256(json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest() if supplied_snapshot is not None else None
                 if supplied_digest != stored_digest:
                     print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
                     return EXIT_VALIDATION
@@ -2738,28 +2731,42 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
             seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
             host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
-            ai_engine = CrawlEngine(
-                CrawlConfig(
-                    same_host_only=True,
-                    allowed_hosts=sorted(allowed_hosts),
-                    respect_robots_txt=True,
-                    max_concurrency=1,
-                    per_host_concurrency=1,
-                    max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
-                    destination_guard="pinned",
-                    challenge_escalate_to_browser=False,
-                    scope_predicate=cast(Any, host_scope),
-                )
-            )
+            ai_engine = CrawlEngine(CrawlConfig(same_host_only=True, allowed_hosts=sorted(allowed_hosts), respect_robots_txt=True, max_concurrency=1, per_host_concurrency=1, max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT, destination_guard="pinned", challenge_escalate_to_browser=False, scope_predicate=cast(Any, host_scope)))
             try:
-                collected = await collect_ai_governance(
-                    ai_engine,
-                    seed_origins=seed_origins,
-                    max_origins=args.ai_governance_max_origins,
-                )
+                collected = await collect_ai_governance(ai_engine, seed_origins=seed_origins, max_origins=args.ai_governance_max_origins)
             finally:
                 await ai_engine.close()
             evidence["ai-governance"] = project_ai_governance(collected)
+        if args.probe_accept_language:
+            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
+                print("Error: this crawl run used an authorization scope; Accept-Language probes require --scope-manifest", file=sys.stderr)
+                return EXIT_VALIDATION
+            if run_context.get("portal_connection_policy_active") is True:
+                print("Error: Accept-Language probes do not reuse the crawl's Portal connection policy", file=sys.stderr)
+                return EXIT_VALIDATION
+            historical_rows = await reports.current_site_join_inventory()
+            allowed = run_context.get("declared_allowed_hosts", [])
+            seeds = run_context.get("seed_origins", [])
+            allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
+            seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
+            scope_predicate = None
+            if args.scope_manifest:
+                from .authorisation import compile_scope_predicate, load_scope_manifest
+                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
+            stored_digest = run_context.get("authorization_scope_digest")
+            if stored_digest:
+                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
+                supplied_digest = hashlib.sha256(json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest() if supplied_snapshot is not None else None
+                if supplied_digest != stored_digest:
+                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
+                    return EXIT_VALIDATION
+            host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
+            language_targets, language_population = select_accept_language_targets(seed_origins, historical_rows, max_targets=args.accept_language_max_targets)
+            language_engine = CrawlEngine(CrawlConfig(same_host_only=True, allowed_hosts=sorted(allowed_hosts), respect_robots_txt=True, max_concurrency=1, per_host_concurrency=1, max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT, destination_guard="pinned", challenge_escalate_to_browser=False, scope_predicate=cast(Any, host_scope)))
+            try:
+                evidence["accept-language-probes"] = await collect_accept_language_evidence(language_engine, language_targets, eligible_population=language_population, max_redirect_hops=args.accept_language_max_hops)
+            finally:
+                await language_engine.close()
         if args.probe_conditional_gets:
             if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
                 print(
@@ -4869,6 +4876,26 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument("--variant-max-control-pages", type=positive_int, default=10)
     audit_parser.add_argument("--variant-max-probes", type=positive_int, default=50)
     audit_parser.add_argument("--soft404-max-hosts", type=positive_int, default=10)
+    audit_parser.add_argument(
+        "--probe-accept-language",
+        action="store_true",
+        help=(
+            "Explicitly probe seed roots and saved locale roots with a fixed set of Accept-Language headers "
+            "to detect language redirects, missing Vary and no-header crawler traps"
+        ),
+    )
+    audit_parser.add_argument(
+        "--accept-language-max-targets",
+        type=positive_int,
+        default=5,
+        help=f"Maximum Accept-Language probe targets (1–{MAX_ACCEPT_LANGUAGE_TARGETS}; default 5)",
+    )
+    audit_parser.add_argument(
+        "--accept-language-max-hops",
+        type=positive_int,
+        default=5,
+        help="Maximum redirects followed per Accept-Language probe (1–10; default 5)",
+    )
     audit_parser.add_argument(
         "--probe-conditional-gets",
         action="store_true",

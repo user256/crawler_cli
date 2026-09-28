@@ -60,6 +60,7 @@ TECHNICAL_AUDIT_REPORTS = (
     "performance-inventory",
     "conditional-get-probes",
     "ai-governance",
+    "accept-language-probes",
 )
 
 # Registry is intentionally wider than the currently implemented report set.
@@ -143,6 +144,11 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
     {"id": "verified-search-bot-logs", "state": "conditional", "source": "validated operator-supplied access logs"},
     {"id": "geo-dependent-behaviour", "state": "conditional", "source": "configured regional proxy observations"},
     {
+        "id": "accept-language-variation",
+        "state": "implemented_conditional",
+        "source": "explicit bounded Accept-Language header probes with guarded, manually followed redirects",
+    },
+    {
         "id": "severity-content-intent-and-priority",
         "state": "analyst_judgement",
         "source": "site purpose and business evidence",
@@ -216,7 +222,7 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
     {
         "id": "locale-redirect-validation",
         "state": "conditional",
-        "source": "requires Accept-Language and matching regional proxy evidence",
+        "source": "Accept-Language probe evidence available; matching regional proxy evidence still required",
     },
     {
         "id": "rich-result-eligibility",
@@ -731,7 +737,7 @@ TECHNICAL_AUDIT_SKILL_REQUIREMENTS = (
         "id": "locale-redirects",
         "section": "Locale auto-redirects",
         "check_id": "geo-dependent-behaviour",
-        "related_check_ids": ["locale-redirect-validation"],
+        "related_check_ids": ["locale-redirect-validation", "accept-language-variation"],
         "requirements": [
             "test alternate URL with no Accept-Language and relevant geo",
             "flag forced redirects only with regional evidence",
@@ -935,6 +941,7 @@ TECHNICAL_AUDIT_REQUIREMENT_DENOMINATORS = {
     "crawl-integrity": "selected-run snapshots; successful/decoded HTML counts are separate populations",
     "fetching-safeguards": "authorized in-scope targets selected for bounded live requests",
     "geo-dependent-behaviour": "relevant alternate URLs requested from configured target regions",
+    "accept-language-variation": "seed-origin roots and saved locale-root pages, each probed with a fixed Accept-Language set",
     "rendered-mobile-and-resource-evidence": "sampled URL/template/locale/device strata and observed browser requests",
     "live-link-rechecks": "unique eligible historical failure targets selected within the configured cap",
     "url-variants-and-soft-404": "valid route controls, bounded variant probes and per-host synthetic paths",
@@ -1757,6 +1764,13 @@ def build_technical_audit(
     ai_bot_posture = [row for row in ai_rows if row.get("record_type") == "bot_posture"]
     ai_llms_files = [row for row in ai_rows if row.get("record_type") == "llms_file"]
     ai_evidence = [row for row in ai_rows if row.get("record_type") == "candidate"]
+    accept_language_rows = rows["accept-language-probes"]
+    accept_language_coverage = (
+        accept_language_rows[0]
+        if accept_language_rows and accept_language_rows[0].get("record_type") == "coverage"
+        else {}
+    )
+    accept_language_evidence = [row for row in accept_language_rows if row.get("record_type") == "candidate"]
     render_rows = rows["rendered-mobile-resources"]
     render_coverage = render_rows[0] if render_rows and render_rows[0].get("record_type") == "coverage" else {}
     render_evidence = [row for row in render_rows if row.get("record_type") == "candidate"]
@@ -2031,6 +2045,22 @@ def build_technical_audit(
             qualification="analyst_only",
         ),
         _check(
+            "accept-language-variation",
+            "Accept-Language variation and language redirects",
+            "Locale Redirects",
+            [{**row, "qualification": "analyst_only"} for row in accept_language_evidence],
+            "finding",
+            "Header-only probes show what the origin does when Accept-Language changes; crawlers usually send none. "
+            "Intent, geo-IP behaviour and alternate discoverability must be reviewed.",
+            available=(
+                source_coverage["accept-language-probes"]["available"] is True
+                and accept_language_coverage.get("record_type") == "coverage"
+            ),
+            denominator=_optional_int(accept_language_coverage.get("target_count")),
+            completion_state=completion_state,
+            qualification="analyst_only",
+        ),
+        _check(
             "rendered-mobile-and-resource-evidence",
             "Rendered, mobile, and resource observations",
             "Rendered & Resources",
@@ -2106,6 +2136,13 @@ def build_technical_audit(
             elif url_variant_coverage.get("complete") is not True:
                 check["status"] = "partial"
                 check["qualification"] = "bounded_or_incomplete_current_probe"
+        if check["id"] == "accept-language-variation":
+            if accept_language_coverage.get("record_type") != "coverage":
+                check["status"] = "unavailable"
+                check["qualification"] = "requires_explicit_accept_language_probe"
+            elif accept_language_coverage.get("complete") is not True:
+                check["status"] = "partial"
+                check["qualification"] = "bounded_accept_language_target_sample"
         if check["id"] == "rendered-mobile-and-resource-evidence":
             if render_coverage.get("record_type") != "coverage":
                 check["status"] = "unavailable"
@@ -2156,6 +2193,11 @@ def build_technical_audit(
             check["id"] == "url-variants-and-soft-404"
             and check["status"] == "unavailable"
             and url_variant_coverage.get("record_type") != "coverage"
+        )
+        and not (
+            check["id"] == "accept-language-variation"
+            and check["status"] == "unavailable"
+            and accept_language_coverage.get("record_type") != "coverage"
         )
         and not (
             check["id"] == "rendered-mobile-and-resource-evidence"
@@ -2216,6 +2258,7 @@ def build_technical_audit(
         "current_site_files_coverage": dict(current_site_files_coverage),
         "parameterized_link_coverage": parameterized_link_coverage,
         "url_variant_coverage": dict(url_variant_coverage),
+        "accept_language_coverage": dict(accept_language_coverage),
         "rendered_coverage": dict(render_coverage),
         "ai_governance": {
             "theme": "AI",
@@ -2459,6 +2502,20 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 ["Current URL-variant probes", variant_coverage.get("variant_probe_count", 0)],
                 ["Synthetic 404 hosts", variant_coverage.get("soft404_host_count", 0)],
                 ["URL-variant probe coverage complete", variant_coverage.get("complete", False)],
+            ]
+        )
+    accept_language_coverage = audit.get("accept_language_coverage", {})
+    if isinstance(accept_language_coverage, Mapping) and accept_language_coverage:
+        language_counts = accept_language_coverage.get("candidate_counts", {})
+        language_counts = language_counts if isinstance(language_counts, Mapping) else {}
+        overview.extend(
+            [
+                ["Accept-Language probe targets", accept_language_coverage.get("target_count", 0)],
+                ["Accept-Language probes", accept_language_coverage.get("probe_count", 0)],
+                ["Language redirects detected", language_counts.get("language_redirect_detected", 0)],
+                ["Language variation without Vary", language_counts.get("missing_vary_header", 0)],
+                ["No-header crawler traps", language_counts.get("bot_trap", 0)],
+                ["Accept-Language probe coverage complete", accept_language_coverage.get("complete", False)],
             ]
         )
     rendered_coverage = audit.get("rendered_coverage", {})
