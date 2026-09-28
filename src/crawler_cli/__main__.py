@@ -22,7 +22,11 @@ if TYPE_CHECKING:
 from .archive import audit_archive_urls
 from .auth import AuthConfig, AuthType
 from .compare_urls import build_pair_rows, load_url_pairs, rows_failing
-from .compare_renders import RENDER_COMPARISON_RULESET_VERSION, RenderParityComparison, compare_rendered_sample
+from .compare_renders import (
+    RENDER_COMPARISON_RULESET_VERSION,
+    RenderParityComparison,
+    compare_rendered_sample,
+)
 from .comparison import DEFAULT_SIMHASH_THRESHOLD, compare_deep, comparison_rows
 from .config import (
     CB_ENABLED_DEFAULT,
@@ -70,6 +74,7 @@ from .exposure_inventory import (
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
 from .current_site_files import build_site_file_scope, collect_current_site_files
+from .rendered_audit import render_audit_records
 from .url_variant_audit import collect_url_variant_evidence
 from .exit_codes import EXIT_FAILURE, EXIT_FINDINGS, EXIT_SUCCESS, EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
@@ -80,6 +85,7 @@ from .reports import CrawlReports
 from .orphan_sources import load_known_url_inventory
 from .technical_audit import (
     TECHNICAL_AUDIT_REPORTS,
+    TECHNICAL_AUDIT_SCHEMA_VERSION,
     audit_sheet_tables,
     build_technical_audit,
     canonical_hreflang_report,
@@ -2428,7 +2434,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         }
         evidence = {}
         for name in TECHNICAL_AUDIT_REPORTS:
-            if name in {"current-robots-sitemaps", "url-variant-soft404"}:
+            if name in {"current-robots-sitemaps", "url-variant-soft404", "rendered-mobile-resources"}:
                 continue
             capability = capability_by_report.get(name)
             if capability and capabilities.get(capability) is not True:
@@ -2604,6 +2610,211 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             variant_evidence.extend(dict(row) for row in variant_candidates)
             variant_evidence.extend(dict(row) for row in soft404_candidates)
             evidence["url-variant-soft404"] = variant_evidence
+        if args.compare_current_renders:
+            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
+                print(
+                    "Error: this crawl run used an authorization scope; current render comparison requires --scope-manifest",
+                    file=sys.stderr,
+                )
+                return EXIT_VALIDATION
+            if run_context.get("portal_connection_policy_active") is True:
+                print(
+                    "Error: current render comparison does not reuse the crawl's Portal connection policy",
+                    file=sys.stderr,
+                )
+                return EXIT_VALIDATION
+            historical_rows = await reports.current_site_join_inventory()
+            history_by_url = {str(row.get("url") or ""): row for row in historical_rows}
+            raw_candidates = await reports.store.fetch_render_comparison_candidates(run_id=run_id)
+            valid_candidates = []
+            for candidate in raw_candidates:
+                url = str(candidate.get("url") or "")
+                page = history_by_url.get(url)
+                if not page or page.get("kind") != "html" or page.get("overall_indexable") is not True:
+                    continue
+                canonicals = page.get("canonical_urls_json")
+                if isinstance(canonicals, str):
+                    try:
+                        canonicals = json.loads(canonicals)
+                    except ValueError:
+                        canonicals = []
+                if not isinstance(canonicals, list) or url not in [str(value) for value in canonicals]:
+                    continue
+                valid_candidates.append({**dict(candidate), "template": page.get("template")})
+            if not valid_candidates:
+                evidence["rendered-mobile-resources"] = [
+                    {
+                        "record_type": "coverage",
+                        "complete": True,
+                        "sample_size": 0,
+                        "candidate_population": 0,
+                        "state": "no_self_canonical_indexable_controls",
+                        "devices": [],
+                    }
+                ]
+            else:
+                scope_predicate = None
+                if args.scope_manifest:
+                    from .authorisation import compile_scope_predicate, load_scope_manifest
+
+                    scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
+                stored_digest = run_context.get("authorization_scope_digest")
+                if stored_digest:
+                    supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
+                    supplied_digest = (
+                        hashlib.sha256(
+                            json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
+                        ).hexdigest()
+                        if supplied_snapshot is not None
+                        else None
+                    )
+                    if supplied_digest != stored_digest:
+                        print(
+                            "Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr
+                        )
+                        return EXIT_VALIDATION
+                allowed = run_context.get("declared_allowed_hosts", [])
+                seeds = run_context.get("seed_origins", [])
+                allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
+                seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
+                host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
+                initial_urls, strata, url_strata, _stratum_sources = _select_run_render_candidates(
+                    valid_candidates,
+                    max_pages=args.render_max_pages,
+                )
+                render_page_context = {
+                    str(candidate.get("url") or ""): {
+                        "locale": history_by_url.get(str(candidate.get("url") or ""), {}).get("html_lang"),
+                        "template": candidate.get("template"),
+                        "stratum": url_strata.get(str(candidate.get("url") or "")),
+                    }
+                    for candidate in valid_candidates
+                }
+                selected_urls = list(initial_urls)
+                device_coverages: list[dict[str, object]] = []
+                device_results: list[dict[str, object]] = []
+                device_specs = [("desktop_viewport", 1280, 720)]
+                if args.render_mobile_viewport:
+                    device_specs.append(("mobile_viewport", 390, 844))
+                for device, width, height in device_specs:
+                    render_config = CrawlConfig(
+                        backend="playwright",
+                        same_host_only=True,
+                        allowed_hosts=sorted(allowed_hosts),
+                        respect_robots_txt=True,
+                        max_concurrency=1,
+                        per_host_concurrency=1,
+                        max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
+                        capture_render_baseline=True,
+                        discover_render_urls=True,
+                        max_render_requests_per_page=args.render_max_requests_per_page,
+                        max_render_links_per_page=args.render_max_links_per_page,
+                        playwright_network_idle_timeout_seconds=args.render_ready_timeout,
+                        playwright_wait_for_selector=args.render_ready_selector or "",
+                        playwright_viewport_width=width,
+                        playwright_viewport_height=height,
+                        destination_guard="pinned",
+                        scope_predicate=cast(Any, host_scope),
+                    )
+                    render_engine = CrawlEngine(render_config)
+                    try:
+                        initial = await compare_rendered_sample(
+                            render_engine,
+                            initial_urls,
+                            max_concurrent=1,
+                        )
+                        expanded = []
+                        if args.render_expansion_pages:
+                            divergent_strata = {
+                                url_strata[item.url]
+                                for item in initial
+                                if item.url in url_strata and (item.state != "complete" or item.findings)
+                            }
+                            taken = set(initial_urls)
+                            for stratum in sorted(divergent_strata):
+                                for candidate_row in valid_candidates:
+                                    url = str(candidate_row.get("url") or "")
+                                    if url_strata.get(url) == stratum and url not in taken:
+                                        expanded.append(url)
+                                        taken.add(url)
+                                        break
+                                if len(expanded) >= args.render_expansion_pages:
+                                    break
+                        extra = (
+                            await compare_rendered_sample(render_engine, expanded, max_concurrent=1) if expanded else []
+                        )
+                    finally:
+                        await render_engine.close()
+                    comparisons = [*initial, *extra]
+                    selected_urls = [*initial_urls, *expanded]
+                    records = render_audit_records(
+                        comparisons,
+                        device=device,
+                        viewport=(width, height),
+                        page_context=render_page_context,
+                    )
+                    records[0]["candidate_population"] = len(valid_candidates)
+                    records[0]["initial_sample_size"] = len(initial_urls)
+                    records[0]["expanded_sample_size"] = len(expanded)
+                    records[0]["strata"] = strata
+                    records[0]["render_ready_selector_configured"] = bool(args.render_ready_selector)
+                    device_coverages.append(dict(records[0]))
+                    device_results.extend(records[1:])
+                    if args.persist_render_comparisons:
+                        persistence_rows: list[dict[str, object]] = []
+                        rendered_observations = [row for row in records[1:] if row.get("record_type") == "observation"]
+                        for comparison in comparisons:
+                            persisted = comparison.as_dict()
+                            persisted["url"] = comparison.url
+                            persisted["state"] = comparison.state
+                            persisted["state_reason"] = comparison.state_reason
+                            persisted["primary_summary"] = comparison.primary_summary
+                            persisted["observed_at"] = datetime.now(UTC).isoformat()
+                            persisted["device"] = device
+                            digest = hashlib.sha256(comparison.url.encode()).hexdigest()
+                            persisted["resource_observations"] = [
+                                row
+                                for row in rendered_observations
+                                if row.get("url_digest_sha256") == digest
+                                and row.get("record_kind") in {"image_reference", "browser_request"}
+                            ]
+                            persistence_rows.append(persisted)
+                        await store.persist_render_comparison_session(
+                            source_crawl_run_id=run_id,
+                            schema_version=TECHNICAL_AUDIT_SCHEMA_VERSION,
+                            ruleset_version=RENDER_COMPARISON_RULESET_VERSION,
+                            input_metadata={
+                                "device": device,
+                                "viewport": {"width": width, "height": height},
+                                "sampling_basis": "deterministic_host_locale_path_depth_strata",
+                                "strata": strata,
+                                "selected_urls": selected_urls,
+                                "sample_contexts": [
+                                    {"url": url, **render_page_context.get(url, {})} for url in selected_urls
+                                ],
+                            },
+                            summary={
+                                "sample_size": len(comparisons),
+                                "complete": records[0].get("complete"),
+                                "candidate_count": len(valid_candidates),
+                            },
+                            results=persistence_rows,
+                        )
+                evidence["rendered-mobile-resources"] = [
+                    {
+                        "record_type": "coverage",
+                        "complete": all(row.get("complete") is True for row in device_coverages),
+                        "sample_size": sum(cast(int, row.get("sample_size", 0)) for row in device_coverages),
+                        "devices": device_coverages,
+                        "rendered_only_link_count": sum(
+                            cast(int, row.get("rendered_only_link_count", 0)) for row in device_coverages
+                        ),
+                        "raw_only_link_count": sum(
+                            cast(int, row.get("raw_only_link_count", 0)) for row in device_coverages
+                        ),
+                    },
+                    *device_results,
+                ]
         if args.recheck_live:
             if not args.scope_manifest:
                 print("Error: --recheck-live requires --scope-manifest", file=sys.stderr)
@@ -4390,6 +4601,19 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument("--variant-max-control-pages", type=positive_int, default=10)
     audit_parser.add_argument("--variant-max-probes", type=positive_int, default=50)
     audit_parser.add_argument("--soft404-max-hosts", type=positive_int, default=10)
+    audit_parser.add_argument(
+        "--compare-current-renders",
+        action="store_true",
+        help="Explicitly compare a stratified current raw/desktop render sample from the selected crawl run",
+    )
+    audit_parser.add_argument("--render-max-pages", type=positive_int, default=10)
+    audit_parser.add_argument("--render-expansion-pages", type=non_negative_int, default=5)
+    audit_parser.add_argument("--render-mobile-viewport", action="store_true")
+    audit_parser.add_argument("--render-ready-selector", default="")
+    audit_parser.add_argument("--render-ready-timeout", type=positive_float, default=5.0)
+    audit_parser.add_argument("--render-max-requests-per-page", type=positive_int, default=200)
+    audit_parser.add_argument("--render-max-links-per-page", type=positive_int, default=200)
+    audit_parser.add_argument("--persist-render-comparisons", action="store_true")
     audit_parser.add_argument("--recheck-limit", type=positive_int, default=25)
     audit_parser.add_argument("--recheck-attempts", type=positive_int, default=2)
     audit_parser.add_argument("--recheck-timeout", type=positive_float, default=10.0)

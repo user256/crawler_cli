@@ -143,6 +143,8 @@ class CrawlConfig:
     per-response cap before a request is emitted.
     """
     playwright_network_idle_timeout_seconds: float = 5.0
+    playwright_viewport_width: int = 1280
+    playwright_viewport_height: int = 720
     playwright_wait_for_selector: str = ""
     """If set, the Playwright backend waits for this CSS selector to appear
     before snapshotting the DOM (ticket 031). Times out gracefully."""
@@ -448,6 +450,8 @@ class CrawlConfig:
         )
         require_positive_int(self.max_render_requests_per_page, field="max_render_requests_per_page")
         require_positive_int(self.max_render_links_per_page, field="max_render_links_per_page")
+        require_positive_int(self.playwright_viewport_width, field="playwright_viewport_width")
+        require_positive_int(self.playwright_viewport_height, field="playwright_viewport_height")
         require_positive_int(self.obscura_workers, field="obscura_workers")
         require_positive_int(self.obscura_port, field="obscura_port")
         if self.obscura_port > 65535:

@@ -292,6 +292,14 @@ def test_playwright_proxy_setting_none_without_proxy():
     assert backend._playwright_proxy_setting() is None
 
 
+def test_playwright_context_uses_configured_device_viewport():
+    backend = PlaywrightBackend(
+        CrawlConfig(backend="playwright", playwright_viewport_width=390, playwright_viewport_height=844)
+    )
+
+    assert backend._context_kwargs()["viewport"] == {"width": 390, "height": 844}
+
+
 @pytest.mark.asyncio
 async def test_managed_obscura_argv_includes_gateway_proxy(monkeypatch):
     # Obscura managed spawn should pick up the general gateway proxy when no
@@ -601,6 +609,7 @@ async def test_playwright_backend_can_launch_persistent_profile(monkeypatch):
         "user_agent": "crawler_cli/0.1",
         "ignore_https_errors": False,
         "extra_http_headers": {},
+        "viewport": {"width": 1280, "height": 720},
         "headless": False,
         "channel": "msedge",
         "args": ["--profile-directory=Profile 7"],
