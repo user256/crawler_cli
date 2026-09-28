@@ -865,10 +865,10 @@ class CrawlEngine:
         job.budget_accounted_bytes = snapshot.accounted_bytes
         job.budget_stop_reason = snapshot.stop_reason
 
-    async def crawl(self, url: str) -> CrawlResult:
+    async def crawl(self, url: str, *, purpose: ScopePurpose = "discovered") -> CrawlResult:
         async with self._semaphore:
             try:
-                admission_reason = self.config.url_admission_reason(url)
+                admission_reason = self.config.url_admission_reason(url, purpose=purpose)
                 if admission_reason is not None:
                     # Authorisation-scope refusals keep their own structured
                     # reason (ticket 148); the local path flags keep the

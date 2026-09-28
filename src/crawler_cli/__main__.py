@@ -75,6 +75,7 @@ from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
 from .reports import CrawlReports
 from .technical_audit import TECHNICAL_AUDIT_REPORTS, build_technical_audit
+from .live_rechecks import candidate_targets, collect_live_rechecks
 from .validators import (
     non_negative_float,
     non_negative_int,
@@ -2347,6 +2348,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
 
     store = _store_from_args(args)
     reports = CrawlReports(store, run_id=args.crawl_run_id)
+    live_rechecks = None
     try:
         # Resolve before fetching so the emitted artifact records the exact
         # stored run even when the operator deliberately selected "latest".
@@ -2372,6 +2374,27 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             if capability and capabilities.get(capability) is not True:
                 continue
             evidence[name] = await _fetch_report(reports, name, args)
+        if args.recheck_live:
+            if not args.scope_manifest:
+                print("Error: --recheck-live requires --scope-manifest", file=sys.stderr)
+                return EXIT_VALIDATION
+            from .authorisation import compile_scope_predicate, load_scope_manifest
+
+            predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
+            assert predicate is not None
+            hosts_value = run_context.get("declared_allowed_hosts", [])
+            seeds_value = run_context.get("seed_hosts", [])
+            hosts = hosts_value if isinstance(hosts_value, list) else []
+            seeds = seeds_value if isinstance(seeds_value, list) else []
+            allowed_hosts = sorted({str(host).lower() for host in [*hosts, *seeds] if host})
+            targets = candidate_targets(evidence.get("internal-link-quality", []), limit=args.recheck_limit)
+            live_rechecks = await collect_live_rechecks(
+                targets,
+                scope_predicate=predicate,
+                allowed_hosts=allowed_hosts,
+                attempts=args.recheck_attempts,
+                timeout_seconds=args.recheck_timeout,
+            )
         final_run = await store.get_crawl_run(run_id)
         initial_updated_at = run_context.get("updated_at")
         final_updated_at = final_run.get("updated_at") if final_run else None
@@ -2391,10 +2414,18 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_VALIDATION
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
     finally:
         await store.close()
 
-    audit = build_technical_audit(crawl_run_id=run_id, reports=evidence, run_context=run_context)
+    audit = build_technical_audit(
+        crawl_run_id=run_id,
+        reports=evidence,
+        run_context=run_context,
+        live_rechecks=live_rechecks,
+    )
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(audit, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
@@ -4038,6 +4069,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Build a deterministic technical-audit evidence bundle from one stored crawl run",
     )
     audit_parser.add_argument("--out", required=True, help="Write the deterministic audit JSON to this path")
+    audit_parser.add_argument(
+        "--recheck-live",
+        action="store_true",
+        help="Recheck saved failing link targets through the guarded crawler (requires an authorization manifest)",
+    )
+    audit_parser.add_argument("--scope-manifest", help="Authorization manifest required by --recheck-live")
+    audit_parser.add_argument("--recheck-limit", type=positive_int, default=25)
+    audit_parser.add_argument("--recheck-attempts", type=positive_int, default=2)
+    audit_parser.add_argument("--recheck-timeout", type=positive_float, default=10.0)
     audit_parser.add_argument(
         "--simhash-threshold",
         type=non_negative_int,

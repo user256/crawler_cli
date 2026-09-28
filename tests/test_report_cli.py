@@ -343,6 +343,13 @@ def test_technical_audit_downgrades_a_run_changed_during_collection(fake_reports
     assert all(check["status"] != "pass" for check in payload["checks"])
 
 
+def test_live_recheck_requires_explicit_scope_manifest(fake_reports, tmp_path, capsys):
+    out = tmp_path / "technical-audit.json"
+    assert _run(["technical-audit", "--recheck-live", "--out", str(out)]) == 2
+    assert "--recheck-live requires --scope-manifest" in capsys.readouterr().err
+    assert fake_reports.closed is True
+
+
 def test_csv_requires_out_directory(fake_reports, capsys):
     assert _run(["report", "orphans", "--format", "csv"]) == 2
     assert "--out" in capsys.readouterr().err

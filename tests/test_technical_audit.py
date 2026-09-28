@@ -74,9 +74,8 @@ def test_sheet_tables_only_include_detail_tabs_with_evidence():
     )
     tables = audit_sheet_tables(audit)
 
-    assert set(tables) == {"Overview", "Audit Log", "Tracking parameters"}
-    assert tables["Audit Log"][0][0] == "Problem"
-    assert tables["Tracking parameters"][0] == ["target_url"]
+    assert set(tables) == {"Overview"}
+    assert ["Client publication ready", False] in tables["Overview"]
 
 
 def test_missing_run_context_and_missing_source_are_not_reported_as_passes():

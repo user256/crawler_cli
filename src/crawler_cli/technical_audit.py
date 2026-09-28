@@ -16,6 +16,7 @@ import json
 from .schema import JSON_LD_PARSER_MODE, _PARSER
 from .indexability import directive_conflicts
 from .models import RobotsDirectiveEvidence
+from .redaction import redact_url_without_digest
 
 
 TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/1"
@@ -44,6 +45,11 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
     {"id": "crawl-integrity", "state": "partial", "source": "crawl run and snapshots"},
     {"id": "indexability-directive-conflicts", "state": "implemented", "source": "indexability report"},
     {"id": "internal-link-quality", "state": "implemented", "source": "link graph report"},
+    {
+        "id": "live-link-rechecks",
+        "state": "implemented_conditional",
+        "source": "guarded crawler and authorization manifest",
+    },
     {"id": "tracking-parameter-links", "state": "implemented", "source": "link graph report"},
     {"id": "orphan-candidates", "state": "implemented_candidate", "source": "orphan report"},
     {"id": "redirect-observations", "state": "implemented_candidate", "source": "redirect report"},
@@ -86,6 +92,7 @@ def build_technical_audit(
     crawl_run_id: str,
     reports: Mapping[str, Sequence[Mapping[str, object]]],
     run_context: Mapping[str, object] | None = None,
+    live_rechecks: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     """Build a stable audit payload from run-scoped report rows.
 
@@ -128,7 +135,30 @@ def build_technical_audit(
             if conflicts:
                 indexability_conflicts.append({**row, "conflicts": conflicts})
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
-    link_failures = [row for row in rows["internal-link-quality"] if row.get("issue") == "error_target"]
+    saved_link_failures = [row for row in rows["internal-link-quality"] if row.get("issue") == "error_target"]
+    confirmed_link_failures = []
+    analyst_link_failures = []
+    for row in saved_link_failures:
+        target_url = str(row.get("target_url", ""))
+        recheck = _lookup_recheck(live_rechecks, target_url)
+        if isinstance(recheck, Mapping) and recheck.get("state") in {
+            "persistent_http_failure",
+            "persistent_server_error",
+        }:
+            confirmed_link_failures.append({**row, "live_recheck": dict(recheck)})
+        else:
+            analyst_link_failures.append(
+                {
+                    **row,
+                    "recheck_state": recheck.get("state") if isinstance(recheck, Mapping) else "not_checked",
+                    **({"live_recheck": dict(recheck)} if isinstance(recheck, Mapping) else {}),
+                }
+            )
+    all_saved_failures_rechecked = (
+        all(_lookup_recheck(live_rechecks, str(row.get("target_url", ""))) is not None for row in saved_link_failures)
+        if live_rechecks is not None
+        else not saved_link_failures
+    )
 
     checks = (
         _check(
@@ -146,13 +176,15 @@ def build_technical_audit(
             "internal-link-failures",
             "Internal links to failed targets",
             "Internal link failures",
-            link_failures,
+            confirmed_link_failures,
             "finding",
             "Saved-crawl failures must be rechecked live before client reporting.",
-            available=source_coverage["internal-link-quality"]["available"] is True,
+            available=source_coverage["internal-link-quality"]["available"] is True and all_saved_failures_rechecked,
             denominator=parsed_html_count,
             completion_state=completion_state,
-            qualification="recheck_required",
+            qualification=(
+                "live_confirmed" if confirmed_link_failures else ("recheck_required" if saved_link_failures else None)
+            ),
         ),
         _check(
             "tracking-parameter-links",
@@ -242,6 +274,32 @@ def build_technical_audit(
         *_tracking_actions(rows["tracking-parameter-links"]),
         *_schema_actions(schema_defects),
     ]
+    client_actions = _link_actions(confirmed_link_failures)
+    unresolved_link_failures = [row for row in analyst_link_failures if row.get("recheck_state") not in {"recovered"}]
+    checks_complete = all(check["status"] not in {"partial", "unavailable", "error"} for check in checks)
+    publication_ready = (
+        completion_state == "complete"
+        and live_rechecks is not None
+        and checks_complete
+        and not unresolved_link_failures
+        and not audit_log
+    )
+    publishable_actions = client_actions if publication_ready else []
+    analyst_evidence = [
+        *[{"check_id": "internal-link-failures", **row} for row in analyst_link_failures],
+        *[{"check_id": "saved-run-candidate", **row} for row in audit_log],
+    ]
+    publication_reasons = []
+    if completion_state != "complete":
+        publication_reasons.append("crawl run is incomplete")
+    if live_rechecks is None:
+        publication_reasons.append("live rechecks were not requested")
+    if not checks_complete:
+        publication_reasons.append("one or more deterministic checks have incomplete coverage")
+    if unresolved_link_failures:
+        publication_reasons.append("some saved link failures are unverified or not publishable")
+    if audit_log:
+        publication_reasons.append("saved action candidates require field-specific current validation")
     return {
         "schema_version": TECHNICAL_AUDIT_SCHEMA_VERSION,
         "ruleset_version": TECHNICAL_AUDIT_RULESET_VERSION,
@@ -264,6 +322,26 @@ def build_technical_audit(
         "check_registry": [dict(item) for item in TECHNICAL_AUDIT_CHECK_REGISTRY],
         "checks": list(checks),
         "audit_log": audit_log,
+        "analyst_evidence": analyst_evidence,
+        "live_rechecks": [
+            {
+                "target_url": redact_url_without_digest(url),
+                "url_digest_sha256": hashlib.sha256(url.encode()).hexdigest(),
+                **dict(recheck),
+            }
+            for url, recheck in sorted((live_rechecks or {}).items())
+        ],
+        "live_rechecks_by_digest": {
+            "sha256:" + hashlib.sha256(url.encode()).hexdigest(): dict(recheck)
+            for url, recheck in sorted((live_rechecks or {}).items())
+        },
+        "client_publication_gate": {
+            "ready": publication_ready,
+            "eligible_action_count": len(publishable_actions),
+            "candidate_count": len(analyst_evidence),
+            "blocked_reasons": publication_reasons,
+            "client_actions": publishable_actions,
+        },
         "manual_checks": _manual_checks(),
     }
 
@@ -283,6 +361,8 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     source_coverage = raw_coverage if isinstance(raw_coverage, Mapping) else {}
     registry = audit.get("check_registry", [])
     audit_log = audit.get("audit_log", [])
+    raw_gate = audit.get("client_publication_gate", {})
+    gate = raw_gate if isinstance(raw_gate, Mapping) else {}
     overview = [
         ["Metric", "Value"],
         ["Audit schema", str(audit["schema_version"])],
@@ -297,15 +377,20 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
         ],
         ["Registry checks", len(registry) if isinstance(registry, list) else 0],
         ["Candidate/action rows", len(audit_log) if isinstance(audit_log, list) else 0],
+        [
+            "Client publication ready",
+            gate.get("ready", False),
+        ],
     ]
     for check in checks:
         assert isinstance(check, Mapping)
         overview.append([str(check["title"]), str(check["status"])])
 
-    tables: dict[str, list[list[object]]] = {
-        "Overview": overview,
-        "Audit Log": _table(
-            audit.get("audit_log", []),
+    tables: dict[str, list[list[object]]] = {"Overview": overview}
+    client_actions = gate.get("client_actions", [])
+    if gate.get("ready") is True and isinstance(client_actions, list) and client_actions:
+        tables["Audit Log"] = _table(
+            client_actions,
             (
                 "Problem",
                 "URL",
@@ -320,13 +405,12 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 "Evidence Reference",
                 "Resolved",
             ),
-        ),
-    }
+        )
     for check in checks:
         assert isinstance(check, Mapping)
         evidence = check["evidence"]
         assert isinstance(evidence, list)
-        if evidence:
+        if evidence and str(check.get("qualification") or "") == "analyst_only":
             tables[str(check["detail_sheet"])] = _table(evidence)
     return tables
 
@@ -376,6 +460,19 @@ def _optional_int(value: object) -> int | None:
         return int(value) if isinstance(value, (int, float, str)) else None
     except (TypeError, ValueError):
         return None
+
+
+def _lookup_recheck(
+    live_rechecks: Mapping[str, Mapping[str, object]] | None,
+    url: str,
+) -> Mapping[str, object] | None:
+    if live_rechecks is None:
+        return None
+    direct = live_rechecks.get(url)
+    if direct is not None:
+        return direct
+    digest_key = "sha256:" + hashlib.sha256(url.encode()).hexdigest()
+    return live_rechecks.get(digest_key)
 
 
 def _parse_directive_evidence(value: object) -> list[RobotsDirectiveEvidence]:
@@ -438,6 +535,23 @@ def _indexability_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str
     ]
 
 
+def _link_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    return [
+        _action(
+            problem="Internal link targets a repeatedly failing URL",
+            url=row.get("target_url", ""),
+            explanation=(
+                f"Saved status {row.get('target_status')}; bounded live rechecks repeatedly failed. "
+                f"Source: {row.get('source_url', '')}; anchor: {row.get('anchor_text', '')}."
+            ),
+            fix="Restore the destination or update the internal link to its intended working URL.",
+            impact="Repeatedly failing internal destinations interrupt navigation and waste crawl paths.",
+            evidence="internal-link-failures with live_recheck evidence",
+        )
+        for row in rows
+    ]
+
+
 def _tracking_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     return [
         _action(
@@ -475,10 +589,6 @@ def _table(rows: object, columns: tuple[str, ...] | None = None) -> list[list[ob
 
 def _manual_checks() -> list[dict[str, str]]:
     return [
-        {
-            "id": "live-rechecks",
-            "reason": "Current status, redirect paths, and intermittent failures change after a crawl.",
-        },
         {
             "id": "robots-and-sitemaps",
             "reason": "Fetch current robots.txt and every current XML sitemap independently.",
