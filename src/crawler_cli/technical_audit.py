@@ -1366,6 +1366,7 @@ def build_technical_audit(
             run_context=context,
             checks=checks,
             actions=publishable_actions,
+            known_url_inventory=known_url_inventory,
             metadata_coverage=metadata_coverage,
             canonical_coverage=canonical_hreflang_coverage,
             performance_report=performance_report,
@@ -1570,6 +1571,9 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     failing_targets = projection.get("failing_target_inventory", [])
     if gate.get("ready") is True and isinstance(failing_targets, list) and failing_targets:
         tables["Failing Link Targets"] = _table(failing_targets)
+    known_urls = projection.get("known_url_inventory", [])
+    if isinstance(known_urls, list) and known_urls:
+        tables["Orphan candidates"] = _table(known_urls)
     conditional_coverage = audit.get("conditional_get_coverage", {})
     conditional_coverage = conditional_coverage if isinstance(conditional_coverage, Mapping) else {}
     conditional_candidates: list[dict[str, object]] = []
@@ -1871,6 +1875,7 @@ def recipient_report_projection(
     run_context: Mapping[str, object],
     checks: Sequence[Mapping[str, object]],
     actions: Sequence[Mapping[str, object]],
+    known_url_inventory: Sequence[Mapping[str, object]],
     metadata_coverage: Mapping[str, object],
     canonical_coverage: Mapping[str, object],
     performance_report: Sequence[Mapping[str, object]],
@@ -1903,6 +1908,15 @@ def recipient_report_projection(
         ("Same-locale duplicate description pages", "duplicate_description_same_locale"),
     ):
         metrics.append([label, type_counts.get(key, 0) if complete else "unknown (inventory incomplete)"])
+    source_counts: dict[str, int] = {}
+    for row in known_url_inventory:
+        labels = row.get("source_labels", [])
+        if not isinstance(labels, list):
+            continue
+        for label in labels:
+            source_counts[str(label)] = source_counts.get(str(label), 0) + 1
+    for label, count in sorted(source_counts.items()):
+        metrics.append([f"Known URLs from {label}", count])
     for check_id, label in (
         ("canonical-consistency", "Canonical issue records"),
         ("hreflang-consistency", "Hreflang issue records"),
@@ -1978,6 +1992,26 @@ def recipient_report_projection(
                 "evidence_reference": action.get("Evidence Reference", ""),
             }
         )
+    projected_known_urls = []
+    for row in known_url_inventory:
+        projected = dict(row)
+        if projected.get("url"):
+            projected["url"] = redact_url_without_digest(str(projected["url"]))
+        sitemaps = projected.get("source_sitemaps")
+        if isinstance(sitemaps, list):
+            projected["source_sitemaps"] = [redact_url_without_digest(str(url)) for url in sitemaps]
+        observations = projected.get("source_observations")
+        if isinstance(observations, list):
+            safe_observations = []
+            for observation in observations:
+                if not isinstance(observation, Mapping):
+                    continue
+                item = dict(observation)
+                if item.get("source_sitemap"):
+                    item["source_sitemap"] = redact_url_without_digest(str(item["source_sitemap"]))
+                safe_observations.append(item)
+            projected["source_observations"] = safe_observations
+        projected_known_urls.append(projected)
     return {
         "crawl_run_id": crawl_run_id,
         "run_date": run_context.get("finished_at") or run_context.get("started_at"),
@@ -1986,6 +2020,7 @@ def recipient_report_projection(
         "coverage_caveats": coverage_caveats,
         "actions": [dict(action) for action in actions],
         "failing_target_inventory": targets,
+        "known_url_inventory": projected_known_urls,
         "qualified_action_count": len(actions),
     }
 

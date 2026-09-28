@@ -80,6 +80,66 @@ async def test_incomplete_render_graph_does_not_claim_complete_orphan_coverage()
 
 
 @pytest.mark.asyncio
+async def test_sitemap_known_urls_join_same_run_graph_with_source_and_history_state():
+    reports = GraphReports(
+        [
+            {
+                "url": "https://e.test/seed",
+                "kind": "html",
+                "links_json": [{"href": "https://e.test/linked"}],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+                "final_status_code": 200,
+                "overall_indexable": True,
+                "canonical_urls_json": ["https://e.test/seed"],
+            },
+            {
+                "url": "https://e.test/linked",
+                "kind": "html",
+                "links_json": [],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+                "final_status_code": 200,
+                "overall_indexable": True,
+                "canonical_urls_json": ["https://e.test/linked"],
+            },
+        ]
+    )
+    findings = await reports.orphan_pages(
+        known_urls=[
+            {
+                "url": "https://e.test/linked",
+                "source": "sitemap",
+                "observed_at": "2026-09-25T12:00:00+00:00",
+                "source_sitemap": "https://e.test/sitemap.xml",
+                "historical_status": "200",
+                "historical_indexable": "True",
+                "historical_canonical_state": "declared_self",
+            },
+            {
+                "url": "https://e.test/sitemap-only",
+                "source": "sitemap",
+                "observed_at": "2026-09-25T12:00:00+00:00",
+                "source_sitemap": "https://e.test/sitemap.xml",
+            },
+            {"url": "https://outside.test/unjoined", "source": "sitemap"},
+        ]
+    )
+    by_url = {row["url"]: row for row in findings}
+    linked = by_url["https://e.test/linked"]
+    assert linked["candidate_type"] == "source_known_with_observed_inlinks"
+    assert linked["source_labels"] == ["sitemap"]
+    assert linked["http_status"] == 200
+    assert linked["overall_indexable"] is True
+    assert linked["canonical_state"] == "declared_self"
+    sitemap_only = by_url["https://e.test/sitemap-only"]
+    assert sitemap_only["candidate_type"] == "source_known_zero_observed_inlinks"
+    assert sitemap_only["source_sitemaps"] == ["https://e.test/sitemap.xml"]
+    assert sitemap_only["graph_complete"] is True
+    assert by_url["https://outside.test/unjoined"]["candidate_type"] == "source_inventory_out_of_scope"
+
+
+@pytest.mark.asyncio
 async def test_link_graph_reports_unique_nodes_and_instances_separately():
     reports = GraphReports(
         [
