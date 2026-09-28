@@ -624,6 +624,10 @@ crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
 Use `--markdown-out PATH` to write a concise recipient-facing projection. The
 JSON remains the source evidence bundle; the projection does not replace the
 manual, conditional, or analyst-judgement checks listed in its registry.
+Its `skill_requirements` map traces every skill section to its requirement
+controls, implementation state, evidence boundary, test and owning ticket. That
+static map describes product support; use `checks` for what this particular run
+actually tested and its denominator.
 
 Saved link failures remain analyst-only until explicitly rechecked. To collect
 two live attempts for up to 25 in-scope failed targets, add
