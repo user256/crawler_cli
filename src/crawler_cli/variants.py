@@ -2,10 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
-VariantKind = Literal["trailing_slash", "suffix_php", "suffix_html", "suffix_aspx", "case"]
+VariantKind = Literal[
+    "trailing_slash",
+    "suffix_php",
+    "suffix_html",
+    "suffix_aspx",
+    "case",
+    "scheme",
+    "www_host",
+    "query_order",
+]
 
 
 @dataclass(slots=True, frozen=True)
@@ -28,6 +37,9 @@ _DEFAULT_KINDS: set[VariantKind] = {
     "suffix_html",
     "suffix_aspx",
     "case",
+    "scheme",
+    "www_host",
+    "query_order",
 }
 
 
@@ -40,15 +52,26 @@ _SUFFIX_MAP: dict[VariantKind, str] = {
 
 def generate_variants(url: str, *, kinds: set[VariantKind] | None = None) -> list[UrlVariant]:
     """Generate URL variants for canonicalisation testing."""
-    kinds = kinds or _DEFAULT_KINDS
+    kinds = _DEFAULT_KINDS if kinds is None else kinds
     parsed = urlsplit(url)
     path = parsed.path or "/"
     variants: list[UrlVariant] = []
 
-    for kind in kinds:
+    for kind in (
+        "trailing_slash",
+        "suffix_php",
+        "suffix_html",
+        "suffix_aspx",
+        "case",
+        "scheme",
+        "www_host",
+        "query_order",
+    ):
+        if kind not in kinds:
+            continue
         if kind == "trailing_slash":
-            if not path.endswith("/"):
-                new_path = path + "/"
+            if path != "/":
+                new_path = path.rstrip("/") if path.endswith("/") else path + "/"
                 variant = urlunsplit((parsed.scheme, parsed.netloc, new_path, parsed.query, parsed.fragment))
                 variants.append(UrlVariant(variant, kind))
         elif kind in _SUFFIX_MAP:
@@ -70,6 +93,28 @@ def generate_variants(url: str, *, kinds: set[VariantKind] | None = None) -> lis
                         new_path += "/"
                     variant = urlunsplit((parsed.scheme, parsed.netloc, new_path, parsed.query, parsed.fragment))
                     variants.append(UrlVariant(variant, kind))
+        elif kind == "scheme":
+            if parsed.scheme.lower() in {"http", "https"}:
+                scheme = "http" if parsed.scheme.lower() == "https" else "https"
+                variants.append(
+                    UrlVariant(urlunsplit((scheme, parsed.netloc, path, parsed.query, parsed.fragment)), kind)
+                )
+        elif kind == "www_host":
+            host = parsed.hostname or ""
+            if "." in host and not host.replace(".", "").isdigit() and "@" not in parsed.netloc:
+                new_host = host[4:] if host.lower().startswith("www.") else f"www.{host}"
+                port = f":{parsed.port}" if parsed.port else ""
+                variants.append(
+                    UrlVariant(urlunsplit((parsed.scheme, new_host + port, path, parsed.query, parsed.fragment)), kind)
+                )
+        elif kind == "query_order":
+            pairs = parse_qsl(parsed.query, keep_blank_values=True)
+            reordered = sorted(pairs, key=lambda pair: (pair[0], pair[1]))
+            query = urlencode(reordered, doseq=True)
+            if len(pairs) > 1 and query != parsed.query:
+                variants.append(
+                    UrlVariant(urlunsplit((parsed.scheme, parsed.netloc, path, query, parsed.fragment)), kind)
+                )
 
     return variants
 

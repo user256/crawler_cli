@@ -145,6 +145,7 @@ def _crawl_run_config_snapshot(config: CrawlConfig, seeds: list[str]) -> dict[st
         "max_outstanding_speculative_per_host": config.max_outstanding_speculative_per_host,
         "discover_render_urls": config.discover_render_urls,
         "capture_render_baseline": config.capture_render_baseline,
+        "capture_render_image_layout": config.capture_render_image_layout,
         "follow_rendered_links": config.follow_rendered_links,
         "render_discovery_max_raw_links": config.render_discovery_max_raw_links,
         "render_discovery_min_scripts": config.render_discovery_min_scripts,
@@ -865,10 +866,10 @@ class CrawlEngine:
         job.budget_accounted_bytes = snapshot.accounted_bytes
         job.budget_stop_reason = snapshot.stop_reason
 
-    async def crawl(self, url: str) -> CrawlResult:
+    async def crawl(self, url: str, *, purpose: ScopePurpose = "discovered") -> CrawlResult:
         async with self._semaphore:
             try:
-                admission_reason = self.config.url_admission_reason(url)
+                admission_reason = self.config.url_admission_reason(url, purpose=purpose)
                 if admission_reason is not None:
                     # Authorisation-scope refusals keep their own structured
                     # reason (ticket 148); the local path flags keep the
@@ -1096,6 +1097,13 @@ class CrawlEngine:
                     cls=response.cls,
                     inp_ms=response.inp_ms,
                     redirect_chain=response.redirect_chain,
+                    observed_requests=list(response.observed_requests),
+                    render_link_observations=list(response.render_link_observations),
+                    render_link_capture=(dict(response.render_link_capture) if response.render_link_capture else None),
+                    render_image_observations=list(response.render_image_observations),
+                    render_image_capture=(
+                        dict(response.render_image_capture) if response.render_image_capture else None
+                    ),
                 )
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)

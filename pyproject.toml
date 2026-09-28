@@ -92,6 +92,10 @@ ann = [
 viz = [
   "umap-learn>=0.5",
 ]
+google-sheets = [
+  "google-api-python-client>=2.0",
+  "google-auth>=2.0",
+]
 # Pinned exactly, and deliberately. A formatter is a consistency tool: a new
 # ruff release can reformat untouched files, so an unpinned `ruff format
 # --check` fails CI on a change that did not cause it. That happened here --
