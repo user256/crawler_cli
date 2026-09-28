@@ -356,6 +356,35 @@ class CrawlReports:
             limit,
         )
 
+    async def technical_audit_performance_inventory(self) -> list[dict[str, object]]:
+        """Return saved run-scoped timing and cache headers for the audit."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT
+                u.url,
+                u.kind,
+                s.final_status_code,
+                s.content_extracted,
+                s.challenge,
+                s.overall_indexable,
+                s.canonical_urls_json,
+                s.html_lang,
+                s.custom_data ->> 'template' AS template,
+                s.headers_json,
+                s.ttfb_seconds,
+                s.total_duration_seconds,
+                s.lcp_ms,
+                s.cls,
+                s.inp_ms
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1
+            ORDER BY u.url
+            """,
+            run_id,
+        )
+
     async def worst_cwv_pages(self, limit: int = 50) -> list[dict[str, object]]:
         """Pages ranked by worst lab Core Web Vitals (ticket 046).
 
