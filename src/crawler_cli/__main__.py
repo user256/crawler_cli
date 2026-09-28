@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import hashlib
 import html
 import json
 import logging
@@ -68,6 +69,7 @@ from .exposure_inventory import (
 )
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
+from .current_site_files import build_site_file_scope, collect_current_site_files
 from .exit_codes import EXIT_FAILURE, EXIT_FINDINGS, EXIT_SUCCESS, EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
@@ -2425,6 +2427,8 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         }
         evidence = {}
         for name in TECHNICAL_AUDIT_REPORTS:
+            if name == "current-robots-sitemaps":
+                continue
             capability = capability_by_report.get(name)
             if capability and capabilities.get(capability) is not True:
                 continue
@@ -2432,6 +2436,96 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 evidence[name] = await reports.orphan_pages(known_urls=known_url_inventory)
             else:
                 evidence[name] = await _fetch_report(reports, name, args)
+        if args.fetch_current_robots_sitemaps:
+            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
+                print(
+                    "Error: this crawl run used an authorization scope; current site-file fetching requires --scope-manifest",
+                    file=sys.stderr,
+                )
+                return EXIT_VALIDATION
+            if run_context.get("portal_connection_policy_active") is True:
+                print(
+                    "Error: current site-file collection does not reuse the crawl's Portal connection policy",
+                    file=sys.stderr,
+                )
+                return EXIT_VALIDATION
+            historical_rows = await reports.current_site_join_inventory()
+            historical_pages = {str(row["url"]): row for row in historical_rows if row.get("url")}
+            allowed = run_context.get("declared_allowed_hosts", [])
+            seeds = run_context.get("seed_origins", [])
+            allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
+            seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
+            scope_predicate = None
+            if args.scope_manifest:
+                from .authorisation import compile_scope_predicate, load_scope_manifest
+
+                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
+            stored_digest = run_context.get("authorization_scope_digest")
+            if stored_digest:
+                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
+                supplied_digest = (
+                    hashlib.sha256(
+                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+                    if supplied_snapshot is not None
+                    else None
+                )
+                if supplied_digest != stored_digest:
+                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
+                    return EXIT_VALIDATION
+            host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
+            current_config = CrawlConfig(
+                same_host_only=True,
+                allowed_hosts=sorted(allowed_hosts),
+                respect_robots_txt=True,
+                max_concurrency=2,
+                per_host_concurrency=1,
+                max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
+                destination_guard="pinned",
+                scope_predicate=cast(Any, host_scope),
+            )
+            current_engine = CrawlEngine(current_config)
+            try:
+                collected = await collect_current_site_files(
+                    current_engine,
+                    seed_origins=seed_origins,
+                    allowed_hosts=allowed_hosts,
+                    historical_pages=historical_pages,
+                    max_sitemaps=args.current_max_sitemaps,
+                    max_urls=args.current_max_sitemap_urls,
+                    max_live_samples=args.current_max_live_samples,
+                )
+            finally:
+                await current_engine.close()
+            coverage_keys = {
+                "record_type",
+                "observed_at",
+                "complete",
+                "seed_origins",
+                "allowed_host_count",
+                "sitemap_document_count",
+                "sitemap_entry_count",
+                "unique_sitemap_url_count",
+                "duplicate_sitemap_url_count",
+                "sampling",
+            }
+            coverage = {key: value for key, value in collected.items() if key in coverage_keys}
+            inventory = {
+                "record_type": "inventory",
+                **{
+                    key: value
+                    for key, value in collected.items()
+                    if key not in coverage_keys and key != "validation_candidates"
+                },
+            }
+            validation_candidates = collected.get("validation_candidates", [])
+            if not isinstance(validation_candidates, list):
+                validation_candidates = []
+            evidence["current-robots-sitemaps"] = [
+                coverage,
+                inventory,
+                *[dict(row, record_type="candidate") for row in validation_candidates if isinstance(row, Mapping)],
+            ]
         if args.recheck_live:
             if not args.scope_manifest:
                 print("Error: --recheck-live requires --scope-manifest", file=sys.stderr)
@@ -2444,7 +2538,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             seeds_value = run_context.get("seed_hosts", [])
             hosts = hosts_value if isinstance(hosts_value, list) else []
             seeds = seeds_value if isinstance(seeds_value, list) else []
-            allowed_hosts = sorted({str(host).lower() for host in [*hosts, *seeds] if host})
+            recheck_allowed_hosts = sorted({str(host).lower() for host in [*hosts, *seeds] if host})
             saved_failure_targets = candidate_targets(
                 evidence.get("internal-link-quality", []), limit=args.recheck_limit
             )
@@ -2464,7 +2558,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             live_rechecks = await collect_live_rechecks(
                 targets,
                 scope_predicate=predicate,
-                allowed_hosts=allowed_hosts,
+                allowed_hosts=recheck_allowed_hosts,
                 attempts=args.recheck_attempts,
                 timeout_seconds=args.recheck_timeout,
             )
@@ -4202,6 +4296,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "repeat to include multiple files"
         ),
     )
+    audit_parser.add_argument(
+        "--fetch-current-robots-sitemaps",
+        action="store_true",
+        help="Explicitly fetch current robots.txt and bounded sitemap samples for the selected run hosts",
+    )
+    audit_parser.add_argument("--current-max-sitemaps", type=positive_int, default=100)
+    audit_parser.add_argument("--current-max-sitemap-urls", type=positive_int, default=100_000)
+    audit_parser.add_argument("--current-max-live-samples", type=non_negative_int, default=25)
     audit_parser.add_argument("--recheck-limit", type=positive_int, default=25)
     audit_parser.add_argument("--recheck-attempts", type=positive_int, default=2)
     audit_parser.add_argument("--recheck-timeout", type=positive_float, default=10.0)

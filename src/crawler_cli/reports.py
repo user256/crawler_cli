@@ -99,10 +99,23 @@ class CrawlReports:
         config = run.get("config") if isinstance(run.get("config"), dict) else {}
         seed_urls = run.get("seed_urls") if isinstance(run.get("seed_urls"), list) else []
         seed_hosts = sorted({parsed.hostname.lower() for seed in seed_urls if (parsed := urlparse(str(seed))).hostname})
+        seed_origins = sorted(
+            {
+                f"{parsed.scheme.lower()}://{parsed.netloc.rsplit('@', 1)[-1]}"
+                for seed in seed_urls
+                if (parsed := urlparse(str(seed))).scheme in {"http", "https"} and parsed.netloc
+            }
+        )
         declared_hosts = config.get("allowed_hosts", [])
         if not isinstance(declared_hosts, list):
             declared_hosts = []
         declared_hosts = sorted({str(host).lower() for host in declared_hosts if host})
+        authorization_scope = config.get("authorization_scope")
+        authorization_scope_digest = (
+            hashlib.sha256(json.dumps(authorization_scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if isinstance(authorization_scope, dict)
+            else None
+        )
         frontier = await self.store.frontier_stats(run_id=run_id)
         run_status = str(run.get("status", "unknown"))
         completion_state = "complete" if run_status == "complete" else run_status
@@ -117,7 +130,11 @@ class CrawlReports:
             "config_keys": sorted(str(key) for key in config),
             "seed_count": len(seed_urls),
             "seed_hosts": seed_hosts,
+            "seed_origins": seed_origins,
             "declared_allowed_hosts": declared_hosts,
+            "authorization_scope_active": authorization_scope_digest is not None,
+            "authorization_scope_digest": authorization_scope_digest,
+            "portal_connection_policy_active": config.get("portal_connection_policy") is True,
             "schema_capabilities": {
                 "content_extracted": has_extraction_state,
                 "images_json": has_images,
@@ -169,6 +186,22 @@ class CrawlReports:
             FROM page_run_snapshots s
             JOIN urls u ON u.id = s.url_id
             LEFT JOIN urls fu ON fu.id = s.final_url_id
+            WHERE s.run_id = $1
+            ORDER BY s.url_id
+            """,
+            run_id,
+        )
+        return [dict(row) for row in rows]
+
+    async def current_site_join_inventory(self) -> list[dict[str, object]]:
+        """Return safe run-scoped facts used to join current sitemaps to history."""
+        run_id = await self._run_id()
+        rows = await self._fetch(
+            """
+            SELECT u.url, u.kind, s.final_status_code, s.overall_indexable,
+                   s.content_extracted, s.html_lang, s.custom_data ->> 'template' AS template,
+                   s.canonical_urls_json
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
             WHERE s.run_id = $1
             ORDER BY s.url_id
             """,

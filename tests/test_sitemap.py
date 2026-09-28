@@ -51,3 +51,13 @@ def test_parse_sitemap_txt():
         "https://example.com/",
         "https://example.com/about",
     ]
+
+
+def test_compressed_sitemap_is_bounded_after_inflation():
+    xml = b"<?xml version='1.0'?><urlset>" + (b" " * 1000) + b"</urlset>"
+    parser = SitemapParser(max_uncompressed_bytes=100)
+
+    import pytest
+
+    with pytest.raises(ValueError, match="exceeds 100 uncompressed bytes"):
+        parser.parse("https://example.com/sitemap.xml.gz", gzip.compress(xml), "application/gzip")
