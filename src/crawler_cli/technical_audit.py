@@ -296,6 +296,22 @@ TECHNICAL_AUDIT_SKILL_REQUIREMENTS = (
         "test": "tests/test_technical_audit.py",
     },
     {
+        "id": "remediation-ticket-template",
+        "section": "Default remediation-ticket template",
+        "check_id": "recipient-value-reporting",
+        "requirements": [
+            "copy the standard ticket-register workbook for each audit and never write into the source",
+            "keep its ticket fields: label, description, suggested solution, acceptance criteria, classification, priority, how to replicate, notes",
+            "add only validated, actionable remediation items and keep healthy checks in the evidence bundle",
+            "state the limitation and supply the same ticket rows locally when the sheet cannot be copied or edited",
+            "keep the ticket register separate from the v2 evidence publisher contract",
+        ],
+        "state": "analyst_judgement",
+        "owner_ticket": 199,
+        "evidence": "analyst ticket register; the v2 publisher does not implement it",
+        "test": "tests/test_technical_audit.py",
+    },
+    {
         "id": "fetching-rules",
         "section": "Fetching Rules",
         "check_id": "fetching-safeguards",
@@ -457,6 +473,7 @@ TECHNICAL_AUDIT_SKILL_REQUIREMENTS = (
         "id": "external-links",
         "section": "External-link integrity",
         "check_id": "external-link-integrity",
+        "related_check_ids": ["rendered-external-link-rechecks"],
         "requirements": [
             "bounded rechecks with chain/DNS/TLS evidence",
             "confirm persistent target failures",
@@ -867,6 +884,7 @@ TECHNICAL_AUDIT_SKILL_SECTION_DIGESTS = {
     "Conditional Requests and 304 Rechecks": "f16221988faf291c29d654d6820ecd73ae7e1615d67e0db5f33c703d394bc091",
     "Crawl Integrity": "a6dbeeb0703aeb85633fff3ef9950da7aca861d5984d4a46154d4a5043ddfffe",
     "Deterministic evidence bundle": "746ddb583ff7de4ccbed7a178868122d87a4019afe9f73b894d468dd14bc0a5e",
+    "Default remediation-ticket template": "bce0d1948cf1e91998fd3688dc53e9b6281011e9d7d0e1e8fe0e64befc272230",
     "Discovery-source integrity": "c9131c1fa6cc702a9d3bd8e6212132c471cd485d4e1d0f089c220c6d0e6cf38b",
     "Domain and URL Configuration": "a587c2d3576f610525d07a99d7dcd7888d8694fac708b297fd90c45ec452e297",
     "External-link integrity": "194db369fca02e9fb651b44f7ab465cecd028b5455e8ff3f5adfc2d0ff3850a8",
