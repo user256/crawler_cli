@@ -19,9 +19,13 @@ from crawler_cli.__main__ import _build_parser, _dispatch, _normalize_argv
 class FakeStore:
     def __init__(self) -> None:
         self.closed = False
+        self.updated_at = 123
 
     async def close(self) -> None:
         self.closed = True
+
+    async def get_crawl_run(self, run_id):
+        return {"run_id": run_id, "status": "complete", "updated_at": self.updated_at}
 
 
 class FakeReports:
@@ -32,6 +36,25 @@ class FakeReports:
         self.run_id = run_id
         self.calls: list[tuple[str, dict[str, object]]] = []
         FakeReports.instances.append(self)
+
+    async def _run_id(self):
+        return self.run_id or "resolved-run"
+
+    async def technical_audit_context(self):
+        return {
+            "run_id": self.run_id or "resolved-run",
+            "run_status": "complete",
+            "completion_state": "complete",
+            "updated_at": 123,
+            "parsed_html_count": 1,
+            "hashed_count": 0,
+            "image_reference_count": 0,
+            "schema_capabilities": {
+                "images_json": True,
+                "links_json": True,
+                "content_hash_simhash": True,
+            },
+        }
 
     async def orphan_pages(self):
         self.calls.append(("orphans", {}))
@@ -132,6 +155,26 @@ class FakeReports:
             }
         ]
 
+    async def image_issues(self):
+        self.calls.append(("image-issues", {}))
+        return []
+
+    async def internal_link_quality(self):
+        self.calls.append(("internal-link-quality", {}))
+        return []
+
+    async def tracking_parameter_links(self):
+        self.calls.append(("tracking-parameter-links", {}))
+        return []
+
+    async def near_duplicates(self, threshold=4, limit=5000):
+        self.calls.append(("near-duplicates", {"threshold": threshold, "limit": limit}))
+        return []
+
+    async def internal_authority(self):
+        self.calls.append(("internal-authority", {}))
+        return []
+
 
 @pytest.fixture
 def fake_reports(monkeypatch):
@@ -202,6 +245,33 @@ def test_schema_compatibility_report_is_selectable(fake_reports, capsys):
     assert "https://example.com/schema" in out
 
 
+def test_audit_extension_reports_are_selectable(fake_reports):
+    assert (
+        _run(
+            [
+                "report",
+                "image-issues",
+                "internal-link-quality",
+                "tracking-parameter-links",
+                "near-duplicates",
+                "internal-authority",
+                "--simhash-threshold",
+                "6",
+                "--similarity-limit",
+                "250",
+            ]
+        )
+        == 0
+    )
+    assert FakeReports.instances[-1].calls == [
+        ("image-issues", {}),
+        ("internal-link-quality", {}),
+        ("tracking-parameter-links", {}),
+        ("near-duplicates", {"threshold": 6, "limit": 250}),
+        ("internal-authority", {}),
+    ]
+
+
 def test_expected_id_joins_default_set(fake_reports):
     assert _run(["report", "--expected-id", "G-TEST"]) == 0
     called = [name for name, _ in FakeReports.instances[-1].calls]
@@ -233,6 +303,43 @@ def test_json_out_writes_file(fake_reports, tmp_path):
     out = tmp_path / "report.json"
     assert _run(["report", "orphans", "--format", "json", "--out", str(out)]) == 0
     assert json.loads(out.read_text()) == {"orphans": [{"url": "https://example.com/orphan"}]}
+
+
+def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, capsys):
+    out = tmp_path / "technical-audit.json"
+    assert _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out)]) == 0
+    payload = json.loads(out.read_text())
+    assert payload["crawl_run_id"] == "run-42"
+    assert payload["schema_version"] == "crawler-cli/technical-audit/1"
+    assert payload["run_context"]["snapshot_consistency"] == "stable"
+    assert {check["id"] for check in payload["checks"]} >= {
+        "tracking-parameter-links",
+        "schema-parser-defects",
+        "orphan-candidates",
+    }
+    assert "Wrote deterministic technical audit" in capsys.readouterr().out
+    called = [name for name, _ in FakeReports.instances[-1].calls]
+    assert called == [
+        "orphans",
+        "indexability",
+        "redirect-chains",
+        "schema-compatibility",
+        "image-issues",
+        "internal-link-quality",
+        "tracking-parameter-links",
+        "near-duplicates",
+        "internal-authority",
+    ]
+
+
+def test_technical_audit_downgrades_a_run_changed_during_collection(fake_reports, tmp_path):
+    fake_reports.updated_at = 124
+    out = tmp_path / "technical-audit.json"
+    assert _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out)]) == 0
+    payload = json.loads(out.read_text())
+    assert payload["run_context"]["snapshot_consistency"] == "changed_during_collection"
+    assert payload["run_context"]["completion_state"] == "partial"
+    assert all(check["status"] != "pass" for check in payload["checks"])
 
 
 def test_csv_requires_out_directory(fake_reports, capsys):
