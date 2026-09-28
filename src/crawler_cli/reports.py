@@ -142,6 +142,17 @@ class CrawlReports:
                 "links_json": "links_json" in snapshot_columns,
                 "schema_json": "schema_json" in snapshot_columns,
                 "content_hash_simhash": "content_hash_simhash" in snapshot_columns,
+                "canonical_urls_json": "canonical_urls_json" in snapshot_columns,
+                "canonical_evidence_json": "canonical_evidence_json" in snapshot_columns,
+                "redirect_chain_json": "redirect_chain_json" in snapshot_columns,
+                "variant_kind": "variant_kind" in snapshot_columns,
+                "render_discovery_attempted": "render_discovery_attempted" in snapshot_columns,
+                "render_discovery_complete": "render_discovery_complete" in snapshot_columns,
+                "ttfb_seconds": "ttfb_seconds" in snapshot_columns,
+                "total_duration_seconds": "total_duration_seconds" in snapshot_columns,
+                "lcp_ms": "lcp_ms" in snapshot_columns,
+                "cls": "cls" in snapshot_columns,
+                "inp_ms": "inp_ms" in snapshot_columns,
             },
             "frontier_queued": frontier[0],
             "frontier_pending": frontier[1],
@@ -197,10 +208,18 @@ class CrawlReports:
     async def current_site_join_inventory(self) -> list[dict[str, object]]:
         """Return safe run-scoped facts used to join current sitemaps to history."""
         run_id = await self._run_id()
+        column_rows = await self._fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_schema = current_schema()
+                 AND table_name = 'page_run_snapshots'"""
+        )
+        snapshot_columns = {str(row["column_name"]) for row in column_rows}
+        extraction_field = "s.content_extracted" if "content_extracted" in snapshot_columns else "NULL::BOOLEAN"
         rows = await self._fetch(
-            """
+            f"""
             SELECT u.url, u.kind, s.final_status_code, s.overall_indexable,
-                   s.content_extracted, s.html_lang, s.custom_data ->> 'template' AS template,
+                   {extraction_field} AS content_extracted,
+                   s.html_lang, s.custom_data ->> 'template' AS template,
                    s.canonical_urls_json, s.links_json
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
             WHERE s.run_id = $1
