@@ -38,3 +38,20 @@ def test_extract_page_data_captures_indexability_and_hreflang():
     assert extracted.headings["h1"] == ["Main title"]
     assert {item.hreflang for item in extracted.hreflang_links} == {"en-gb", "en-us"}
     assert extracted.word_count > 0
+
+
+def test_extract_page_data_preserves_canonical_channels_and_multiplicity():
+    extracted = extract_page_data(
+        """<html><head>
+        <link rel='canonical' href='/one'>
+        <link rel='canonical' href='/two'>
+        </head></html>""",
+        "https://example.com/page",
+        {"Link": '<https://example.com/header,path>; rel="canonical"; title="a,b"'},
+    )
+    assert extracted.canonical == "https://example.com/one"
+    assert [(row["source"], row["href"]) for row in extracted.canonical_evidence] == [
+        ("html_head", "https://example.com/one"),
+        ("html_head", "https://example.com/two"),
+        ("http_header_link", "https://example.com/header,path"),
+    ]

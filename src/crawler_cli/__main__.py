@@ -79,6 +79,7 @@ from .technical_audit import (
     TECHNICAL_AUDIT_REPORTS,
     audit_sheet_tables,
     build_technical_audit,
+    canonical_hreflang_report,
     metadata_locale_report,
 )
 from .live_rechecks import candidate_targets, collect_live_rechecks
@@ -2254,6 +2255,8 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.authority_coverage()
     if name == "metadata-locale-inventory":
         return metadata_locale_report(await reports.metadata_locale_inventory())
+    if name == "canonical-hreflang-inventory":
+        return canonical_hreflang_report(await reports.canonical_hreflang_inventory())
     raise ValueError(f"unknown report: {name}")
 
 

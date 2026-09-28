@@ -153,6 +153,7 @@ class ExtractedContent:
     metadata: dict[str, Any]
     image_references: list[ImageReference] = field(default_factory=list)
     robots_directive_evidence: list[RobotsDirectiveEvidence] = field(default_factory=list)
+    canonical_evidence: list[dict[str, Any]] = field(default_factory=list)
     amphtml: str | None = None
     """Absolute URL from ``<link rel="amphtml" href=...>`` — the page's declared
     AMP variant.  Captured so AMP variants get a first-class page<->AMP pairing
