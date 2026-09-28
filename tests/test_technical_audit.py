@@ -521,6 +521,34 @@ def test_missing_run_context_and_missing_source_are_not_reported_as_passes():
     assert checks["indexability-directive-conflicts"]["denominator"] is None
 
 
+def test_external_link_rechecks_survive_audit_build_and_get_separate_sheet():
+    coverage = {
+        "record_type": "coverage",
+        "record_kind": "external_link_recheck_coverage",
+        "state": "complete",
+        "attempted_target_count": 1,
+        "out_of_scope_target_count": 0,
+    }
+    observation = {
+        "record_type": "observation",
+        "record_kind": "external_link_recheck",
+        "target_url": "https://partner.example/page",
+        "state": "responsive",
+        "attempts": [],
+    }
+
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={"external-link-rechecks": [coverage, observation]},
+    )
+
+    assert audit["external_link_recheck_coverage"]["attempted_target_count"] == 1
+    assert audit["external_link_rechecks"] == [observation]
+    tables = audit_sheet_tables(audit)
+    assert tables["External Link Rechecks"][0][0] == "record_type"
+    assert any(row == ["Rendered external-link coverage", "complete"] for row in tables["Overview"])
+
+
 def test_similarity_sample_and_authority_graph_gaps_are_partial_not_pass():
     reports = {
         "near-duplicates": [],
