@@ -14,6 +14,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .technical_audit_tickets import (
+    TICKET_TEMPLATE_COLUMNS,
+    build_technical_audit_ticket_rows,
+    load_ticket_language,
+    technical_audit_ticket_overview,
+)
+
 
 TEMPLATE_VERSION = "crawler-cli/technical-audit-sheets/2"
 _SHEET_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,}$")
@@ -108,6 +115,211 @@ _MAX_TABLE_BYTES = 8_000_000
 _WRITE_CHUNK_ROWS = 500
 _SPREADSHEET_MIME = "application/vnd.google-apps.spreadsheet"
 _RECEIPT_VERSION = 1
+_TICKET_REGISTER_RECEIPT_VERSION = 1
+
+
+def ticket_register_payload(audit: Mapping[str, object]) -> dict[str, object]:
+    """Build the values and write range for a copied client ticket register.
+
+    This is intentionally separate from the v2 evidence publisher below: the
+    recipient ticket template has its own layout, styling and formula cells.
+    A ticket-register publisher copies that template unchanged, then uses this
+    payload to populate the rows beginning at its declared first data cell.
+    """
+
+    language = load_ticket_language()
+    template = language["target_template"]
+    if not isinstance(template, Mapping):  # Defensive: load_ticket_language validates this already.
+        raise ValueError("Ticket language mapping has invalid target-template metadata")
+    rows = build_technical_audit_ticket_rows(audit, language)
+    overview = technical_audit_ticket_overview(audit, language)
+    start_row = int(template["first_data_row"])
+    start_column = str(template["start_column"])
+    end_column = _column_label(_column_index(start_column) + len(TICKET_TEMPLATE_COLUMNS) - 1)
+    end_row = start_row + len(rows) - 1
+    return {
+        "template": dict(template),
+        "ticket_headers": list(TICKET_TEMPLATE_COLUMNS),
+        "ticket_rows": [[row[column] for column in TICKET_TEMPLATE_COLUMNS] for row in rows],
+        "ticket_range": f"'{template['tab']}'!{start_column}{start_row}:{end_column}{end_row}" if rows else None,
+        "overview_rows": overview,
+    }
+
+
+def _mapping_payload(value: object, name: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"Ticket-register {name} must be an object")
+    return value
+
+
+class GoogleSheetsTicketRegisterPublisher:
+    """Copy the client ticket template, then populate only its ticket rows.
+
+    Unlike :class:`GoogleSheetsTemplatePublisher`, this accepts the standard
+    client template with its own layout and formulas.  The source workbook is
+    copied in Drive before any values are changed, so it remains untouched.
+    """
+
+    def __init__(self, drive: Any, sheets: Any) -> None:
+        self.drive = drive
+        self.sheets = sheets
+
+    def publish(
+        self,
+        *,
+        audit: Mapping[str, object],
+        title: str,
+        receipt_path: str | Path,
+        folder_id: str | None = None,
+        resume: bool = False,
+    ) -> str:
+        payload = ticket_register_payload(audit)
+        template = _mapping_payload(payload.get("template"), "ticket template")
+        template_id = google_sheet_id(str(template.get("url") or ""))
+        source = (
+            self.drive.files().get(fileId=template_id, fields="id,mimeType,capabilities(canCopy),webViewLink").execute()
+        )
+        if source.get("mimeType") != _SPREADSHEET_MIME:
+            raise ValueError("The standard ticket template is not a native Google spreadsheet")
+        if source.get("capabilities", {}).get("canCopy") is False:
+            raise ValueError("Google Drive reports that this account cannot copy the standard ticket template")
+        if folder_id:
+            folder = (
+                self.drive.files().get(fileId=folder_id, fields="id,mimeType,capabilities(canAddChildren)").execute()
+            )
+            if folder.get("mimeType") != "application/vnd.google-apps.folder":
+                raise ValueError("--ticket-register-folder must identify a Google Drive folder")
+            if folder.get("capabilities", {}).get("canAddChildren") is False:
+                raise ValueError("Google Drive reports that this account cannot add files to the destination folder")
+
+        headers = self._ticket_headers(template_id, template)
+        if headers != payload["ticket_headers"]:
+            raise ValueError(
+                f"Standard ticket template header mismatch; expected {payload['ticket_headers']!r}, got {headers!r}"
+            )
+
+        receipt_file = Path(receipt_path)
+        payload_digest = _digest({"ticket_rows": payload["ticket_rows"], "ticket_range": payload["ticket_range"]})
+        if receipt_file.exists():
+            if not resume:
+                raise ValueError(
+                    f"Ticket-register publication receipt already exists; pass resume=True: {receipt_file}"
+                )
+            try:
+                receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError("Ticket-register publication receipt is unreadable") from exc
+            if not isinstance(receipt, dict) or (
+                receipt.get("receipt_version") != _TICKET_REGISTER_RECEIPT_VERSION
+                or receipt.get("template_id") != template_id
+                or receipt.get("ticket_payload_digest") != payload_digest
+                or receipt.get("title") != title
+                or receipt.get("folder_id") != folder_id
+            ):
+                raise ValueError("Ticket-register receipt does not match this template and audit")
+            spreadsheet_id = str(receipt.get("spreadsheet_id") or "")
+            if not spreadsheet_id:
+                raise ValueError("Ticket-register copy outcome is unknown; inspect the Drive folder before retrying")
+            sheet_url = str(receipt.get("url") or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit")
+            if receipt.get("state") == "verified":
+                return sheet_url
+            previous_range = payload["ticket_range"]
+            if receipt.get("state") == "writing" and previous_range:
+                previous_values = (
+                    self.sheets.spreadsheets()
+                    .values()
+                    .get(
+                        spreadsheetId=spreadsheet_id,
+                        range=str(previous_range),
+                        valueRenderOption="UNFORMATTED_VALUE",
+                    )
+                    .execute()
+                    .get("values", [])
+                )
+                if previous_values == payload["ticket_rows"]:
+                    receipt["state"] = "verified"
+                    receipt["ticket_count"] = len(payload["ticket_rows"])
+                    _write_receipt(receipt_file, receipt)
+                    return sheet_url
+                if previous_values:
+                    raise ValueError(
+                        "Ticket-register rows changed during the interrupted publication; refusing to overwrite them"
+                    )
+        else:
+            receipt = {
+                "receipt_version": _TICKET_REGISTER_RECEIPT_VERSION,
+                "state": "copy_pending",
+                "template_id": template_id,
+                "ticket_payload_digest": payload_digest,
+                "title": title,
+                "folder_id": folder_id,
+                "spreadsheet_id": None,
+                "url": None,
+            }
+            _write_receipt(receipt_file, receipt)
+
+            body: dict[str, object] = {"name": title}
+            if folder_id:
+                body["parents"] = [folder_id]
+            copied = (
+                self.drive.files()
+                .copy(fileId=template_id, body=body, fields="id,webViewLink", supportsAllDrives=True)
+                .execute()
+            )
+            spreadsheet_id = str(copied.get("id") or "")
+            if not spreadsheet_id:
+                raise RuntimeError("Google Drive did not return an ID for the copied ticket register")
+            sheet_url = str(
+                copied.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+            )
+            receipt.update({"state": "copy_created", "spreadsheet_id": spreadsheet_id, "url": sheet_url})
+            _write_receipt(receipt_file, receipt)
+
+        receipt["state"] = "writing"
+        _write_receipt(receipt_file, receipt)
+        self.sheets.spreadsheets().values().clear(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{template['tab']}'!{template['start_column']}{template['first_data_row']}:{_column_label(_column_index(str(template['start_column'])) + len(TICKET_TEMPLATE_COLUMNS) - 1)}",
+            body={},
+        ).execute()
+        rows = payload["ticket_rows"]
+        ticket_range = payload["ticket_range"]
+        if rows and ticket_range:
+            self.sheets.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=str(ticket_range),
+                valueInputOption="RAW",
+                body={"values": rows},
+            ).execute()
+            readback = (
+                self.sheets.spreadsheets()
+                .values()
+                .get(spreadsheetId=spreadsheet_id, range=str(ticket_range), valueRenderOption="UNFORMATTED_VALUE")
+                .execute()
+                .get("values", [])
+            )
+            if readback != rows:
+                raise ValueError("Ticket-register readback did not match the ticket rows written")
+        receipt["state"] = "verified"
+        receipt["ticket_count"] = len(rows) if isinstance(rows, list) else 0
+        _write_receipt(receipt_file, receipt)
+        return sheet_url
+
+    def _ticket_headers(self, spreadsheet_id: str, template: Mapping[str, object]) -> list[object]:
+        start_column = str(template["start_column"])
+        end_column = _column_label(_column_index(start_column) + len(TICKET_TEMPLATE_COLUMNS) - 1)
+        response = (
+            self.sheets.spreadsheets()
+            .values()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                range=f"'{template['tab']}'!{start_column}{template['header_row']}:{end_column}{template['header_row']}",
+                valueRenderOption="UNFORMATTED_VALUE",
+            )
+            .execute()
+        )
+        values = response.get("values", [])
+        return list(values[0]) if isinstance(values, list) and values else []
 
 
 def google_sheet_id(value: str) -> str:
