@@ -702,6 +702,31 @@ uses RAW cell input, and reports success only after readback. See
 [`docs/technical-audit-google-sheets.md`](docs/technical-audit-google-sheets.md)
 for OAuth and service-account setup.
 
+#### Discovery source reconciliation
+
+`reconcile-sources` joins one run's internal link graph with XML sitemaps, a
+Search Console URL export and a backlink URL export, and puts every in-scope
+URL in exactly one segment: `graph_and_sitemap`, `sitemap_orphan`,
+`unmapped_in_sitemap`, `backlink_dead_end`, `gsc_unlinked`, plus the remainders
+`linked_not_in_sitemap_other` and `crawled_unlinked_no_source`. No network
+request is made unless `--fetch-current-sitemaps` is given.
+
+```bash
+crawler-cli reconcile-sources --postgres-dsn ... --crawl-run-id crawl-20260716-a \
+  --sitemap-file ./sitemap.xml --gsc-export ./gsc-pages.csv \
+  --backlinks-export ./backlinks.csv \
+  --out ./reconciliation.json --csv-out ./reconciliation.csv
+```
+
+Exports are UTF-8 CSVs with a URL column (matched ignoring case, e.g. `URL`,
+`Top pages`, `Target URL`; override with `--gsc-column` / `--backlinks-column`)
+or one URL per line. URLs the crawl found through sitemaps (`url_sources`) also
+count as sitemap members; disable with `--no-crawl-sitemap-provenance`. URLs on
+hosts the run did not crawl are listed under `out_of_scope` and not joined. The
+`coverage` block states whether the crawl fetched everything it discovered: when
+it did not, unlinked rows mean "no inlinks from crawled pages", not confirmed
+orphans.
+
 ### Run snapshots and retention
 
 Each fetch is retained as an immutable page snapshot for its crawl run. The

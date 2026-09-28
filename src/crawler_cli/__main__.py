@@ -2435,6 +2435,164 @@ def _deduplicate_known_urls(rows: Sequence[Mapping[str, object]]) -> list[dict[s
     return [unique[key] for key in sorted(unique)]
 
 
+async def _collect_run_current_site_files(
+    args: argparse.Namespace,
+    reports: CrawlReports,
+    run_context: Mapping[str, object],
+    *,
+    max_live_samples: int,
+) -> dict[str, object] | None:
+    """Fetch current robots.txt and sitemaps for a stored run's hosts through the guarded engine.
+
+    Shared by ``technical-audit --fetch-current-robots-sitemaps`` and
+    ``reconcile-sources --fetch-current-sitemaps``. Returns ``None`` after
+    printing the error when the run's authorization or connection policy
+    cannot be honoured.
+    """
+    if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
+        print(
+            "Error: this crawl run used an authorization scope; current site-file fetching requires --scope-manifest",
+            file=sys.stderr,
+        )
+        return None
+    if run_context.get("portal_connection_policy_active") is True:
+        print(
+            "Error: current site-file collection does not reuse the crawl's Portal connection policy",
+            file=sys.stderr,
+        )
+        return None
+    historical_rows = await reports.current_site_join_inventory()
+    historical_pages = {str(row["url"]): row for row in historical_rows if row.get("url")}
+    allowed = run_context.get("declared_allowed_hosts", [])
+    seeds = run_context.get("seed_origins", [])
+    allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
+    seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
+    scope_predicate = None
+    if args.scope_manifest:
+        from .authorisation import compile_scope_predicate, load_scope_manifest
+
+        scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
+    stored_digest = run_context.get("authorization_scope_digest")
+    if stored_digest:
+        supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
+        supplied_digest = (
+            hashlib.sha256(json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if supplied_snapshot is not None
+            else None
+        )
+        if supplied_digest != stored_digest:
+            print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
+            return None
+    host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
+    current_config = CrawlConfig(
+        same_host_only=True,
+        allowed_hosts=sorted(allowed_hosts),
+        respect_robots_txt=True,
+        max_concurrency=2,
+        per_host_concurrency=1,
+        max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
+        destination_guard="pinned",
+        challenge_escalate_to_browser=False,
+        scope_predicate=cast(Any, host_scope),
+    )
+    current_engine = CrawlEngine(current_config)
+    try:
+        collected = await collect_current_site_files(
+            current_engine,
+            seed_origins=seed_origins,
+            allowed_hosts=allowed_hosts,
+            historical_pages=historical_pages,
+            max_sitemaps=args.current_max_sitemaps,
+            max_urls=args.current_max_sitemap_urls,
+            max_live_samples=max_live_samples,
+        )
+    finally:
+        await current_engine.close()
+    return collected
+
+
+async def _run_reconcile_sources(args: argparse.Namespace) -> int:
+    """Join the run's link graph with sitemaps, GSC and backlink URL exports (ticket 262)."""
+    from .source_reconciliation import (
+        BACKLINK_URL_COLUMNS,
+        GSC_URL_COLUMNS,
+        SourceInput,
+        crawl_sitemap_source,
+        current_sitemap_source,
+        load_sitemap_files,
+        load_url_list,
+        reconcile_sources,
+        write_reconciliation_csv,
+    )
+
+    if args.scope_manifest and not args.fetch_current_sitemaps:
+        print("Error: --scope-manifest requires --fetch-current-sitemaps", file=sys.stderr)
+        return EXIT_VALIDATION
+    import asyncpg
+
+    sources: list[SourceInput] = []
+    try:
+        if args.sitemap_files:
+            sources.append(load_sitemap_files(args.sitemap_files))
+        for label, paths, column, defaults in (
+            ("gsc_export", args.gsc_exports, args.gsc_column, GSC_URL_COLUMNS),
+            ("backlinks_export", args.backlinks_exports, args.backlinks_column, BACKLINK_URL_COLUMNS),
+        ):
+            loaded = [load_url_list(path, label=label, column=column, default_columns=defaults) for path in paths]
+            if loaded:
+                merged = SourceInput(label=label, urls={url: [] for item in loaded for url in item.urls})
+                merged.metadata = {
+                    "label": label,
+                    "inputs": [item.metadata for item in loaded],
+                    "unique_url_count": len(merged.urls),
+                    "complete": True,
+                }
+                sources.append(merged)
+    except (OSError, ValueError, csv.Error) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+
+    store = _store_from_args(args)
+    reports = CrawlReports(store, run_id=args.crawl_run_id)
+    try:
+        run_id = await reports._run_id()
+        run_context = await reports.technical_audit_context()
+        inventory = await reports.source_reconciliation_inventory()
+        if not args.no_crawl_sitemap_provenance:
+            sources.append(crawl_sitemap_source(inventory["crawl_sitemap_urls"]))
+        if args.fetch_current_sitemaps:
+            collected = await _collect_run_current_site_files(args, reports, run_context, max_live_samples=0)
+            if collected is None:
+                return EXIT_VALIDATION
+            records, graph_urls = project_current_site_files(collected)
+            sources.append(current_sitemap_source(graph_urls, records[0] if records else {}))
+    except asyncpg.exceptions.UndefinedTableError as exc:
+        print(
+            f"Error: {exc}. This database has no run-aware snapshot schema — it either "
+            "predates snapshots (re-crawl with a current version) or is not a crawler_cli database.",
+            file=sys.stderr,
+        )
+        return EXIT_VALIDATION
+    finally:
+        await store.close()
+
+    result = reconcile_sources(run_id=run_id, context=run_context, pages=inventory["pages"], sources=sources)
+    Path(args.out).write_text(json.dumps(result, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    if args.csv_out:
+        write_reconciliation_csv(args.csv_out, cast(list[dict[str, object]], result["urls"]))
+    summary = cast(dict[str, object], result["summary"])
+    coverage = cast(dict[str, object], result["coverage"])
+    counts = cast(dict[str, int], summary["segment_counts"])
+    print(f"reconcile-sources: {summary['total_urls']} URLs for run {run_id} -> {args.out}")
+    for segment, count in counts.items():
+        print(f"  {segment}: {count}")
+    if summary["out_of_scope_count"]:
+        print(f"  out_of_scope (not joined): {summary['out_of_scope_count']}")
+    if coverage["complete"] is not True:
+        print(f"Note: {coverage['statement']}", file=sys.stderr)
+    return 0
+
+
 async def _run_technical_audit(args: argparse.Namespace) -> int:
     """Build one deterministic evidence bundle from a stored crawl run."""
     if args.check_external_links and not args.compare_current_renders:
@@ -2592,67 +2750,11 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             else:
                 evidence[name] = await _fetch_report(reports, name, args)
         if args.fetch_current_robots_sitemaps:
-            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
-                print(
-                    "Error: this crawl run used an authorization scope; current site-file fetching requires --scope-manifest",
-                    file=sys.stderr,
-                )
-                return EXIT_VALIDATION
-            if run_context.get("portal_connection_policy_active") is True:
-                print(
-                    "Error: current site-file collection does not reuse the crawl's Portal connection policy",
-                    file=sys.stderr,
-                )
-                return EXIT_VALIDATION
-            historical_rows = await reports.current_site_join_inventory()
-            historical_pages = {str(row["url"]): row for row in historical_rows if row.get("url")}
-            allowed = run_context.get("declared_allowed_hosts", [])
-            seeds = run_context.get("seed_origins", [])
-            allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
-            seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
-            scope_predicate = None
-            if args.scope_manifest:
-                from .authorisation import compile_scope_predicate, load_scope_manifest
-
-                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
-            stored_digest = run_context.get("authorization_scope_digest")
-            if stored_digest:
-                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
-                supplied_digest = (
-                    hashlib.sha256(
-                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
-                    ).hexdigest()
-                    if supplied_snapshot is not None
-                    else None
-                )
-                if supplied_digest != stored_digest:
-                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
-                    return EXIT_VALIDATION
-            host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
-            current_config = CrawlConfig(
-                same_host_only=True,
-                allowed_hosts=sorted(allowed_hosts),
-                respect_robots_txt=True,
-                max_concurrency=2,
-                per_host_concurrency=1,
-                max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
-                destination_guard="pinned",
-                challenge_escalate_to_browser=False,
-                scope_predicate=cast(Any, host_scope),
+            collected = await _collect_run_current_site_files(
+                args, reports, run_context, max_live_samples=args.current_max_live_samples
             )
-            current_engine = CrawlEngine(current_config)
-            try:
-                collected = await collect_current_site_files(
-                    current_engine,
-                    seed_origins=seed_origins,
-                    allowed_hosts=allowed_hosts,
-                    historical_pages=historical_pages,
-                    max_sitemaps=args.current_max_sitemaps,
-                    max_urls=args.current_max_sitemap_urls,
-                    max_live_samples=args.current_max_live_samples,
-                )
-            finally:
-                await current_engine.close()
+            if collected is None:
+                return EXIT_VALIDATION
             current_site_records, sitemap_graph_urls = project_current_site_files(collected)
             evidence["current-robots-sitemaps"] = current_site_records
             if sitemap_graph_urls:
@@ -4985,6 +5087,54 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_postgres_args(audit_parser)
     _add_reporting_run_selector(audit_parser)
 
+    rec_parser = subparsers.add_parser(
+        "reconcile-sources",
+        help="Reconcile a stored crawl's link graph with sitemaps, Search Console and backlink URL exports",
+    )
+    rec_parser.add_argument("--out", required=True, help="Write the deterministic reconciliation JSON to this path")
+    rec_parser.add_argument("--csv-out", help="Optionally write the per-URL breakdown as CSV")
+    rec_parser.add_argument(
+        "--sitemap-file",
+        dest="sitemap_files",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Local XML, text or .gz sitemap file; repeat for index children (index children are not fetched)",
+    )
+    rec_parser.add_argument(
+        "--fetch-current-sitemaps",
+        action="store_true",
+        help="Fetch current robots.txt-declared and well-known sitemaps for the run's hosts through the guarded engine",
+    )
+    rec_parser.add_argument("--scope-manifest", help="Authorization manifest for --fetch-current-sitemaps")
+    rec_parser.add_argument("--current-max-sitemaps", type=positive_int, default=100)
+    rec_parser.add_argument("--current-max-sitemap-urls", type=positive_int, default=100_000)
+    rec_parser.add_argument(
+        "--no-crawl-sitemap-provenance",
+        action="store_true",
+        help="Do not treat URLs the crawl discovered via sitemaps (url_sources) as sitemap members",
+    )
+    rec_parser.add_argument(
+        "--gsc-export",
+        dest="gsc_exports",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Search Console URL export (CSV with a URL/'Top pages' column, or one URL per line); repeatable",
+    )
+    rec_parser.add_argument("--gsc-column", help="URL column name in --gsc-export (default: auto-detect)")
+    rec_parser.add_argument(
+        "--backlinks-export",
+        dest="backlinks_exports",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Backlink target URL export (UTF-8 CSV with a URL column, or one URL per line); repeatable",
+    )
+    rec_parser.add_argument("--backlinks-column", help="URL column name in --backlinks-export (default: auto-detect)")
+    _add_postgres_args(rec_parser)
+    _add_reporting_run_selector(rec_parser)
+
     cmp_parser = subparsers.add_parser(
         "compare",
         help="Compare two crawls (saved JSON artifacts or stored runs), with optional host remapping",
@@ -5320,6 +5470,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "intent-overlap",
         "render-report",
         "report",
+        "reconcile-sources",
         "compare",
         "compare-urls",
         "compare-renders",
@@ -5375,6 +5526,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_report(args)
     if command == "technical-audit":
         return await _run_technical_audit(args)
+    if command == "reconcile-sources":
+        return await _run_reconcile_sources(args)
     if command == "compare":
         return await _run_compare(args)
     if command == "compare-urls":

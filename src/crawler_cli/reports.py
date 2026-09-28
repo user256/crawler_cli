@@ -323,6 +323,41 @@ class CrawlReports:
             )
         return candidates
 
+    async def source_reconciliation_inventory(self) -> dict[str, list[dict[str, object]]]:
+        """Return run-scoped snapshots and crawl sitemap provenance for ``reconcile-sources``.
+
+        ``pages`` covers every snapshot kind so non-HTML sitemap or backlink
+        targets still carry an HTTP status; only HTML rows feed the link graph.
+        ``crawl_sitemap_urls`` reads ticket 013's ``url_sources`` rows. That
+        table is database-wide, so it is intersected with the selected run's
+        frontier to avoid importing sitemap memberships seen only by other runs.
+        """
+        run_id = await self._run_id()
+        pages = await self._fetch(
+            """
+            SELECT u.url, u.kind, s.links_json, s.content_extracted,
+                   s.render_discovery_attempted, s.render_discovery_complete,
+                   s.initial_status_code, s.final_status_code, s.overall_indexable,
+                   s.canonical_urls_json
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1
+            ORDER BY u.url
+            """,
+            run_id,
+        )
+        crawl_sitemap_urls = await self._fetch(
+            """
+            SELECT DISTINCT u.url, COALESCE(us.detail, '') AS detail
+            FROM url_sources us
+            JOIN urls u ON u.id = us.url_id
+            JOIN frontier f ON f.url_id = us.url_id AND f.run_id = $1
+            WHERE us.source = 'sitemap'
+            ORDER BY u.url, detail
+            """,
+            run_id,
+        )
+        return {"pages": pages, "crawl_sitemap_urls": crawl_sitemap_urls}
+
     @staticmethod
     def _source_value(observations: list[dict[str, str]], field: str) -> str | None:
         return next((item[field] for item in observations if item.get(field)), None)

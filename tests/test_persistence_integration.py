@@ -1977,3 +1977,60 @@ async def test_compare_urls_persist_writes_a_session(store: AsyncpgStore, dsn: s
     assert row["candidate_url"] == "https://new/a"
     assert "redirect_ok" in row["redirect_chain"]
     assert row["content_verdict"] == "identical"
+
+
+@pytest.mark.asyncio
+async def test_source_reconciliation_inventory_is_run_scoped(store: AsyncpgStore, tmp_path: Path) -> None:
+    """Ticket 262: snapshots and sitemap provenance come only from the selected run."""
+    from crawler_cli.__main__ import _build_parser, _dispatch
+
+    root = "https://reconcile.example/"
+    linked = "https://reconcile.example/linked"
+    orphan = "https://reconcile.example/sitemap-orphan"
+    other_run_only = "https://reconcile.example/other-run"
+    await store.create_crawl_run("rec-run-b", seed_urls=[root], config_hash="b", config={})
+    await store.enqueue_frontier([(other_run_only, 0, None)], source="sitemap", source_detail="old.xml")
+    await store.create_crawl_run("rec-run-a", seed_urls=[root], config_hash="a", config={})
+    await store.enqueue_frontier([(root, 0, None)], source="seed")
+    await store.enqueue_frontier([(orphan, 0, None)], source="sitemap", source_detail="sitemap.xml")
+    for url, html in (
+        (root, f'<html><body><a href="{linked}">x</a></body></html>'),
+        (linked, "<html><body>linked</body></html>"),
+        (orphan, "<html><body>orphan</body></html>"),
+    ):
+        await store.persist(
+            CrawlResult(
+                requested_url=url,
+                final_url=url,
+                status=200,
+                headers={"content-type": "text/html"},
+                content_type="text/html",
+                fetch_backend="test",
+                extracted=extract_page_data(html, url, {}),
+                raw_html=html,
+                discovered_links=(
+                    [DiscoveredLink(href=linked, anchor_text="x", xpath="/html/body/a[1]", is_image=False)]
+                    if url == root
+                    else []
+                ),
+            )
+        )
+    await store.frontier_next_batch(10)
+    await store.frontier_mark_done([root, orphan])
+    await store.update_crawl_run_status("rec-run-a", "complete")
+
+    inventory = await CrawlReports(store, run_id="rec-run-a").source_reconciliation_inventory()
+    assert [row["url"] for row in inventory["pages"]] == [root, linked, orphan]
+    assert inventory["crawl_sitemap_urls"] == [{"url": orphan, "detail": "sitemap.xml"}]
+
+    out = tmp_path / "reconciliation.json"
+    args = _build_parser().parse_args(
+        ["reconcile-sources", "--postgres-dsn", store.dsn, "--crawl-run-id", "rec-run-a", "--out", str(out)]
+    )
+    assert await _dispatch(args) == 0
+    segments = {row["url"]: row["segment"] for row in json.loads(out.read_text())["urls"]}
+    assert segments == {
+        root: "crawled_unlinked_no_source",
+        linked: "unmapped_in_sitemap",
+        orphan: "sitemap_orphan",
+    }

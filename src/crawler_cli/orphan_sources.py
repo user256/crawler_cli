@@ -10,6 +10,21 @@ from urllib.parse import urlsplit
 KNOWN_URL_SOURCES = frozenset({"analytics", "search_console"})
 
 
+def is_absolute_http_url(url: str) -> bool:
+    """Return whether ``url`` is an absolute, credential-free HTTP(S) URL."""
+    parsed = urlsplit(url)
+    try:
+        parsed.port
+        valid_authority = bool(parsed.hostname) and not parsed.username and not parsed.password
+    except ValueError:
+        valid_authority = False
+    return (
+        parsed.scheme in {"http", "https"}
+        and valid_authority
+        and not any(character.isspace() or ord(character) < 32 for character in url)
+    )
+
+
 def load_known_url_inventory(path: str | Path) -> list[dict[str, str]]:
     """Load a deterministic URL CSV without normalizing URL identity.
 
@@ -32,17 +47,7 @@ def load_known_url_inventory(path: str | Path) -> list[dict[str, str]]:
             normalized = {str(key).strip().lower(): (value or "").strip() for key, value in row.items() if key}
             url = normalized.get("url", "")
             source = normalized.get("source", "").lower()
-            parsed = urlsplit(url)
-            try:
-                parsed.port
-                valid_authority = bool(parsed.hostname) and not parsed.username and not parsed.password
-            except ValueError:
-                valid_authority = False
-            if (
-                parsed.scheme not in {"http", "https"}
-                or not valid_authority
-                or any(character.isspace() or ord(character) < 32 for character in url)
-            ):
+            if not is_absolute_http_url(url):
                 raise ValueError(f"{inventory_path}:{line_number}: url must be an absolute credential-free HTTP(S) URL")
             if source not in KNOWN_URL_SOURCES:
                 allowed = ", ".join(sorted(KNOWN_URL_SOURCES))
