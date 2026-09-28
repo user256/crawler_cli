@@ -1420,7 +1420,7 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     ]
     projection = audit.get("recipient_projection", {})
     projection = projection if isinstance(projection, Mapping) else {}
-    overview.extend([[str(row[0]), row[1]] for row in projection.get("health_metrics", [])])
+    overview.extend([[str(row[0]), _sheet_value(row[1])] for row in projection.get("health_metrics", [])])
     for check in checks:
         assert isinstance(check, Mapping)
         title = str(check["title"])
@@ -1461,7 +1461,7 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
         )
     overview.extend(
         [
-            ["Run scope", projection.get("scope", "unknown")],
+            ["Run scope", _sheet_value(projection.get("scope", "unknown"))],
             ["Audit date", projection.get("run_date", "unknown")],
             ["Coverage caveats", projection.get("coverage_caveats", "unknown")],
         ]
@@ -1582,7 +1582,39 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 dict(row) for row in evidence if isinstance(row, Mapping) and row.get("record_type") == "candidate"
             )
     if conditional_coverage.get("state") == "tested" and conditional_candidates:
-        tables["304 Recheck"] = _table(conditional_candidates)
+        tables["304 Recheck"] = _table(
+            conditional_candidates,
+            (
+                "record_type",
+                "url",
+                "url_digest_sha256",
+                "stratum",
+                "locale",
+                "template",
+                "ruleset_version",
+                "observed_at",
+                "ordinary_status",
+                "ordinary_headers",
+                "ordinary_ttfb_seconds",
+                "ordinary_duration_seconds",
+                "ordinary_wire_bytes",
+                "ordinary_decoded_bytes",
+                "ordinary_representation_sha256",
+                "ordinary_state",
+                "validator_kind",
+                "validator_digest_sha256",
+                "conditional_status",
+                "conditional_headers",
+                "conditional_ttfb_seconds",
+                "conditional_duration_seconds",
+                "conditional_wire_bytes",
+                "conditional_decoded_bytes",
+                "conditional_representation_sha256",
+                "representation_equal",
+                "outcome",
+                "qualification",
+            ),
+        )
     return tables
 
 
@@ -2056,7 +2088,16 @@ def _table(rows: object, columns: tuple[str, ...] | None = None) -> list[list[ob
     materialised = [dict(row) for row in rows if isinstance(row, Mapping)] if isinstance(rows, list) else []
     if columns is None:
         columns = tuple(dict.fromkeys(key for row in materialised for key in row))
-    return [list(columns), *[[row.get(column, "") for column in columns] for row in materialised]]
+    return [
+        list(columns),
+        *[[_sheet_value(row.get(column, "")) for column in columns] for row in materialised],
+    ]
+
+
+def _sheet_value(value: object) -> object:
+    if isinstance(value, (Mapping, list, tuple)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return value
 
 
 def _manual_checks() -> list[dict[str, str]]:
