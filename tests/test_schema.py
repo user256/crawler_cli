@@ -211,3 +211,24 @@ def test_extract_microdata_and_rdfa():
     assert "rdfa" in formats
     assert all(item["parser_mode"] is None for item in items)
     assert all(item["compatibility_diagnostics"] == [] for item in items)
+
+
+def test_inert_template_and_commented_structured_data_are_not_active_markup():
+    html = """
+    <html><body>
+      <script type="application/ld+json">{"@context":"https://schema.org","@type":"Thing","name":"active"}</script>
+      <div itemscope itemtype="https://schema.org/Product"><span itemprop="name">active product</span></div>
+      <div typeof="https://schema.org/Organization"><span property="name">active org</span></div>
+      <template>
+        <script type="application/ld+json">{"@context":"https://schema.org","@type":"Recipe","name":"inert"}</script>
+        <div itemscope itemtype="https://schema.org/Product"><span itemprop="name">inert</span></div>
+        <div typeof="https://schema.org/Event"><span property="name">inert</span></div>
+      </template>
+      <!-- <script type="application/ld+json">{"@context":"https://schema.org","@type":"Event"}</script> -->
+      <!-- <div itemscope itemtype="https://schema.org/Recipe">inert</div> -->
+    </body></html>
+    """
+    items = extract_schema_data(html, "https://example.com/page")
+    types = {item["type"] for item in items}
+    assert {"Thing", "Product", "Organization"}.issubset(types)
+    assert not {"Recipe", "Event", "BrokenCommentSchema"}.intersection(types)

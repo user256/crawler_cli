@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bounded live rechecks for saved failing link targets require an explicit
+  authorization manifest; only repeated in-scope HTTP failures can become
+  client actions, while recovered/challenged/disallowed/transport-error states
+  remain distinct and non-publishable.
+
+- Run-scoped indexability evidence preserves explicit robots declarations by
+  source channel and user-agent scope; conflicts require a genuine explicit
+  index/noindex contradiction.
+
 - Run-scoped technical-audit extensions: image reference extraction and issue
   reporting, internal link-quality evidence, tracking-parameter links,
   PageRank-like internal authority scores, and SimHash near-duplicate pairs.
@@ -33,8 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Breaking for artifact consumers:** saved crawl artifacts advance to
-  `crawler-cli/crawl-artifact/8` and add `extracted.image_references`. Version 7
-  and earlier artifacts remain loadable.
+  `crawler-cli/crawl-artifact/9` and add scoped robots declaration evidence.
+  Version 8 and earlier artifacts remain loadable.
 
 - **Breaking for artifact consumers:** saved crawl artifacts are stamped
   `crawler-cli/crawl-artifact/7`, carrying the speculative-discovery evidence

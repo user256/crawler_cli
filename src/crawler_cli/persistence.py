@@ -366,10 +366,13 @@ SCHEMA_STATEMENTS = [
         render_discovery_complete BOOLEAN,
         render_discovery_skip_reason TEXT,
         canonical_urls_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        canonical_evidence_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         hreflang_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         robots_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        indexability_evidence_json JSONB,
         schema_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         links_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        redirect_chain_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         images_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         analytics_json JSONB NOT NULL DEFAULT '[]'::jsonb,
         amphtml_url TEXT,
@@ -512,12 +515,15 @@ SCHEMA_STATEMENTS = [
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS canonical_urls_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS hreflang_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS robots_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS indexability_evidence_json JSONB""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS schema_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS links_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS redirect_chain_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS images_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS content_extracted BOOLEAN""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS analytics_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS variant_kind TEXT""",
+    """ALTER TABLE page_run_snapshots ADD COLUMN IF NOT EXISTS canonical_evidence_json JSONB NOT NULL DEFAULT '[]'::jsonb""",
     """
     CREATE TABLE IF NOT EXISTS run_intent_signatures (
         run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
@@ -2516,22 +2522,44 @@ class AsyncpgStore:
         extracted = result.extracted if content_url else None
         hreflang = []
         canonicals: list[str] = []
+        canonical_evidence: list[dict[str, object]] = []
         robots: list[object] = []
         schema: list[object] = []
         links: list[dict[str, object]] = []
         images: list[dict[str, object]] = []
+        indexability_evidence: list[dict[str, object]] | None = None
         analytics: list[dict[str, object]] = []
         if extracted is not None:
             canonicals = [u for u in (extracted.canonical, extracted.x_canonical) if u]
+            canonical_evidence = list(extracted.canonical_evidence)
             hreflang = [
                 {"href": link.href, "hreflang": link.hreflang, "source": link.source}
                 for link in extracted.hreflang_links
                 if link.href
             ]
             robots = [*extracted.meta_robots.raw, *extracted.x_robots_tag.raw]
+            indexability_evidence = [
+                {
+                    "channel": item.channel,
+                    "user_agent": item.user_agent,
+                    "raw_value": item.raw_value,
+                    "directives": item.directives,
+                }
+                for item in extracted.robots_directive_evidence
+            ]
             schema = list(extracted.schema_data or [])
             links = [
-                {"href": link.href, "anchor_text": link.anchor_text, "xpath": link.xpath}
+                {
+                    "href": link.href,
+                    "original_href": link.original_href,
+                    "anchor_text": link.anchor_text,
+                    "xpath": link.xpath,
+                    "is_image": link.is_image,
+                    "fragment": link.fragment,
+                    "url_parameters": link.url_parameters,
+                    "rel": link.rel,
+                    "discovery_source": "html_anchor",
+                }
                 for link in (result.discovered_links or [])
                 if link.href
             ]
@@ -2577,13 +2605,13 @@ class AsyncpgStore:
                 word_count, html_lang, content_length, content_hash_sha256, content_hash_simhash,
                 custom_data, html_meta_allows, http_header_allows, overall_indexable, challenge,
                 skip_reason, content_extracted, ttfb_seconds, total_duration_seconds, lcp_ms, cls, inp_ms, canonical_urls_json, hreflang_json, robots_json, schema_json,
-                links_json, images_json, analytics_json, amphtml_url, render_discovery_attempted,
-                render_discovery_complete, render_discovery_skip_reason
+                links_json, images_json, analytics_json, indexability_evidence_json, amphtml_url, render_discovery_attempted,
+                render_discovery_complete, render_discovery_skip_reason, redirect_chain_json, canonical_evidence_json
             ) VALUES (
                 $1, $2, $3, $4, $5, EXTRACT(EPOCH FROM NOW())::INTEGER,
                 $6::jsonb, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
                 $17::jsonb, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
-                $29::jsonb, $30::jsonb, $31::jsonb, $32::jsonb, $33::jsonb, $34::jsonb, $35::jsonb, $36, $37, $38, $39
+                $29::jsonb, $30::jsonb, $31::jsonb, $32::jsonb, $33::jsonb, $34::jsonb, $35::jsonb, $36::jsonb, $37, $38, $39, $40, $41::jsonb, $42::jsonb
             )
             ON CONFLICT (run_id, url_id) DO UPDATE SET
                 final_url_id = EXCLUDED.final_url_id,
@@ -2620,15 +2648,18 @@ class AsyncpgStore:
                 links_json = EXCLUDED.links_json,
                 images_json = EXCLUDED.images_json,
                 analytics_json = EXCLUDED.analytics_json
+                , indexability_evidence_json = EXCLUDED.indexability_evidence_json
                 , amphtml_url = EXCLUDED.amphtml_url
                 , render_discovery_attempted = EXCLUDED.render_discovery_attempted
                 , render_discovery_complete = EXCLUDED.render_discovery_complete
                 , render_discovery_skip_reason = EXCLUDED.render_discovery_skip_reason
+                , redirect_chain_json = EXCLUDED.redirect_chain_json
+                , canonical_evidence_json = EXCLUDED.canonical_evidence_json
             """,
             self.active_run_id,
             url_id,
             final_url_id,
-            result.status,
+            (result.redirect_chain[0].get("status") if result.redirect_chain else result.status),
             result.status,
             json.dumps(result.headers, sort_keys=True),
             html_blob,
@@ -2660,10 +2691,13 @@ class AsyncpgStore:
             json.dumps(links),
             json.dumps(images),
             json.dumps(analytics),
+            json.dumps(indexability_evidence) if indexability_evidence is not None else None,
             extracted.amphtml if extracted else None,
             result.render_discovery_attempted,
             result.render_discovery_complete,
             result.render_discovery_skip_reason,
+            json.dumps(result.redirect_chain),
+            json.dumps(canonical_evidence),
         )
 
     async def _persist_once(self, result: CrawlResult) -> None:

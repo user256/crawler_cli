@@ -621,6 +621,67 @@ crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
   --out ./audit-evidence/technical-audit.json
 ```
 
+Use `--markdown-out PATH` to write a concise recipient-facing projection. The
+JSON remains the source evidence bundle; the projection does not replace the
+manual, conditional, or analyst-judgement checks listed in its registry.
+Its `skill_requirements` map traces every skill section to its requirement
+controls, implementation state, evidence boundary, test and owning ticket. That
+static map describes product support; use `checks` for what this particular run
+actually tested and its denominator.
+
+Saved link failures remain analyst-only until explicitly rechecked. To collect
+two live attempts for up to 25 in-scope failed targets, add
+`--recheck-live --scope-manifest ./authorized-scope.json`. The recheck honours
+robots.txt, the manifest and destination guard, does not escalate challenges
+to a browser, and keeps recovered or inconclusive targets out of client action
+tabs. Robots refusals, challenges, access denials, rate limits, DNS/TLS and
+other transport errors remain distinct. The JSON publication gate stays closed for incomplete coverage or
+unvalidated candidates.
+
+For a separately reported, evidence-only sample of rendered external links,
+combine `--check-external-links` with `--compare-current-renders` and an
+explicit `--scope-manifest`. The command tests up to 25 sorted unique targets
+by default (adjust with `--external-link-max-targets`, capped at 25), honours
+the manifest, robots.txt and destination pinning, and only repeats a target
+after a transport or HTTP failure. Out-of-scope links are recorded without a
+request; results are not automatically promoted to client actions. Rendered
+links are observed after bounded scrolling only—controls are not activated.
+Private destinations remain denied unless the manifest itself permits private
+network access and the invocation also opts in with `--allow-private-network`
+and, preferably, a narrow `--allow-network-cidr`.
+
+To include externally known URLs in orphan review, pass one or more CSVs with
+`url,source` columns; `source` must be `search_console` or `analytics`. An
+optional `observed_at` column retains the export date/period label. URL identity
+is not rewritten, and URLs outside hosts observed in the selected crawl are
+labelled out of scope rather than fetched or counted as orphans:
+
+```csv
+url,source,observed_at
+https://example.test/landing,search_console,2026-09-01/2026-09-24
+https://example.test/promo,analytics,2026-09
+```
+
+```bash
+crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
+  --known-url-inventory ./known-urls.csv --out ./audit-evidence/technical-audit.json
+```
+
+These are discovery candidates, not proof of indexability or an orphan defect.
+Use the existing explicitly authorized `--recheck-live --scope-manifest ...`
+path to validate supplied URLs; rechecks share the 25-URL audit limit with
+saved failures, prioritize saved failures, and record any known URLs not
+selected. Robots and scope denials are not bypassed.
+
+To explicitly copy a compatible Google Sheets v2 template after writing the
+JSON artifact, add `--publish-google-sheets --google-sheets-template SHEET_URL`.
+The default durable receipt is written beside `--out`; retain it to recover a
+partial copy. Retry with `--resume-google-sheets --google-sheets-receipt PATH`
+to reconcile that exact workbook. Publication never edits the source template,
+uses RAW cell input, and reports success only after readback. See
+[`docs/technical-audit-google-sheets.md`](docs/technical-audit-google-sheets.md)
+for OAuth and service-account setup.
+
 ### Run snapshots and retention
 
 Each fetch is retained as an immutable page snapshot for its crawl run. The
@@ -704,7 +765,7 @@ crawler-cli compare-urls --pairs mapping.csv \
 
 Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any` and exits **3** (findings) when tripped — distinct from `2` (usage error). Replacements are literal strings applied in order (no regex in v1).
 
-JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/8`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
+JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/9`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
 
 ### 4. Storage lifecycle
 

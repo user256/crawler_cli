@@ -53,11 +53,41 @@ class FakeReports:
                 "images_json": True,
                 "links_json": True,
                 "content_hash_simhash": True,
+                "indexability_evidence_json": True,
+                "content_extracted": True,
+                "canonical_urls_json": True,
+                "canonical_evidence_json": True,
+                "redirect_chain_json": True,
+                "variant_kind": True,
+                "render_discovery_attempted": True,
+                "render_discovery_complete": True,
+                "schema_json": True,
+                "ttfb_seconds": True,
+                "total_duration_seconds": True,
+                "lcp_ms": True,
+                "cls": True,
+                "inp_ms": True,
             },
+            "declared_allowed_hosts": ["example.com"],
+            "seed_hosts": ["example.com"],
         }
 
-    async def orphan_pages(self):
-        self.calls.append(("orphans", {}))
+    async def orphan_pages(self, *, known_urls=None):
+        self.calls.append(("orphans", {} if known_urls is None else {"known_urls": known_urls}))
+        if known_urls:
+            return [
+                {
+                    "url": row["url"],
+                    "candidate_type": "source_known_zero_observed_inlinks",
+                    "observed_inlink_count": 0,
+                    "graph_complete": True,
+                    "is_crawled": False,
+                    "source_labels": [row["source"]],
+                    "source_observations": [row],
+                    "live_validation_state": "not_requested",
+                }
+                for row in known_urls
+            ]
         return [{"url": "https://example.com/orphan"}]
 
     async def indexability_reasons(self):
@@ -155,6 +185,14 @@ class FakeReports:
             }
         ]
 
+    async def structured_data_inventory(self):
+        self.calls.append(("structured-data-inventory", {}))
+        return []
+
+    async def technical_audit_performance_inventory(self):
+        self.calls.append(("performance-inventory", {}))
+        return []
+
     async def image_issues(self):
         self.calls.append(("image-issues", {}))
         return []
@@ -162,6 +200,10 @@ class FakeReports:
     async def internal_link_quality(self):
         self.calls.append(("internal-link-quality", {}))
         return []
+
+    async def link_graph_metrics(self):
+        self.calls.append(("link-graph-metrics", {}))
+        return [{"graph_complete": True}]
 
     async def tracking_parameter_links(self):
         self.calls.append(("tracking-parameter-links", {}))
@@ -171,8 +213,24 @@ class FakeReports:
         self.calls.append(("near-duplicates", {"threshold": threshold, "limit": limit}))
         return []
 
+    async def similarity_coverage(self, threshold=4, limit=5000):
+        self.calls.append(("similarity-coverage", {"threshold": threshold, "limit": limit}))
+        return [{"truncated": False, "missing_primary_hashes": 0, "findings_truncated": False}]
+
     async def internal_authority(self):
         self.calls.append(("internal-authority", {}))
+        return []
+
+    async def authority_coverage(self):
+        self.calls.append(("authority-coverage", {}))
+        return [{"graph_complete": True, "canonical_indexable_population": 1}]
+
+    async def metadata_locale_inventory(self):
+        self.calls.append(("metadata-locale-inventory", {}))
+        return []
+
+    async def canonical_hreflang_inventory(self):
+        self.calls.append(("canonical-hreflang-inventory", {}))
         return []
 
 
@@ -307,10 +365,28 @@ def test_json_out_writes_file(fake_reports, tmp_path):
 
 def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, capsys):
     out = tmp_path / "technical-audit.json"
-    assert _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out)]) == 0
+    known_urls = tmp_path / "known-urls.csv"
+    known_urls.write_text(
+        "url,source\nhttps://example.com/landing,search_console\n",
+        encoding="utf-8",
+    )
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--crawl-run-id",
+                "run-42",
+                "--known-url-inventory",
+                str(known_urls),
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
     payload = json.loads(out.read_text())
     assert payload["crawl_run_id"] == "run-42"
-    assert payload["schema_version"] == "crawler-cli/technical-audit/1"
+    assert payload["schema_version"] == "crawler-cli/technical-audit/2"
     assert payload["run_context"]["snapshot_consistency"] == "stable"
     assert {check["id"] for check in payload["checks"]} >= {
         "tracking-parameter-links",
@@ -318,18 +394,161 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "orphan-candidates",
     }
     assert "Wrote deterministic technical audit" in capsys.readouterr().out
-    called = [name for name, _ in FakeReports.instances[-1].calls]
+    calls = FakeReports.instances[-1].calls
+    called = [name for name, _ in calls]
+    orphan_call = next(args for name, args in calls if name == "orphans")
+    assert orphan_call["known_urls"] == [{"url": "https://example.com/landing", "source": "search_console"}]
     assert called == [
         "orphans",
         "indexability",
         "redirect-chains",
         "schema-compatibility",
+        "structured-data-inventory",
         "image-issues",
         "internal-link-quality",
+        "link-graph-metrics",
         "tracking-parameter-links",
         "near-duplicates",
+        "similarity-coverage",
         "internal-authority",
+        "authority-coverage",
+        "metadata-locale-inventory",
+        "canonical-hreflang-inventory",
+        "performance-inventory",
     ]
+
+
+def test_technical_audit_skips_reports_requiring_absent_legacy_columns(fake_reports, tmp_path, monkeypatch):
+    original = FakeReports.technical_audit_context
+
+    async def legacy_context(self):
+        context = await original(self)
+        context["schema_capabilities"].update(
+            {
+                "content_extracted": False,
+                "canonical_evidence_json": False,
+                "redirect_chain_json": False,
+            }
+        )
+        return context
+
+    monkeypatch.setattr(FakeReports, "technical_audit_context", legacy_context)
+    out = tmp_path / "legacy-technical-audit.json"
+    assert _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out)]) == 0
+
+    payload = json.loads(out.read_text())
+    checks = {check["id"]: check for check in payload["checks"]}
+    for check_id in (
+        "orphan-candidates",
+        "redirect-chains",
+        "metadata-and-locale",
+        "canonical-consistency",
+        "hreflang-consistency",
+        "performance-and-conditional-requests",
+        "internal-authority-inventory",
+    ):
+        assert checks[check_id]["status"] in {"partial", "unavailable"}
+
+    called = {name for name, _ in FakeReports.instances[-1].calls}
+    assert "orphans" not in called
+    assert "redirect-chains" not in called
+    assert "metadata-locale-inventory" not in called
+    assert "canonical-hreflang-inventory" not in called
+    assert "performance-inventory" not in called
+    assert "internal-authority" not in called
+    assert "authority-coverage" not in called
+
+
+def test_technical_audit_writes_optional_recipient_markdown(fake_reports, tmp_path, capsys):
+    out = tmp_path / "technical-audit.json"
+    markdown = tmp_path / "client-summary.md"
+    assert (
+        _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out), "--markdown-out", str(markdown)]) == 0
+    )
+
+    rendered = markdown.read_text()
+    assert rendered.startswith("# Technical SEO audit")
+    assert "Evidence summary" in rendered
+    assert "No live-confirmed client actions" in rendered
+    assert "unknown" in rendered
+
+
+def test_technical_audit_sheets_publishing_is_explicit_and_requires_template(fake_reports, tmp_path, capsys):
+    out = tmp_path / "technical-audit.json"
+    assert _run(["technical-audit", "--out", str(out), "--publish-google-sheets"]) == 2
+    assert "requires --google-sheets-template" in capsys.readouterr().err
+    assert FakeReports.instances == []
+
+    assert _run(["technical-audit", "--out", str(out), "--google-sheets-template", "a" * 20]) == 2
+    assert "require --publish-google-sheets" in capsys.readouterr().err
+
+
+def test_technical_audit_publisher_is_invoked_only_after_json_is_written(fake_reports, tmp_path, monkeypatch, capsys):
+    from crawler_cli import google_sheets
+
+    out = tmp_path / "technical-audit.json"
+    calls = {}
+
+    class Publisher:
+        def __init__(self, drive, sheets):
+            calls["clients"] = (drive, sheets)
+
+        def publish(self, **kwargs):
+            assert out.exists()
+            calls["publish"] = kwargs
+            return "https://docs.google.com/spreadsheets/d/copy/edit"
+
+    monkeypatch.setattr(google_sheets, "GoogleSheetsTemplatePublisher", Publisher)
+    monkeypatch.setattr(google_sheets, "google_services", lambda credentials: ("drive", "sheets"))
+    monkeypatch.setattr(google_sheets, "credential_path", lambda credentials: credentials)
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--out",
+                str(out),
+                "--publish-google-sheets",
+                "--google-sheets-template",
+                "a" * 20,
+                "--resume-google-sheets",
+            ]
+        )
+        == 0
+    )
+    assert calls["publish"]["template"] == "a" * 20
+    assert calls["publish"]["resume"] is True
+    assert calls["publish"]["receipt_path"] == f"{out}.sheets-receipt.json"
+    assert "Published technical audit" in capsys.readouterr().out
+
+
+def test_technical_audit_reports_auth_initialization_failure_without_masking_it(
+    fake_reports, tmp_path, monkeypatch, capsys
+):
+    from crawler_cli import google_sheets
+
+    out = tmp_path / "technical-audit.json"
+
+    def raise_refresh_error(_credentials):
+        raise LookupError("refresh token rejected")
+
+    monkeypatch.setattr(google_sheets, "google_services", raise_refresh_error)
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--out",
+                str(out),
+                "--publish-google-sheets",
+                "--google-sheets-template",
+                "a" * 20,
+            ]
+        )
+        == 2
+    )
+    error = capsys.readouterr().err
+    assert "Google Sheets publication failed: LookupError" in error
+    assert f"receipt: {out}.sheets-receipt.json" in error
+    assert "UnboundLocalError" not in error
 
 
 def test_technical_audit_downgrades_a_run_changed_during_collection(fake_reports, tmp_path):
@@ -340,6 +559,142 @@ def test_technical_audit_downgrades_a_run_changed_during_collection(fake_reports
     assert payload["run_context"]["snapshot_consistency"] == "changed_during_collection"
     assert payload["run_context"]["completion_state"] == "partial"
     assert all(check["status"] != "pass" for check in payload["checks"])
+
+
+def test_live_recheck_requires_explicit_scope_manifest(fake_reports, tmp_path, capsys):
+    out = tmp_path / "technical-audit.json"
+    assert _run(["technical-audit", "--recheck-live", "--out", str(out)]) == 2
+    assert "--recheck-live requires --scope-manifest" in capsys.readouterr().err
+    assert fake_reports.closed is True
+
+
+def test_external_link_recheck_requires_render_and_scope_preflight(fake_reports, capsys):
+    assert _run(["technical-audit", "--check-external-links", "--out", "audit.json"]) == 2
+    assert "requires --compare-current-renders" in capsys.readouterr().err
+    assert FakeReports.instances == []
+
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--check-external-links",
+                "--compare-current-renders",
+                "--out",
+                "audit.json",
+            ]
+        )
+        == 2
+    )
+    assert "requires --scope-manifest" in capsys.readouterr().err
+    assert FakeReports.instances == []
+
+
+def test_external_link_private_network_requires_explicit_manifest_and_invocation(fake_reports, tmp_path, capsys):
+    assert _run(["technical-audit", "--allow-private-network", "--out", "audit.json"]) == 2
+    assert "require --check-external-links" in capsys.readouterr().err
+    assert FakeReports.instances == []
+
+    from datetime import UTC, datetime, timedelta
+
+    from crawler_cli.authorisation import SCOPE_MANIFEST_SCHEMA_VERSION
+
+    now = datetime.now(UTC)
+    manifest = tmp_path / "scope.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": SCOPE_MANIFEST_SCHEMA_VERSION,
+                "authorization_reference": "CHANGE-1234",
+                "operator": "audit-test",
+                "valid_from": (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "valid_until": (now + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "allowed_origins": ["https://example.com"],
+                "allowed_path_prefixes": ["/"],
+                "allow_private_network": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--check-external-links",
+                "--compare-current-renders",
+                "--scope-manifest",
+                str(manifest),
+                "--allow-private-network",
+                "--allow-network-cidr",
+                "127.0.0.0/8",
+                "--out",
+                "audit.json",
+            ]
+        )
+        == 2
+    )
+    assert "scope manifest does not authorize private-network access" in capsys.readouterr().err
+    assert FakeReports.instances == []
+
+
+def test_live_recheck_includes_known_urls_with_scope_and_records_selection(fake_reports, tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from crawler_cli.authorisation import SCOPE_MANIFEST_SCHEMA_VERSION
+
+    now = datetime.now(UTC)
+    manifest = tmp_path / "scope.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": SCOPE_MANIFEST_SCHEMA_VERSION,
+                "authorization_reference": "CHANGE-1234",
+                "operator": "audit-test",
+                "valid_from": (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "valid_until": (now + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "allowed_origins": ["https://example.com"],
+                "allowed_path_prefixes": ["/"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    known_urls = tmp_path / "known.csv"
+    known_urls.write_text(
+        "url,source\nhttps://example.com/known,search_console\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    async def collect(targets, **kwargs):
+        selected = list(targets)
+        captured["targets"] = selected
+        captured["kwargs"] = kwargs
+        return {url: {"state": "responsive", "attempts": [{"status": 200}]} for url in selected}
+
+    monkeypatch.setattr("crawler_cli.__main__.collect_live_rechecks", collect)
+    out = tmp_path / "audit.json"
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--crawl-run-id",
+                "run-42",
+                "--known-url-inventory",
+                str(known_urls),
+                "--recheck-live",
+                "--scope-manifest",
+                str(manifest),
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(out.read_text())
+    assert captured["targets"] == ["https://example.com/known"]
+    assert captured["kwargs"]["allowed_hosts"] == ["example.com"]
+    assert payload["run_context"]["audit_options"]["known_url_recheck_selected_count"] == 1
+    assert payload["known_url_inventory"][0]["live_validation_state"] == "responsive"
 
 
 def test_csv_requires_out_directory(fake_reports, capsys):

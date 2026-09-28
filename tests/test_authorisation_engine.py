@@ -497,10 +497,14 @@ async def test_unchanged_scope_digest_permits_resume() -> None:
 
     store = MemoryStore()
     backend = TrackingBackend({"https://www.example.com/": (html(), "text/html")})
-    engine = build_engine(predicate_for(["https://www.example.com"]), backend, store)
+    # Reuse the exact compiled manifest: predicate_for() generates a current
+    # validity window, so calling it twice can cross a one-second boundary and
+    # accidentally test changed scope instead of unchanged-scope resume.
+    predicate = predicate_for(["https://www.example.com"])
+    engine = build_engine(predicate, backend, store)
     await engine.crawl_open(["https://www.example.com/"], max_urls=5, run_id="run-148b")
 
-    resumed = build_engine(predicate_for(["https://www.example.com"]), TrackingBackend({}), store)
+    resumed = build_engine(predicate, TrackingBackend({}), store)
     job = await resumed.crawl_open(
         ["https://www.example.com/"],
         max_urls=5,

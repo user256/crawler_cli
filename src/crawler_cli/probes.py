@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import random
-import string
+import hashlib
+import re
 from dataclasses import dataclass
 
 from .hashing import simhash64
@@ -15,6 +15,12 @@ class SoftFourOhFourFingerprint:
     body_len: int
     title: str | None
     simhash: int | None
+    headers: dict[str, str]
+    redirect_chain: list[dict[str, object]]
+    canonical: str | None
+    noindex_by_saved_directives: bool | None
+    elapsed_seconds: float | None
+    error_phrase_in_body: bool
 
 
 async def soft_404_fingerprint(engine, base_url: str) -> SoftFourOhFourFingerprint:
@@ -29,7 +35,9 @@ async def soft_404_fingerprint(engine, base_url: str) -> SoftFourOhFourFingerpri
     One request, one invented path. Callers that need a different probe URL
     should pass their own base; this never retries with further paths.
     """
-    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    # A stable invalid route makes evidence replayable and avoids consuming a
+    # different crawl path every time the same run is audited.
+    suffix = hashlib.sha256(base_url.encode("utf-8")).hexdigest()[:12]
     test_url = f"{base_url.rstrip('/')}/__crawler-cli-404-{suffix}"
 
     config = engine.config
@@ -42,7 +50,7 @@ async def soft_404_fingerprint(engine, base_url: str) -> SoftFourOhFourFingerpri
 
     final_url = result.final_url
     status = result.status
-    body_len = len(result.raw_html or "")
+    body_len = result.decoded_bytes or len((result.raw_html or "").encode("utf-8"))
     title = result.extracted.title if result.extracted else None
     sh = None
     if result.raw_html:
@@ -55,4 +63,17 @@ async def soft_404_fingerprint(engine, base_url: str) -> SoftFourOhFourFingerpri
         body_len=body_len,
         title=title,
         simhash=sh,
+        headers=dict(result.headers),
+        redirect_chain=list(result.redirect_chain),
+        canonical=result.extracted.canonical if result.extracted else None,
+        noindex_by_saved_directives=(
+            result.extracted.meta_robots.noindex or result.extracted.x_robots_tag.noindex if result.extracted else None
+        ),
+        elapsed_seconds=result.total_duration_seconds,
+        error_phrase_in_body=bool(
+            result.raw_html
+            and re.search(
+                r"\b(page not found|not found|404|does not exist|no longer available)\b", result.raw_html, re.I
+            )
+        ),
     )

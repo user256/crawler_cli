@@ -6,7 +6,14 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
-from .models import DiscoveredLink, ExtractedContent, HreflangLink, ImageReference, RobotsDirectives
+from .models import (
+    DiscoveredLink,
+    ExtractedContent,
+    HreflangLink,
+    ImageReference,
+    RobotsDirectiveEvidence,
+    RobotsDirectives,
+)
 from .schema import _PARSER, extract_schema_data
 
 
@@ -34,10 +41,54 @@ def _parse_directives(raw_values: Iterable[str]) -> RobotsDirectives:
             if normalized:
                 directives.append(normalized)
     return RobotsDirectives(
-        noindex="noindex" in directives,
-        nofollow="nofollow" in directives,
+        noindex="noindex" in directives or "none" in directives,
+        nofollow="nofollow" in directives or "none" in directives,
         raw=directives,
     )
+
+
+_HEADER_ROBOT_NAMES = {
+    "baiduspider",
+    "bingbot",
+    "duckduckbot",
+    "googlebot",
+    "googlebot-image",
+    "googlebot-news",
+    "googlebot-video",
+    "slurp",
+    "yandex",
+}
+
+
+def _directive_tokens(value: str) -> list[str]:
+    return [token.strip().lower() for token in value.split(",") if token.strip()]
+
+
+def _robots_declaration_evidence(soup: BeautifulSoup, headers: dict[str, str]) -> list[RobotsDirectiveEvidence]:
+    evidence: list[RobotsDirectiveEvidence] = []
+    for tag in soup.find_all("meta", attrs={"name": True, "content": True}):
+        name = str(tag.get("name", "")).strip().lower()
+        raw = str(tag.get("content", ""))
+        is_robot_name = name == "robots" or any(token in name for token in ("bot", "spider", "crawler", "slurp"))
+        if is_robot_name and raw.strip():
+            evidence.append(
+                RobotsDirectiveEvidence("html_meta", "*" if name == "robots" else name, raw, _directive_tokens(raw))
+            )
+    header = headers.get("x-robots-tag", "")
+    if header.strip():
+        grouped: dict[str, list[str]] = {}
+        active_agent = "*"
+        for segment in header.split(","):
+            prefix, separator, rest = segment.partition(":")
+            if separator and prefix.strip().lower() in _HEADER_ROBOT_NAMES:
+                active_agent = prefix.strip().lower()
+                segment = rest.strip()
+            if segment.strip():
+                grouped.setdefault(active_agent, []).append(segment.strip())
+        for agent, segments in grouped.items():
+            raw = ", ".join(segments)
+            evidence.append(RobotsDirectiveEvidence("http_header", agent, raw, _directive_tokens(raw)))
+    return evidence
 
 
 def _rel_tokens(value: object) -> list[str]:
@@ -54,6 +105,37 @@ def _positive_int(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _split_link_header(value: str, separator: str) -> list[str]:
+    """Split an RFC 8288 Link field outside URI references and quoted values."""
+    parts: list[str] = []
+    start = 0
+    in_uri = False
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if in_uri:
+            if char == ">":
+                in_uri = False
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in {'"', "'"}:
+            quote = char
+        elif char == "<":
+            in_uri = True
+        elif char == separator and not in_uri:
+            parts.append(value[start:index].strip())
+            start = index + 1
+    parts.append(value[start:].strip())
+    return [part for part in parts if part]
 
 
 def _srcset_urls(value: object) -> list[str]:
@@ -132,8 +214,8 @@ def _extract_header_hreflang(headers: dict[str, str], base_url: str) -> list[Hre
         return []
 
     hreflangs: list[HreflangLink] = []
-    for chunk in link_header.split(","):
-        parts = [part.strip() for part in chunk.split(";") if part.strip()]
+    for chunk in _split_link_header(link_header, ","):
+        parts = _split_link_header(chunk, ";")
         if not parts or not parts[0].startswith("<") or not parts[0].endswith(">"):
             continue
         href = parts[0][1:-1]
@@ -154,6 +236,46 @@ def _extract_header_hreflang(headers: dict[str, str], base_url: str) -> list[Hre
                 )
             )
     return hreflangs
+
+
+def _extract_canonical_evidence(soup: BeautifulSoup, headers: dict[str, str], base_url: str) -> list[dict[str, object]]:
+    evidence: list[dict[str, object]] = []
+
+    def add(raw_href: object, source: str) -> None:
+        raw = str(raw_href or "").strip()
+        resolved = urljoin(base_url, raw) if raw else ""
+        parsed = urlparse(resolved)
+        evidence.append(
+            {
+                "href": resolved,
+                "raw_href": raw,
+                "source": source,
+                "well_formed_http_url": parsed.scheme in {"http", "https"} and bool(parsed.netloc),
+            }
+        )
+
+    for tag in soup.find_all("link"):
+        if "canonical" in _rel_tokens(tag.get("rel")):
+            add(tag.get("href"), "html_head")
+
+    # RFC 8288 Link fields can contain multiple comma-separated link-values.
+    link_header = _header_map(headers).get("link", "")
+    for chunk in _split_link_header(link_header, ","):
+        parts = _split_link_header(chunk, ";")
+        if not parts or not (parts[0].startswith("<") and parts[0].endswith(">")):
+            continue
+        attrs: dict[str, str] = {}
+        for part in parts[1:]:
+            key, separator, value = part.partition("=")
+            if separator:
+                attrs[key.strip().lower()] = value.strip().strip('"')
+        if "canonical" in _rel_tokens(attrs.get("rel", "")):
+            add(parts[0][1:-1], "http_header_link")
+
+    x_canonical = _header_map(headers).get("x-canonical")
+    if x_canonical:
+        add(x_canonical, "http_header_x_canonical")
+    return evidence
 
 
 def extract_page_data(
@@ -185,12 +307,17 @@ def extract_page_data(
         )
     ]
     meta_robots = _parse_directives(meta_robots_values)
-    x_robots_tag = _parse_directives([header_values.get("x-robots-tag", "")])
+    declaration_evidence = _robots_declaration_evidence(soup, header_values)
+    x_robots_tag = _parse_directives([item.raw_value for item in declaration_evidence if item.channel == "http_header"])
+    # The user-agent-qualified header form is ``googlebot: noindex``; its
+    # prefix is metadata, not a directive token.
+    x_robots_tag.raw = [
+        token for item in declaration_evidence if item.channel == "http_header" for token in item.directives
+    ]
 
-    canonical = None
-    canonical_tag = soup.find("link", attrs={"rel": lambda value: "canonical" in _rel_tokens(value)})
-    if canonical_tag and canonical_tag.get("href"):
-        canonical = urljoin(base_url, canonical_tag["href"].strip())
+    canonical_evidence = _extract_canonical_evidence(soup, headers, base_url)
+    html_canonicals = [item["href"] for item in canonical_evidence if item["source"] == "html_head" and item["href"]]
+    canonical = str(html_canonicals[0]) if html_canonicals else None
 
     x_canonical = header_values.get("x-canonical")
     if x_canonical:
@@ -245,6 +372,8 @@ def extract_page_data(
             ),
         },
         image_references=extract_image_references(soup, base_url),
+        robots_directive_evidence=declaration_evidence,
+        canonical_evidence=canonical_evidence,
         schema_data=extract_schema_data(html, base_url, soup=soup),
     )
 
@@ -338,6 +467,7 @@ def extract_links(
                 fragment=parsed.fragment or None,
                 url_parameters=parsed.query or None,
                 original_href=original_href,
+                rel=[str(value).lower() for value in (anchor.get("rel") or [])],
             )
         )
     return links

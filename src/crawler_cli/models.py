@@ -51,6 +51,7 @@ class BrowserRequestObservation:
     resource_type: str
     outcome: BrowserRequestOutcome = "issued"
     status: int | None = None
+    content_type: str | None = None
     failure: str | None = None
     occurrence_count: int = 1
 
@@ -95,6 +96,13 @@ class FetchResponse:
     """Whether the captured pre-hydration body exceeded its configured cap."""
     observed_requests: list[BrowserRequestObservation] = field(default_factory=list)
     """Bounded browser network observations, populated only when explicitly enabled."""
+    render_link_observations: list[dict[str, object]] = field(default_factory=list)
+    """Bounded pre-scroll and after-scroll rendered anchor evidence."""
+    render_link_capture: dict[str, object] | None = None
+    """Coverage counters for the optional, non-clicking scroll-link capture."""
+    render_image_observations: list[dict[str, object]] = field(default_factory=list)
+    render_image_capture: dict[str, object] | None = None
+    """Bounded rendered image/background measurements and their coverage."""
     render_settled: bool | None = None
     """Whether configured Playwright settle/selector waits completed."""
 
@@ -128,6 +136,16 @@ class RobotsDirectives:
 
 
 @dataclass(slots=True)
+class RobotsDirectiveEvidence:
+    """One robots directive declaration with channel and crawler scope."""
+
+    channel: Literal["html_meta", "http_header"]
+    user_agent: str
+    raw_value: str
+    directives: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ExtractedContent:
     title: str | None
     meta_description: str | None
@@ -142,6 +160,8 @@ class ExtractedContent:
     word_count: int
     metadata: dict[str, Any]
     image_references: list[ImageReference] = field(default_factory=list)
+    robots_directive_evidence: list[RobotsDirectiveEvidence] = field(default_factory=list)
+    canonical_evidence: list[dict[str, Any]] = field(default_factory=list)
     amphtml: str | None = None
     """Absolute URL from ``<link rel="amphtml" href=...>`` — the page's declared
     AMP variant.  Captured so AMP variants get a first-class page<->AMP pairing
@@ -158,6 +178,7 @@ class DiscoveredLink:
     fragment: str | None = None
     url_parameters: str | None = None
     original_href: str | None = None
+    rel: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -274,6 +295,12 @@ class CrawlResult:
     """Interaction to Next Paint in ms — lab metric, Playwright only (ticket 046)."""
     redirect_chain: list[dict[str, Any]] = field(default_factory=list)
     """Redirect hops carried through from :class:`FetchResponse` (ticket 122)."""
+    observed_requests: list[BrowserRequestObservation] = field(default_factory=list)
+    """Bounded browser subrequest observations retained for render audits."""
+    render_link_observations: list[dict[str, object]] = field(default_factory=list)
+    render_link_capture: dict[str, object] | None = None
+    render_image_observations: list[dict[str, object]] = field(default_factory=list)
+    render_image_capture: dict[str, object] | None = None
 
 
 @dataclass(slots=True)

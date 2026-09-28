@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import importlib.metadata
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlparse
 
-from .hashing import hamming64
+from .compression import decompress_html
+from .hashing import hamming64, sha256_of_normalized, simhash64_of_normalized, simhash_to_signed
+from .intent_signature import extract_main_text, resolve_signal_confidence
 from .persistence import AsyncpgStore
 
 
@@ -30,6 +34,7 @@ class CrawlReports:
     def __init__(self, store: AsyncpgStore, *, run_id: str | None = None) -> None:
         self.store = store
         self.run_id = run_id
+        self._similarity_coverage: list[dict[str, object]] | None = None
 
     async def _run_id(self) -> str:
         """Resolve the selected report run without silently choosing one."""
@@ -55,6 +60,7 @@ class CrawlReports:
         snapshot_columns = {str(row["column_name"]) for row in column_rows}
         has_extraction_state = "content_extracted" in snapshot_columns
         has_images = "images_json" in snapshot_columns
+        has_directive_evidence = "indexability_evidence_json" in snapshot_columns
         extraction_true = "s.content_extracted IS TRUE" if has_extraction_state else "FALSE"
         extraction_false = "s.content_extracted IS FALSE" if has_extraction_state else "FALSE"
         extraction_unknown = "s.content_extracted IS NULL" if has_extraction_state else "TRUE"
@@ -93,10 +99,23 @@ class CrawlReports:
         config = run.get("config") if isinstance(run.get("config"), dict) else {}
         seed_urls = run.get("seed_urls") if isinstance(run.get("seed_urls"), list) else []
         seed_hosts = sorted({parsed.hostname.lower() for seed in seed_urls if (parsed := urlparse(str(seed))).hostname})
+        seed_origins = sorted(
+            {
+                f"{parsed.scheme.lower()}://{parsed.netloc.rsplit('@', 1)[-1]}"
+                for seed in seed_urls
+                if (parsed := urlparse(str(seed))).scheme in {"http", "https"} and parsed.netloc
+            }
+        )
         declared_hosts = config.get("allowed_hosts", [])
         if not isinstance(declared_hosts, list):
             declared_hosts = []
         declared_hosts = sorted({str(host).lower() for host in declared_hosts if host})
+        authorization_scope = config.get("authorization_scope")
+        authorization_scope_digest = (
+            hashlib.sha256(json.dumps(authorization_scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if isinstance(authorization_scope, dict)
+            else None
+        )
         frontier = await self.store.frontier_stats(run_id=run_id)
         run_status = str(run.get("status", "unknown"))
         completion_state = "complete" if run_status == "complete" else run_status
@@ -111,12 +130,29 @@ class CrawlReports:
             "config_keys": sorted(str(key) for key in config),
             "seed_count": len(seed_urls),
             "seed_hosts": seed_hosts,
+            "seed_origins": seed_origins,
             "declared_allowed_hosts": declared_hosts,
+            "authorization_scope_active": authorization_scope_digest is not None,
+            "authorization_scope_digest": authorization_scope_digest,
+            "portal_connection_policy_active": config.get("portal_connection_policy") is True,
             "schema_capabilities": {
                 "content_extracted": has_extraction_state,
                 "images_json": has_images,
+                "indexability_evidence_json": has_directive_evidence,
                 "links_json": "links_json" in snapshot_columns,
+                "schema_json": "schema_json" in snapshot_columns,
                 "content_hash_simhash": "content_hash_simhash" in snapshot_columns,
+                "canonical_urls_json": "canonical_urls_json" in snapshot_columns,
+                "canonical_evidence_json": "canonical_evidence_json" in snapshot_columns,
+                "redirect_chain_json": "redirect_chain_json" in snapshot_columns,
+                "variant_kind": "variant_kind" in snapshot_columns,
+                "render_discovery_attempted": "render_discovery_attempted" in snapshot_columns,
+                "render_discovery_complete": "render_discovery_complete" in snapshot_columns,
+                "ttfb_seconds": "ttfb_seconds" in snapshot_columns,
+                "total_duration_seconds": "total_duration_seconds" in snapshot_columns,
+                "lcp_ms": "lcp_ms" in snapshot_columns,
+                "cls": "cls" in snapshot_columns,
+                "inp_ms": "inp_ms" in snapshot_columns,
             },
             "frontier_queued": frontier[0],
             "frontier_pending": frontier[1],
@@ -124,18 +160,189 @@ class CrawlReports:
             **stats,
         }
 
-    async def orphan_pages(self) -> list[dict[str, object]]:
+    async def metadata_locale_inventory(self) -> list[dict[str, object]]:
+        """Return run-scoped page metadata for deterministic audit projection.
+
+        Only the explicitly configured ``custom_data.template`` value is
+        selected; arbitrary custom extraction fields may contain client data.
+        Sitemap membership is intentionally absent because URL sources are not
+        keyed by crawl run in the current schema.
+        """
         run_id = await self._run_id()
-        return await self._fetch(
+        rows = await self._fetch(
             """
-            SELECT u.url
+            SELECT s.url_id, s.final_url_id, u.url, fu.url AS final_url,
+                   u.kind, s.final_status_code, s.content_extracted,
+                   s.overall_indexable, s.challenge, s.title, s.meta_description,
+                   s.h1_tags, s.html_lang, s.canonical_urls_json,
+                   s.variant_kind, s.custom_data ->> 'template' AS template
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            LEFT JOIN urls fu ON fu.id = s.final_url_id
+            WHERE s.run_id = $1
+            ORDER BY s.url_id
+            """,
+            run_id,
+        )
+        return [dict(row) for row in rows]
+
+    async def canonical_hreflang_inventory(self) -> list[dict[str, object]]:
+        """Return only immutable canonical/hreflang facts for the selected run."""
+        run_id = await self._run_id()
+        rows = await self._fetch(
+            """
+            SELECT s.url_id, u.url, fu.url AS final_url, u.kind,
+                   s.final_status_code, s.content_extracted, s.overall_indexable,
+                   s.challenge, s.html_lang, s.canonical_urls_json,
+                   s.canonical_evidence_json, s.hreflang_json
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            LEFT JOIN urls fu ON fu.id = s.final_url_id
+            WHERE s.run_id = $1
+            ORDER BY s.url_id
+            """,
+            run_id,
+        )
+        return [dict(row) for row in rows]
+
+    async def current_site_join_inventory(self) -> list[dict[str, object]]:
+        """Return safe run-scoped facts used to join current sitemaps to history."""
+        run_id = await self._run_id()
+        column_rows = await self._fetch(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_schema = current_schema()
+                 AND table_name = 'page_run_snapshots'"""
+        )
+        snapshot_columns = {str(row["column_name"]) for row in column_rows}
+        extraction_field = "s.content_extracted" if "content_extracted" in snapshot_columns else "NULL::BOOLEAN"
+        rows = await self._fetch(
+            f"""
+            SELECT u.url, u.kind, s.final_status_code, s.overall_indexable,
+                   {extraction_field} AS content_extracted,
+                   s.html_lang, s.custom_data ->> 'template' AS template,
+                   s.canonical_urls_json, s.links_json
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
-            LEFT JOIN frontier f ON f.run_id = s.run_id AND f.url_id = u.id
-            WHERE s.run_id = $1 AND u.kind = 'html' AND f.parent_id IS NULL
+            WHERE s.run_id = $1
+            ORDER BY s.url_id
+            """,
+            run_id,
+        )
+        return [dict(row) for row in rows]
+
+    async def orphan_pages(self, *, known_urls: list[dict[str, str]] | None = None) -> list[dict[str, object]]:
+        run_id = await self._run_id()
+        run = await self.store.get_crawl_run(run_id)
+        pages = await self._fetch(
+            """
+            SELECT u.url, u.kind, s.links_json, s.content_extracted,
+                   s.render_discovery_attempted, s.render_discovery_complete,
+                   s.final_status_code, s.overall_indexable, s.canonical_urls_json
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1 AND u.kind = 'html'
             ORDER BY u.url
             """,
             run_id,
         )
+        graph = _build_link_graph(pages, known_urls=known_urls or [])
+        inbound = graph["inbound"]
+        complete = graph["complete"] and bool(run and run.get("status") == "complete")
+        seeds = set(run.get("seed_urls", [])) if run and isinstance(run.get("seed_urls"), list) else set()
+        page_urls = {str(page["url"]) for page in pages}
+        source_urls: dict[str, list[dict[str, str]]] = {}
+        for item in known_urls or []:
+            url = item.get("url", "").strip()
+            source = item.get("source", "").strip()
+            if url and source:
+                observation = {"source": source}
+                observed_at = item.get("observed_at", "").strip()
+                if observed_at:
+                    observation["observed_at"] = observed_at
+                for field in (
+                    "source_sitemap",
+                    "historical_status",
+                    "historical_indexable",
+                    "historical_canonical_state",
+                ):
+                    value = item.get(field, "").strip()
+                    if value:
+                        observation[field] = value
+                source_urls.setdefault(url, []).append(observation)
+        candidates = [
+            {
+                "url": str(page["url"]),
+                "candidate_type": "crawled_html_zero_observed_inlinks",
+                "observed_inlink_count": 0,
+                "graph_complete": complete,
+                "seed": str(page["url"]) in seeds,
+                "is_crawled": True,
+                "http_status": page.get("final_status_code"),
+                "overall_indexable": page.get("overall_indexable"),
+                "canonical_state": _canonical_state(str(page["url"]), page.get("canonical_urls_json")),
+                "source_labels": sorted({item["source"] for item in source_urls.get(str(page["url"]), [])}),
+                "source_observations": sorted(
+                    source_urls.get(str(page["url"]), []),
+                    key=lambda item: (item["source"], item.get("observed_at", "")),
+                ),
+                "live_validation_state": "not_requested",
+            }
+            for page in pages
+            if inbound.get(str(page["url"]), 0) == 0
+        ]
+        for url, observations in sorted(source_urls.items()):
+            if url in page_urls and inbound.get(url, 0) == 0:
+                # The crawled-orphan row above already carries these source labels.
+                continue
+            sources = {item["source"] for item in observations}
+            in_scope = url in inbound
+            count = inbound.get(url)
+            candidates.append(
+                {
+                    "url": url,
+                    "candidate_type": (
+                        "source_inventory_out_of_scope"
+                        if not in_scope
+                        else (
+                            "source_known_zero_observed_inlinks" if count == 0 else "source_known_with_observed_inlinks"
+                        )
+                    ),
+                    "observed_inlink_count": count,
+                    "graph_complete": complete if in_scope else False,
+                    "is_crawled": url in page_urls,
+                    "http_status": self._source_int(observations, "historical_status"),
+                    "overall_indexable": self._source_bool(observations, "historical_indexable"),
+                    "canonical_state": self._source_value(observations, "historical_canonical_state") or "unknown",
+                    "source_sitemaps": sorted(
+                        {item["source_sitemap"] for item in observations if item.get("source_sitemap")}
+                    ),
+                    "source_labels": sorted(sources),
+                    "source_observations": sorted(
+                        observations, key=lambda item: (item["source"], item.get("observed_at", ""))
+                    ),
+                    "live_validation_state": "not_requested",
+                }
+            )
+        return candidates
+
+    @staticmethod
+    def _source_value(observations: list[dict[str, str]], field: str) -> str | None:
+        return next((item[field] for item in observations if item.get(field)), None)
+
+    @staticmethod
+    def _source_bool(observations: list[dict[str, str]], field: str) -> bool | None:
+        value = next((item[field].lower() for item in observations if item.get(field)), None)
+        if value in {"true", "1", "yes"}:
+            return True
+        if value in {"false", "0", "no"}:
+            return False
+        return None
+
+    @staticmethod
+    def _source_int(observations: list[dict[str, str]], field: str) -> int | None:
+        value = next((item[field] for item in observations if item.get(field)), None)
+        try:
+            return int(value) if value is not None else None
+        except ValueError:
+            return None
 
     async def indexability_reasons(self) -> list[dict[str, object]]:
         run_id = await self._run_id()
@@ -145,11 +352,14 @@ class CrawlReports:
                  AND table_name = 'page_run_snapshots'"""
         )
         has_extraction_state = any(row["column_name"] == "content_extracted" for row in column_rows)
+        has_directive_evidence = any(row["column_name"] == "indexability_evidence_json" for row in column_rows)
         extraction_field = "s.content_extracted" if has_extraction_state else "NULL::BOOLEAN"
+        evidence_field = "s.indexability_evidence_json" if has_directive_evidence else "NULL::JSONB"
         return await self._fetch(
             f"""
             SELECT u.url, s.html_meta_allows, s.http_header_allows, s.overall_indexable,
-                   {extraction_field} AS content_extracted
+                   {extraction_field} AS content_extracted,
+                   {evidence_field} AS directive_evidence
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
             WHERE s.run_id = $1
             ORDER BY u.url
@@ -161,7 +371,9 @@ class CrawlReports:
         run_id = await self._run_id()
         return await self._fetch(
             """
-            SELECT src.url AS requested_url, dst.url AS final_url, pm.initial_status_code, pm.final_status_code
+            SELECT src.url AS requested_url, dst.url AS final_url,
+                   pm.initial_status_code, pm.final_status_code,
+                   pm.redirect_chain_json AS ordered_hops
             FROM page_run_snapshots pm
             JOIN urls src ON src.id = pm.url_id
             JOIN urls dst ON dst.id = pm.final_url_id
@@ -201,6 +413,35 @@ class CrawlReports:
             """,
             run_id,
             limit,
+        )
+
+    async def technical_audit_performance_inventory(self) -> list[dict[str, object]]:
+        """Return saved run-scoped timing and cache headers for the audit."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT
+                u.url,
+                u.kind,
+                s.final_status_code,
+                s.content_extracted,
+                s.challenge,
+                s.overall_indexable,
+                s.canonical_urls_json,
+                s.html_lang,
+                s.custom_data ->> 'template' AS template,
+                s.headers_json,
+                s.ttfb_seconds,
+                s.total_duration_seconds,
+                s.lcp_ms,
+                s.cls,
+                s.inp_ms
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1
+            ORDER BY u.url
+            """,
+            run_id,
         )
 
     async def worst_cwv_pages(self, limit: int = 50) -> list[dict[str, object]]:
@@ -326,39 +567,127 @@ class CrawlReports:
         )
 
     async def internal_link_quality(self) -> list[dict[str, object]]:
-        """Internal links carrying weak crawl or consolidation signals."""
+        """Run-scoped internal link instances with every applicable issue."""
         run_id = await self._run_id()
-        return await self._fetch(
+        rows = await self._fetch(
             """
-            WITH edges AS (
-                SELECT source.url AS source_url, link ->> 'href' AS target_url,
-                       NULLIF(link ->> 'anchor_text', '') AS anchor_text,
-                       link ->> 'xpath' AS xpath
-                FROM page_run_snapshots snapshot
-                JOIN urls source ON source.id = snapshot.url_id
-                CROSS JOIN LATERAL jsonb_array_elements(snapshot.links_json) link
-                WHERE snapshot.run_id = $1
-            )
-            SELECT edges.source_url, edges.target_url, edges.anchor_text, edges.xpath,
-                   target.final_status_code AS target_status,
-                   target.overall_indexable AS target_indexable,
-                   CASE
-                     WHEN edges.anchor_text IS NULL THEN 'empty_anchor'
-                     WHEN target.final_status_code BETWEEN 300 AND 399 THEN 'redirect_target'
-                     WHEN target.final_status_code >= 400 THEN 'error_target'
-                     WHEN target.overall_indexable = FALSE THEN 'non_indexable_target'
-                   END AS issue
-            FROM edges
-            LEFT JOIN urls target_url ON target_url.url = edges.target_url
-            LEFT JOIN page_run_snapshots target
-              ON target.run_id = $1 AND target.url_id = target_url.id
-            WHERE edges.anchor_text IS NULL
-               OR target.final_status_code >= 300
-               OR target.overall_indexable = FALSE
-            ORDER BY edges.source_url, edges.target_url
+            SELECT source.url AS source_url, source_snapshot.overall_indexable AS source_indexable,
+                   link AS link_evidence, target_snapshot.initial_status_code AS target_initial_status,
+                   target_snapshot.final_status_code AS target_status,
+                   target_snapshot.final_url_id AS target_final_url_id,
+                   target_snapshot.url_id AS target_url_id,
+                   target_snapshot.overall_indexable AS target_indexable,
+                   target_snapshot.html_meta_allows, target_snapshot.http_header_allows,
+                   target_snapshot.canonical_urls_json, target_snapshot.challenge,
+                   target_url.url AS target_saved_url
+            FROM page_run_snapshots source_snapshot
+            JOIN urls source ON source.id = source_snapshot.url_id
+            CROSS JOIN LATERAL jsonb_array_elements(source_snapshot.links_json) link
+            LEFT JOIN urls target_url ON target_url.url = link ->> 'href'
+            LEFT JOIN page_run_snapshots target_snapshot
+              ON target_snapshot.run_id = $1 AND target_snapshot.url_id = target_url.id
+            WHERE source_snapshot.run_id = $1
+            ORDER BY source.url, link ->> 'href', link ->> 'xpath'
             """,
             run_id,
         )
+        graph_hosts = {urlparse(str(row["source_url"])).hostname for row in rows}
+        findings: list[dict[str, object]] = []
+        for row in rows:
+            evidence = _json_object(row.get("link_evidence"))
+            target_url = str(evidence.get("href", ""))
+            host = urlparse(target_url).hostname
+            if not target_url or host not in graph_hosts:
+                continue
+            issues: list[str] = []
+            anchor = evidence.get("anchor_text")
+            if not isinstance(anchor, str) or not anchor.strip():
+                issues.append("empty_anchor")
+            status = row.get("target_status")
+            initial_status = row.get("target_initial_status")
+            if row.get("target_url_id") is not None and (
+                row.get("target_final_url_id") != row.get("target_url_id")
+                or (isinstance(initial_status, int) and 300 <= initial_status < 400)
+            ):
+                issues.append("redirect_target")
+            if isinstance(status, int) and status >= 400 and not row.get("challenge"):
+                issues.append("error_target")
+            if row.get("challenge"):
+                issues.append("challenge_target")
+            if row.get("html_meta_allows") is False or row.get("http_header_allows") is False:
+                issues.append("noindex_target")
+            if row.get("target_indexable") is False:
+                issues.append("non_indexable_target")
+            canonicals = _json_list(row.get("canonical_urls_json"))
+            canonical = str(canonicals[0]) if canonicals else None
+            if canonical and _without_fragment(canonical) != _without_fragment(target_url):
+                issues.append("noncanonical_target")
+            if urlparse(target_url).query:
+                issues.append("parameter_target")
+            if not issues:
+                continue
+            # Keep the legacy scalar field for ticket-185's live-failure join;
+            # issue_list carries simultaneous facts without hiding any.
+            legacy_issue = "error_target" if "error_target" in issues else issues[0]
+            findings.append(
+                {
+                    "source_url": row["source_url"],
+                    "source_indexable": row.get("source_indexable"),
+                    "target_url": target_url,
+                    "target_status": status,
+                    "target_initial_status": initial_status,
+                    "target_indexable": row.get("target_indexable"),
+                    "target_canonical_url": canonical,
+                    "anchor_text": anchor,
+                    "xpath": evidence.get("xpath"),
+                    "original_href": evidence.get("original_href"),
+                    "is_image": evidence.get("is_image", False),
+                    "fragment": evidence.get("fragment"),
+                    "rel": evidence.get("rel", []),
+                    "discovery_source": evidence.get("discovery_source", "legacy_unspecified"),
+                    "issues": issues,
+                    "issue": legacy_issue,
+                }
+            )
+        return findings
+
+    async def link_graph_metrics(self) -> list[dict[str, object]]:
+        """Separate edge counts from qualified depth/reachability claims."""
+        run_id = await self._run_id()
+        pages = await self._fetch(
+            """
+            SELECT u.url, s.links_json, s.content_extracted,
+                   s.render_discovery_attempted, s.render_discovery_complete
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1 AND u.kind = 'html' ORDER BY u.url
+            """,
+            run_id,
+        )
+        graph = _build_link_graph(pages)
+        run = await self.store.get_crawl_run(run_id)
+        graph["complete"] = graph["complete"] and bool(run and run.get("status") == "complete")
+        seeds = run.get("seed_urls", []) if run and isinstance(run.get("seed_urls"), list) else []
+        adjacency = graph["adjacency"]
+        depths: dict[str, int] = {}
+        pending = [str(seed) for seed in seeds if str(seed) in adjacency]
+        depths.update({seed: 0 for seed in pending})
+        while pending:
+            source = pending.pop(0)
+            for target in sorted(adjacency.get(source, set())):
+                if target not in depths:
+                    depths[target] = depths[source] + 1
+                    pending.append(target)
+        return [
+            {
+                "unique_sources": graph["source_count"],
+                "unique_targets": graph["target_count"],
+                "link_instances": graph["instance_count"],
+                "graph_complete": graph["complete"],
+                "reachable_pages": len(depths) if graph["complete"] else None,
+                "max_depth": max(depths.values(), default=0) if graph["complete"] else None,
+                "depth_qualification": "complete_saved_graph" if graph["complete"] else "unqualified_incomplete_graph",
+            }
+        ]
 
     async def tracking_parameter_links(self) -> list[dict[str, object]]:
         """Internal links that publish known analytics/session parameters."""
@@ -389,83 +718,260 @@ class CrawlReports:
         return findings
 
     async def near_duplicates(self, threshold: int = 4, limit: int = 5000) -> list[dict[str, object]]:
-        """Near-duplicate indexable pages using persisted 64-bit SimHash."""
+        """Exact/near primary-content candidates from a deterministic bounded sample."""
         run_id = await self._run_id()
+        sample_limit = max(1, min(limit, 5000))
         rows = await self._fetch(
             """
-            SELECT u.url, s.content_hash_sha256, s.content_hash_simhash
+            SELECT u.url, u.kind, s.title, s.h1_tags AS h1, s.meta_description, s.html_lang,
+                   s.html_compressed, s.overall_indexable,
+                   s.canonical_urls_json ->> 0 AS canonical_url,
+                   sig.main_text_compressed, sig.extraction_method AS saved_extraction_method,
+                   sig.signal_confidence AS saved_signal_confidence,
+                   COUNT(*) OVER()::INT AS eligible_population
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
-            WHERE s.run_id = $1 AND s.overall_indexable = TRUE
-              AND s.content_hash_simhash IS NOT NULL
-            ORDER BY u.url LIMIT $2
+            LEFT JOIN run_intent_signatures sig ON sig.run_id = s.run_id AND sig.url_id = s.url_id
+            WHERE s.run_id = $1 AND s.overall_indexable = TRUE AND u.kind = 'html'
+              AND (jsonb_array_length(s.canonical_urls_json) = 0 OR s.canonical_urls_json ->> 0 = u.url)
+              AND u.variant_kind IS NULL
+            ORDER BY md5(u.url), u.url LIMIT $2
             """,
             run_id,
-            limit,
+            sample_limit,
         )
+        prepared: list[dict[str, object]] = []
+        methods: dict[str, int] = {}
+        for row in rows:
+            primary_text, method = _primary_content(row)
+            normalized = " ".join(primary_text.split()) if primary_text else ""
+            exact_hash = sha256_of_normalized(normalized) if normalized else None
+            simhash = simhash_to_signed(simhash64_of_normalized(normalized)) if normalized else None
+            methods[method] = methods.get(method, 0) + 1
+            prepared.append(
+                {
+                    "url": str(row["url"]),
+                    "locale": row.get("html_lang"),
+                    "indexable": row.get("overall_indexable") is True,
+                    "canonical_state": _canonical_state(str(row["url"]), row.get("canonical_url")),
+                    "exact_hash": exact_hash,
+                    "simhash": simhash,
+                    "extraction_method": method,
+                    "signal_confidence": row.get("saved_signal_confidence") or _confidence(normalized, method),
+                }
+            )
+
+        exact_groups: dict[str, list[str]] = {}
+        for row in prepared:
+            if row["exact_hash"] is not None:
+                exact_groups.setdefault(str(row["exact_hash"]), []).append(str(row["url"]))
+        prepared_by_url = {str(row["url"]): row for row in prepared}
         findings: list[dict[str, object]] = []
-        for index, left in enumerate(rows):
-            for right in rows[index + 1 :]:
-                if left["content_hash_sha256"] == right["content_hash_sha256"]:
+        finding_cap = 50000
+        total_candidate_findings = 0
+        for urls in exact_groups.values():
+            if len(urls) > 1:
+                for index, exact_left in enumerate(urls):
+                    for exact_right in urls[index + 1 :]:
+                        total_candidate_findings += 1
+                        if len(findings) < finding_cap:
+                            findings.append(
+                                {
+                                    "match_kind": "exact_primary_content",
+                                    "url": exact_left,
+                                    "near_duplicate_url": exact_right,
+                                    "simhash_distance": 0,
+                                    "url_locale": prepared_by_url[exact_left]["locale"],
+                                    "near_locale": prepared_by_url[exact_right]["locale"],
+                                    "url_canonical_state": prepared_by_url[exact_left]["canonical_state"],
+                                    "near_canonical_state": prepared_by_url[exact_right]["canonical_state"],
+                                    "url_indexable": prepared_by_url[exact_left]["indexable"],
+                                    "near_indexable": prepared_by_url[exact_right]["indexable"],
+                                    "template_context": "not_stored",
+                                    "url_extraction_method": prepared_by_url[exact_left]["extraction_method"],
+                                    "near_extraction_method": prepared_by_url[exact_right]["extraction_method"],
+                                    "url_signal_confidence": prepared_by_url[exact_left]["signal_confidence"],
+                                    "near_signal_confidence": prepared_by_url[exact_right]["signal_confidence"],
+                                }
+                            )
+        near_pair_count = 0
+        for index, left in enumerate(prepared):
+            if left["simhash"] is None:
+                continue
+            for near_right in prepared[index + 1 :]:
+                if near_right["simhash"] is None or left["exact_hash"] == near_right["exact_hash"]:
                     continue
-                distance = hamming64(
-                    int(cast(int, left["content_hash_simhash"])),
-                    int(cast(int, right["content_hash_simhash"])),
-                )
+                near_pair_count += 1
+                distance = hamming64(int(cast(int, left["simhash"])), int(cast(int, near_right["simhash"])))
                 if distance <= threshold:
-                    findings.append(
-                        {"url": left["url"], "near_duplicate_url": right["url"], "simhash_distance": distance}
-                    )
-        return sorted(findings, key=lambda row: (row["simhash_distance"], row["url"], row["near_duplicate_url"]))
+                    total_candidate_findings += 1
+                    if len(findings) < finding_cap:
+                        findings.append(
+                            {
+                                "match_kind": "near_primary_content",
+                                "url": left["url"],
+                                "near_duplicate_url": near_right["url"],
+                                "simhash_distance": distance,
+                                "url_locale": left["locale"],
+                                "near_locale": near_right["locale"],
+                                "url_canonical_state": left["canonical_state"],
+                                "near_canonical_state": near_right["canonical_state"],
+                                "url_indexable": left["indexable"],
+                                "near_indexable": near_right["indexable"],
+                                "template_context": "not_stored",
+                                "url_extraction_method": left["extraction_method"],
+                                "near_extraction_method": near_right["extraction_method"],
+                                "url_signal_confidence": left["signal_confidence"],
+                                "near_signal_confidence": near_right["signal_confidence"],
+                            }
+                        )
+        population = int(cast(int, rows[0]["eligible_population"])) if rows else 0
+        sample_urls = sorted(str(row["url"]) for row in rows)
+        sampled_count = len(rows)
+        self._similarity_coverage = [
+            {
+                "eligible_population": population,
+                "sampled_population": sampled_count,
+                "sample_limit": sample_limit,
+                "truncated": population > sampled_count,
+                "candidate_pair_count": total_candidate_findings,
+                "findings_truncated": total_candidate_findings > finding_cap,
+                "findings_limit": finding_cap,
+                "missing_primary_hashes": sum(row["exact_hash"] is None for row in prepared),
+                "compared_near_pairs": near_pair_count,
+                "pair_comparison_cap": sample_limit * max(0, sample_limit - 1) // 2,
+                "threshold_hamming_bits": threshold,
+                "selection_strategy": "stable md5(url) order; bounded sample; exact and pairwise near comparison",
+                "sample_url_set_sha256": hashlib.sha256("\n".join(sample_urls).encode()).hexdigest(),
+                "sample_page_sha256_refs": [hashlib.sha256(url.encode()).hexdigest() for url in sample_urls],
+                "extraction_method_counts": methods,
+                "extractor_version": _extractor_version(),
+                "inventory_basis": "canonical indexable HTML; explicit non-self canonicals and variants excluded",
+                "template_context": "not_stored_in_page_snapshot_schema",
+            }
+        ]
+        return sorted(
+            findings,
+            key=lambda row: (str(row["match_kind"]), row["simhash_distance"], row["url"], row["near_duplicate_url"]),
+        )
+
+    async def similarity_coverage(self, threshold: int = 4, limit: int = 5000) -> list[dict[str, object]]:
+        """Coverage summary paired with :meth:`near_duplicates` candidates."""
+        if self._similarity_coverage is None:
+            await self.near_duplicates(threshold=threshold, limit=limit)
+        return list(self._similarity_coverage or [])
 
     async def internal_authority(self) -> list[dict[str, object]]:
-        """PageRank-like relative authority over indexable run-scoped pages."""
+        """Relative authority over canonical indexable HTML in the selected run."""
         run_id = await self._run_id()
         pages = await self._fetch(
             """
-            SELECT u.url, s.links_json
+            SELECT u.url, u.kind, s.links_json, s.content_extracted,
+                   s.render_discovery_attempted, s.render_discovery_complete,
+                   s.overall_indexable, s.canonical_urls_json
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
-            WHERE s.run_id = $1 AND s.overall_indexable = TRUE
+            WHERE s.run_id = $1 AND u.kind = 'html'
             ORDER BY u.url
             """,
             run_id,
         )
-        urls = {str(row["url"]) for row in pages}
+        graph = _build_link_graph(pages)
+        run = await self.store.get_crawl_run(run_id)
+        graph_complete = graph["complete"] and bool(run and run.get("status") == "complete")
+        eligible = [
+            row
+            for row in pages
+            if row.get("kind") == "html"
+            and row.get("overall_indexable") is True
+            and _canonical_state(str(row["url"]), row.get("canonical_urls_json")) != "noncanonical"
+        ]
+        urls = {str(row["url"]) for row in eligible}
         if not urls:
             return []
         outgoing: dict[str, set[str]] = {}
-        for row in pages:
+        canonical_by_url = {str(row["url"]): row.get("canonical_urls_json") for row in eligible}
+        for row in eligible:
             raw_links = row["links_json"] or []
             if isinstance(raw_links, str):
                 raw_links = json.loads(raw_links)
             links = cast(list[dict[str, Any]], raw_links)
             outgoing[str(row["url"])] = {str(link["href"]) for link in links if link.get("href") in urls}
-        score = {url: 1.0 / len(urls) for url in urls}
+        ordered_urls = sorted(urls)
+        score = {url: 1.0 / len(urls) for url in ordered_urls}
         damping = 0.85
         for _ in range(50):
-            sink = sum(score[url] for url, targets in outgoing.items() if not targets)
-            updated = {url: (1.0 - damping) / len(urls) + damping * sink / len(urls) for url in urls}
-            for source, targets in outgoing.items():
+            sink = sum(score[url] for url in ordered_urls if not outgoing[url])
+            updated = {url: (1.0 - damping) / len(urls) + damping * sink / len(urls) for url in ordered_urls}
+            for source in ordered_urls:
+                targets = outgoing[source]
                 if targets:
                     contribution = damping * score[source] / len(targets)
-                    for target in targets:
+                    for target in sorted(targets):
                         updated[target] += contribution
-            if max(abs(updated[url] - score[url]) for url in urls) < 1e-10:
+            if max(abs(updated[url] - score[url]) for url in ordered_urls) < 1e-10:
                 score = updated
                 break
             score = updated
         inbound = {url: 0 for url in urls}
         for targets in outgoing.values():
-            for target in targets:
+            for target in sorted(targets):
                 inbound[target] += 1
         maximum = max(score.values()) or 1.0
+        ordered = sorted(urls, key=lambda value: (-score[value], value))
+        rank = {url: index + 1 for index, url in enumerate(ordered)}
         return [
             {
                 "url": url,
-                "authority_score": round(100.0 * score[url] / maximum, 4),
+                "authority_score": round(100.0 * score[url] / maximum, 4) if graph_complete else None,
                 "unique_inlinks": inbound[url],
                 "unique_outlinks": len(outgoing[url]),
+                "canonical_state": _canonical_state(
+                    url,
+                    canonical_by_url[url],
+                ),
+                "indexable": True,
+                "peer_population_count": len(urls),
+                "relative_rank": rank[url] if graph_complete else None,
+                "relative_percentile": round(100.0 * (len(urls) - rank[url] + 1) / len(urls), 2)
+                if graph_complete
+                else None,
+                "graph_complete": graph_complete,
             }
-            for url in sorted(urls, key=lambda value: (score[value], value))
+            for url in ordered
+        ]
+
+    async def authority_coverage(self) -> list[dict[str, object]]:
+        run_id = await self._run_id()
+        pages = await self._fetch(
+            """
+            SELECT u.url, u.kind, s.links_json, s.content_extracted,
+                   s.render_discovery_attempted, s.render_discovery_complete,
+                   s.overall_indexable, s.canonical_urls_json
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1 AND u.kind = 'html'
+            ORDER BY u.url
+            """,
+            run_id,
+        )
+        graph = _build_link_graph(pages)
+        run = await self.store.get_crawl_run(run_id)
+        eligible = [
+            row
+            for row in pages
+            if row.get("kind") == "html"
+            and row.get("overall_indexable") is True
+            and _canonical_state(str(row["url"]), row.get("canonical_urls_json")) != "noncanonical"
+        ]
+        return [
+            {
+                "html_population": len(pages),
+                "canonical_indexable_population": len(eligible),
+                "excluded_noncanonical_count": sum(
+                    _canonical_state(str(row["url"]), row.get("canonical_urls_json")) == "noncanonical" for row in pages
+                ),
+                "graph_complete": graph["complete"] and bool(run and run.get("status") == "complete"),
+                "edge_source": "same-run immutable page snapshots",
+                "relative_peer_context": "canonical indexable HTML pages in selected run",
+            }
         ]
 
     async def schema_compatibility(self) -> list[dict[str, object]]:
@@ -495,6 +1001,32 @@ class CrawlReports:
             ) AS diagnostics(diagnostic)
             WHERE s.run_id = $1
             ORDER BY u.url, script_position, diagnostic_code, json_pointer
+            """,
+            run_id,
+        )
+
+    async def structured_data_inventory(self) -> list[dict[str, object]]:
+        """Return every active structured-data item saved for the selected run."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT
+                u.url,
+                COALESCE(schema_item ->> 'format', 'unknown') AS format,
+                COALESCE(schema_item ->> 'type', 'Unknown') AS schema_type,
+                schema_item ->> 'position' AS position,
+                schema_item ->> 'parser_mode' AS parser_mode,
+                (schema_item ->> 'is_valid')::BOOLEAN AS is_valid,
+                schema_item -> 'validation_errors' AS validation_errors,
+                schema_item -> 'compatibility_diagnostics' AS compatibility_diagnostics,
+                schema_item ->> 'raw_data' AS raw_data,
+                schema_item ->> 'parsed_data' AS parsed_data
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(s.schema_json, '[]'::jsonb))
+                WITH ORDINALITY AS schema_rows(schema_item, schema_ordinal)
+            WHERE s.run_id = $1
+            ORDER BY u.url, schema_ordinal
             """,
             run_id,
         )
@@ -653,11 +1185,34 @@ class CrawlReports:
         async with self.store.pool.acquire() as conn:
             await conn.execute(
                 """
-                CREATE MATERIALIZED VIEW IF NOT EXISTS crawler_orphan_pages AS
-                SELECT u.url
-                FROM urls u
-                LEFT JOIN frontier f ON f.url_id = u.id
-                WHERE u.kind = 'html' AND f.parent_id IS NULL
+                DROP MATERIALIZED VIEW IF EXISTS crawler_orphan_pages
+                """
+            )
+            await conn.execute(
+                """
+                CREATE MATERIALIZED VIEW crawler_orphan_pages AS
+                SELECT s.run_id, u.url,
+                       'crawled_html_zero_observed_inlinks'::TEXT AS candidate_type,
+                       (r.status = 'complete' AND NOT EXISTS (
+                           SELECT 1 FROM page_run_snapshots coverage
+                           JOIN urls covered_url ON covered_url.id = coverage.url_id
+                           WHERE coverage.run_id = s.run_id AND covered_url.kind = 'html'
+                             AND (coverage.content_extracted IS DISTINCT FROM TRUE
+                                  OR (coverage.render_discovery_attempted
+                                      AND coverage.render_discovery_complete IS DISTINCT FROM TRUE))
+                       )) AS graph_complete
+                FROM page_run_snapshots s
+                JOIN urls u ON u.id = s.url_id
+                JOIN crawl_runs r ON r.run_id = s.run_id
+                WHERE u.kind = 'html'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM page_run_snapshots source_snapshot
+                      JOIN urls source ON source.id = source_snapshot.url_id
+                      CROSS JOIN LATERAL jsonb_array_elements(source_snapshot.links_json) link
+                      WHERE source_snapshot.run_id = s.run_id
+                        AND source.url <> u.url
+                        AND link ->> 'href' = u.url
+                  )
                 """
             )
 
@@ -667,3 +1222,113 @@ class CrawlReports:
         async with self.store.pool.acquire() as conn:
             rows = await conn.fetch(query, *args)
         return [dict(row) for row in rows]
+
+
+def _json_object(value: object) -> dict[str, object]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _json_list(value: object) -> list[object]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    return value if isinstance(value, list) else []
+
+
+def _without_fragment(value: str) -> str:
+    return urlparse(value)._replace(fragment="").geturl()
+
+
+def _canonical_state(url: str, value: object) -> str:
+    canonicals = _json_list(value)
+    if not canonicals and isinstance(value, str) and value and value != "[]":
+        canonicals = [value]
+    if not canonicals:
+        return "implicit_self"
+    return "declared_self" if _without_fragment(str(canonicals[0])) == _without_fragment(url) else "noncanonical"
+
+
+def _primary_content(row: dict[str, object]) -> tuple[str, str]:
+    saved_text = row.get("main_text_compressed")
+    method = str(row.get("saved_extraction_method") or "")
+    if isinstance(saved_text, (bytes, bytearray)):
+        try:
+            text = decompress_html(bytes(saved_text))
+        except (OSError, UnicodeDecodeError):
+            return "", "unavailable"
+        return text, method or "saved_signature"
+    raw_html = row.get("html_compressed")
+    if not isinstance(raw_html, (bytes, bytearray)):
+        return "", "unavailable"
+    try:
+        html = decompress_html(bytes(raw_html))
+    except (OSError, UnicodeDecodeError):
+        return "", "unavailable"
+    text, method = extract_main_text(html)
+    return text or "", method
+
+
+def _confidence(text: str, method: str) -> str:
+    return resolve_signal_confidence(len(text.split()), method)
+
+
+def _extractor_version() -> str:
+    versions = []
+    for package in ("trafilatura", "lxml"):
+        try:
+            versions.append(f"{package}={importlib.metadata.version(package)}")
+        except importlib.metadata.PackageNotFoundError:
+            versions.append(f"{package}=unavailable")
+    return ";".join(versions)
+
+
+def _build_link_graph(
+    pages: list[dict[str, object]], *, known_urls: list[dict[str, str]] | None = None
+) -> dict[str, Any]:
+    """Build edges only between same-run HTML snapshot nodes and in-scope hosts."""
+    nodes = {str(page["url"]) for page in pages}
+    hosts = {urlparse(url).hostname for url in nodes}
+    known_targets = {
+        item["url"] for item in (known_urls or []) if item.get("url") and urlparse(item["url"]).hostname in hosts
+    }
+    all_targets = nodes | known_targets
+    inbound = {url: 0 for url in all_targets}
+    adjacency: dict[str, set[str]] = {url: set() for url in nodes}
+    instances = 0
+    sources: set[str] = set()
+    targets: set[str] = set()
+    complete = bool(pages)
+    for page in pages:
+        if page.get("content_extracted") is not True:
+            complete = False
+        if page.get("render_discovery_attempted") is True and page.get("render_discovery_complete") is not True:
+            complete = False
+        source = str(page["url"])
+        for raw_link in _json_list(page.get("links_json")):
+            link = raw_link if isinstance(raw_link, dict) else {}
+            target = str(link.get("href", ""))
+            if target not in all_targets or urlparse(target).hostname not in hosts:
+                continue
+            instances += 1
+            sources.add(source)
+            targets.add(target)
+            adjacency[source].add(target)
+            # Self-links are preserved as instances, but do not count as an
+            # incoming discovery edge for orphan classification.
+            if source != target:
+                inbound[target] += 1
+    return {
+        "inbound": inbound,
+        "adjacency": adjacency,
+        "complete": complete,
+        "source_count": len(sources),
+        "target_count": len(targets),
+        "instance_count": instances,
+    }
