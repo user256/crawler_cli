@@ -1421,6 +1421,7 @@ async def test_technical_audit_timing_inventory_isolated_across_sites_runs_and_p
     a_rows = await CrawlReports(store, run_id="audit-site-a-run").technical_audit_performance_inventory()
     b_rows = await CrawlReports(store, run_id="audit-site-b-run").technical_audit_performance_inventory()
     assert [row["url"] for row in a_rows] == [site_a_url]
+    assert a_rows[0]["final_url"] == site_a_url
     assert {row["url"] for row in b_rows} == {site_b_url, partial_url}
     b_coverage, *_ = performance_inventory_report(b_rows)
     assert b_coverage["eligible_canonical_indexable_html_count"] == 1

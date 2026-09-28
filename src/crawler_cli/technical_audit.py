@@ -29,6 +29,7 @@ from .structured_data_audit import (
 from .performance_audit import (
     performance_inventory_report,
 )
+from .transport_security import transport_security_report
 
 
 TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/2"
@@ -236,6 +237,14 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
         "id": "conditional-cache-validation",
         "state": "implemented_conditional",
         "source": "real-validator conditional GET evidence",
+    },
+    {
+        "id": "transport-security",
+        "state": "implemented_candidate",
+        "source": (
+            "stored HTTPS response headers and HTTP-scheme variant probes; preload list not queried; "
+            "OCSP stapling not determinable with the available TLS stack"
+        ),
     },
     {
         "id": "healthy-overview",
@@ -532,6 +541,7 @@ TECHNICAL_AUDIT_SKILL_REQUIREMENTS = (
         "id": "non-production-https",
         "section": "Non-production hosts and HTTPS hygiene",
         "check_id": "non-production-hosts-and-https",
+        "related_check_ids": ["transport-security"],
         "requirements": [
             "inventory non-production hosts from all evidence sources",
             "check exposed duplicate content and certificate errors",
@@ -752,7 +762,7 @@ TECHNICAL_AUDIT_SKILL_REQUIREMENTS = (
         "id": "performance",
         "section": "Performance as a Crawl-Budget Signal",
         "check_id": "performance-and-conditional-requests",
-        "related_check_ids": ["field-versus-lab-performance", "conditional-cache-validation"],
+        "related_check_ids": ["field-versus-lab-performance", "conditional-cache-validation", "transport-security"],
         "requirements": [
             "report timing distribution and qualified population",
             "separate lab and field metrics",
@@ -1671,6 +1681,9 @@ def build_technical_audit(
         if conditional_input and conditional_input[0].get("record_type") == "coverage"
         else []
     )
+    transport_report = transport_security_report(rows["performance-inventory"], rows["url-variant-soft404"])
+    transport_coverage = transport_report[0]
+    transport_findings = [row for row in transport_report[1:] if row.get("record_type") == "candidate"]
     similarity = rows["similarity-coverage"][0] if rows["similarity-coverage"] else {}
     similarity_complete = (
         source_coverage["similarity-coverage"]["available"] is True
@@ -1905,6 +1918,19 @@ def build_technical_audit(
             denominator=_optional_int(performance_coverage.get("eligible_canonical_indexable_html_count")),
             completion_state=completion_state,
             qualification="analyst_only",
+        ),
+        _check(
+            "transport-security",
+            "HSTS preload and OCSP stapling",
+            "Transport security",
+            transport_findings,
+            "finding",
+            "HSTS preload eligibility covers only criteria observable from saved HTTPS headers and HTTP-scheme probes; "
+            "preload-list membership is not queried and OCSP stapling is informational and not determinable here.",
+            available=source_coverage["performance-inventory"]["available"] is True,
+            denominator=_optional_int(transport_coverage.get("https_host_count")),
+            completion_state=completion_state,
+            qualification="analyst_only; transport optimization, not a TTFB defect claim",
         ),
         _check(
             "image-markup-candidates",
@@ -2151,6 +2177,9 @@ def build_technical_audit(
             and check["status"] in {"partial", "unavailable"}
             and conditional_coverage.get("state") in {"not_requested", "not_testable"}
         )
+        # Transport-security evidence is an informational optimization check;
+        # unobservable preload/OCSP criteria must not block client publication.
+        and check["id"] != "transport-security"
     )
     publication_ready = (
         completion_state == "complete"
@@ -2206,6 +2235,8 @@ def build_technical_audit(
         "performance_coverage": dict(performance_coverage),
         "performance_report": performance_report,
         "conditional_get_coverage": conditional_coverage,
+        "transport_security_coverage": dict(transport_coverage),
+        "transport_security_report": transport_report[1:],
         "external_link_recheck_coverage": (
             dict(external_link_rechecks[0])
             if external_link_rechecks and external_link_rechecks[0].get("record_type") == "coverage"
@@ -2334,6 +2365,20 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 ["Conditional GET eligible validators", conditional_summary.get("validator_eligible_count", 0)],
                 ["Conditional GET 304 rate", conditional_summary.get("not_modified_304_rate", "not_testable")],
                 ["Field CWV source", performance_coverage.get("field_cwv", "unavailable")],
+            ]
+        )
+    transport_coverage = audit.get("transport_security_coverage", {})
+    if isinstance(transport_coverage, Mapping) and transport_coverage.get("https_host_count"):
+        overview.extend(
+            [
+                ["HTTPS hosts assessed for HSTS", transport_coverage.get("https_host_count", 0)],
+                ["HSTS preload-eligible hosts", transport_coverage.get("hsts_preload_eligible_count", 0)],
+                ["HSTS preload not-eligible hosts", transport_coverage.get("hsts_preload_not_eligible_count", 0)],
+                ["HSTS preload list membership", transport_coverage.get("hsts_preload_list_membership", "unknown")],
+                [
+                    "OCSP stapling states",
+                    _sheet_value(transport_coverage.get("ocsp_stapling_state_counts", {})),
+                ],
             ]
         )
     overview.extend(

@@ -435,9 +435,11 @@ class CrawlReports:
                 s.total_duration_seconds,
                 s.lcp_ms,
                 s.cls,
-                s.inp_ms
+                s.inp_ms,
+                fu.url AS final_url
             FROM page_run_snapshots s
             JOIN urls u ON u.id = s.url_id
+            LEFT JOIN urls fu ON fu.id = s.final_url_id
             WHERE s.run_id = $1
             ORDER BY u.url
             """,
