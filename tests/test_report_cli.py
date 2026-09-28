@@ -740,6 +740,7 @@ def test_table_out_writes_file(fake_reports, tmp_path):
     [
         ("--fetch-current-robots-sitemaps", "collect_current_site_files"),
         ("--probe-url-variants", "collect_url_variant_evidence"),
+        ("--audit-ai-governance", "collect_ai_governance"),
     ],
 )
 def test_live_probe_engines_build_a_valid_pinned_config(fake_reports, tmp_path, monkeypatch, flag, collector):

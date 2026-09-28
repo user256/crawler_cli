@@ -4,17 +4,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
-import re
 from typing import Any, Mapping, Sequence
 from urllib.parse import urljoin, urlsplit
 
 from .hashing import simhash64
-from .probes import soft_404_fingerprint
+from .probes import SOFT_404_ERROR_PHRASE, soft_404_fingerprint
 from .redaction import redact_url_without_digest
 from .variants import generate_variants
 
 
-_ERROR_COPY = re.compile(r"\b(page not found|not found|404|does not exist|no longer available)\b", re.I)
+_ERROR_COPY = SOFT_404_ERROR_PHRASE
 
 
 async def collect_url_variant_evidence(

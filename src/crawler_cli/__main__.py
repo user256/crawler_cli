@@ -76,6 +76,7 @@ from .engine import CrawlEngine, CrawlRunSelectionError
 from .current_site_files import build_site_file_scope, collect_current_site_files, project_current_site_files
 from .rendered_audit import render_audit_records
 from .url_variant_audit import collect_url_variant_evidence
+from .ai_governance import collect_ai_governance, project_ai_governance
 from .exit_codes import EXIT_FAILURE, EXIT_FINDINGS, EXIT_SUCCESS, EXIT_VALIDATION, resolve_crawl_exit_code
 from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
@@ -2477,6 +2478,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             "conditional_get_probe_requested": args.probe_conditional_gets,
             "conditional_get_sample_limit": args.conditional_max_pages,
             "conditional_get_timeout_seconds": args.conditional_timeout,
+            "ai_governance_probe_requested": args.audit_ai_governance,
         }
         run_context["audit_options"] = audit_options
         capabilities = run_context.get("schema_capabilities", {})
@@ -2537,6 +2539,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 "url-variant-soft404",
                 "rendered-mobile-resources",
                 "conditional-get-probes",
+                "ai-governance",
             }:
                 continue
             required_capabilities = capabilities_by_report.get(name, ())
@@ -2699,6 +2702,64 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             variant_evidence.extend(dict(row) for row in variant_candidates)
             variant_evidence.extend(dict(row) for row in soft404_candidates)
             evidence["url-variant-soft404"] = variant_evidence
+        if args.audit_ai_governance:
+            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
+                print(
+                    "Error: this crawl run used an authorization scope; AI governance probes require --scope-manifest",
+                    file=sys.stderr,
+                )
+                return EXIT_VALIDATION
+            if run_context.get("portal_connection_policy_active") is True:
+                print(
+                    "Error: AI governance probes do not reuse the crawl's Portal connection policy",
+                    file=sys.stderr,
+                )
+                return EXIT_VALIDATION
+            scope_predicate = None
+            if args.scope_manifest:
+                from .authorisation import compile_scope_predicate, load_scope_manifest
+
+                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
+            stored_digest = run_context.get("authorization_scope_digest")
+            if stored_digest:
+                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
+                supplied_digest = (
+                    hashlib.sha256(
+                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+                    if supplied_snapshot is not None
+                    else None
+                )
+                if supplied_digest != stored_digest:
+                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
+                    return EXIT_VALIDATION
+            allowed = run_context.get("declared_allowed_hosts", [])
+            seeds = run_context.get("seed_origins", [])
+            allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
+            seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
+            host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
+            ai_engine = CrawlEngine(
+                CrawlConfig(
+                    same_host_only=True,
+                    allowed_hosts=sorted(allowed_hosts),
+                    respect_robots_txt=True,
+                    max_concurrency=1,
+                    per_host_concurrency=1,
+                    max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
+                    destination_guard="pinned",
+                    challenge_escalate_to_browser=False,
+                    scope_predicate=cast(Any, host_scope),
+                )
+            )
+            try:
+                collected = await collect_ai_governance(
+                    ai_engine,
+                    seed_origins=seed_origins,
+                    max_origins=args.ai_governance_max_origins,
+                )
+            finally:
+                await ai_engine.close()
+            evidence["ai-governance"] = project_ai_governance(collected)
         if args.probe_conditional_gets:
             if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
                 print(
@@ -4813,6 +4874,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Explicitly sample ordinary and validator-based conditional GETs for public self-canonical HTML",
     )
+    audit_parser.add_argument(
+        "--audit-ai-governance",
+        action="store_true",
+        help=(
+            "Explicitly evaluate robots.txt posture for recognised AI crawlers and probe "
+            "/.well-known/llms.txt, /llms.txt and /llms-full.txt on the selected run origins"
+        ),
+    )
+    audit_parser.add_argument("--ai-governance-max-origins", type=positive_int, default=10)
     audit_parser.add_argument("--conditional-max-pages", type=positive_int, default=10)
     audit_parser.add_argument("--conditional-timeout", type=positive_float, default=10.0)
     audit_parser.add_argument(

@@ -6,6 +6,10 @@ from dataclasses import dataclass
 
 from .hashing import simhash64
 
+# Error-page copy shared by every soft-404 heuristic (synthetic 404 probes,
+# URL-variant probes, AI context files). One pattern keeps them comparable.
+SOFT_404_ERROR_PHRASE = re.compile(r"\b(page not found|not found|404|does not exist|no longer available)\b", re.I)
+
 
 @dataclass(slots=True)
 class SoftFourOhFourFingerprint:
@@ -70,10 +74,5 @@ async def soft_404_fingerprint(engine, base_url: str) -> SoftFourOhFourFingerpri
             result.extracted.meta_robots.noindex or result.extracted.x_robots_tag.noindex if result.extracted else None
         ),
         elapsed_seconds=result.total_duration_seconds,
-        error_phrase_in_body=bool(
-            result.raw_html
-            and re.search(
-                r"\b(page not found|not found|404|does not exist|no longer available)\b", result.raw_html, re.I
-            )
-        ),
+        error_phrase_in_body=bool(result.raw_html and SOFT_404_ERROR_PHRASE.search(result.raw_html)),
     )

@@ -58,6 +58,7 @@ TECHNICAL_AUDIT_REPORTS = (
     "rendered-mobile-resources",
     "performance-inventory",
     "conditional-get-probes",
+    "ai-governance",
 )
 
 # Registry is intentionally wider than the currently implemented report set.
@@ -132,6 +133,11 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
         "id": "performance-and-conditional-requests",
         "state": "implemented_conditional",
         "source": "run-scoped HTTP timing distributions and explicit validator probes",
+    },
+    {
+        "id": "ai-crawler-governance",
+        "state": "implemented_conditional",
+        "source": "explicit bounded robots.txt AI-token evaluation and /llms.txt probes; declared policy only",
     },
     {"id": "verified-search-bot-logs", "state": "conditional", "source": "validated operator-supplied access logs"},
     {"id": "geo-dependent-behaviour", "state": "conditional", "source": "configured regional proxy observations"},
@@ -541,7 +547,7 @@ TECHNICAL_AUDIT_SKILL_REQUIREMENTS = (
         "id": "robots-sitemaps",
         "section": "Robots and XML Sitemaps",
         "check_id": "current-robots-and-sitemaps",
-        "related_check_ids": ["robots-link-purpose"],
+        "related_check_ids": ["robots-link-purpose", "ai-crawler-governance"],
         "requirements": [
             "fetch live sitemap indexes and every bounded child sitemap, independent of stored discovery flags",
             "check final status and canonical/indexable/noindex state of listed URLs",
@@ -929,6 +935,7 @@ TECHNICAL_AUDIT_REQUIREMENT_DENOMINATORS = {
     "domain-and-host-configuration": "bounded homepage/deep-path route controls and configured host variants",
     "non-production-hosts-and-https": "not collected; host exposure and mixed-content population are unavailable",
     "current-robots-and-sitemaps": "fetched robots documents, sitemap documents/URLs and selected live samples",
+    "ai-crawler-governance": "recognised AI crawler families per origin plus bounded /llms.txt probe locations",
     "metadata-and-locale": "eligible parsed 200 HTML pages; exclusions and unknown extraction states are separate",
     "growing-url-families": "observed rendered/internal link instances and unique targets; growth needs repeated timestamps",
     "hreflang-noindex-guidance": "indexable source pages; noindexed-source defect checks are excluded",
@@ -1732,6 +1739,11 @@ def build_technical_audit(
         url_variant_rows[0] if url_variant_rows and url_variant_rows[0].get("record_type") == "coverage" else {}
     )
     url_variant_evidence = [row for row in url_variant_rows if row.get("record_type") == "candidate"]
+    ai_rows = rows["ai-governance"]
+    ai_coverage = ai_rows[0] if ai_rows and ai_rows[0].get("record_type") == "coverage" else {}
+    ai_bot_posture = [row for row in ai_rows if row.get("record_type") == "bot_posture"]
+    ai_llms_files = [row for row in ai_rows if row.get("record_type") == "llms_file"]
+    ai_evidence = [row for row in ai_rows if row.get("record_type") == "candidate"]
     render_rows = rows["rendered-mobile-resources"]
     render_coverage = render_rows[0] if render_rows and render_rows[0].get("record_type") == "coverage" else {}
     render_evidence = [row for row in render_rows if row.get("record_type") == "candidate"]
@@ -2007,6 +2019,22 @@ def build_technical_audit(
             completion_state=completion_state,
             qualification="analyst_only",
         ),
+        _check(
+            "ai-crawler-governance",
+            "AI crawler governance and /llms.txt",
+            "AI Governance",
+            [{**row, "qualification": row.get("qualification") or "analyst_only"} for row in ai_evidence],
+            "finding",
+            "Declared robots.txt posture for recognised AI crawler families and current /llms.txt availability; "
+            "blocking an AI token is a business decision and llms.txt absence is not a defect.",
+            available=(
+                source_coverage["ai-governance"]["available"] is True and ai_coverage.get("record_type") == "coverage"
+            ),
+            denominator=_optional_int(ai_coverage.get("tested_count")),
+            completion_state=completion_state,
+            qualification="analyst_only",
+            theme="AI",
+        ),
     )
     for check in checks:
         if check["id"] == "near-duplicate-content" and not similarity_complete:
@@ -2059,6 +2087,13 @@ def build_technical_audit(
             elif render_coverage.get("complete") is not True:
                 check["status"] = "partial"
                 check["qualification"] = "unsettled_or_incomplete_render_sample"
+        if check["id"] == "ai-crawler-governance":
+            if ai_coverage.get("record_type") != "coverage":
+                check["status"] = "unavailable"
+                check["qualification"] = "requires_explicit_ai_governance_probe"
+            elif ai_coverage.get("complete") is not True:
+                check["status"] = "partial"
+                check["qualification"] = "bounded_or_incomplete_ai_governance_probe"
         if check["id"] == "feature-specific-structured-data" and capabilities.get("schema_json") is not True:
             check["status"] = "unavailable"
             check["qualification"] = "structured_data_snapshot_capability_unavailable"
@@ -2100,6 +2135,11 @@ def build_technical_audit(
             check["id"] == "rendered-mobile-and-resource-evidence"
             and check["status"] == "unavailable"
             and render_coverage.get("record_type") != "coverage"
+        )
+        and not (
+            check["id"] == "ai-crawler-governance"
+            and check["status"] == "unavailable"
+            and ai_coverage.get("record_type") != "coverage"
         )
         and not (
             check["id"] == "feature-specific-structured-data"
@@ -2148,6 +2188,13 @@ def build_technical_audit(
         "parameterized_link_coverage": parameterized_link_coverage,
         "url_variant_coverage": dict(url_variant_coverage),
         "rendered_coverage": dict(render_coverage),
+        "ai_governance": {
+            "theme": "AI",
+            "coverage": dict(ai_coverage),
+            "bot_posture": ai_bot_posture,
+            "llms_files": ai_llms_files,
+            "findings": ai_evidence,
+        },
         "structured_data_coverage": dict(structured_data_coverage),
         "structured_data_report": structured_data_report,
         "structured_data_rules": {
@@ -2195,6 +2242,8 @@ def build_technical_audit(
             metadata_coverage=metadata_coverage,
             canonical_coverage=canonical_hreflang_coverage,
             performance_report=performance_report,
+            ai_bot_posture=ai_bot_posture,
+            ai_llms_files=ai_llms_files,
         ),
         "analyst_evidence": analyst_evidence,
         "live_rechecks": [
@@ -2475,6 +2524,7 @@ def _check(
     denominator: int | None,
     completion_state: str,
     qualification: str | None = None,
+    theme: str | None = None,
 ) -> dict[str, object]:
     if evidence:
         status = positive_status
@@ -2497,6 +2547,7 @@ def _check(
         "excluded_count": None,
         "denominator": denominator,
         "detail_sheet": detail_sheet,
+        "theme": theme,
         "interpretation": interpretation,
         "qualification": qualification,
         "evidence": evidence,
@@ -2720,6 +2771,8 @@ def recipient_report_projection(
     metadata_coverage: Mapping[str, object],
     canonical_coverage: Mapping[str, object],
     performance_report: Sequence[Mapping[str, object]],
+    ai_bot_posture: Sequence[Mapping[str, object]] = (),
+    ai_llms_files: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """Build the concise recipient view while retaining unknowns as unknown."""
     check_map = {str(check.get("id")): check for check in checks}
@@ -2863,6 +2916,36 @@ def recipient_report_projection(
         "failing_target_inventory": targets,
         "known_url_inventory": projected_known_urls,
         "qualified_action_count": len(actions),
+        "ai_governance": _ai_governance_projection(
+            check_map.get("ai-crawler-governance", {}), ai_bot_posture, ai_llms_files
+        ),
+    }
+
+
+def _ai_governance_projection(
+    check: Mapping[str, object],
+    bot_posture: Sequence[Mapping[str, object]],
+    llms_files: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Summarise the AI theme: declared posture per family and AI context-file state."""
+    return {
+        "theme": "AI",
+        "status": check.get("status", "unavailable"),
+        "finding_count": check.get("row_count", 0),
+        "bot_posture": [
+            {
+                key: row.get(key)
+                for key in ("origin", "family", "operator", "role", "posture", "effective_access", "governing_token")
+            }
+            for row in bot_posture
+        ],
+        "llms_files": [
+            {
+                key: row.get(key)
+                for key in ("origin", "path", "state", "http_status", "content_type", "byte_size", "title", "final_url")
+            }
+            for row in llms_files
+        ],
     }
 
 
@@ -2906,6 +2989,37 @@ def render_technical_audit_markdown(audit: Mapping[str, object]) -> str:
                     "",
                 ]
             )
+    ai_governance = projection.get("ai_governance", {})
+    ai_governance = ai_governance if isinstance(ai_governance, Mapping) else {}
+    if ai_governance.get("status") not in {None, "unavailable"}:
+        lines.extend(
+            [
+                "## AI crawler governance",
+                "",
+                f"Theme: AI. Status: {ai_governance.get('status')}. Declared robots.txt policy only; "
+                "llms.txt is a proposal and its absence is not a defect.",
+                "",
+                "| Origin | AI crawler | Operator | Posture |",
+                "|---|---|---|---|",
+            ]
+        )
+        for row in ai_governance.get("bot_posture", []) if isinstance(ai_governance.get("bot_posture"), list) else []:
+            if isinstance(row, Mapping):
+                lines.append(
+                    f"| {_markdown_cell(row.get('origin'))} | {_markdown_cell(row.get('governing_token') or row.get('family'))} "
+                    f"| {_markdown_cell(row.get('operator'))} | {_markdown_cell(row.get('posture'))} |"
+                )
+        lines.extend(
+            ["", "| Origin | File | State | HTTP | Content-Type | Bytes | Title |", "|---|---|---|---:|---|---:|---|"]
+        )
+        for row in ai_governance.get("llms_files", []) if isinstance(ai_governance.get("llms_files"), list) else []:
+            if isinstance(row, Mapping):
+                cells = [
+                    row.get(key)
+                    for key in ("origin", "path", "state", "http_status", "content_type", "byte_size", "title")
+                ]
+                lines.append("| " + " | ".join(_markdown_cell("" if cell is None else cell) for cell in cells) + " |")
+        lines.append("")
     reasons = audit.get("client_publication_gate", {})
     reasons = reasons if isinstance(reasons, Mapping) else {}
     caveats = reasons.get("blocked_reasons", [])

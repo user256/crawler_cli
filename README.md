@@ -650,6 +650,19 @@ Private destinations remain denied unless the manifest itself permits private
 network access and the invocation also opts in with `--allow-private-network`
 and, preferably, a narrow `--allow-network-cidr`.
 
+To audit AI crawler governance, add `--audit-ai-governance`. For each run
+origin (up to `--ai-governance-max-origins`, default 10) it classifies the
+declared robots.txt posture of nine AI crawler families (GPTBot, ChatGPT-User,
+ClaudeBot/anthropic-ai, PerplexityBot, Google-Extended, Amazonbot, Bytespider,
+CCBot, Applebot-Extended) as `allowed`, `blocked`, `partially_blocked` or
+`default_wildcard`, then makes at most three GETs for `/.well-known/llms.txt`,
+`/llms.txt` and `/llms-full.txt`. It records the status, final URL, content
+type, size and title of each file and flags HTML returned with a 200 as a
+soft-404. The results appear in the `ai-crawler-governance` check (theme `AI`),
+under `ai_governance` in the JSON, and in the Markdown projection. This is
+declared policy only. CDN rules can still block a token that robots.txt allows,
+and a missing llms.txt is not a defect.
+
 To include externally known URLs in orphan review, pass one or more CSVs with
 `url,source` columns; `source` must be `search_console` or `analytics`. An
 optional `observed_at` column retains the export date/period label. URL identity
