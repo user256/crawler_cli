@@ -233,6 +233,10 @@ class FakeReports:
         self.calls.append(("canonical-hreflang-inventory", {}))
         return []
 
+    async def current_site_join_inventory(self):
+        self.calls.append(("current-site-join-inventory", {}))
+        return []
+
 
 @pytest.fixture
 def fake_reports(monkeypatch):
@@ -729,3 +733,32 @@ def test_table_out_writes_file(fake_reports, tmp_path):
     out = tmp_path / "report.txt"
     assert _run(["report", "orphans", "--out", str(out)]) == 0
     assert "# orphans (1 rows)" in out.read_text()
+
+
+@pytest.mark.parametrize(
+    ("flag", "collector"),
+    [
+        ("--fetch-current-robots-sitemaps", "collect_current_site_files"),
+        ("--probe-url-variants", "collect_url_variant_evidence"),
+    ],
+)
+def test_live_probe_engines_build_a_valid_pinned_config(fake_reports, tmp_path, monkeypatch, flag, collector):
+    """Regression: pinned probe engines must disable browser challenge escalation.
+
+    CrawlConfig rejects destination_guard='pinned' with challenge escalation, so
+    both options crashed before sending a request (rainbet.com, 2026-09-28).
+    """
+    seen = []
+
+    async def fake_collect(engine, *args, **kwargs):
+        seen.append(engine.config)
+        return {}
+
+    monkeypatch.setattr(f"crawler_cli.__main__.{collector}", fake_collect)
+    monkeypatch.setattr("crawler_cli.__main__.project_current_site_files", lambda collected: ([], []))
+    out = tmp_path / "live-probe.json"
+
+    assert _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out), flag]) == 0
+    assert len(seen) == 1
+    assert seen[0].destination_guard == "pinned"
+    assert seen[0].challenge_escalate_to_browser is False

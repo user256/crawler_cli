@@ -2592,6 +2592,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 per_host_concurrency=1,
                 max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
                 destination_guard="pinned",
+                challenge_escalate_to_browser=False,
                 scope_predicate=cast(Any, host_scope),
             )
             current_engine = CrawlEngine(current_config)
@@ -2666,6 +2667,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                     per_host_concurrency=1,
                     max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
                     destination_guard="pinned",
+                    challenge_escalate_to_browser=False,
                     scope_predicate=cast(Any, host_scope),
                 )
             )
