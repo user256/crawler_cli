@@ -630,6 +630,29 @@ tabs. Robots refusals, challenges, access denials, rate limits, DNS/TLS and
 other transport errors remain distinct. The JSON publication gate stays closed for incomplete coverage or
 unvalidated candidates.
 
+To include externally known URLs in orphan review, pass one or more CSVs with
+`url,source` columns; `source` must be `search_console` or `analytics`. An
+optional `observed_at` column retains the export date/period label. URL identity
+is not rewritten, and URLs outside hosts observed in the selected crawl are
+labelled out of scope rather than fetched or counted as orphans:
+
+```csv
+url,source,observed_at
+https://example.test/landing,search_console,2026-09-01/2026-09-24
+https://example.test/promo,analytics,2026-09
+```
+
+```bash
+crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
+  --known-url-inventory ./known-urls.csv --out ./audit-evidence/technical-audit.json
+```
+
+These are discovery candidates, not proof of indexability or an orphan defect.
+Use the existing explicitly authorized `--recheck-live --scope-manifest ...`
+path to validate supplied URLs; rechecks share the 25-URL audit limit with
+saved failures, prioritize saved failures, and record any known URLs not
+selected. Robots and scope denials are not bypassed.
+
 ### Run snapshots and retention
 
 Each fetch is retained as an immutable page snapshot for its crawl run. The

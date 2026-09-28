@@ -74,6 +74,7 @@ from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
 from .reports import CrawlReports
+from .orphan_sources import load_known_url_inventory
 from .technical_audit import TECHNICAL_AUDIT_REPORTS, build_technical_audit
 from .live_rechecks import candidate_targets, collect_live_rechecks
 from .validators import (
@@ -2232,6 +2233,8 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.image_issues()
     if name == "internal-link-quality":
         return await reports.internal_link_quality()
+    if name == "link-graph-metrics":
+        return await reports.link_graph_metrics()
     if name == "tracking-parameter-links":
         return await reports.tracking_parameter_links()
     if name == "near-duplicates":
@@ -2346,6 +2349,20 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
     """Build one deterministic evidence bundle from a stored crawl run."""
     import asyncpg
 
+    try:
+        known_url_inventory = [
+            row for path in (args.known_url_inventory or []) for row in load_known_url_inventory(path)
+        ]
+        known_url_inventory = [
+            {"url": url, "source": source, **({"observed_at": observed_at} if observed_at else {})}
+            for url, source, observed_at in sorted(
+                {(row["url"], row["source"], row.get("observed_at", "")) for row in known_url_inventory}
+            )
+        ]
+    except (OSError, UnicodeError, ValueError, csv.Error) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+
     store = _store_from_args(args)
     reports = CrawlReports(store, run_id=args.crawl_run_id)
     live_rechecks = None
@@ -2354,17 +2371,22 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         # stored run even when the operator deliberately selected "latest".
         run_id = await reports._run_id()
         run_context = await reports.technical_audit_context()
-        run_context["audit_options"] = {
+        audit_options: dict[str, object] = {
             "simhash_threshold": args.simhash_threshold,
             "similarity_limit": args.similarity_limit,
             "similarity_selection": "indexable pages ordered by URL; first N pages",
+            "known_url_inventory_count": len(known_url_inventory),
+            "known_url_inventory_url_count": len({row["url"] for row in known_url_inventory}),
+            "known_url_inventory_sources": sorted({row["source"] for row in known_url_inventory}),
         }
+        run_context["audit_options"] = audit_options
         capabilities = run_context.get("schema_capabilities", {})
         if not isinstance(capabilities, dict):
             capabilities = {}
         capability_by_report = {
             "image-issues": "images_json",
             "internal-link-quality": "links_json",
+            "link-graph-metrics": "links_json",
             "tracking-parameter-links": "links_json",
             "near-duplicates": "content_hash_simhash",
         }
@@ -2373,7 +2395,10 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             capability = capability_by_report.get(name)
             if capability and capabilities.get(capability) is not True:
                 continue
-            evidence[name] = await _fetch_report(reports, name, args)
+            if name == "orphans":
+                evidence[name] = await reports.orphan_pages(known_urls=known_url_inventory)
+            else:
+                evidence[name] = await _fetch_report(reports, name, args)
         if args.recheck_live:
             if not args.scope_manifest:
                 print("Error: --recheck-live requires --scope-manifest", file=sys.stderr)
@@ -2387,7 +2412,22 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             hosts = hosts_value if isinstance(hosts_value, list) else []
             seeds = seeds_value if isinstance(seeds_value, list) else []
             allowed_hosts = sorted({str(host).lower() for host in [*hosts, *seeds] if host})
-            targets = candidate_targets(evidence.get("internal-link-quality", []), limit=args.recheck_limit)
+            saved_failure_targets = candidate_targets(
+                evidence.get("internal-link-quality", []), limit=args.recheck_limit
+            )
+            known_target_urls = {row["url"] for row in known_url_inventory}
+            known_targets = sorted(known_target_urls - set(saved_failure_targets))
+            selected_known_targets = known_targets[: max(0, args.recheck_limit - len(saved_failure_targets))]
+            targets = sorted({*saved_failure_targets, *selected_known_targets})
+            selected_known_urls = known_target_urls.intersection(targets)
+            audit_options.update(
+                {
+                    "known_url_recheck_candidate_count": len(known_target_urls),
+                    "known_url_recheck_selected_count": len(selected_known_urls),
+                    "known_url_recheck_not_selected_count": len(known_target_urls - selected_known_urls),
+                    "known_url_recheck_selection": "sorted source URLs after saved failures, within shared recheck limit",
+                }
+            )
             live_rechecks = await collect_live_rechecks(
                 targets,
                 scope_predicate=predicate,
@@ -4075,6 +4115,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Recheck saved failing link targets through the guarded crawler (requires an authorization manifest)",
     )
     audit_parser.add_argument("--scope-manifest", help="Authorization manifest required by --recheck-live")
+    audit_parser.add_argument(
+        "--known-url-inventory",
+        action="append",
+        default=[],
+        metavar="CSV",
+        help=(
+            "Optional Search Console or analytics URL inventory CSV with url,source columns; "
+            "repeat to include multiple files"
+        ),
+    )
     audit_parser.add_argument("--recheck-limit", type=positive_int, default=25)
     audit_parser.add_argument("--recheck-attempts", type=positive_int, default=2)
     audit_parser.add_argument("--recheck-timeout", type=positive_float, default=10.0)

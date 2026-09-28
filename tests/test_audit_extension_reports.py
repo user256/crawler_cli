@@ -19,6 +19,148 @@ class StubReports(CrawlReports):
         return self.rows
 
 
+class GraphStore:
+    async def get_crawl_run(self, _run_id):
+        return {"status": "complete", "seed_urls": ["https://e.test/seed"]}
+
+
+class GraphReports(StubReports):
+    def __init__(self, pages):
+        super().__init__(pages)
+        self.store = GraphStore()
+
+
+@pytest.mark.asyncio
+async def test_orphans_uses_same_run_snapshot_inlinks_not_frontier_seed_provenance():
+    reports = GraphReports(
+        [
+            {
+                "url": "https://e.test/seed",
+                "kind": "html",
+                "links_json": [{"href": "https://e.test/target"}],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+            },
+            {
+                "url": "https://e.test/target",
+                "kind": "html",
+                "links_json": [{"href": "https://e.test/seed"}],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+            },
+            {
+                "url": "https://e.test/orphan",
+                "kind": "html",
+                "links_json": [],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+            },
+        ]
+    )
+    findings = await reports.orphan_pages()
+    assert [row["url"] for row in findings] == ["https://e.test/orphan"]
+    assert findings[0]["graph_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_incomplete_render_graph_does_not_claim_complete_orphan_coverage():
+    reports = GraphReports(
+        [
+            {
+                "url": "https://e.test/a",
+                "kind": "html",
+                "links_json": [],
+                "content_extracted": True,
+                "render_discovery_attempted": True,
+                "render_discovery_complete": False,
+            }
+        ]
+    )
+    assert (await reports.orphan_pages())[0]["graph_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_link_graph_reports_unique_nodes_and_instances_separately():
+    reports = GraphReports(
+        [
+            {
+                "url": "https://e.test/seed",
+                "kind": "html",
+                "links_json": [
+                    {"href": "https://e.test/child"},
+                    {"href": "https://e.test/child"},
+                ],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+            },
+            {
+                "url": "https://e.test/child",
+                "kind": "html",
+                "links_json": [],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+            },
+        ]
+    )
+    metrics = (await reports.link_graph_metrics())[0]
+    assert metrics["unique_sources"] == 1
+    assert metrics["unique_targets"] == 1
+    assert metrics["link_instances"] == 2
+    assert metrics["max_depth"] == 1
+
+
+@pytest.mark.asyncio
+async def test_internal_link_quality_retains_multiple_issues_and_redirect_identity():
+    reports = StubReports(
+        [
+            {
+                "source_url": "https://e.test/source",
+                "source_indexable": True,
+                "link_evidence": {
+                    "href": "https://e.test/broken?ref=x",
+                    "anchor_text": "",
+                    "xpath": "/html/body/a[1]",
+                    "original_href": "/broken?ref=x",
+                    "discovery_source": "html_anchor",
+                },
+                "target_initial_status": 404,
+                "target_status": 404,
+                "target_final_url_id": 2,
+                "target_url_id": 2,
+                "target_indexable": False,
+                "html_meta_allows": False,
+                "http_header_allows": True,
+                "canonical_urls_json": [],
+            },
+            {
+                "source_url": "https://e.test/source",
+                "source_indexable": True,
+                "link_evidence": {"href": "https://e.test/old", "anchor_text": "Moved", "xpath": "/a[2]"},
+                "target_initial_status": 301,
+                "target_status": 200,
+                "target_final_url_id": 4,
+                "target_url_id": 3,
+                "target_indexable": True,
+                "html_meta_allows": True,
+                "http_header_allows": True,
+                "canonical_urls_json": ["https://e.test/new"],
+            },
+        ]
+    )
+    rows = await reports.internal_link_quality()
+    assert rows[0]["issues"] == [
+        "empty_anchor",
+        "error_target",
+        "noindex_target",
+        "non_indexable_target",
+        "parameter_target",
+    ]
+    assert rows[0]["issue"] == "error_target"
+    assert rows[0]["source_indexable"] is True
+    assert rows[0]["xpath"] == "/html/body/a[1]"
+    assert rows[1]["issues"] == ["redirect_target", "noncanonical_target"]
+
+
 @pytest.mark.asyncio
 async def test_tracking_parameter_links_only_returns_known_tracking_keys():
     reports = StubReports(

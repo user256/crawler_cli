@@ -396,6 +396,7 @@ def extract_links(
                 fragment=parsed.fragment or None,
                 url_parameters=parsed.query or None,
                 original_href=original_href,
+                rel=[str(value).lower() for value in (anchor.get("rel") or [])],
             )
         )
     return links
