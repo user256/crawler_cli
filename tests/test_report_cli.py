@@ -385,6 +385,54 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
     ]
 
 
+def test_technical_audit_sheets_publishing_is_explicit_and_requires_template(fake_reports, tmp_path, capsys):
+    out = tmp_path / "technical-audit.json"
+    assert _run(["technical-audit", "--out", str(out), "--publish-google-sheets"]) == 2
+    assert "requires --google-sheets-template" in capsys.readouterr().err
+    assert FakeReports.instances == []
+
+    assert _run(["technical-audit", "--out", str(out), "--google-sheets-template", "a" * 20]) == 2
+    assert "require --publish-google-sheets" in capsys.readouterr().err
+
+
+def test_technical_audit_publisher_is_invoked_only_after_json_is_written(fake_reports, tmp_path, monkeypatch, capsys):
+    from crawler_cli import google_sheets
+
+    out = tmp_path / "technical-audit.json"
+    calls = {}
+
+    class Publisher:
+        def __init__(self, drive, sheets):
+            calls["clients"] = (drive, sheets)
+
+        def publish(self, **kwargs):
+            assert out.exists()
+            calls["publish"] = kwargs
+            return "https://docs.google.com/spreadsheets/d/copy/edit"
+
+    monkeypatch.setattr(google_sheets, "GoogleSheetsTemplatePublisher", Publisher)
+    monkeypatch.setattr(google_sheets, "google_services", lambda credentials: ("drive", "sheets"))
+    monkeypatch.setattr(google_sheets, "credential_path", lambda credentials: credentials)
+    assert (
+        _run(
+            [
+                "technical-audit",
+                "--out",
+                str(out),
+                "--publish-google-sheets",
+                "--google-sheets-template",
+                "a" * 20,
+                "--resume-google-sheets",
+            ]
+        )
+        == 0
+    )
+    assert calls["publish"]["template"] == "a" * 20
+    assert calls["publish"]["resume"] is True
+    assert calls["publish"]["receipt_path"] == f"{out}.sheets-receipt.json"
+    assert "Published technical audit" in capsys.readouterr().out
+
+
 def test_technical_audit_downgrades_a_run_changed_during_collection(fake_reports, tmp_path):
     fake_reports.updated_at = 124
     out = tmp_path / "technical-audit.json"
