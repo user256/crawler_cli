@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from crawler_cli.hashing import simhash64, simhash_to_signed
+from crawler_cli.compression import compress_html
 from crawler_cli.reports import CrawlReports
 
 
@@ -189,54 +189,161 @@ async def test_tracking_parameter_links_excludes_external_links():
 
 
 @pytest.mark.asyncio
-async def test_near_duplicates_excludes_exact_hashes_and_sorts_by_distance():
-    first = "<main>apple banana cedar ember</main>"
-    near = "<main>apple banana cedar ember fig</main>"
+async def test_similarity_uses_main_content_and_separates_exact_from_near():
+    shared = "<nav>same large shared navigation boilerplate</nav>"
+    first = f"<html>{shared}<main>apple banana cedar ember market analysis topic A</main></html>"
+    different = f"<html>{shared}<main>ocean mountain river valley forest climate research topic B</main></html>"
     reports = StubReports(
         [
-            {
-                "url": "https://e.test/a",
-                "content_hash_sha256": "a",
-                "content_hash_simhash": simhash_to_signed(simhash64(first)),
-            },
-            {
-                "url": "https://e.test/a-copy",
-                "content_hash_sha256": "a",
-                "content_hash_simhash": simhash_to_signed(simhash64(first)),
-            },
-            {
-                "url": "https://e.test/b",
-                "content_hash_sha256": "b",
-                "content_hash_simhash": simhash_to_signed(simhash64(near)),
-            },
+            {"url": "https://e.test/a", "html_compressed": compress_html(first), "eligible_population": 3},
+            {"url": "https://e.test/a-copy", "html_compressed": compress_html(first), "eligible_population": 3},
+            {"url": "https://e.test/b", "html_compressed": compress_html(different), "eligible_population": 3},
         ]
     )
-    rows = await reports.near_duplicates(threshold=64)
-    assert all({row["url"], row["near_duplicate_url"]} != {"https://e.test/a", "https://e.test/a-copy"} for row in rows)
-    assert any(row["near_duplicate_url"] == "https://e.test/b" for row in rows)
+    rows = await reports.near_duplicates(threshold=0)
+    exact_pairs = [row for row in rows if row["match_kind"] == "exact_primary_content"]
+    assert [{row["url"], row["near_duplicate_url"]} for row in exact_pairs] == [
+        {"https://e.test/a", "https://e.test/a-copy"}
+    ]
+    assert all(row["match_kind"] != "exact_primary_content" for row in rows if row["url"] == "https://e.test/b")
+    coverage = (await reports.similarity_coverage())[0]
+    assert coverage["eligible_population"] == 3
+    assert coverage["sampled_population"] == 3
+    assert coverage["missing_primary_hashes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_similarity_reports_missing_hashes_instead_of_claiming_a_pass():
+    reports = StubReports([{"url": "https://e.test/no-html", "html_compressed": None, "eligible_population": 1}])
+    assert await reports.near_duplicates() == []
+    coverage = (await reports.similarity_coverage())[0]
+    assert coverage["missing_primary_hashes"] == 1
+    assert coverage["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_similarity_limit_is_hard_bounded_and_population_truncation_is_explicit():
+    class CappedReports(StubReports):
+        def __init__(self):
+            super().__init__(
+                [
+                    {
+                        "url": "https://e.test/a",
+                        "html_compressed": compress_html("<main>one</main>"),
+                        "eligible_population": 6001,
+                    }
+                ]
+            )
+            self.fetch_args = ()
+
+        async def _fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+            self.fetch_args = args
+            return self.rows
+
+    reports = CappedReports()
+    await reports.near_duplicates(limit=6001)
+    assert reports.fetch_args[-1] == 5000
+    coverage = (await reports.similarity_coverage())[0]
+    assert coverage["sample_limit"] == 5000
+    assert coverage["truncated"] is True
 
 
 @pytest.mark.asyncio
 async def test_internal_authority_rewards_linked_page_and_handles_sink():
-    reports = StubReports(
+    reports = GraphReports(
         [
-            {"url": "https://e.test/a", "links_json": [{"href": "https://e.test/b"}]},
-            {"url": "https://e.test/b", "links_json": []},
+            {
+                "url": "https://e.test/a",
+                "kind": "html",
+                "overall_indexable": True,
+                "canonical_urls_json": [],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+                "links_json": [{"href": "https://e.test/b"}],
+            },
+            {
+                "url": "https://e.test/b",
+                "kind": "html",
+                "overall_indexable": True,
+                "canonical_urls_json": [],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+                "links_json": [],
+            },
+            {
+                "url": "https://e.test/alias",
+                "kind": "html",
+                "overall_indexable": True,
+                "canonical_urls_json": ["https://e.test/a"],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+                "links_json": [{"href": "https://e.test/b"}],
+            },
+            {
+                "url": "https://e.test/file.pdf",
+                "kind": "asset",
+                "overall_indexable": True,
+                "canonical_urls_json": [],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+                "links_json": [],
+            },
         ]
     )
-    rows = {row["url"]: row for row in await reports.internal_authority()}
+    first = await reports.internal_authority()
+    assert first == await reports.internal_authority()
+    rows = {row["url"]: row for row in first}
+    assert "https://e.test/alias" not in rows
+    assert "https://e.test/file.pdf" not in rows
     assert rows["https://e.test/b"]["authority_score"] == 100.0
     assert rows["https://e.test/b"]["unique_inlinks"] == 1
     assert rows["https://e.test/a"]["unique_outlinks"] == 1
+    assert rows["https://e.test/b"]["graph_complete"] is True
 
 
 @pytest.mark.asyncio
 async def test_internal_authority_accepts_asyncpg_json_text():
-    reports = StubReports(
+    reports = GraphReports(
         [
-            {"url": "https://e.test/a", "links_json": '[{"href":"https://e.test/b"}]'},
-            {"url": "https://e.test/b", "links_json": "[]"},
+            {
+                "url": "https://e.test/a",
+                "kind": "html",
+                "overall_indexable": True,
+                "canonical_urls_json": [],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+                "links_json": '[{"href":"https://e.test/b"}]',
+            },
+            {
+                "url": "https://e.test/b",
+                "kind": "html",
+                "overall_indexable": True,
+                "canonical_urls_json": [],
+                "content_extracted": True,
+                "render_discovery_attempted": False,
+                "links_json": "[]",
+            },
         ]
     )
     rows = {row["url"]: row for row in await reports.internal_authority()}
     assert rows["https://e.test/b"]["unique_inlinks"] == 1
+
+
+@pytest.mark.asyncio
+async def test_incomplete_authority_graph_withholds_relative_scores():
+    reports = GraphReports(
+        [
+            {
+                "url": "https://e.test/a",
+                "kind": "html",
+                "overall_indexable": True,
+                "canonical_urls_json": [],
+                "content_extracted": None,
+                "render_discovery_attempted": False,
+                "links_json": [],
+            },
+        ]
+    )
+    row = (await reports.internal_authority())[0]
+    assert row["authority_score"] is None
+    assert row["relative_rank"] is None

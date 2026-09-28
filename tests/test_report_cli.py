@@ -192,9 +192,17 @@ class FakeReports:
         self.calls.append(("near-duplicates", {"threshold": threshold, "limit": limit}))
         return []
 
+    async def similarity_coverage(self, threshold=4, limit=5000):
+        self.calls.append(("similarity-coverage", {"threshold": threshold, "limit": limit}))
+        return [{"truncated": False, "missing_primary_hashes": 0, "findings_truncated": False}]
+
     async def internal_authority(self):
         self.calls.append(("internal-authority", {}))
         return []
+
+    async def authority_coverage(self):
+        self.calls.append(("authority-coverage", {}))
+        return [{"graph_complete": True, "canonical_indexable_population": 1}]
 
 
 @pytest.fixture
@@ -371,7 +379,9 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "link-graph-metrics",
         "tracking-parameter-links",
         "near-duplicates",
+        "similarity-coverage",
         "internal-authority",
+        "authority-coverage",
     ]
 
 

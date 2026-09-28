@@ -2196,7 +2196,9 @@ _REPORT_NAMES = (
     "internal-link-quality",
     "tracking-parameter-links",
     "near-duplicates",
+    "similarity-coverage",
     "internal-authority",
+    "authority-coverage",
 )
 
 
@@ -2239,8 +2241,12 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.tracking_parameter_links()
     if name == "near-duplicates":
         return await reports.near_duplicates(threshold=args.simhash_threshold, limit=args.similarity_limit)
+    if name == "similarity-coverage":
+        return await reports.similarity_coverage(threshold=args.simhash_threshold, limit=args.similarity_limit)
     if name == "internal-authority":
         return await reports.internal_authority()
+    if name == "authority-coverage":
+        return await reports.authority_coverage()
     raise ValueError(f"unknown report: {name}")
 
 
@@ -2388,7 +2394,6 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             "internal-link-quality": "links_json",
             "link-graph-metrics": "links_json",
             "tracking-parameter-links": "links_json",
-            "near-duplicates": "content_hash_simhash",
         }
         evidence = {}
         for name in TECHNICAL_AUDIT_REPORTS:

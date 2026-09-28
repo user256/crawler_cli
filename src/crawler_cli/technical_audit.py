@@ -35,7 +35,9 @@ TECHNICAL_AUDIT_REPORTS = (
     "link-graph-metrics",
     "tracking-parameter-links",
     "near-duplicates",
+    "similarity-coverage",
     "internal-authority",
+    "authority-coverage",
 )
 
 # Registry is intentionally wider than the currently implemented report set.
@@ -54,10 +56,18 @@ TECHNICAL_AUDIT_CHECK_REGISTRY = (
     {"id": "tracking-parameter-links", "state": "implemented", "source": "link graph report"},
     {"id": "orphan-candidates", "state": "implemented_candidate", "source": "orphan report"},
     {"id": "redirect-observations", "state": "implemented_candidate", "source": "redirect report"},
-    {"id": "near-duplicate-content", "state": "implemented_candidate", "source": "content hash report"},
+    {
+        "id": "near-duplicate-content",
+        "state": "implemented_candidate",
+        "source": "primary-content signatures and bounded similarity coverage",
+    },
     {"id": "schema-parser-diagnostics", "state": "implemented_candidate", "source": "schema report"},
     {"id": "image-markup", "state": "implemented_candidate", "source": "image report"},
-    {"id": "internal-authority", "state": "implemented_candidate", "source": "internal graph report"},
+    {
+        "id": "internal-authority",
+        "state": "implemented_candidate",
+        "source": "canonical indexable HTML and run-scoped link graph",
+    },
     {"id": "metadata-and-locale", "state": "not_implemented", "source": "stored page snapshots"},
     {"id": "canonical-targets", "state": "not_implemented", "source": "canonical and live response evidence"},
     {"id": "hreflang-clusters", "state": "not_implemented", "source": "HTML, header and sitemap annotations"},
@@ -125,7 +135,6 @@ def build_technical_audit(
     if _PARSER == "lxml":
         parser_versions["lxml"] = _package_version("lxml")
     parsed_html_count = _optional_int(context.get("parsed_html_count"))
-    hashed_count = _optional_int(context.get("hashed_count"))
     completion_state = str(context.get("completion_state", "unavailable"))
     graph_complete = bool(rows["link-graph-metrics"] and rows["link-graph-metrics"][0].get("graph_complete") is True)
     known_url_inventory = [row for row in rows["orphans"] if row.get("source_labels")]
@@ -155,6 +164,17 @@ def build_technical_audit(
             if conflicts:
                 indexability_conflicts.append({**row, "conflicts": conflicts})
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
+    similarity = rows["similarity-coverage"][0] if rows["similarity-coverage"] else {}
+    similarity_complete = (
+        source_coverage["similarity-coverage"]["available"] is True
+        and similarity.get("truncated") is False
+        and similarity.get("findings_truncated") is False
+        and similarity.get("missing_primary_hashes") == 0
+    )
+    authority = rows["authority-coverage"][0] if rows["authority-coverage"] else {}
+    authority_complete = (
+        source_coverage["authority-coverage"]["available"] is True and authority.get("graph_complete") is True
+    )
     saved_link_failures = [row for row in rows["internal-link-quality"] if row.get("issue") == "error_target"]
     confirmed_link_failures = []
     analyst_link_failures = []
@@ -252,8 +272,8 @@ def build_technical_audit(
             rows["near-duplicates"],
             "finding",
             "Similarity is evidence for review, not proof of a duplicate-content defect.",
-            available=source_coverage["near-duplicates"]["available"] is True,
-            denominator=hashed_count,
+            available=source_coverage["similarity-coverage"]["available"] is True,
+            denominator=_optional_int(similarity.get("eligible_population")),
             completion_state=completion_state,
             qualification="review_required",
         ),
@@ -287,11 +307,19 @@ def build_technical_audit(
             rows["internal-authority"],
             "inventory",
             "Relative scores require template and business-priority comparison.",
-            available=source_coverage["internal-authority"]["available"] is True,
-            denominator=parsed_html_count,
+            available=source_coverage["authority-coverage"]["available"] is True,
+            denominator=_optional_int(authority.get("canonical_indexable_population")),
             completion_state=completion_state,
         ),
     )
+    for check in checks:
+        if check["id"] == "near-duplicate-content" and not similarity_complete:
+            check["status"] = "partial" if source_coverage["similarity-coverage"]["available"] else "unavailable"
+            check["tested_count"] = _optional_int(similarity.get("sampled_population"))
+            check["qualification"] = "bounded_or_incomplete_coverage"
+        if check["id"] == "internal-authority-inventory" and not authority_complete:
+            check["status"] = "partial" if source_coverage["authority-coverage"]["available"] else "unavailable"
+            check["qualification"] = "incomplete_graph"
 
     audit_log = [
         *_indexability_actions(indexability_conflicts),
