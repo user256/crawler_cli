@@ -19,6 +19,7 @@ from urllib.parse import quote as _urlquote, urlsplit
 if TYPE_CHECKING:
     from .models import CrawlJobResult, CrawlResult
 
+from .adaptive_rate import format_pressure_summary
 from .archive import audit_archive_urls
 from .auth import AuthConfig, AuthType
 from .compare_urls import build_pair_rows, load_url_pairs, rows_failing
@@ -847,6 +848,10 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         obscura_fetch_subprocess=getattr(args, "obscura_fetch", False),
         curl_impersonate=curl_impersonate,
         per_host_concurrency=getattr(args, "per_host_concurrency", 4),
+        adaptive_rate=bool(getattr(args, "adaptive_rate", False)),
+        adaptive_calibration_requests=getattr(args, "adaptive_calibration_requests", 5),
+        adaptive_ttfb_degradation_factor=getattr(args, "adaptive_ttfb_factor", 2.5),
+        adaptive_max_retry_after_seconds=getattr(args, "adaptive_max_retry_after", 60.0),
         scope_predicate=scope_predicate,
     )
 
@@ -1180,6 +1185,34 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         "--no-circuit-breaker",
         action="store_true",
         help="Disable the per-host circuit breaker entirely (env CRAWLER_CLI_CB_ENABLED=0)",
+    )
+    adaptive = parser.add_argument_group("Adaptive rate control (ticket 261)")
+    adaptive.add_argument(
+        "--adaptive-rate",
+        action="store_true",
+        help=(
+            "Calibrate origin TTFB before crawling, then slow down (never speed up past the "
+            "configured concurrency/rate) on 429, 503, Retry-After or TTFB degradation, and "
+            "report crawl-budget pressure in the run summary."
+        ),
+    )
+    adaptive.add_argument(
+        "--adaptive-calibration-requests",
+        type=non_negative_int,
+        default=5,
+        help="Pre-crawl probe requests per seed origin (0-20, default 5; 0 learns the baseline at runtime).",
+    )
+    adaptive.add_argument(
+        "--adaptive-ttfb-factor",
+        type=positive_float,
+        default=2.5,
+        help="Throttle when rolling median TTFB exceeds this multiple of baseline (default 2.5).",
+    )
+    adaptive.add_argument(
+        "--adaptive-max-retry-after",
+        type=positive_float,
+        default=60.0,
+        help="Cap on a single Retry-After or backoff pause in seconds (default 60).",
     )
     parser.add_argument("--archive-org-check", action="store_true", help="Seed from archive.org + run audit")
     parser.add_argument("--skip-sitemaps", action="store_true", help="Skip sitemap discovery")
@@ -1716,6 +1749,9 @@ async def _run_crawl(args: argparse.Namespace) -> int:
         if job.run_id:
             summary += f" (run {job.run_id})"
         print(summary)
+        pressure_line = format_pressure_summary(job.crawl_budget_pressure)
+        if pressure_line:
+            print(pressure_line)
 
         if getattr(args, "intent_signatures", False):
             if isinstance(store, AsyncpgStore):

@@ -266,6 +266,8 @@ def serialize_job_summary_metadata(job: CrawlJobResult, *, saved_to: str | None 
         "render_discovery_attempt_count": job.render_discovery_attempt_count,
         "authorization_scope": job.authorization_scope,
     }
+    if job.crawl_budget_pressure is not None:
+        payload["crawl_budget_pressure"] = job.crawl_budget_pressure
     return payload
 
 
@@ -305,6 +307,8 @@ def serialize_crawl_job(job: CrawlJobResult, *, saved_to: str | None = None) -> 
         "authorization_scope": job.authorization_scope,
         "results": [serialize_crawl_result(result) for result in job.results],
     }
+    if job.crawl_budget_pressure is not None:
+        payload["crawl_budget_pressure"] = job.crawl_budget_pressure
     if job.max_urls is not None:
         payload["max_urls"] = job.max_urls
     return payload

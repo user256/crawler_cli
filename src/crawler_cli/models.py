@@ -355,6 +355,10 @@ class CrawlJobResult:
     validity window, the exact allowed origins, the path policy, and the
     attestation notice — never the manifest's free-text notes or its filesystem
     path."""
+    crawl_budget_pressure: dict[str, Any] | None = None
+    """Adaptive-rate calibration, throttling history and origin pressure
+    metrics (ticket 261). ``None`` unless ``--adaptive-rate`` was enabled, and
+    then omitted from artifacts so the default artifact shape is unchanged."""
 
     @property
     def crawled_count(self) -> int:

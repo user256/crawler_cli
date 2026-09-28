@@ -340,6 +340,20 @@ class CrawlConfig:
     per_host_concurrency: int = 4
     """Maximum simultaneous requests to any single host (0 = unlimited).
     Prevents the full worker pool bursting against one origin (ticket-063)."""
+    adaptive_rate: bool = False
+    """Opt-in adaptive origin rate control (ticket 261). Calibrates a TTFB
+    baseline before the crawl, then narrows per-host concurrency / adds spacing
+    on 429, 503 or TTFB degradation. Only ever slows down: it never exceeds
+    ``max_concurrency``, ``per_host_concurrency`` or the configured rate."""
+    adaptive_calibration_requests: int = 5
+    """Bounded pre-crawl probe requests per seed origin (0 = learn the baseline
+    from the first runtime responses). Clamped to 20."""
+    adaptive_ttfb_degradation_factor: float = 2.5
+    """Throttle when the rolling median TTFB exceeds this multiple of baseline."""
+    adaptive_recovery_window: int = 50
+    """Consecutive healthy responses required before one recovery step."""
+    adaptive_max_retry_after_seconds: float = 60.0
+    """Upper bound on a single Retry-After / exponential backoff pause."""
     keep_html_in_results: bool = False
     """Retain raw_html/extracted/discovered_links on results after persist
     during open crawls.  Off by default so long crawls stay memory-bounded
@@ -417,6 +431,22 @@ class CrawlConfig:
         require_non_negative_float(
             self.frontier_retry_base_delay_seconds,
             field="frontier_retry_base_delay_seconds",
+        )
+        require_non_negative_int(self.adaptive_calibration_requests, field="adaptive_calibration_requests")
+        if self.adaptive_calibration_requests > 20:
+            raise ValueError(
+                f"adaptive_calibration_requests must be at most 20, got {self.adaptive_calibration_requests}"
+            )
+        require_positive_float(self.adaptive_ttfb_degradation_factor, field="adaptive_ttfb_degradation_factor")
+        if self.adaptive_ttfb_degradation_factor <= 1.0:
+            raise ValueError(
+                "adaptive_ttfb_degradation_factor must be greater than 1.0, "
+                f"got {self.adaptive_ttfb_degradation_factor}"
+            )
+        require_positive_int(self.adaptive_recovery_window, field="adaptive_recovery_window")
+        require_positive_float(
+            self.adaptive_max_retry_after_seconds,
+            field="adaptive_max_retry_after_seconds",
         )
         require_non_negative_int(self.proxy_max_failures, field="proxy_max_failures")
         require_non_negative_float(self.proxy_cooldown_seconds, field="proxy_cooldown_seconds")

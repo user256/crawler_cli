@@ -277,6 +277,13 @@ Page HTML is **gzip-compressed by default** in `pages.html_compressed`. Use `--n
 crawler-cli https://example.com --circuit-breaker-threshold 25 --circuit-breaker-recovery-seconds 60
 crawler-cli https://example.com --no-circuit-breaker
 
+# Opt-in adaptive rate control (ticket 261): a bounded pre-crawl TTFB probe
+# (robots and the destination guard apply), then per-host slow-down on 429/503,
+# Retry-After (capped) or rolling TTFB > 2.5x baseline. It only ever slows
+# below the configured concurrency/rate; the run summary and saved artifact
+# gain a `crawl_budget_pressure` block with throttling history.
+crawler-cli https://example.com --adaptive-rate --adaptive-calibration-requests 5
+
 # Route every backend through a proxy (HTTP or SOCKS); credentials may be
 # embedded in the URL or passed separately.
 crawler-cli https://example.com --proxy socks5://127.0.0.1:1080 --proxy-auth user:pass

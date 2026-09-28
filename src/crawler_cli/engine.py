@@ -12,6 +12,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .adaptive_rate import (
+    ADAPTIVE_CALIBRATION_MAX_ORIGINS,
+    ADAPTIVE_CALIBRATION_MAX_REQUESTS,
+    PRESSURE_STATUSES,
+    AdaptiveRateRegistry,
+    CalibrationSample,
+    summarize_calibration,
+)
 from .amp import is_amp_url_shape
 from .archive import discover_historical_urls
 from .authorisation import ScopeManifestDenied, ScopePurpose, describe_manifest
@@ -268,6 +276,18 @@ class CrawlEngine:
             failure_threshold=config.circuit_breaker_failure_threshold,
             recovery_timeout_seconds=config.circuit_breaker_recovery_seconds,
         )
+        # Adaptive origin rate control (ticket 261): opt-in, and bounded by the
+        # same per-host cap the fixed semaphore enforces so it can only narrow.
+        self._adaptive: AdaptiveRateRegistry | None = None
+        if config.adaptive_rate:
+            host_cap = config.per_host_concurrency if config.per_host_concurrency > 0 else config.max_concurrency
+            self._adaptive = AdaptiveRateRegistry(
+                max_concurrency=min(config.max_concurrency, host_cap),
+                degradation_factor=config.adaptive_ttfb_degradation_factor,
+                recovery_window=config.adaptive_recovery_window,
+                max_retry_after_seconds=config.adaptive_max_retry_after_seconds,
+            )
+        self._adaptive_retry_attempts = 0
         self._cms_detector = CMSDetector() if config.cms_detection else None
         self._analytics_detector = AnalyticsDetector() if config.analytics_detection else None
         self._custom_extractor = CustomExtractor(config.extraction_rules) if config.extraction_rules else None
@@ -857,6 +877,8 @@ class CrawlEngine:
         snapshot, so every job that reaches an artifact writer already has them.
         """
         job.authorization_scope = self._scope_snapshot()
+        if self._adaptive is not None:
+            job.crawl_budget_pressure = self._adaptive.summary()
         if self._run_budget is None:
             return
         snapshot = await self._run_budget.snapshot()
@@ -898,7 +920,13 @@ class CrawlEngine:
                     # Prefer the gateway-retry wrapper (ticket 072); fall back to
                     # plain fetch for backends that don't implement it (test fakes,
                     # external backends).
-                    response = await self._fetch_for_purpose(url, "initial")
+                    if self._adaptive is not None:
+                        # Narrower, variable per-host gate inside the fixed cap
+                        # (ticket 261): waits out Retry-After pauses and spacing.
+                        async with self._adaptive.for_host(host).slot():
+                            response = await self._fetch_for_purpose(url, "initial")
+                    else:
+                        response = await self._fetch_for_purpose(url, "initial")
                 finally:
                     if _host_sem is not None:
                         _host_sem.release()
@@ -914,6 +942,12 @@ class CrawlEngine:
                 body_opaque = response.body_truncated and response.body_truncation_reason is not None
                 if self.config.detect_challenges and not body_opaque:
                     response, challenge_kind = await self._handle_challenge(url, response)
+                if self._adaptive is not None and challenge_kind is None:
+                    # A bot challenge is not origin load (ticket 181 keeps the
+                    # two apart), so only unchallenged responses feed pressure.
+                    self._adaptive.for_host(host).record_response(
+                        response.status, response.ttfb_seconds, response.headers
+                    )
                 # Case-insensitive header lookup (Playwright returns lowercase keys)
                 headers_lower = {k.lower(): v for k, v in response.headers.items()}
                 content_type = headers_lower.get("content-type")
@@ -1142,6 +1176,8 @@ class CrawlEngine:
             except Exception as exc:
                 host = urlparse(url).netloc.lower()
                 logger.warning("fetch_error for %s: %s: %s", url, type(exc).__name__, exc)
+                if self._adaptive is not None:
+                    self._adaptive.for_host(host).record_fetch_error(type(exc).__name__)
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)
                     self._record_breaker_failure(circuit, host, f"fetch_error:{type(exc).__name__}")
@@ -1206,10 +1242,14 @@ class CrawlEngine:
         url_list = list(urls)
         if not url_list:
             return []
+        await self._calibrate_adaptive_rate(url_list)
         # Slot results by original index to preserve input order.
         ordered: list[CrawlResult | None] = [None] * len(url_list)
         in_flight: dict[asyncio.Task, int] = {}  # task → url_list index
         pending_indices = list(range(len(url_list)))
+        # List mode has no frontier retry, so with adaptive rate on a 429/503
+        # is re-queued (the host gate holds it back) instead of dropped.
+        pressure_retries: dict[int, int] = {}
 
         while pending_indices or in_flight:
             # Honour request_stop(): drain in-flight, schedule nothing new
@@ -1231,7 +1271,17 @@ class CrawlEngine:
             done, _ = await asyncio.wait(set(in_flight.keys()), return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 idx = in_flight.pop(task)
-                ordered[idx] = task.result()
+                result = task.result()
+                if (
+                    self._adaptive is not None
+                    and result.status in PRESSURE_STATUSES
+                    and pressure_retries.get(idx, 0) < self.config.frontier_max_retries
+                ):
+                    pressure_retries[idx] = pressure_retries.get(idx, 0) + 1
+                    self._adaptive_retry_attempts += 1
+                    pending_indices.insert(0, idx)
+                    continue
+                ordered[idx] = result
 
         results = [r for r in ordered if r is not None]
         if save_to:
@@ -1239,6 +1289,7 @@ class CrawlEngine:
                 mode="list",
                 seed_urls=url_list,
                 results=results,
+                retry_attempts=self._adaptive_retry_attempts,
                 interrupted=self._stop_requested,
                 javascript_url_candidate_count=sum(len(result.javascript_url_candidates) for result in results),
                 css_url_candidate_count=sum(len(result.css_url_candidates) for result in results),
@@ -1282,6 +1333,7 @@ class CrawlEngine:
             seed_urls=seed_urls,
             results=results,
             saved_to=save_to,
+            retry_attempts=self._adaptive_retry_attempts,
             interrupted=self._stop_requested,
             javascript_url_candidate_count=sum(len(result.javascript_url_candidates) for result in results),
             css_url_candidate_count=sum(len(result.css_url_candidates) for result in results),
@@ -1865,6 +1917,9 @@ class CrawlEngine:
             done_count,
         )
 
+        # Calibrate before sitemap discovery so the origin sees the bounded
+        # probe first, not a burst of sitemap fetches (ticket 261).
+        await self._calibrate_adaptive_rate(seeds)
         if not resume:
             # Fresh crawl: enqueue seeds (record out-of-scope seeds without fetching)
             seed_enqueue = [
@@ -2395,6 +2450,98 @@ class CrawlEngine:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
+
+    async def _calibrate_adaptive_rate(self, urls: list[str]) -> None:
+        """Probe each new seed origin with a few bounded requests (ticket 261).
+
+        Probes go through the same admission, robots, crawl-delay, rate-limit
+        and ``_fetch_for_purpose`` boundary as page fetches, so the scope
+        manifest, destination guard and run budget all apply. Probing stops
+        at the first 429/503: the origin has already answered the question.
+        """
+        if self._adaptive is None:
+            return
+        per_origin = min(self.config.adaptive_calibration_requests, ADAPTIVE_CALIBRATION_MAX_REQUESTS)
+        if per_origin <= 0:
+            return
+        origins: dict[str, list[str]] = {}
+        for url in urls:
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                continue
+            host = parsed.netloc.lower()
+            if host in self._adaptive.calibrated_hosts:
+                continue
+            if host not in origins and len(origins) >= ADAPTIVE_CALIBRATION_MAX_ORIGINS:
+                continue
+            candidates = origins.setdefault(host, [f"{parsed.scheme}://{parsed.netloc}/"])
+            if url not in candidates and len(candidates) < per_origin:
+                candidates.append(url)
+
+        for host, candidates in origins.items():
+            self._adaptive.calibrated_hosts.add(host)
+            controller = self._adaptive.for_host(host)
+            admitted: list[str] = []
+            for candidate in candidates:
+                if self.config.url_admission_reason(candidate, purpose="probe") is not None:
+                    continue
+                if self.config.respect_robots_txt and not await self._robots.is_allowed(candidate):
+                    continue
+                admitted.append(candidate)
+            if not admitted:
+                logger.info("Adaptive calibration skipped for %s: no admissible probe URL", host)
+                continue
+            samples: list[CalibrationSample] = []
+            for index in range(per_origin):
+                probe_url = admitted[index % len(admitted)]
+                if self.config.respect_robots_txt and self.config.honor_robots_crawl_delay:
+                    await self._wait_for_host_delay(probe_url)
+                await self._rate_limiter.wait()
+                try:
+                    response = await self._fetch_for_purpose(probe_url, "initial")
+                except (ScopeManifestDenied, DestinationRejection, RunBudgetExhausted) as exc:
+                    samples.append(
+                        CalibrationSample(url=probe_url, status=0, ttfb_seconds=None, error=type(exc).__name__)
+                    )
+                    break
+                except Exception as exc:  # noqa: BLE001 - a failed probe is calibration evidence
+                    samples.append(
+                        CalibrationSample(url=probe_url, status=0, ttfb_seconds=None, error=type(exc).__name__)
+                    )
+                    controller.record_fetch_error(type(exc).__name__)
+                    continue
+                samples.append(
+                    CalibrationSample(
+                        url=probe_url,
+                        status=response.status,
+                        ttfb_seconds=response.ttfb_seconds,
+                        headers=dict(response.headers),
+                    )
+                )
+                if response.status in PRESSURE_STATUSES:
+                    # Starts the Retry-After pause before any worker fetch.
+                    controller.record_response(response.status, response.ttfb_seconds, response.headers)
+                    break
+            result = summarize_calibration(
+                host,
+                samples,
+                max_concurrency=controller.configured_concurrency,
+                max_retry_after_seconds=self.config.adaptive_max_retry_after_seconds,
+            )
+            controller.apply_calibration(result)
+            logger.info(
+                "Adaptive calibration for %s: %d probes, TTFB median=%s p95=%s, stack=%s, "
+                "initial concurrency=%d (configured %d), min interval=%.3fs",
+                host,
+                result.requests,
+                "n/a" if result.ttfb_median_seconds is None else f"{result.ttfb_median_seconds:.3f}s",
+                "n/a" if result.ttfb_p95_seconds is None else f"{result.ttfb_p95_seconds:.3f}s",
+                ",".join(result.origin_stack) or "unknown",
+                controller.concurrency_limit,
+                controller.configured_concurrency,
+                controller.min_interval_seconds,
+                extra={"event": "adaptive_calibration", "calibration": result.to_dict()},
+            )
 
     async def _wait_for_host_delay(self, url: str) -> None:
         host = urlparse(url).netloc.lower()
