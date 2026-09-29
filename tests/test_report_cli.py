@@ -27,6 +27,9 @@ class FakeStore:
     async def get_crawl_run(self, run_id):
         return {"run_id": run_id, "status": "complete", "updated_at": self.updated_at}
 
+    async def persist_language_probe_evidence(self, run_id, records, *, session_id):
+        self.language_probe_evidence = (run_id, records, session_id)
+
 
 class FakeReports:
     instances: list["FakeReports"] = []
@@ -39,6 +42,16 @@ class FakeReports:
 
     async def _run_id(self):
         return self.run_id or "resolved-run"
+
+    async def accept_language_probes(self):
+        return [
+            {
+                "record_type": "coverage",
+                "state": "not_recorded",
+                "complete": False,
+                "qualification": "no_explicit_accept_language_probe_session_for_selected_run",
+            }
+        ]
 
     async def technical_audit_context(self):
         return {

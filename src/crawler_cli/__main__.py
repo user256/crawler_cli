@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 import asyncpg
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -2321,6 +2322,8 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return metadata_locale_report(await reports.metadata_locale_inventory())
     if name == "canonical-hreflang-inventory":
         return canonical_hreflang_report(await reports.canonical_hreflang_inventory())
+    if name == "accept-language-probes":
+        return await reports.accept_language_probes()
     raise ValueError(f"unknown report: {name}")
 
 
@@ -2739,7 +2742,6 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 "rendered-mobile-resources",
                 "conditional-get-probes",
                 "ai-governance",
-                "accept-language-probes",
             }:
                 continue
             required_capabilities = capabilities_by_report.get(name, ())
@@ -2952,7 +2954,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 )
             )
             try:
-                evidence["accept-language-probes"] = await collect_accept_language_evidence(
+                language_evidence = await collect_accept_language_evidence(
                     language_engine,
                     language_targets,
                     eligible_population=language_population,
@@ -2960,6 +2962,10 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 )
             finally:
                 await language_engine.close()
+            await store.persist_language_probe_evidence(
+                await reports._run_id(), language_evidence, session_id=str(uuid.uuid4())
+            )
+            evidence["accept-language-probes"] = await reports.accept_language_probes()
         if args.probe_conditional_gets:
             if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
                 print(

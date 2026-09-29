@@ -1,7 +1,7 @@
 # Ticket 264: Persist language probes and add regional comparison evidence
 
-**Status:** Open — remediation from concluded ticket 260.
-**State:** Open
+**Status:** In progress — run-scoped language evidence persistence started 2026-09-29; regional comparison remains required.
+**State:** In progress
 **Priority:** P1
 **Module:** technical-audit
 
