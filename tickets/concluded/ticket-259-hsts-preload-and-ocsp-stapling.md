@@ -2,7 +2,12 @@
 
 ## Status and priority
 
-Core implemented (2026-09-28, branch `feature/ticket-259-hsts-ocsp`); preload-list lookup and live OCSP inspection deferred — P2. Extends passive security header checks (Ticket 150) and server performance checks (relates to question Q63).
+Concluded with remediation 263 (2026-09-29). HSTS directive/eligibility evidence is merged; preload-list lookup and live OCSP inspection remain explicitly unimplemented and must not be inferred from the current report. P2. Extends passive security header checks (Ticket 150) and server performance checks (relates to question Q63).
+
+**Status:** Concluded with remediation 263 — merged to `master` after review on 2026-09-29.
+**State:** Needs closing
+**Priority:** P2
+**Module:** technical-audit
 
 ## Goal
 
@@ -105,4 +110,3 @@ Search bot crawling efficiency and Core Web Vitals (TTFB) depend heavily on init
   the apex), valid certificate chain and "all subdomains over HTTPS" are not
   observable from stored snapshots and are listed in coverage as
   `hsts_preload_criteria_not_observable`.
-

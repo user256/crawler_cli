@@ -4,6 +4,13 @@ A list of tickets, their status and the md file which summarises action taken fo
 **Authoritative register** for status, acceptance notes, and delivery order.
 Ticket files remain the source of truth for scope and DoD.
 
+### Current position (2026-09-29)
+
+- **Review / integration:** no GitHub pull requests were open. The historical technical-audit PR stack (183–213) was already present on `origin/master`; its disposable worktrees were stale review artifacts.
+- **Merged and concluded:** tickets **258–262** were reviewed as clean local branches and landed together. The cross-feature resolution retains both AI-governance and Accept-Language collectors. Integrated validation: `ruff check src tests`, `ruff format --check src tests`, and `pytest -q` (**1,615 passed, 60 skipped**).
+- **Filed remediation:** **264** (run-scoped language persistence and explicit regional evidence) is first; **263** (real OCSP/preload membership), **265** (reconciliation Sheets delivery), and **266** (duplicate adaptive-rate diagnostic reason) follow. See `ROADMAP.md` for dependency order.
+- **Concluded records:** 258–262 now live in `tickets/concluded/`; active remediation records remain in `tickets/`.
+
 ### Current position (2026-07-17)
 
 - Ticket **122** (PR **#47**) is reviewed and **merged**: compare `--replace`

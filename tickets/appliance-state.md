@@ -1,5 +1,13 @@
 # Repository Delivery State
 
+## 2026-09-29 audit batch review
+
+- No GitHub pull request was awaiting a decision. The 183–213 audit stack was already merged on `origin/master`.
+- Merged local tickets 258–262: AI crawler governance, transport-security evidence, Accept-Language variation, adaptive crawl-rate control, and source reconciliation.
+- Cross-feature validation passed: Ruff clean; full suite **1,615 passed, 60 skipped**. The six existing aiohttp BasicAuth deprecation warnings are pre-existing and non-failing.
+- Completed ticket files moved to `tickets/concluded/`. New ordered remediation tickets are 264, 263, 265, and 266; details are in `tickets/ROADMAP.md` and `plan.md`.
+- Review and integration worktrees are disposable after the `master` push. No crawl store or production service was changed.
+
 **Recorded:** 2026-07-15
 **Branch:** `master`
 
