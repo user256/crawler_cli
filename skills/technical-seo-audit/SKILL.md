@@ -39,7 +39,7 @@ interpret evidence. It does not create additional checks.
 | `nonproduction-https` | Are non-production hosts excluded from indexing, and are HTTP/HTTPS controls correct? In-scope host, response, robots and indexability evidence. |
 | `robots-controls` | Is robots.txt reachable, syntactically usable, scoped correctly, and consistent with crawl directives? Current robots fetch plus crawl evidence. |
 | `sitemap-integrity` | Are declared sitemaps reachable, parseable, current, in scope, and consistent with canonical/indexable URLs? Current sitemap fetches plus crawl evidence. |
-| `rendered-robots-links` | Do rendered pages expose links that robots disallows or that the crawl could not follow? Raw/rendered link extraction and robots evaluation. |
+| `rendered-robots-links` | Can important game/product inventory be discovered from the initial rendered DOM without a user action, and which additional URLs appear only after Load more, infinite scroll or pagination interaction? Initial raw/rendered links plus an explicit pre/post-interaction inventory capture. |
 | `indexability-segmentation` | Which URLs are indexable, blocked, noindex, canonicalised, redirected, errored, or unknown, and are directives contradictory? Stored page directives and responses. |
 | `crawl-waste-url-families` | Which URL families create crawl waste through sessions, search, sort/filter, dates, tracking, pagination, or other repeats? URL-family analysis with denominators. |
 | `parameter-and-faceted-controls` | Are parameterised and faceted URLs linked, canonicalised, indexable, and controlled as intended? Link, canonical, indexability and URL-family evidence. |
@@ -47,7 +47,7 @@ interpret evidence. It does not create additional checks.
 | `metadata-basics` | Which indexable pages have missing, short, long, malformed, or otherwise invalid titles and meta descriptions? Metadata inventory. |
 | `metadata-duplicates-aliases` | What are the true duplicate title/description counts after canonical and alias grouping, with the raw counts retained? Metadata, canonical and alias evidence. |
 | `content-quality` | Which indexable pages are thin, boilerplate-heavy, empty after extraction, or carry material content warnings? Extracted-content evidence and declared thresholds. |
-| `locale-html-lang` | Are HTML `lang` values present, valid, and consistent with the URL locale convention where one exists? HTML attributes and declared locale rules. |
+| `locale-html-lang` | Do locale pages have valid HTML language signals and substantively distinct primary content for their declared language? HTML lang, hreflang context and run-scoped primary-content signatures. |
 | `near-duplicate-content` | Which canonical page pairs remain near-duplicates after the declared text normalisation and extraction process? Content hashes/similarity evidence and comparison population. |
 | `canonical-declarations` | Are canonical declarations present, absolute where required, singular, syntactically valid, and internally consistent? Raw HTML canonical inventory. |
 | `canonical-target-validation` | Are canonical targets reachable, indexable, in scope where expected, and free of chains or loops? Canonical target and response/indexability evidence. |
@@ -64,7 +64,7 @@ interpret evidence. It does not create additional checks.
 | `performance-distribution` | What are the URL-level performance distributions and worst outliers for the collected metrics? Performance samples, percentiles and denominators. |
 | `conditional-cache-behaviour` | Do conditional requests and cache validators behave correctly for the sampled URLs? `ETag`/`Last-Modified` and conditional-request evidence. |
 | `validated-bot-log-analysis` | What do verified search-bot logs show about crawling, response outcomes, and waste? Supplied logs with verified bot identity. |
-| `supplied-search-evidence` | What do supplied Search Console, URL Inspection, CDN, origin, or analytics records add to the crawl conclusions? Supplied source evidence and time range. |
+| `supplied-search-evidence` | Do dated Search Console performance/indexing and URL Inspection records show Google discovering, indexing and canonicalising important template and locale URLs as intended, with impressions for declared priority URLs? Dated supplied records. |
 | `recipient-action-eligibility` | Which findings have a named owner, evidence, impact, next action, and any needed business/context qualification? Audit finding records and supplied context. |
 | `healthy-overview` | Which controls have affirmative evidence of healthy behaviour and may be reported as healthy? Passed/qualified rows from this contract. |
 | `artifact-validation` | Is the produced JSON/Markdown/XLSX internally consistent, reproducible from the selected inputs, and safe to publish? Artifact validation evidence. |
@@ -132,6 +132,13 @@ URL, recorded configuration, and a declared comparison basis. A challenge page
 is evidence of an access challenge, not evidence of page parity or content
 quality.
 
+For inventory discovery, capture an initial browser navigation without any
+click or scroll action, then capture the same page after each inventory-
+expanding action. Record the source URL, action, initial document-link count,
+post-action document-link count, completion state and capture time. A link
+added by normal hydration is not itself a user-interaction failure. A ticket
+is justified only when a completed action exposes additional document URLs.
+
 Locale/geo tests require configured proxies and an explicit test matrix. Bot-log
 claims require verified bot identity; reverse DNS alone is insufficient unless
 the verification procedure records the required forward confirmation.
@@ -159,6 +166,25 @@ Treat HTML, HTTP-header, and sitemap hreflang as separate channels. Hreflang
 target validity depends on the target's final response, canonical, indexability
 and reciprocal relationship, not on syntax alone.
 
+Matching `html lang` and reciprocal hreflang do not establish that a locale
+page is useful to index. Generate primary-content signatures from the selected
+run and compare them across declared languages. A cross-language signature
+match is a review candidate; confirm the template and business purpose before
+calling it untranslated content.
+
+### Search evidence
+
+The deterministic audit accepts dated CSV or JSON records with `url`, `source`
+and `export_date`. For URL Inspection include indexing state, Google-selected
+canonical and user-declared canonical where available. For Search Console
+performance include clicks and impressions; mark a URL as priority only where
+the audit scope says it should attract search demand. Treat a priority URL
+with zero impressions as a review finding, not proof of a technical defect.
+
+If this evidence is absent, the Tickets tab creates the mapped Improvement
+task to collect it. Do not claim that Google discovered, indexed or selected
+the intended canonical from crawl evidence alone.
+
 ### Structured data
 
 Parse every discovered syntax before applying feature rules. Apply a feature
@@ -183,14 +209,22 @@ method. Qualify uncertainty rather than using absolute language that the
 evidence cannot support.
 
 Create remediation tickets only for `finding` or action-bearing `partial` rows.
+The template may also define a specific `unavailable_ticket` Improvement task
+where missing evidence prevents a material audit conclusion; use its supplied
+language rather than turning a missing input into a site defect.
 Each ticket must include the check ID, reproduction query or function, affected
 URL examples, acceptance criteria, expected state after remediation, and a
 rerun command or evidence recipe.
 
-Report healthy controls only from `healthy-overview`; it must link back to
-qualifying `pass` or `not_applicable` rows. Apply any recipient/request filter
-to the presentation after computing the complete result. Keep excluded findings
-in the full artifact with their filter rationale.
+Compute the full check ledger, including `healthy-overview`, in the internal
+artifact. Do not populate a client sheet, ticket register, question list or
+evidence tab merely to say that nothing is wrong: omit `pass`,
+`not_applicable`, and no-action rows from client-facing output. Apply the
+recipient/request filter after computing the full result and retain excluded
+rows with their rationale internally. State an unavailable or partial result
+once in client scope only when that gap could materially change a retained
+recommendation; never present it as an empty Pending activity row or a site
+defect.
 
 Before delivery, validate that:
 

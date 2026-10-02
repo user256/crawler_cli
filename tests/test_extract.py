@@ -1,4 +1,4 @@
-from crawler_cli.extract import extract_page_data
+from crawler_cli.extract import extract_links, extract_page_data
 
 
 def test_extract_page_data_captures_indexability_and_hreflang():
@@ -38,3 +38,15 @@ def test_extract_page_data_captures_indexability_and_hreflang():
     assert extracted.headings["h1"] == ["Main title"]
     assert {item.hreflang for item in extracted.hreflang_links} == {"en-gb", "en-us"}
     assert extracted.word_count > 0
+
+
+def test_extract_links_records_follow_state():
+    links = extract_links(
+        '<a href="/follow">Follow</a><a href="https://offsite.example/no" rel="nofollow">No follow</a>',
+        "https://example.com/",
+        same_host_only=False,
+    )
+    assert [(link.href, link.follow) for link in links] == [
+        ("https://example.com/follow", True),
+        ("https://offsite.example/no", False),
+    ]

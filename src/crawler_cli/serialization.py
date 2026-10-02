@@ -134,6 +134,7 @@ def serialize_crawl_result(result: CrawlResult) -> dict[str, object]:
                 "fragment": link.fragment,
                 "url_parameters": link.url_parameters,
                 "original_href": link.original_href,
+                "follow": link.follow,
             }
             for link in result.discovered_links
         ],

@@ -25,10 +25,10 @@ Two database shapes are supported:
 
 The internal link graph (inlinks/outlinks) is read from the current-state
 ``internal_links`` table on both schemas; it is not part of the immutable
-snapshot, so it reflects the most recent crawl. External outlinks come from a
-snapshot's ``links_json`` and are only present when the crawl ran with
-``same_host_only=False`` — the default crawl drops cross-host links at
-extraction time, so they are genuinely absent rather than hidden here.
+snapshot, so it reflects the most recent crawl. External outlinks initially
+come from a snapshot's ``links_json``. The saved HTML evidence endpoint also
+recovers links, social metadata, and scripts on demand without visiting the
+original website.
 """
 
 from __future__ import annotations
@@ -40,16 +40,23 @@ import json
 import os
 import sys
 import uuid
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import asyncpg
 from aiohttp import web
+from lxml import html as lxml_html
+
+from crawler_cli.compression import decompress_html
+if __name__ == "__main__" and not __package__:
+    from resume import resume_configuration
+else:
+    from crawler_gui.resume import resume_configuration
 
 
 GUI_DIR = Path(__file__).resolve().parent
@@ -272,7 +279,7 @@ def is_external(href: str, page_host: str) -> bool:
 
 
 def category_hints(page: dict[str, Any]) -> list[str]:
-    hints = ["internal"]
+    hints = ["internal", "url", "response-codes"]
     code, content_type = page["statusCode"], page["contentType"]
     if code != 200:
         hints.append("response-codes")
@@ -282,7 +289,34 @@ def category_hints(page: dict[str, Any]) -> list[str]:
         hints.append("url")
     if page["indexability"] != "Indexable":
         hints.append("directives")
+    for key, category in (("structuredData", "structured-data"), ("h2", "h2"),
+                          ("images", "images"), ("hreflang", "hreflang"),
+                          ("social", "social"), ("scripts", "javascript")):
+        if page.get(key):
+            hints.append(category)
     return sorted(set(hints))
+
+
+def live_category_tabs(template_tabs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Insert live URL-source tabs without changing the static prototype.
+
+    The crawler records whether a URL came from a link, sitemap, archive.org,
+    or seed.  In live mode those are useful first-class grid views, unlike the
+    static fixture where that provenance does not exist.
+    """
+    source_tabs = [
+        {"id": "internal", "label": "Internal URLs"},
+        {"id": "archive-org", "label": "Archive.org URLs"},
+        {"id": "backlinks", "label": "External backlinks"},
+        {"id": "custom-checks", "label": "Custom checks"},
+        {"id": "host-protocol-checks", "label": "Host & protocol"},
+        {"id": "url-variant-checks", "label": "URL variants"},
+        {"id": "fictional-url-checks", "label": "Fictional URLs"},
+        {"id": "external", "label": "External outlinks"},
+        {"id": "security", "label": "Insecure HTTP URLs"},
+    ]
+    remaining = [tab for tab in template_tabs if tab["id"] not in {"internal", "external", "security"}]
+    return source_tabs + remaining + [{"id": "social", "label": "Social Metadata"}]
 
 
 def overview_from_counts(counts: dict[str, int]) -> dict[str, list[dict[str, Any]]]:
@@ -346,8 +380,13 @@ def structured_data_of(schema_json: Any) -> list[dict[str, Any]]:
     for item in as_list(schema_json):
         if isinstance(item, dict):
             stype = item.get("@type") or item.get("type") or "Item"
-            name = item.get("name") or item.get("headline") or ""
-            out.append({"type": str(stype), "name": str(name) if name else ""})
+            parsed = headers(item.get("parsed_data"))
+            name = item.get("name") or item.get("headline") or parsed.get("name") or parsed.get("headline") or ""
+            entry: dict[str, Any] = {"type": str(stype), "name": str(name) if name else ""}
+            for key in ("format", "is_valid", "validation_errors"):
+                if key in item:
+                    entry[key] = item[key]
+            out.append(entry)
         elif isinstance(item, str):
             out.append({"type": item, "name": ""})
     return out
@@ -374,10 +413,15 @@ def page_from_row(row: dict[str, Any], *, has_snapshots: bool) -> dict[str, Any]
     if has_snapshots:
         canonical_values = as_list(row.get("canonical_urls_json"))
         structured = structured_data_of(row.get("schema_json"))
-        # External outlinks are only recoverable from the snapshot link list;
-        # internal ones come from internal_links via attach_link_graph.
+        # Snapshot link inventory includes external links without widening the
+        # crawl frontier. Internal links come from internal_links below.
         external_outlinks = [
-            {"targetUrl": link.get("href"), "anchorText": link.get("anchor_text") or "", "external": True}
+            {
+                "targetUrl": link.get("href"),
+                "anchorText": link.get("anchor_text") or "",
+                "external": True,
+                "follow": bool(link.get("follow", True)),
+            }
             for link in as_list(row.get("links_json"))
             if isinstance(link, dict) and link.get("href") and is_external(str(link["href"]), page_host)
         ]
@@ -402,18 +446,29 @@ def page_from_row(row: dict[str, Any], *, has_snapshots: bool) -> dict[str, Any]
         "metaDescription": row.get("meta_description") or "",
         "metaDescriptionLength": len(row.get("meta_description") or ""),
         "h1": h1_tags,
-        "h1Count": 1 if h1_tags else 0,
+        "h1Count": len(h1_tags.splitlines()) if h1_tags else 0,
+        "h2": row.get("h2_tags") or "",
+        "h2Count": len((row.get("h2_tags") or "").splitlines()),
+        "images": as_list(row.get("images_json")),
+        "hreflang": as_list(row.get("hreflang_json")),
+        "social": [],
+        "scripts": [],
+        "hasStoredHtml": bool(row.get("has_stored_html")),
         "responseTimeMs": round(float(duration) * 1000) if duration else None,
         "redirectUrl": row.get("redirect_url"),
         "internalInlinks": 0,
         "externalInlinks": 0,
         "wordCount": int(row.get("word_count") or 0),
         "canonical": canonical_values[0] if canonical_values else None,
-        "robots": "index, follow" if row.get("overall_indexable") else "non-indexable",
+        "robots": ", ".join(str(v) for v in as_list(row.get("robots_json"))) or "Not recorded",
         "headers": response_headers,
         "structuredData": structured,
         "inlinks": [],
         "outlinks": external_outlinks,
+        # Populated from url_sources by the live store.  The static fixture has
+        # no equivalent provenance, so this deliberately starts empty.
+        "sources": [],
+        "sourceEvidence": [],
     }
     page["categoryHints"] = category_hints(page)
     return page
@@ -435,6 +490,21 @@ def attach_link_graph(
         page["inlinks"] = page_inlinks
         page["internalInlinks"] = len(page_inlinks)
         page["outlinks"] = outlinks.get(uid, []) + page["outlinks"]
+
+
+def attach_url_sources(pages: list[dict[str, Any]], sources: dict[int, list[dict[str, str]]]) -> None:
+    """Attach run-scoped source evidence to the matching page rows."""
+    for page in pages:
+        evidence = sources.get(page["id"], [])
+        page["sourceEvidence"] = evidence
+        page["sources"] = list(dict.fromkeys(row["source"] for row in evidence))
+        if any(source in page["sources"] for source in ("sitemap", "robots_sitemap")):
+            page["categoryHints"].append("sitemaps")
+        # Backlink imports are inbound-link evidence, unlike the crawler's
+        # native internal-link graph.
+        page["externalInlinks"] = len(
+            {row.get("detail") or row["source"] for row in evidence if row["source"] == "backlink"}
+        )
 
 
 @dataclass
@@ -627,14 +697,18 @@ class CrawlLauncher:
             started_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         )
         argv = build_crawl_argv(spec, self.dsn)
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=str(GUI_DIR.parent),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
         self.jobs[job.id] = job
         self._active_id = job.id
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(GUI_DIR.parent),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except Exception:
+            job.state = "failed"
+            raise
         asyncio.create_task(self._watch(job, proc))
         return job
 
@@ -646,6 +720,63 @@ class CrawlLauncher:
         job.state = "succeeded" if job.exit_code == 0 else "failed"
         job.finished_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
+    async def resume(self, payload: dict[str, Any], target: str) -> CrawlJob:
+        if self.active_job():
+            raise RuntimeError("Another GUI crawl is running")
+        job = CrawlJob(id=uuid.uuid4().hex[:12], run_id=payload["runId"], target=target,
+                       mode="Resume", started_at=datetime.now(UTC).isoformat())
+        # Reserve the slot before the subprocess await to prevent duplicate starts.
+        self.jobs[job.id] = job
+        self._active_id = job.id
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "crawler_gui.resume", cwd=str(GUI_DIR.parent),
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            proc.stdin.write(json.dumps({**payload, "dsn": self.dsn}).encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+        except Exception:
+            job.state = "failed"
+            raise
+        asyncio.create_task(self._watch(job, proc))
+        return job
+
+
+def saved_html_evidence(row: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {"id": int(row["url_id"]), "social": [], "scripts": [], "savedOutlinks": [], "evidenceLoaded": True}
+    if not row.get("html_compressed"):
+        result["evidenceNote"] = "No saved HTML for this URL."
+        return result
+    try:
+        document = lxml_html.fromstring(decompress_html(row["html_compressed"]))
+        base = row["url"]
+        base_tags = document.xpath("//base[@href]/@href")
+        if base_tags:
+            base = urljoin(base, base_tags[0])
+        for node in document.xpath("//meta[@property or @name]"):
+            key = (node.get("property") or node.get("name") or "").lower()
+            if key.startswith(("og:", "twitter:")):
+                result["social"].append({"property": key, "content": node.get("content", "")})
+        for node in document.xpath("//script"):
+            kind = node.get("type", "").lower()
+            if kind and kind not in {"module", "text/javascript", "application/javascript"}:
+                continue
+            result["scripts"].append({"url": urljoin(base, node.get("src")) if node.get("src") else "Inline script", "type": kind or "text/javascript"})
+        seen = set()
+        for node in document.xpath("//a[@href]"):
+            target = urljoin(base, node.get("href"))
+            if urlparse(target).scheme not in {"http", "https"} or target in seen:
+                continue
+            seen.add(target)
+            result["savedOutlinks"].append({"targetUrl": target, "anchorText": " ".join(node.text_content().split()),
+                                          "external": is_external(target, host_of(row["url"])),
+                                          "follow": "nofollow" not in node.get("rel", "").lower().split()})
+        result["evidenceNote"] = "Recovered from this run’s saved HTML; no live requests."
+    except (ValueError, OSError, lxml_html.etree.ParserError) as exc:
+        result["evidenceNote"] = f"Saved HTML could not be read ({type(exc).__name__})."
+    return result
+
 
 class LiveStore:
     def __init__(self, dsn: str) -> None:
@@ -653,7 +784,10 @@ class LiveStore:
         self.pool: asyncpg.Pool | None = None
         self.has_run_snapshots = False
         self.has_crawl_schema = False
+        self.has_url_sources = False
+        self.has_run_url_sources = False
         self.template = json.loads(TEMPLATE_PATH.read_text(encoding="utf-8"))
+        self.evidence_cache: OrderedDict[tuple[str, int, int], dict[str, Any]] = OrderedDict()
 
     async def connect(self) -> None:
         self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=4)
@@ -672,15 +806,45 @@ class LiveStore:
                 """
                 SELECT to_regclass('crawl_runs') IS NOT NULL AS has_runs,
                        to_regclass('page_run_snapshots') IS NOT NULL AS has_snapshots,
-                       to_regclass('page_metadata') IS NOT NULL AS has_pages
+                       to_regclass('page_metadata') IS NOT NULL AS has_pages,
+                       to_regclass('url_sources') IS NOT NULL AS has_url_sources,
+                       to_regclass('run_url_sources') IS NOT NULL AS has_run_url_sources
                 """
             )
         self.has_crawl_schema = bool(row["has_runs"] and row["has_pages"])
         self.has_run_snapshots = bool(row["has_snapshots"])
+        self.has_url_sources = bool(row["has_url_sources"])
+        self.has_run_url_sources = bool(row["has_run_url_sources"])
 
     async def close(self) -> None:
         if self.pool:
             await self.pool.close()
+
+    async def resume_plan(self, run_id: str, backend: str | None = None) -> dict[str, Any]:
+        assert self.pool
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM crawl_runs WHERE run_id=$1", run_id)
+            if row is None:
+                raise web.HTTPNotFound(text="Crawl run not found")
+            counts = await conn.fetch("SELECT status, count(*) AS n FROM frontier WHERE run_id=$1 GROUP BY status", run_id)
+        counts = {item["status"]: int(item["n"]) for item in counts}
+        reason = ""
+        config = None
+        if row["mode"] != "open":
+            reason = "Only open crawls have a resumable frontier."
+        elif not counts.get("queued", 0) + counts.get("pending", 0):
+            reason = "No queued or pending URLs remain. Resume does not re-fetch completed URLs or retry recorded HTTP errors."
+        elif row["status"] == "running":
+            reason = "This run is marked running. Check its original worker before resuming with the CLI."
+        else:
+            try:
+                config, _ = resume_configuration(row, backend)
+            except ValueError as exc:
+                reason = str(exc)
+        return {"runId": run_id, "status": row["status"], "queued": counts.get("queued", 0),
+                "pending": counts.get("pending", 0), "done": counts.get("done", 0),
+                "canResume": not reason, "reason": reason, "backend": config.backend if config else backend or "aiohttp",
+                "url": self._first_seed(row["seed_urls_json"])}
 
     async def runs(self) -> list[dict[str, Any]]:
         assert self.pool
@@ -802,6 +966,72 @@ class LiveStore:
             )
         return inlinks, outlinks
 
+    async def _url_sources(
+        self, conn: asyncpg.Connection, run_id: str, url_ids: list[int]
+    ) -> dict[int, list[dict[str, str]]]:
+        """Return source evidence for the selected run's URL identities.
+
+        New databases use ``run_url_sources``. The older identity-level table
+        remains a compatibility fallback, but cannot claim that a historical
+        source belonged to the run currently on screen.
+        """
+        sources: dict[int, list[dict[str, str]]] = defaultdict(list)
+        if not url_ids:
+            return sources
+        if self.has_run_url_sources:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT url_id, source, detail
+                FROM run_url_sources
+                WHERE run_id = $1 AND url_id = ANY($2::int[])
+                ORDER BY url_id, source, detail
+                """,
+                run_id,
+                url_ids,
+            )
+        else:
+            rows = []
+        for row in rows:
+            sources[int(row["url_id"])].append({"source": str(row["source"]), "detail": str(row["detail"] or ""), "scope": "run"})
+        if self.has_url_sources:
+            legacy_rows = await conn.fetch(
+                """
+                SELECT DISTINCT url_id, source, detail
+                FROM url_sources
+                WHERE url_id = ANY($1::int[])
+                ORDER BY url_id, source, detail
+                """,
+                url_ids,
+            )
+            for row in legacy_rows:
+                uid = int(row["url_id"])
+                source, detail = str(row["source"]), str(row["detail"] or "")
+                if not any(item["source"] == source and item["detail"] == detail for item in sources[uid]):
+                    sources[uid].append({"source": source, "detail": detail, "scope": "database"})
+        return sources
+
+    async def evidence(self, run_id: str, ids: list[int]) -> list[dict[str, Any]]:
+        """Recover fields from saved HTML only; never visit a crawled website."""
+        assert self.pool
+        if not self.has_run_snapshots:
+            return [saved_html_evidence({"url_id": uid}) for uid in ids]
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT s.url_id, u.url, s.fetched_at, s.html_compressed
+                   FROM page_run_snapshots s JOIN urls u ON u.id=s.url_id
+                   WHERE s.run_id=$1 AND s.url_id=ANY($2::int[])""", run_id, ids,
+            )
+        results = []
+        for row in rows:
+            key = (run_id, int(row["url_id"]), int(row["fetched_at"]))
+            if key not in self.evidence_cache:
+                self.evidence_cache[key] = await asyncio.to_thread(saved_html_evidence, dict(row))
+            self.evidence_cache.move_to_end(key)
+            results.append(self.evidence_cache[key])
+            while len(self.evidence_cache) > 1000:
+                self.evidence_cache.popitem(last=False)
+        return results
+
     async def _run_counts(self, run_id: str) -> dict[str, int]:
         """Whole-run aggregate counts for the overview sidebar.
 
@@ -855,7 +1085,9 @@ class LiveStore:
         if self.has_run_snapshots:
             query = """
                 SELECT s.url_id, u.url, u.kind, s.final_status_code, s.fetched_at, s.headers_json,
-                       s.title, s.meta_description, s.h1_tags, s.word_count, s.overall_indexable,
+                       s.title, s.meta_description, s.h1_tags, s.h2_tags, s.word_count, s.overall_indexable,
+                       s.images_json, s.hreflang_json, s.robots_json,
+                       (s.html_compressed IS NOT NULL) AS has_stored_html,
                        s.total_duration_seconds, s.canonical_urls_json, s.schema_json, s.links_json,
                        final_url.url AS redirect_url
                 FROM page_run_snapshots s
@@ -899,7 +1131,9 @@ class LiveStore:
         data = copy.deepcopy(self.template)
         data["meta"] = {"uiName": "crawler_gui · live", "source": "PostgreSQL (no crawls yet)", "runId": None}
         data["nav"] = [item for item in data["nav"] if item["id"] != "intent-overlap"]
+        data["categoryTabs"] = live_category_tabs(data["categoryTabs"])
         data["pages"] = []
+        data["customChecks"] = []
         data["history"] = []
         data["crawl"] = {
             "id": None,
@@ -949,13 +1183,26 @@ class LiveStore:
         assert self.pool
         async with self.pool.acquire() as conn:
             inlinks, outlinks = await self._link_graph(conn, [page["id"] for page in pages])
+            url_sources = await self._url_sources(conn, selected["id"], [page["id"] for page in pages])
         attach_link_graph(pages, inlinks, outlinks)
+        attach_url_sources(pages, url_sources)
 
         data = copy.deepcopy(self.template)
         source = "PostgreSQL run snapshot" if self.has_run_snapshots else "PostgreSQL legacy current-state tables"
         data["meta"] = {"uiName": "crawler_gui · live", "source": source, "runId": selected["id"]}
         data["nav"] = [item for item in data["nav"] if item["id"] != "intent-overlap"]
+        data["categoryTabs"] = live_category_tabs(data["categoryTabs"])
         data["pages"] = pages
+        # Ticket 257 will add a dedicated run-scoped probe-results relation.
+        # URL provenance is not a result and must never populate this view.
+        data["customChecks"] = []
+        data["detailTabs"] += [
+            {"id": "social", "label": "Social Metadata"},
+            {"id": "images", "label": "Images"},
+            {"id": "hreflang", "label": "Hreflang"},
+            {"id": "javascript", "label": "JavaScript"},
+            {"id": "sources", "label": "Sources"},
+        ]
         data["history"] = [{**run, "viewing": run["id"] == selected["id"]} for run in runs]
         total = selected["urls"]
         window_end = offset + len(pages)
@@ -1024,6 +1271,42 @@ async def runs_handler(request: web.Request) -> web.Response:
     return web.json_response({"runs": await store.runs()})
 
 
+async def evidence_handler(request: web.Request) -> web.Response:
+    store: LiveStore = request.app["store"]
+    run_id = request.query.get("run", "")
+    try:
+        ids = [int(value) for value in request.query.get("ids", "").split(",") if value]
+    except ValueError:
+        raise web.HTTPBadRequest(text="ids must be integers") from None
+    if not run_id or not ids or len(ids) > 100:
+        raise web.HTTPBadRequest(text="Supply a run and 1–100 URL IDs")
+    return web.json_response({"pages": await store.evidence(run_id, ids)})
+
+
+async def resume_plan_handler(request: web.Request) -> web.Response:
+    return web.json_response(await request.app["store"].resume_plan(request.match_info["run_id"]))
+
+
+async def resume_handler(request: web.Request) -> web.Response:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="Expected a JSON object")
+    backend = payload.get("backend", "aiohttp")
+    if backend not in {"aiohttp", "curl_cffi", "playwright"}:
+        raise web.HTTPBadRequest(text="Unknown backend")
+    max_pages = _parse_int(str(payload.get("maxPages", 200)), minimum=1, maximum=100000, name="maxPages")
+    concurrency = _parse_int(str(payload.get("concurrency", 2)), minimum=1, maximum=20, name="concurrency")
+    plan = await request.app["store"].resume_plan(request.match_info["run_id"], backend)
+    if not plan["canResume"]:
+        raise web.HTTPConflict(text=plan["reason"])
+    try:
+        job = await request.app["launcher"].resume({"runId": plan["runId"], "backend": backend,
+                                                   "maxPages": max_pages, "concurrency": concurrency}, plan["url"])
+    except RuntimeError as exc:
+        raise web.HTTPConflict(text=str(exc)) from None
+    return web.json_response(job.as_json(), status=202)
+
+
 async def chrome_profiles_handler(_: web.Request) -> web.Response:
     """List local Chrome profile metadata for the profile picker (ticket 128)."""
     return web.json_response({"profiles": discover_chrome_profiles()})
@@ -1084,6 +1367,9 @@ def build_app(dsn: str) -> web.Application:
     app.on_response_prepare.append(no_cache)
     app.router.add_get("/api/live/runs", runs_handler)
     app.router.add_get("/api/live/snapshot", snapshot_handler)
+    app.router.add_get("/api/live/evidence", evidence_handler)
+    app.router.add_get("/api/live/runs/{run_id}/resume", resume_plan_handler)
+    app.router.add_post("/api/live/runs/{run_id}/resume", resume_handler)
     app.router.add_get("/api/live/chrome-profiles", chrome_profiles_handler)
     app.router.add_post("/api/live/crawls", create_crawl_handler)
     app.router.add_get("/api/live/crawls/{job_id}", crawl_status_handler)

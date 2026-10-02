@@ -4,6 +4,18 @@ A list of tickets, their status and the md file which summarises action taken fo
 **Authoritative register** for status, acceptance notes, and delivery order.
 Ticket files remain the source of truth for scope and DoD.
 
+### Current position (2026-10-02, template question runner)
+
+- The 96 Questions-tab questions of the audit template are now a registry
+  (`templates/technical-audit-questions.json`, review copy
+  `docs/technical-audit-questions.md`). Every question reads Yes = problem
+  with a deterministic `issue_if` rule and a why-it-matters summary.
+- Ticket **263** (`technical-audit-questions`) answers 11 of them today from
+  a saved audit JSON; the rest are Pending with the reason. Detector batches
+  **264** (stored HTML), **265** (site profile) and **266** (render, probes,
+  external) move the remainder. Numbers 258–262 are skipped because they are
+  in git history. Next unreserved ticket number is **267**.
+
 ### Current position (2026-09-28, Rainbet audit delivery)
 
 - **Immediate priority: finish the Rainbet audit ASAP.** Tickets **240–246**
@@ -22,12 +34,8 @@ Ticket files remain the source of truth for scope and DoD.
   [Rainbet immediate delivery and process follow-up](./rainbet-audit-qa-two-track-2026-09-28.md).
 - Existing tickets **238** (external outlink inventory) and **239** (security
   findings GUI) are preserved. Ticket **257** records the missing run-scoped
-  custom-probe persistence contract exposed by the Rainbet GUI. Tickets
-  **258–262** capture technical SEO audit gaps that can realistically be
-  determined natively by crawler_cli: AI crawler governance and `/llms.txt` (258),
-  HSTS preload and OCSP stapling (259), Accept-Language / geo redirect detection (260),
-  adaptive rate calibration (261), and multi-source discovery reconciliation (262).
-  Next unreserved ticket number is **263**.
+  custom-probe persistence contract exposed by the Rainbet GUI. Next
+  unreserved ticket number is **258**.
 
 ### Current position (2026-09-28, deterministic-check QA)
 
@@ -795,11 +803,10 @@ existing-ticket reuse and review finding coverage.
 - `255` `proposed` [Add a UA-parity check to the technical audit's server-configuration group](./ticket-255-technical-audit-agent-parity-check.md) — **P2, depends on 254:** an opt-in `agent-parity` check alongside the host/variant and soft-404 probes (193/236); differences get Review status only.
 - `256` `proposed` [Accept a Semrush Organic Pages export as a URL source](./ticket-256-semrush-organic-pages-url-source.md) — **P1:** fixes the `csv_urls` fallback that turned the rainbet export into 542 junk URLs; recognises Semrush exports; keeps traffic for `--top`/`--order-by`; flags ranking dev/staging hosts; shares the loader with 217.
 - `257` `proposed` [Persist run-scoped custom probe results for generic GUI reporting](./ticket-257-run-scoped-custom-probe-results.md) — **P1, extends 193/236:** save actual bounded host/protocol, URL-variant and fictional-URL outcomes against a crawl run; generic consumers query only those rows, never source imports or inferred URLs.
-- `258` `proposed` [AI search crawler governance and /llms.txt audit check](./ticket-258-ai-crawler-governance-and-llms-txt.md) — **P2:** audit robots.txt AI bot directives (GPTBot, ClaudeBot, PerplexityBot, etc.) and probe for valid /llms.txt manifests.
-- `259` `proposed` [TLS transport optimization: HSTS preload status and OCSP stapling verification](./ticket-259-hsts-preload-and-ocsp-stapling.md) — **P2:** evaluate HSTS header preload compliance and verify TLS handshake OCSP stapled responses.
-- `260` `proposed` [Accept-Language and geo-redirect detection probe](./ticket-260-accept-language-geo-redirect-probe.md) — **P2, extends 193/236/257:** test origin homepage and key routes with varied Accept-Language headers to detect bot traps and forced dynamic redirects.
-- `261` `proposed` [Adaptive rate calibration and origin crawl-budget pressure detection](./ticket-261-adaptive-rate-calibration-and-backoff.md) — **P2, extends 224:** pre-crawl latency calibration probe and dynamic TTFB/429 backoff controller reporting crawl-budget pressure.
-- `262` `proposed` [Multi-source discovery provenance and graph discrepancy reconciliation](./ticket-262-multi-source-discovery-reconciliation.md) — **P2, extends 186/204/256:** `reconcile-sources` cross-joins crawl graph, XML sitemaps, GSC, and backlink exports into a 5-quadrant provenance matrix.
+- `263` `implemented (local)` [Answer the audit template's Questions tab from a saved technical audit](./ticket-263-technical-audit-question-runner.md) — **P1:** question registry, site profile, `technical-audit-questions` runner with Q26 run gate, data tabs, draft tickets and header-aware Tickets publish; answers 11 questions, the rest Pending with reasons. Real-run publish review outstanding.
+- `264` `proposed` [Stored-HTML detectors for the question runner](./ticket-264-question-detectors-stored-html.md) — **P1, depends on 263:** 17 HTML-only detectors plus answerers over contract checks as their collectors land.
+- `265` `proposed` [Site-profile detectors for the question runner](./ticket-265-question-detectors-site-profile.md) — **P1, depends on 263:** template/hub/parameter/affiliate/host/AI-policy rules; Rainbet profile first.
+- `266` `proposed` [Render, probe and external detectors for the question runner](./ticket-266-question-detectors-render-probe-external.md) — **P2, depends on 263:** rendered, mobile, probe and third-party evidence; heuristics capped at Needs validation.
 
 Deferred lanes remain below.
 

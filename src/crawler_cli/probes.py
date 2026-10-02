@@ -17,6 +17,14 @@ class SoftFourOhFourFingerprint:
     simhash: int | None
 
 
+async def _record_custom_check(engine, url: str, detail: str) -> None:
+    """Attach a synthetic request to the active run when persistence exists."""
+    store = getattr(engine, "store", None)
+    recorder = getattr(store, "record_source_by_url", None)
+    if recorder is not None:
+        await recorder(url, "custom_check", detail)
+
+
 async def soft_404_fingerprint(engine, base_url: str) -> SoftFourOhFourFingerprint:
     """Probe a deliberately bogus URL to capture the site's error-page fingerprint.
 
@@ -39,6 +47,8 @@ async def soft_404_fingerprint(engine, base_url: str) -> SoftFourOhFourFingerpri
         result = await engine.crawl(test_url)
     finally:
         config.follow_redirects = previous_follow_redirects
+
+    await _record_custom_check(engine, test_url, "soft_404_fingerprint")
 
     final_url = result.final_url
     status = result.status

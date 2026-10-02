@@ -53,6 +53,12 @@ DEFAULT_ARCHIVE_STRIP_PATHS = (
     "/.well-known",
 )
 
+# CDX pagination is measured in index blocks, rather than an exact record
+# count.  One block is normally much smaller than an unbounded domain query,
+# while still giving the URL cleaner enough candidates to fill its result cap.
+ARCHIVE_FALLBACK_PAGE_SIZE = 1
+ARCHIVE_FALLBACK_MAX_PAGES = 10
+
 
 def _normalize_url(url: str) -> str | None:
     """Strip whitespace and basic fix-ups."""
@@ -128,6 +134,69 @@ def _guarded_connector(config: CrawlConfig) -> aiohttp.TCPConnector | None:
     return aiohttp.TCPConnector(resolver=_GuardedResolver(policy), use_dns_cache=False)
 
 
+def _cdx_endpoint(query_domain: str, *, page: int | None = None) -> str:
+    endpoint = (
+        "https://web.archive.org/cdx/search/cdx"
+        f"?url={query_domain}/*&output=json&fl=original&filter=statuscode:200&collapse=urlkey"
+    )
+    if page is not None:
+        endpoint += f"&page={page}&pageSize={ARCHIVE_FALLBACK_PAGE_SIZE}"
+    return endpoint
+
+
+async def _fetch_cdx_urls(endpoint: str, config: CrawlConfig, headers: dict[str, str]) -> list[str] | None:
+    """Return CDX originals, or ``None`` when this request failed.
+
+    A failed unpaged request deliberately gets one long attempt.  Retrying the
+    same large response can keep an archive audit blocked for minutes; callers
+    can instead move on to CDX's bounded pagination API.
+    """
+    timeout = aiohttp.ClientTimeout(total=config.archive_timeout_seconds)
+    try:
+        async with aiohttp.ClientSession(
+            timeout=timeout, headers=headers, connector=_guarded_connector(config)
+        ) as session:
+            async with session.get(endpoint) as response:
+                if response.status == 429:
+                    return None
+                response.raise_for_status()
+                payload = await response.json()
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return None
+
+    if not isinstance(payload, list):
+        return None
+    return [row[0] for row in payload[1:] if isinstance(row, list) and row]
+
+
+def _clean_archive_urls(
+    raw_urls: list[str],
+    *,
+    strip_extensions: tuple[str, ...],
+    strip_paths: tuple[str, ...],
+    force_https: bool,
+    force_www: bool,
+) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_urls:
+        norm = _normalize_url(raw)
+        if norm is None:
+            continue
+        cleaned_url = _clean_url(
+            norm,
+            strip_extensions=strip_extensions,
+            strip_paths=strip_paths,
+            force_https=force_https,
+            force_www=force_www,
+        )
+        if cleaned_url is None or cleaned_url in seen:
+            continue
+        seen.add(cleaned_url)
+        cleaned.append(cleaned_url)
+    return cleaned
+
+
 async def discover_historical_urls(
     domain_or_url: str,
     config: CrawlConfig,
@@ -141,57 +210,35 @@ async def discover_historical_urls(
     query_domain = netloc.lower().strip()
     if not query_domain:
         return []
-    endpoint = (
-        "https://web.archive.org/cdx/search/cdx"
-        f"?url={query_domain}/*&output=json&fl=original&filter=statuscode:200&collapse=urlkey"
-    )
-    timeout = aiohttp.ClientTimeout(total=config.archive_timeout_seconds)
     headers = {"User-Agent": config.user_agent, **config.request_headers}
-    attempts = 0
-    raw_urls: list[str] = []
-    while attempts < 3:
-        attempts += 1
-        try:
-            async with aiohttp.ClientSession(
-                timeout=timeout, headers=headers, connector=_guarded_connector(config)
-            ) as session:
-                async with session.get(endpoint) as response:
-                    if response.status == 429:
-                        await asyncio.sleep(1.0 * attempts)
-                        continue
-                    response.raise_for_status()
-                    payload = await response.json()
-                    if not isinstance(payload, list):
-                        return []
-                    raw_urls = [row[0] for row in payload[1:] if isinstance(row, list) and row]
-                    break
-        except (aiohttp.ClientError, asyncio.TimeoutError):
-            await asyncio.sleep(0.5 * attempts)
-
     se = strip_extensions if strip_extensions is not None else DEFAULT_ARCHIVE_STRIP_EXTENSIONS
     sp = strip_paths if strip_paths is not None else DEFAULT_ARCHIVE_STRIP_PATHS
+    raw_urls = await _fetch_cdx_urls(_cdx_endpoint(query_domain), config, headers)
+    if raw_urls is None:
+        raw_urls = []
+        for page in range(ARCHIVE_FALLBACK_MAX_PAGES):
+            page_urls = await _fetch_cdx_urls(_cdx_endpoint(query_domain, page=page), config, headers)
+            if page_urls is None or not page_urls:
+                break
+            raw_urls.extend(page_urls)
+            if len(
+                _clean_archive_urls(
+                    raw_urls,
+                    strip_extensions=se,
+                    strip_paths=sp,
+                    force_https=force_https,
+                    force_www=force_www,
+                )
+            ) >= config.archive_max_urls:
+                break
 
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for raw in raw_urls:
-        norm = _normalize_url(raw)
-        if norm is None:
-            continue
-        cleaned_url = _clean_url(
-            norm,
-            strip_extensions=se,
-            strip_paths=sp,
-            force_https=force_https,
-            force_www=force_www,
-        )
-        if cleaned_url is None:
-            continue
-        if cleaned_url in seen:
-            continue
-        seen.add(cleaned_url)
-        cleaned.append(cleaned_url)
-
-    return cleaned[: config.archive_max_urls]
+    return _clean_archive_urls(
+        raw_urls,
+        strip_extensions=se,
+        strip_paths=sp,
+        force_https=force_https,
+        force_www=force_www,
+    )[: config.archive_max_urls]
 
 
 async def audit_archive_urls(

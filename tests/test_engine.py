@@ -47,6 +47,7 @@ class FakeStore:
         self.frontier: dict[str, dict[str, object]] = {}
         self.saved_metadata: dict[str, dict[str, object]] = {}
         self.requested_batch_sizes: list[int] = []
+        self.sources: dict[str, str | None] = {}
 
     async def persist(self, result) -> None:
         return None
@@ -75,6 +76,7 @@ class FakeStore:
                 "retry_count": 0,
                 "retry_at": 0,
             }
+            self.sources[url] = source
             inserted += 1
         return inserted
 
@@ -631,6 +633,33 @@ async def test_open_crawl_archive_seed_dedupes_same_host_csv_urls(monkeypatch):
 
     assert len(job.results) == 4
     assert archive_calls == ["www.officeriders.com", "app.officeriders.com"]
+
+
+@pytest.mark.asyncio
+async def test_open_crawl_records_archive_candidates_as_archive_source(monkeypatch):
+    store = FakeStore()
+    engine = CrawlEngine(
+        CrawlConfig(max_concurrency=1, default_open_crawl_limit=2, seed_from_archive=True, discover_sitemaps=False),
+        store=store,
+    )
+    engine.backend = FakeBackend(
+        {
+            "https://example.com/": "<html><body>home</body></html>",
+            "https://example.com/retired-page": "<html><body>archive</body></html>",
+        }
+    )
+    engine._robots = FakeRobots()
+
+    async def fake_discover_historical_urls(seed: str, config: CrawlConfig) -> list[str]:
+        assert seed == "example.com"
+        return ["https://example.com/retired-page"]
+
+    monkeypatch.setattr("crawler_cli.engine.discover_historical_urls", fake_discover_historical_urls)
+
+    await engine.crawl_open(["https://example.com/"], max_urls=2)
+
+    assert store.sources["https://example.com/"] == "seed"
+    assert store.sources["https://example.com/retired-page"] == "archive_org"
 
 
 @pytest.mark.asyncio

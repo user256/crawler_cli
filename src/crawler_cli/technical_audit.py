@@ -16,8 +16,8 @@ import json
 from .schema import JSON_LD_PARSER_MODE, _PARSER
 
 
-TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/2"
-TECHNICAL_AUDIT_RULESET_VERSION = "technical-audit-rules/1"
+TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/3"
+TECHNICAL_AUDIT_RULESET_VERSION = "technical-audit-rules/2"
 
 # The report names are run-scoped and have no dependency on a changing live
 # endpoint.  Keep this list explicit so additions are intentional and appear
@@ -32,6 +32,11 @@ TECHNICAL_AUDIT_REPORTS = (
     "tracking-parameter-links",
     "near-duplicates",
     "internal-authority",
+    "locale-content-alignment",
+    "render-url-candidates",
+    "render-attempts",
+    "inventory-interactions",
+    "supplied-search-evidence",
 )
 
 # This is the code representation of the table in
@@ -149,7 +154,7 @@ TECHNICAL_AUDIT_CHECK_CONTRACT = (
         "id": "rendered-robots-links",
         "title": "Rendered robots links",
         "detail_sheet": "Rendered robots links",
-        "required_evidence": "raw/rendered links and robots evaluation",
+        "required_evidence": "initial raw/rendered links plus an explicit pre/post-interaction inventory capture",
         "owner_ticket": "205",
     },
     {
@@ -205,7 +210,7 @@ TECHNICAL_AUDIT_CHECK_CONTRACT = (
         "id": "locale-html-lang",
         "title": "Locale HTML language",
         "detail_sheet": "Locale language",
-        "required_evidence": "HTML attributes and declared locale rules",
+        "required_evidence": "HTML lang, hreflang context and run-scoped primary-content signatures",
         "owner_ticket": "221",
     },
     {
@@ -324,7 +329,7 @@ TECHNICAL_AUDIT_CHECK_CONTRACT = (
         "id": "supplied-search-evidence",
         "title": "Supplied search evidence",
         "detail_sheet": "Supplied search evidence",
-        "required_evidence": "supplied Search Console, URL Inspection, CDN, origin or analytics evidence",
+        "required_evidence": "dated Search Console performance/indexing and URL Inspection records",
         "owner_ticket": "204",
     },
     {
@@ -360,6 +365,9 @@ _IMPLEMENTED_CHECK_REPORTS = {
     "schema-parser-diagnostics": ("schema-compatibility",),
     "image-markup": ("image-issues",),
     "internal-authority": ("internal-authority",),
+    "locale-html-lang": ("locale-content-alignment",),
+    "rendered-robots-links": ("render-url-candidates", "render-attempts", "inventory-interactions"),
+    "supplied-search-evidence": ("supplied-search-evidence",),
 }
 
 TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES = {
@@ -370,6 +378,15 @@ TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES = {
     "schema-parser-defects": "schema-parser-diagnostics",
     "image-markup-candidates": "image-markup",
     "internal-authority-inventory": "internal-authority",
+    "parameterized-canonical-links": "parameter-and-faceted-controls",
+    "feature-specific-structured-data": "structured-data-feature-rules",
+    "performance-and-conditional-requests": "conditional-cache-behaviour",
+    "metadata-and-locale": "locale-html-lang",
+    "canonical-consistency": "canonical-target-validation",
+    "hreflang-consistency": "hreflang-html-http",
+    "current-robots-and-sitemaps": "sitemap-integrity",
+    "url-variants-and-soft-404": "url-host-and-variants",
+    "rendered-mobile-and-resource-evidence": "rendered-indexing-parity",
 }
 
 TECHNICAL_AUDIT_CHECK_REGISTRY = tuple(
@@ -423,6 +440,18 @@ def build_technical_audit(
     ]
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
     link_failures = [row for row in rows["internal-link-quality"] if row.get("issue") == "error_target"]
+    locale_signature_count = _optional_int(context.get("locale_signature_count"))
+    locale_alignment = rows["locale-content-alignment"]
+    interaction_rows = rows["inventory-interactions"]
+    inventory_issues = [
+        row
+        for row in interaction_rows
+        if row.get("requires_interaction") is True
+        or (_optional_int(row.get("post_interaction_document_url_count")) or 0)
+        > (_optional_int(row.get("initial_document_url_count")) or 0)
+    ]
+    search_records = rows["supplied-search-evidence"]
+    search_issues = [row for row in search_records if row.get("is_issue") is True]
 
     detector_checks = (
         _check(
@@ -529,6 +558,48 @@ def build_technical_audit(
             denominator=parsed_html_count,
             completion_state=completion_state,
         ),
+        _check(
+            "locale-html-lang",
+            "Locale language and substantive content",
+            "Locale language",
+            locale_alignment,
+            "finding",
+            "The same primary-content signature occurs on pages that declare different languages; confirm the page purpose before treating this as untranslated locale content.",
+            available=source_coverage["locale-content-alignment"]["available"] is True
+            and locale_signature_count is not None
+            and locale_signature_count > 0,
+            denominator=locale_signature_count,
+            completion_state=completion_state,
+            qualification="review_required",
+        ),
+        _check(
+            "rendered-robots-links",
+            "Inventory discovery without interaction",
+            "Rendered robots links",
+            inventory_issues,
+            "finding",
+            "A documented interaction exposes additional document URLs that were absent from the initial rendered DOM.",
+            available=source_coverage["inventory-interactions"]["available"] is True,
+            denominator=len(interaction_rows)
+            if source_coverage["inventory-interactions"]["available"] is True
+            else None,
+            completion_state=completion_state,
+            verified_evidence=interaction_rows,
+        ),
+        _check(
+            "supplied-search-evidence",
+            "Google indexing, canonical and performance evidence",
+            "Supplied search evidence",
+            search_issues,
+            "finding",
+            "Supplied Search Console or URL Inspection records show an indexing, canonical-selection or priority-URL impression issue.",
+            available=source_coverage["supplied-search-evidence"]["available"] is True,
+            denominator=len(search_records)
+            if source_coverage["supplied-search-evidence"]["available"] is True
+            else None,
+            completion_state=completion_state,
+            verified_evidence=search_records,
+        ),
     )
 
     checks = _complete_contract_checks(detector_checks, source_coverage)
@@ -537,6 +608,9 @@ def build_technical_audit(
         *_indexability_actions(indexability_conflicts),
         *_tracking_actions(rows["tracking-parameter-links"]),
         *_schema_actions(schema_defects),
+        *_locale_actions(locale_alignment),
+        *_inventory_actions(inventory_issues),
+        *_search_evidence_actions(search_issues),
     ]
     return {
         "schema_version": TECHNICAL_AUDIT_SCHEMA_VERSION,
@@ -578,6 +652,7 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     source_coverage = raw_coverage if isinstance(raw_coverage, Mapping) else {}
     registry = audit.get("check_registry", [])
     audit_log = audit.get("audit_log", [])
+    ticket_register = audit.get("ticket_register", [])
     overview = [
         ["Metric", "Value"],
         ["Audit schema", str(audit["schema_version"])],
@@ -617,12 +692,18 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
             ),
         ),
     }
+    if "ticket_register" in audit and isinstance(ticket_register, list):
+        from .technical_audit_tickets import ticket_sheet_table
+
+        tables["Tickets"] = ticket_sheet_table([row for row in ticket_register if isinstance(row, Mapping)])
     for check in checks:
         assert isinstance(check, Mapping)
         evidence = check["evidence"]
         assert isinstance(evidence, list)
-        if evidence:
-            tables[str(check["detail_sheet"])] = _table(evidence)
+        verified_evidence = check.get("verified_evidence", [])
+        assert isinstance(verified_evidence, list)
+        if evidence or verified_evidence:
+            tables[str(check["detail_sheet"])] = _table(evidence or verified_evidence)
     return tables
 
 
@@ -638,13 +719,17 @@ def _check(
     denominator: int | None,
     completion_state: str,
     qualification: str | None = None,
+    verified_evidence: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     if evidence:
         status = positive_status
     elif not available or denominator is None or completion_state != "complete":
         status = "partial" if available else "unavailable"
     elif denominator == 0:
-        status = "not_applicable"
+        # A zero collection population is not proof that this control does
+        # not apply.  It commonly means that hashing, rendering or another
+        # collector never produced a usable population.
+        status = "unavailable"
     else:
         status = "pass"
     return {
@@ -663,6 +748,7 @@ def _check(
         "interpretation": interpretation,
         "qualification": qualification,
         "evidence": evidence,
+        "verified_evidence": verified_evidence or [],
     }
 
 
@@ -804,6 +890,54 @@ def _schema_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, obje
             fix=str(row.get("remediation", "Correct the structured-data markup and validate it again.")),
             impact="Invalid markup can prevent eligible structured-data features from being understood.",
             evidence="schema-parser-diagnostics",
+        )
+        for row in rows
+    ]
+
+
+def _locale_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    return [
+        _action(
+            problem="Locale pages reuse the same primary-content signature",
+            url=row.get("url", ""),
+            explanation=(
+                f"Declared language: {row.get('html_lang', '')}; the same signature appears in "
+                f"{row.get('languages', '')}. Confirm whether this page is intentionally shared before assignment."
+            ),
+            fix="Translate and localise the page's primary content, or remove the locale URL from indexation and hreflang.",
+            impact="Untranslated locale pages can compete with the intended language version and give users an irrelevant result.",
+            evidence="locale-html-lang",
+        )
+        for row in rows
+    ]
+
+
+def _inventory_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    return [
+        _action(
+            problem="Inventory URLs require a user interaction to appear",
+            url=row.get("source_url", row.get("url", "")),
+            explanation=(
+                f"Action {row.get('action', 'interaction')} increased document URLs from "
+                f"{row.get('initial_document_url_count', '')} to {row.get('post_interaction_document_url_count', '')}."
+            ),
+            fix="Publish crawlable pagination or ordinary links for the additional inventory URLs in the initial response or initial rendered DOM.",
+            impact="URLs exposed only after interaction can remain undiscovered or receive weak internal discovery signals.",
+            evidence="rendered-robots-links",
+        )
+        for row in rows
+    ]
+
+
+def _search_evidence_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    return [
+        _action(
+            problem="Google evidence conflicts with the intended technical state",
+            url=row.get("url", ""),
+            explanation=str(row.get("issue_reason", "The supplied search record requires review.")),
+            fix="Resolve the recorded indexing, canonical or performance cause, then validate the URL through URL Inspection and the next Search Console export.",
+            impact="Google may exclude the URL, select another canonical, or show no demand for a declared priority page.",
+            evidence="supplied-search-evidence",
         )
         for row in rows
     ]

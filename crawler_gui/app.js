@@ -1,7 +1,6 @@
 /* crawler_gui — bind sample-data.json into the layout shell */
 import { adaptReportData, mountIntentOverlapViewer } from "./intent-overlap.mjs";
 import { REPORT_DATA } from "./intent-report-fixture.mjs";
-import { REPORT_DATA as THOMPSONS_REPORT_DATA } from "./thompsons-intent-report.mjs";
 
 const state = {
   data: null,
@@ -10,6 +9,8 @@ const state = {
   detail: "url-details",
   selectedId: null,
   filter: "",
+  sortKey: "row",
+  sortDirection: "asc",
   historyFilter: "all",
   newCrawlType: "Spider",
   scheduleType: "Single URL",
@@ -21,6 +22,8 @@ const state = {
   pageLimit: null,
   crawlJobId: null,
   chromeProfiles: [],
+  evidenceTask: null,
+  evidenceMessage: "",
 };
 
 const INTENT_ONLY_DATA = {
@@ -91,10 +94,42 @@ function filteredPages() {
   const { data, category, filter } = state;
   let rows = data.pages;
 
-  if (category === "external") {
-    rows = rows.filter((p) => p.outlinks?.some((o) => o.external));
+  if (category === "internal" && state.live) {
+    // The live bridge records these sources in url_sources.  Seeds are
+    // deliberately excluded: this view means discovered from a site link or
+    // XML sitemap, rather than every URL in the crawl run.
+    rows = rows.filter((p) => p.sources?.some((source) => ["link", "sitemap", "robots_sitemap"].includes(source)));
+  } else if (category === "archive-org") {
+    rows = rows.filter((p) => p.sources?.includes("archive_org"));
+  } else if (category === "backlinks") {
+    rows = rows.filter((p) => p.sources?.includes("backlink"));
+  } else if (["custom-checks", "host-protocol-checks", "url-variant-checks", "fictional-url-checks"].includes(category)) {
+    rows = data.customChecks || [];
+    const groupByCategory = {
+      "host-protocol-checks": "host-protocol",
+      "url-variant-checks": "url-variant",
+      "fictional-url-checks": "fictional",
+    };
+    if (groupByCategory[category]) rows = rows.filter((p) => p.checkGroup === groupByCategory[category]);
+  } else if (category === "external") {
+    rows = rows.flatMap((source) =>
+      (source.outlinks || [])
+        .filter((link) => link.external)
+        .map((link) => ({
+          ...source,
+          address: link.targetUrl,
+          externalTarget: link.targetUrl,
+          sourceAddress: source.address,
+          anchorText: link.anchorText || "—",
+          follow: link.follow === false ? "Nofollow" : "Follow",
+        }))
+    );
+  } else if (category === "social") {
+    rows = rows.filter((p) => p.social?.length);
+  } else if (category === "javascript") {
+    rows = rows.filter((p) => p.scripts?.length);
   } else if (category === "security") {
-    rows = rows.filter((p) => !p.address.startsWith("https://") || p.statusCode >= 400);
+    rows = rows.filter((p) => !p.address.startsWith("https://"));
   } else if (category !== "internal") {
     rows = rows.filter((p) => (p.categoryHints || []).includes(category));
   }
@@ -102,7 +137,7 @@ function filteredPages() {
   const q = filter.trim().toLowerCase();
   if (q) {
     rows = rows.filter((p) =>
-      [p.address, p.title, p.status, String(p.statusCode), p.contentType]
+      [p.address, p.sourceAddress, p.anchorText, p.title, p.status, p.check, p.protocol, p.hostVariant, p.result, String(p.statusCode), p.contentType]
         .join(" ")
         .toLowerCase()
         .includes(q)
@@ -111,11 +146,89 @@ function filteredPages() {
   return rows;
 }
 
+const NUMERIC_SORT_COLUMNS = new Set([
+  "row",
+  "statusCode",
+  "responseTimeMs",
+  "internalInlinks",
+  "externalInlinks",
+  "titleLength",
+  "metaDescriptionLength",
+  "h1Count",
+  "h2Count", "imageCount", "schemaCount", "hreflangCount", "socialCount", "scriptCount", "externalOutlinkCount", "wordCount",
+]);
+
+function sortValue(page, key, rowIndex) {
+  if (key === "row") return rowIndex;
+  if (["sources", "sourceEvidence", "schemaTypes", "languages", "ogTitle", "twitterCard"].includes(key)) return cellValue(page, key, rowIndex);
+  const computed = {imageCount: "images", schemaCount: "structuredData", hreflangCount: "hreflang", socialCount: "social", scriptCount: "scripts"};
+  if (computed[key]) return (page[computed[key]] || []).length;
+  if (key === "externalOutlinkCount") return (page.outlinks || []).filter((link) => link.external).length;
+  return page[key];
+}
+
+function sortPages(pages) {
+  const { sortKey, sortDirection } = state;
+  return pages
+    .map((page, index) => ({ page, index, value: sortValue(page, sortKey, index) }))
+    .sort((a, b) => {
+      const aBlank = a.value == null || a.value === "";
+      const bBlank = b.value == null || b.value === "";
+      if (aBlank || bBlank) {
+        if (aBlank && bBlank) return a.index - b.index;
+        return aBlank ? 1 : -1;
+      }
+      let comparison;
+      if (NUMERIC_SORT_COLUMNS.has(sortKey)) {
+        comparison = Number(a.value) - Number(b.value);
+      } else {
+        comparison = String(a.value).localeCompare(String(b.value), undefined, { numeric: true, sensitivity: "base" });
+      }
+      return comparison === 0 ? a.index - b.index : comparison * (sortDirection === "asc" ? 1 : -1);
+    })
+    .map(({ page }) => page);
+}
+
 function columnsForCategory(cat) {
+  if (cat === "external") {
+    return [
+      { key: "row", label: "#" },
+      { key: "externalTarget", label: "Destination URL" },
+      { key: "sourceAddress", label: "Source URL" },
+      { key: "anchorText", label: "Anchor text" },
+      { key: "follow", label: "Follow" },
+    ];
+  }
+  if (["custom-checks", "host-protocol-checks", "url-variant-checks", "fictional-url-checks"].includes(cat)) {
+    return [
+      { key: "row", label: "#" },
+      { key: "check", label: "Check" },
+      { key: "address", label: "Attempted URL" },
+      { key: "protocol", label: "Protocol" },
+      { key: "hostVariant", label: "Host variant" },
+      { key: "statusCode", label: "Status Code" },
+      { key: "status", label: "Status" },
+      { key: "redirectUrl", label: "Redirect URL" },
+      { key: "result", label: "Recorded result" },
+    ];
+  }
   const base = [
     { key: "row", label: "#" },
     { key: "address", label: "Address" },
   ];
+  const reportColumns = {
+    "structured-data": [["schemaCount", "Items"], ["schemaTypes", "Types"], ["title", "Title"]],
+    h2: [["h2Count", "H2 Count"], ["h2", "H2 headings"], ["title", "Title"]],
+    images: [["imageCount", "Image references"], ["title", "Page title"]],
+    hreflang: [["hreflangCount", "Alternates"], ["languages", "Languages"], ["title", "Title"]],
+    social: [["ogTitle", "Open Graph title"], ["twitterCard", "Twitter card"], ["socialCount", "Social tags"]],
+    javascript: [["scriptCount", "Saved script references"], ["title", "Title"]],
+    sitemaps: [["sourceEvidence", "Source evidence"], ["statusCode", "Status Code"], ["title", "Title"]],
+    canonicals: [["canonical", "Canonical URL"], ["indexability", "Indexability"]],
+    directives: [["robots", "Recorded directives"], ["indexability", "Indexability"]],
+    content: [["wordCount", "Words"], ["title", "Title"]],
+  };
+  if (reportColumns[cat]) return [...base, ...reportColumns[cat].map(([key, label]) => ({ key, label }))];
   if (cat === "response-codes") {
     return [
       ...base,
@@ -132,6 +245,18 @@ function columnsForCategory(cat) {
       { key: "internalInlinks", label: "Int. Inlinks" },
       { key: "externalInlinks", label: "Ext. Inlinks" },
       { key: "statusCode", label: "Status" },
+    ];
+  }
+  if (cat === "internal" || cat === "archive-org" || cat === "backlinks") {
+    return [
+      ...base,
+      { key: "sources", label: "Discovery Source" },
+      { key: "sourceEvidence", label: "Source evidence" },
+      ...(cat === "backlinks" ? [{ key: "externalInlinks", label: "Backlinks" }] : []),
+      { key: "statusCode", label: "Status Code" },
+      { key: "status", label: "Status" },
+      { key: "indexability", label: "Indexability" },
+      { key: "title", label: "Title" },
     ];
   }
   if (cat === "page-titles") {
@@ -172,6 +297,29 @@ function columnsForCategory(cat) {
 function cellValue(page, key, rowNum) {
   if (key === "row") return rowNum;
   if (key === "responseTimeMs") return page.responseTimeMs != null ? `${page.responseTimeMs} ms` : "";
+  const computed = {imageCount: "images", schemaCount: "structuredData", hreflangCount: "hreflang", socialCount: "social", scriptCount: "scripts"};
+  if (computed[key]) return (page[computed[key]] || []).length;
+  if (key === "externalOutlinkCount") return (page.outlinks || []).filter((link) => link.external).length;
+  if (key === "schemaTypes") return [...new Set((page.structuredData || []).map((item) => item.type))].join(", ");
+  if (key === "languages") return [...new Set((page.hreflang || []).map((item) => item.hreflang))].join(", ");
+  if (key === "ogTitle" || key === "twitterCard") return page.social?.find((item) => item.property === (key === "ogTitle" ? "og:title" : "twitter:card"))?.content || "—";
+  if (key === "sources") {
+    const labels = {
+      link: "Internal link",
+      sitemap: "XML sitemap",
+      robots_sitemap: "robots.txt sitemap",
+      archive_org: "Archive.org",
+      backlink: "Backlink export",
+      custom_check: "Custom status check",
+      seed: "Seed URL",
+    };
+    return (page.sources || []).map((source) => labels[source] || source).join(", ");
+  }
+  if (key === "sourceEvidence") {
+    const details = [...new Set((page.sourceEvidence || []).map((item) => `${item.scope === "database" ? "Database-wide: " : ""}${item.detail || item.source}`).filter(Boolean))];
+    if (details.length <= 3) return details.join(", ") || "—";
+    return `${details.slice(0, 3).join(", ")} +${details.length - 3}`;
+  }
   const v = page[key];
   return v == null || v === "" ? "—" : v;
 }
@@ -204,10 +352,17 @@ function renderCrawlBar() {
   const c = state.data.crawl;
   $("#crawl-url").value = c.url;
   $("#crawl-mode").value = c.mode;
-  const pct = c.progress.pct;
+  const pct = state.live ? (state.data.live?.totalPages ? 100 * state.data.pages.length / state.data.live.totalPages : 0) : c.progress.pct;
   $("#mini-progress-fill").style.width = `${pct}%`;
   $("#mini-progress-label").textContent = `${Math.round(pct)}%`;
   renderRunSelector();
+  $("#btn-resume").hidden = !state.live || !state.data.live?.snapshotBacked;
+  for (const id of ["#btn-new-schedule", "#btn-delete"]) {
+    $(id).disabled = state.live;
+    $(id).title = state.live ? "Not available in this local GUI" : "";
+  }
+  const schedule = $("#nav-links [data-nav='schedule']");
+  if (schedule && state.live) { schedule.disabled = true; schedule.title = "Scheduling is not connected"; }
 }
 
 function runOptionLabel(run) {
@@ -253,18 +408,41 @@ function renderCategoryTabs() {
 }
 
 function renderTable() {
-  const pages = filteredPages();
+  const pages = sortPages(filteredPages());
   const cols = columnsForCategory(state.category);
   $("#filter-total").textContent = `Filter Total: ${pages.length}`;
+  const notes = [];
+  if (state.live && state.data.live?.hasMore) notes.push("Filters and sorting apply to loaded URLs. Load all for the full run.");
+  if (["internal", "sitemaps", "archive-org", "backlinks"].includes(state.category) && state.data.pages.some((p) => p.sourceEvidence?.some((item) => item.scope === "database"))) notes.push("Database-wide source evidence is labelled; it may come from another run or import.");
+  if (["custom-checks", "host-protocol-checks", "url-variant-checks", "fictional-url-checks"].includes(state.category) && (state.data.customChecks || []).some((p) => p.sourceEvidence?.some((item) => item.scope === "database"))) notes.push("Database-wide custom-check evidence is labelled; it may come from another run or import.");
+  if (["social", "javascript", "external"].includes(state.category)) notes.push(state.evidenceMessage || "Recovered from saved HTML. Select a row for details.");
+  if (state.category === "javascript") notes.push("Script references are shown here; these are not JavaScript-discovered crawl URLs.");
+  if (state.category === "security") notes.push("This is HTTPS transport screening only. Security findings will appear in a dedicated view once recorded for a run.");
+  if (["custom-checks", "host-protocol-checks", "url-variant-checks", "fictional-url-checks"].includes(state.category) && !pages.length) notes.push("No run-scoped custom-probe results are stored for this view. Viewing these tabs never runs a probe or infers one from URL sources.");
+  $("#grid-note").textContent = notes.join(" ");
+  $("#grid-note").hidden = !notes.length;
 
-  const thead = `<tr>${cols.map((c) => `<th>${escapeHtml(c.label)}</th>`).join("")}</tr>`;
+  const thead = `<tr>${cols
+    .map((c) => {
+      const active = c.key === state.sortKey;
+      const direction = active ? state.sortDirection : "none";
+      const directionLabel = direction === "asc" ? "ascending" : "descending";
+      const indicator = active ? (state.sortDirection === "asc" ? " ▲" : " ▼") : "";
+      return `<th aria-sort="${direction === "none" ? "none" : directionLabel}"><button type="button" class="sort-header${
+        active ? " active" : ""
+      }" data-sort="${escapeHtml(c.key)}" aria-label="Sort by ${escapeHtml(c.label)}${
+        active ? `, currently ${directionLabel}` : ""
+      }">${escapeHtml(c.label)}<span aria-hidden="true">${indicator}</span></button></th>`;
+    })
+    .join("")}</tr>`;
   const tbody = pages
     .map((p, i) => {
       const selected = p.id === state.selectedId ? " selected" : "";
       const cells = cols
         .map((c) => {
           const cls = cellClass(p, c.key);
-          return `<td class="${cls}">${escapeHtml(cellValue(p, c.key, i + 1))}</td>`;
+          const value = escapeHtml(cellValue(p, c.key, i + 1));
+          return `<td class="${cls}" title="${value}">${value}</td>`;
         })
         .join("");
       return `<tr data-id="${p.id}" class="${selected}">${cells}</tr>`;
@@ -272,7 +450,7 @@ function renderTable() {
     .join("");
 
   $("#grid-head").innerHTML = thead;
-  $("#grid-body").innerHTML = tbody || `<tr><td colspan="${cols.length}" class="muted">No rows for this filter.</td></tr>`;
+  $("#grid-body").innerHTML = tbody || `<tr><td colspan="${cols.length}" class="muted">${state.evidenceTask && ["social", "javascript", "external"].includes(state.category) ? "Reading saved HTML…" : "No matching evidence in the loaded URLs."}</td></tr>`;
 }
 
 function renderSidebar() {
@@ -350,7 +528,9 @@ function sectionHtml(title, rows) {
 }
 
 function selectedPage() {
-  return state.data.pages.find((p) => p.id === state.selectedId) || null;
+  return state.data.pages.find((p) => p.id === state.selectedId)
+    || (state.data.customChecks || []).find((p) => p.id === state.selectedId)
+    || null;
 }
 
 function renderDetailTabs() {
@@ -404,12 +584,12 @@ function renderDetail() {
         </div>
       </div>`;
   } else if (state.detail === "inlinks") {
-    body.innerHTML = linkTable(
+    body.innerHTML = (state.live ? '<p class="muted">Internal inlinks reflect the latest stored link graph, which may include other runs.</p>' : "") + linkTable(
       ["Source URL", "Anchor Text", "Follow"],
       (page.inlinks || []).map((l) => [l.sourceUrl, l.anchorText, l.follow ? "True" : "False"])
     );
   } else if (state.detail === "outlinks") {
-    body.innerHTML = linkTable(
+    body.innerHTML = (state.live ? `<p class="muted">${escapeHtml(page.evidenceNote || "Reading outlinks from this run’s saved HTML…")}</p>` : "") + linkTable(
       ["Target URL", "Anchor Text", "External"],
       (page.outlinks || []).map((l) => [l.targetUrl, l.anchorText, l.external ? "True" : "False"])
     );
@@ -427,10 +607,24 @@ function renderDetail() {
       entries.map(([k, v]) => [k, String(v)])
     );
   } else if (state.detail === "structured-data") {
-    const rows = (page.structuredData || []).map((s) => [s.type, s.name || s.headline || ""]);
+    const rows = (page.structuredData || []).map((s) => [s.type, s.name || s.headline || "", s.format || "", s.is_valid == null ? "Not recorded" : s.is_valid ? "Valid" : "Invalid", (s.validation_errors || []).join("; ")]);
     body.innerHTML = rows.length
-      ? linkTable(["Type", "Name / Headline"], rows)
+      ? linkTable(["Type", "Name / Headline", "Format", "Parser validation", "Errors"], rows)
       : `<p class="muted">No structured data on this URL.</p>`;
+  } else if (state.detail === "images") {
+    body.innerHTML = linkTable(["Image URL", "Alt", "Alt present", "Width", "Height"], (page.images || []).map((item) => [item.url, item.alt || "", item.alt_present ? "Yes" : "No", item.width ?? "", item.height ?? ""]));
+  } else if (state.detail === "hreflang") {
+    body.innerHTML = linkTable(["Language", "Alternate URL", "Source"], (page.hreflang || []).map((item) => [item.hreflang, item.href, item.source]));
+  } else if (state.detail === "sources") {
+    body.innerHTML = linkTable(["Source", "Evidence", "Scope"], (page.sourceEvidence || []).map((item) => [item.source, item.detail || "—", item.scope === "database" ? "Database-wide; not attributed to this run" : "This run"]));
+  } else if (state.detail === "social" || state.detail === "javascript") {
+    if (!page.evidenceLoaded && state.live) {
+      body.innerHTML = '<p class="muted">Reading this URL’s saved HTML…</p>';
+    } else {
+      body.innerHTML = `<p class="muted">${escapeHtml(page.evidenceNote || "Saved crawl evidence")}</p>` + (state.detail === "social"
+        ? linkTable(["Property", "Content"], (page.social || []).map((item) => [item.property, item.content]))
+        : linkTable(["Script URL", "Type"], (page.scripts || []).map((item) => [item.url, item.type])));
+    }
   }
 }
 
@@ -456,6 +650,7 @@ function renderLiveNote() {
   const note = $("#live-note");
   const more = $("#btn-load-more");
   const live = state.data.live;
+  $("#btn-load-all").hidden = !state.live || !live?.hasMore;
   if (!state.live || !live) {
     note.hidden = true;
     more.hidden = true;
@@ -475,6 +670,14 @@ function renderLiveNote() {
 function renderStatusbar() {
   const c = state.data.crawl;
   $("#status-label").textContent = c.statusLabel;
+  if (state.live) {
+    $("#status-avg").textContent = "Saved results";
+    $("#status-cur").textContent = "";
+    const loaded = state.data.pages.length, total = state.data.live?.totalPages || 0;
+    $("#status-fill").style.width = `${total ? 100 * loaded / total : 0}%`;
+    $("#status-fill-label").textContent = `${loaded} of ${total} saved URLs loaded`;
+    return;
+  }
   $("#status-avg").textContent = `Average: ${c.speed.average} URL/s`;
   $("#status-cur").textContent = `Current: ${c.speed.current} URL/s`;
   const pct = c.progress.pct;
@@ -638,7 +841,28 @@ function bindEvents() {
     const btn = e.target.closest("[data-cat]");
     if (!btn) return;
     state.category = btn.dataset.cat;
+    state.sortKey = "row";
+    state.sortDirection = "asc";
+    const detailForCategory = {"structured-data": "structured-data", social: "social", images: "images", hreflang: "hreflang", javascript: "javascript", external: "outlinks", sitemaps: "sources", backlinks: "sources", "archive-org": "sources", "custom-checks": "sources", "host-protocol-checks": "sources", "url-variant-checks": "sources", "fictional-url-checks": "sources"};
+    state.detail = detailForCategory[state.category] || "url-details";
     renderCategoryTabs();
+    renderTable();
+    state.selectedId = filteredPages()[0]?.id ?? null;
+    renderTable();
+    renderDetail();
+    ensureEvidence();
+  });
+
+  $("#grid-head").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-sort]");
+    if (!btn) return;
+    const key = btn.dataset.sort;
+    if (state.sortKey === key) {
+      state.sortDirection = state.sortDirection === "asc" ? "desc" : "asc";
+    } else {
+      state.sortKey = key;
+      state.sortDirection = "asc";
+    }
     renderTable();
   });
 
@@ -654,6 +878,7 @@ function bindEvents() {
     if (!btn) return;
     state.detail = btn.dataset.detail;
     renderDetail();
+    ensureEvidence();
   });
 
   $("#grid-body").addEventListener("click", (e) => {
@@ -662,11 +887,14 @@ function bindEvents() {
     state.selectedId = Number(tr.dataset.id);
     renderTable();
     renderDetail();
+    ensureEvidence();
   });
 
   $("#grid-filter").addEventListener("input", (e) => {
     state.filter = e.target.value;
+    if (!filteredPages().some((page) => page.id === state.selectedId)) state.selectedId = filteredPages()[0]?.id ?? null;
     renderTable();
+    renderDetail();
   });
 
   $("#btn-history").addEventListener("click", () => {
@@ -675,6 +903,53 @@ function bindEvents() {
   });
 
   $("#btn-load-more").addEventListener("click", loadMore);
+  $("#btn-resume").addEventListener("click", async () => {
+    const run = state.data.crawl.id;
+    $("#modal-resume").dataset.run = run;
+    $("#resume-summary").textContent = "Checking saved queue…";
+    $("#btn-confirm-resume").disabled = true;
+    openModal("#modal-resume");
+    try {
+      const response = await fetch(`./api/live/runs/${encodeURIComponent(run)}/resume`, { cache: "no-store" });
+      if (!response.ok) throw new Error(await response.text());
+      const plan = await response.json();
+      $("#resume-summary").textContent = `${plan.queued} queued · ${plan.pending} pending · ${plan.done} done. ${plan.reason || "The saved crawl scope will be preserved. Runtime settings were not saved; review the settings below."}`;
+      $("#resume-backend").value = plan.backend;
+      $("#btn-confirm-resume").disabled = !plan.canResume;
+    } catch (err) { $("#resume-summary").textContent = err.message; }
+  });
+  $("#btn-confirm-resume").addEventListener("click", async () => {
+    const button = $("#btn-confirm-resume");
+    button.disabled = true;
+    try {
+      const response = await fetch(`./api/live/runs/${encodeURIComponent($("#modal-resume").dataset.run)}/resume`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ backend: $("#resume-backend").value, maxPages: Number($("#resume-max").value), concurrency: Number($("#resume-concurrency").value) }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const job = await response.json();
+      closeModals();
+      pollCrawlJob(job.jobId);
+      toast(`Resuming ${job.runId}`);
+    } catch (err) {
+      $("#resume-summary").textContent = err.message;
+      button.disabled = false;
+    }
+  });
+  $("#btn-load-all").addEventListener("click", async () => {
+    const data = state.data;
+    const button = $("#btn-load-all");
+    button.disabled = true;
+    button.textContent = "Loading all…";
+    try {
+      while (state.data === data && data.live?.hasMore) {
+        if (!await loadMore()) break;
+      }
+    } finally {
+      button.disabled = false;
+      button.textContent = "Load all";
+    }
+  });
 
   $("#run-selector").addEventListener("change", (e) => switchRun(e.target.value));
 
@@ -805,7 +1080,7 @@ function bindEvents() {
       profileDirectory: selectedProfile?.profileDirectory || "",
     };
     closeModals();
-    toast(state.configContext === "schedule" ? "Scheduled crawl options saved" : "Configuration updated in local fixture state only");
+    toast(state.configContext === "schedule" ? "Scheduled crawl options saved" : "Settings saved for the next new crawl in this browser session");
   });
 
   $("#opt-concurrency").addEventListener("input", (e) => {
@@ -832,7 +1107,7 @@ function showCrawler() {
   renderNav();
 }
 
-function showIntentOverlap() {
+async function showIntentOverlap() {
   state.view = "intent-overlap";
   $(".stage").hidden = true;
   $("#category-tabs").hidden = true;
@@ -840,7 +1115,18 @@ function showIntentOverlap() {
   root.hidden = false;
   if (!state.intentViewer) {
     const isThompsons = state.intentDataset === "thompsons";
-    const report = isThompsons ? THOMPSONS_REPORT_DATA : REPORT_DATA;
+    let report = REPORT_DATA;
+    if (isThompsons) {
+      try {
+        // This export is optional in a checkout.  Loading it lazily keeps the
+        // normal crawler UI available when the Thompson fixture is absent.
+        ({ REPORT_DATA: report } = await import("./thompsons-intent-report.mjs"));
+      } catch (err) {
+        root.textContent = `Could not load the Thompsons report fixture: ${err.message}`;
+        renderNav();
+        return;
+      }
+    }
     // Static fixture today; replace only this adapter input with the future
     // deterministic GET /crawls/{crawl_id}/runs/{run_id}/intent-report endpoint.
     state.intentViewer = mountIntentOverlapViewer(root, adaptReportData(report, {
@@ -864,6 +1150,49 @@ async function fetchSnapshot({ run, offset = 0, limit = state.pageLimit } = {}) 
   const res = await fetch(endpoint, { cache: "no-store" });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
+}
+
+async function ensureEvidence() {
+  if (!state.live || state.evidenceTask) return;
+  const data = state.data;
+  const pending = () => {
+    if (state.data !== data) return [];
+    const all = ["social", "javascript", "external"].includes(state.category);
+    const selected = ["social", "javascript", "outlinks"].includes(state.detail);
+    return data.pages.filter((page) => !page.evidenceLoaded && (all || (selected && page.id === state.selectedId)));
+  };
+  if (!pending().length) return;
+  state.evidenceTask = data;
+  try {
+    while (pending().length) {
+      const batch = pending().slice(0, 100);
+      state.evidenceMessage = `Reading saved HTML: ${pending().length} loaded URLs remaining…`;
+      renderTable();
+      const endpoint = new URL("./api/live/evidence", window.location.href);
+      endpoint.searchParams.set("run", data.crawl.id);
+      endpoint.searchParams.set("ids", batch.map((page) => page.id).join(","));
+      const response = await fetch(endpoint, { cache: "no-store" });
+      if (!response.ok) throw new Error(await response.text());
+      const recovered = new Map((await response.json()).pages.map((page) => [page.id, page]));
+      for (const page of batch) {
+        const evidence = recovered.get(page.id);
+        Object.assign(page, evidence || { evidenceLoaded: true, evidenceNote: "No saved snapshot for this URL." });
+        if (evidence?.savedOutlinks) page.outlinks = evidence.savedOutlinks;
+      }
+      if (state.data !== data) break;
+      if (!filteredPages().some((p) => p.id === state.selectedId)) state.selectedId = filteredPages()[0]?.id ?? null;
+      renderTable();
+      renderDetail();
+    }
+    state.evidenceMessage = "Recovered from this run’s saved HTML. No live website requests.";
+  } catch (err) {
+    state.evidenceMessage = `Could not read saved HTML: ${err.message}. Reopen the tab to retry.`;
+  } finally {
+    state.evidenceTask = null;
+    renderTable();
+    renderDetail();
+    if (state.data !== data) ensureEvidence();
+  }
 }
 
 function liveChipLabel() {
@@ -949,7 +1278,7 @@ async function refreshRuns(preferRunId) {
     if (target) {
       // The new run exists now, so show it without restarting the bridge.
       state.data.history = runs;
-      await switchRun(preferRunId);
+      await switchRun(preferRunId, true);
     } else {
       state.data.history = runs.map((r) => ({ ...r, viewing: r.id === state.data.crawl.id }));
       renderRunSelector();
@@ -959,11 +1288,12 @@ async function refreshRuns(preferRunId) {
   }
 }
 
-async function switchRun(runId) {
-  if (!state.live || !runId || runId === state.data.crawl.id) return;
+async function switchRun(runId, force = false) {
+  if (!state.live || !runId || (!force && runId === state.data.crawl.id)) return;
   try {
     const next = await fetchSnapshot({ run: runId });
     state.data = next;
+    state.evidenceMessage = "";
     state.selectedId = state.data.pages[0]?.id ?? null;
     // Keep the URL shareable: the selected run stays addressable via ?run=.
     const url = new URL(window.location.href);
@@ -979,13 +1309,16 @@ async function switchRun(runId) {
 }
 
 async function loadMore() {
+  const data = state.data;
   const live = state.data.live;
-  if (!live?.hasMore) return;
+  if (!live?.hasMore) return false;
   const btn = $("#btn-load-more");
+  if (btn.disabled) return false;
   btn.disabled = true;
   btn.textContent = "Loading…";
   try {
     const next = await fetchSnapshot({ run: live.runId, offset: live.windowEnd, limit: live.limit });
+    if (state.data !== data) return false;
     // Append the next window; overview/issues are whole-run aggregates from the
     // server, so they need no client-side recomputation.
     state.data.pages = state.data.pages.concat(next.pages);
@@ -993,8 +1326,12 @@ async function loadMore() {
     renderTable();
     renderLiveNote();
     renderStatusbar();
+    renderCrawlBar();
+    ensureEvidence();
+    return true;
   } catch (err) {
     toast(`Could not load more URLs: ${err.message}`);
+    return false;
   } finally {
     btn.disabled = false;
     btn.textContent = "Load more";
@@ -1010,6 +1347,7 @@ function renderAll() {
   renderDetail();
   renderStatusbar();
   renderLiveNote();
+  ensureEvidence();
 }
 
 async function main() {

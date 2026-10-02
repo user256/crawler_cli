@@ -598,7 +598,7 @@ async def test_playwright_backend_can_launch_persistent_profile(monkeypatch):
     assert fake_playwright.chromium.launch_called is False
     assert fake_playwright.chromium.persistent_user_data_dir == "/tmp/edge-user-data"
     assert fake_playwright.chromium.persistent_kwargs == {
-        "user_agent": "crawler_cli/0.1",
+        "user_agent": "canonicalbot/0.1",
         "ignore_https_errors": False,
         "extra_http_headers": {},
         "headless": False,

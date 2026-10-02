@@ -35,4 +35,8 @@ Redirect reports and migration checks consequently under-report redirects.
 
 ## Status
 
+Consumed by [technical audit ticket 186](./ticket-186-technical-audit-link-graph-correctness.md)
+and [live recheck ticket 185](./ticket-185-technical-audit-live-rechecks-publication-gate.md).
+The new lane reuses this backend fix; report multi-issue classification belongs to 186.
+
 proposed (2026-09-23, Priority: **P1**) — redirect-report correctness; found in Shopify crawls.

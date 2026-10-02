@@ -499,6 +499,32 @@ async def test_record_sources_bulk_deduplicates(store: AsyncpgStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_source_evidence_is_scoped_to_the_active_run(store: AsyncpgStore) -> None:
+    url = "https://example.com/landing"
+    await store.create_crawl_run("source-run-a", seed_urls=[url], config_hash="a", config={})
+    await store.record_sources_bulk([(url, "https://referrer.example/a")], source="backlink")
+    await store.create_crawl_run("source-run-b", seed_urls=[url], config_hash="b", config={})
+    await store.record_sources_bulk([(url, "https://referrer.example/b")], source="backlink")
+
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT rus.run_id, rus.detail
+            FROM run_url_sources rus
+            JOIN urls u ON u.id = rus.url_id
+            WHERE u.url = $1 AND rus.source = 'backlink'
+            ORDER BY rus.run_id
+            """,
+            url,
+        )
+    assert [(row["run_id"], row["detail"]) for row in rows] == [
+        ("source-run-a", "https://referrer.example/a"),
+        ("source-run-b", "https://referrer.example/b"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_web_vitals_round_trip(store: AsyncpgStore) -> None:
     """CWV columns persist and read back via the worst_cwv_pages report (ticket 046)."""
     from crawler_cli.reports import CrawlReports

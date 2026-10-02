@@ -1,6 +1,6 @@
 # crawler_cli
 
-`crawler_cli` is a reusable async crawler module extracted from `PostgreSQLCrawler` and narrowed into a smaller package for resumable bounded crawling, extraction, sitemap parsing, robots-aware fetch control, and asyncpg persistence.
+`crawler_cli` is a reusable async crawler module extracted from `PostgreSQLCrawler` and narrowed into a smaller package for resumable bounded crawling, extraction using trafilatura, sitemap parsing, robots-aware fetch control, and asyncpg persistence.
 
 ## What This Is / What This Is Not
 
@@ -621,6 +621,27 @@ crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
   --out ./audit-evidence/technical-audit.json
 ```
 
+The command also builds the template-column `ticket_register` in the JSON.
+It contains evidence-backed remediation tickets and only the explicitly mapped
+Improvement tickets for material missing inputs. Publish a fresh copy of the
+Sheets template with the same run:
+
+```bash
+crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
+  --search-evidence ./search-console-records.json \
+  --inventory-interaction-evidence ./listing-interactions.json \
+  --google-sheets-template 'https://docs.google.com/spreadsheets/d/.../edit' \
+  --out ./audit-evidence/technical-audit.json
+```
+
+`--search-evidence` accepts dated CSV/JSON records with `url`, `source` and
+`export_date`; optional fields cover index status, Google/user canonical,
+clicks, impressions and `priority_url`. `--inventory-interaction-evidence`
+accepts source URL, action and initial/post-interaction document-link counts.
+The audit records a finding only when that completed action exposes additional
+URLs. The copied workbook receives the exact `Tickets` columns plus Overview,
+Audit Log and URL-level evidence tabs.
+
 ### Run snapshots and retention
 
 Each fetch is retained as an immutable page snapshot for its crawl run. The
@@ -875,7 +896,7 @@ async def main() -> None:
         backend="aiohttp",
         max_concurrency=5,
         rate_limit_per_second=2.0,
-        user_agent="crawler_cli/0.1",
+        user_agent="canonicalbot/0.1",
     )
     engine = CrawlEngine(config)
 

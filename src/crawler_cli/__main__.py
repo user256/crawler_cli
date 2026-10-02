@@ -74,7 +74,8 @@ from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
 from .reports import CrawlReports
-from .technical_audit import TECHNICAL_AUDIT_REPORTS, build_technical_audit
+from .technical_audit import TECHNICAL_AUDIT_REPORTS, audit_sheet_tables, build_technical_audit
+from .technical_audit_tickets import TicketLanguageError, build_ticket_register, load_ticket_language
 from .validators import (
     non_negative_float,
     non_negative_int,
@@ -623,7 +624,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     if curl_impersonate and curl_impersonate != "none" and not args.custom_ua:
         _user_agent = ""
     else:
-        _user_agent = args.custom_ua or "crawler_cli/0.1"
+        _user_agent = args.custom_ua or "canonicalbot/0.1"
 
     user_data_dir = getattr(args, "playwright_user_data_dir", "") or ""
     if user_data_dir:
@@ -2058,6 +2059,7 @@ class _SavedDiscoveredLink(TypedDict, total=False):
     fragment: str | None
     url_parameters: str | None
     original_href: str | None
+    follow: bool
 
 
 class _SavedJavaScriptUrlCandidate(TypedDict, total=False):
@@ -2236,6 +2238,8 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.near_duplicates(threshold=args.simhash_threshold, limit=args.similarity_limit)
     if name == "internal-authority":
         return await reports.internal_authority()
+    if name == "locale-content-alignment":
+        return await reports.locale_content_alignment()
     raise ValueError(f"unknown report: {name}")
 
 
@@ -2364,9 +2368,37 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             "internal-link-quality": "links_json",
             "tracking-parameter-links": "links_json",
             "near-duplicates": "content_hash_simhash",
+            "locale-content-alignment": "run_intent_signatures",
         }
         evidence = {}
+        supplied_inputs: dict[str, list[dict[str, object]]] = {}
+        if args.search_evidence:
+            from .technical_audit_inputs import AuditInputError, load_search_evidence
+
+            try:
+                supplied_inputs["supplied-search-evidence"] = load_search_evidence(args.search_evidence)
+            except AuditInputError as exc:
+                print(f"Error: --search-evidence {exc}", file=sys.stderr)
+                return EXIT_VALIDATION
+        if args.inventory_interaction_evidence:
+            from .technical_audit_inputs import AuditInputError, load_inventory_interaction_evidence
+
+            try:
+                supplied_inputs["inventory-interactions"] = load_inventory_interaction_evidence(
+                    args.inventory_interaction_evidence
+                )
+            except AuditInputError as exc:
+                print(f"Error: --inventory-interaction-evidence {exc}", file=sys.stderr)
+                return EXIT_VALIDATION
         for name in TECHNICAL_AUDIT_REPORTS:
+            if name in supplied_inputs:
+                evidence[name] = supplied_inputs[name]
+                continue
+            if name in {"inventory-interactions", "supplied-search-evidence"}:
+                continue
+            if name in {"render-url-candidates", "render-attempts"}:
+                evidence[name] = await _fetch_report(reports, name, args)
+                continue
             capability = capability_by_report.get(name)
             if capability and capabilities.get(capability) is not True:
                 continue
@@ -2394,11 +2426,141 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         await store.close()
 
     audit = build_technical_audit(crawl_run_id=run_id, reports=evidence, run_context=run_context)
+    try:
+        audit["ticket_register"] = build_ticket_register(audit, load_ticket_language(args.ticket_language))
+    except TicketLanguageError as exc:
+        print(f"Error: ticket language {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(audit, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     print(f"Wrote deterministic technical audit to {output}")
 
+    if args.google_sheets_template:
+        from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services
+
+        try:
+            drive, sheets = google_services(credential_path(args.google_sheets_credentials))
+            title = args.google_sheets_title or f"Technical SEO Audit – {run_id}"
+            url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
+                template=args.google_sheets_template,
+                title=title,
+                folder_id=args.google_sheets_folder,
+                tables=audit_sheet_tables(audit),
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
+            return EXIT_VALIDATION
+        print(f"Published technical audit workbook: {url}")
+
+    return EXIT_SUCCESS
+
+
+def _run_technical_audit_questions(args: argparse.Namespace) -> int:
+    """Answer every registry question from one saved audit bundle; no database or network."""
+    from .technical_audit_questions import (
+        QuestionRegistryError,
+        answer_questions,
+        load_question_registry,
+        question_ticket_rows,
+        questions_sheet_tables,
+        validate_question_registry,
+    )
+
+    try:
+        registry = load_question_registry(args.questions)
+        profile = json.loads(Path(args.site_profile).read_text(encoding="utf-8")) if args.site_profile else None
+        if profile is not None and not isinstance(profile, dict):
+            raise QuestionRegistryError("site profile must be a JSON object")
+        audit = json.loads(Path(args.audit).read_text(encoding="utf-8"))
+        language = load_ticket_language(args.ticket_language)
+    except (OSError, json.JSONDecodeError, QuestionRegistryError, TicketLanguageError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    if profile is not None:
+        try:
+            validate_question_registry(registry, profile)
+        except QuestionRegistryError as exc:
+            # Missing keys only leave those questions Pending; say which.
+            print(f"Warning: {exc}", file=sys.stderr)
+
+    answers = answer_questions(audit, registry, profile)
+    tickets = question_ticket_rows(audit, registry, answers, language)
+    output = Path(args.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "crawl_run_id": audit.get("crawl_run_id"),
+        "registry_version": registry.get("version"),
+        "answers": answers,
+        "tickets": tickets,
+    }
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    counts: dict[str, int] = {}
+    for answer in answers:
+        counts[str(answer["status"])] = counts.get(str(answer["status"]), 0) + 1
+    summary = ", ".join(f"{name} {counts.get(name, 0)}" for name in ("Issue", "Needs validation", "Healthy", "Pending"))
+    print(f"Wrote {len(answers)} question answers and {len(tickets)} draft tickets to {output} ({summary})")
+
+    if args.google_sheets_template:
+        from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services
+
+        try:
+            drive, sheets = google_services(credential_path(args.google_sheets_credentials))
+            title = args.google_sheets_title or f"Technical SEO Audit – {audit.get('crawl_run_id')}"
+            url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
+                template=args.google_sheets_template,
+                title=title,
+                folder_id=args.google_sheets_folder,
+                tables=questions_sheet_tables(audit, registry, answers, tickets),
+                locate_ticket_header=True,
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
+            return EXIT_VALIDATION
+        print(f"Published question workbook: {url}")
+    return EXIT_SUCCESS
+
+
+async def _run_import_backlinks(args: argparse.Namespace) -> int:
+    """Import inbound-link evidence for one existing crawl run."""
+    from .backlinks import BacklinkImportError, load_backlink_import
+
+    try:
+        imported = load_backlink_import(
+            args.file,
+            target_column=args.target_column,
+            referring_column=args.referring_column,
+        )
+    except (OSError, BacklinkImportError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+
+    store = _store_from_args(args)
+    try:
+        await store.initialize()
+        run = await store.get_crawl_run(args.crawl_run_id)
+        if run is None:
+            print(f"Error: crawl run {args.crawl_run_id!r} was not found", file=sys.stderr)
+            return EXIT_VALIDATION
+        store.set_active_crawl_run(args.crawl_run_id)
+        await store.record_sources_bulk(imported.pairs, source="backlink")
+    finally:
+        await store.close()
+
+    print(
+        json.dumps(
+            {
+                "crawl_run_id": args.crawl_run_id,
+                "source": "backlink",
+                "file": str(args.file),
+                "rows_read": imported.total_rows,
+                "valid_target_rows": len(imported.pairs),
+                "unique_targets": len({url for url, _ in imported.pairs}),
+                "skipped_rows": imported.skipped_rows,
+            },
+            sort_keys=True,
+        )
+    )
     return EXIT_SUCCESS
 
 
@@ -2500,6 +2662,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
                     fragment=item.get("fragment"),
                     url_parameters=item.get("url_parameters"),
                     original_href=item.get("original_href"),
+                    follow=bool(item.get("follow", True)),
                 )
             )
         return links
@@ -4034,8 +4197,88 @@ def _build_parser() -> argparse.ArgumentParser:
         default=5000,
         help="Maximum indexable pages compared by near-duplicates (default 5000)",
     )
+    audit_parser.add_argument(
+        "--search-evidence",
+        help="CSV or JSON Search Console/URL Inspection records. Required fields: url, source, export_date.",
+    )
+    audit_parser.add_argument(
+        "--inventory-interaction-evidence",
+        help=(
+            "CSV or JSON initial-render versus interaction capture. Required fields: "
+            "source_url, action, initial_document_url_count, post_interaction_document_url_count."
+        ),
+    )
+    audit_parser.add_argument(
+        "--ticket-language",
+        help="Ticket-language JSON. Defaults to templates/technical-audit-ticket-language.json.",
+    )
+    audit_parser.add_argument(
+        "--google-sheets-template",
+        help="Copy this Google Sheets template and publish the Tickets and evidence tabs.",
+    )
+    audit_parser.add_argument("--google-sheets-title", help="Title for the copied Google Sheet.")
+    audit_parser.add_argument("--google-sheets-folder", help="Optional Google Drive folder ID for the copied sheet.")
+    audit_parser.add_argument(
+        "--google-sheets-credentials",
+        help="Service-account credential file; otherwise GOOGLE_DOCS_OAUTH_TOKEN_FILE is used.",
+    )
     _add_postgres_args(audit_parser)
     _add_reporting_run_selector(audit_parser)
+
+    questions_parser = subparsers.add_parser(
+        "technical-audit-questions",
+        help="Answer the audit template's Questions tab from a saved technical-audit JSON",
+    )
+    questions_parser.add_argument(
+        "--audit", required=True, help="technical-audit JSON written by technical-audit --out"
+    )
+    questions_parser.add_argument("--out", required=True, help="Write the question answers JSON to this path")
+    questions_parser.add_argument(
+        "--site-profile",
+        help="Site profile JSON (see templates/site-profile.example.json); questions needing it stay Pending without it.",
+    )
+    questions_parser.add_argument(
+        "--questions",
+        help="Question registry JSON. Defaults to templates/technical-audit-questions.json.",
+    )
+    questions_parser.add_argument(
+        "--ticket-language",
+        help="Ticket-language JSON. Defaults to templates/technical-audit-ticket-language.json.",
+    )
+    questions_parser.add_argument(
+        "--google-sheets-template",
+        help="Copy this Google Sheets template and publish the Questions, Tickets and data tabs.",
+    )
+    questions_parser.add_argument("--google-sheets-title", help="Title for the copied Google Sheet.")
+    questions_parser.add_argument(
+        "--google-sheets-folder", help="Optional Google Drive folder ID for the copied sheet."
+    )
+    questions_parser.add_argument(
+        "--google-sheets-credentials",
+        help="Service-account credential file; otherwise GOOGLE_DOCS_OAUTH_TOKEN_FILE is used.",
+    )
+
+    backlink_parser = subparsers.add_parser(
+        "import-backlinks",
+        help="Attach an inbound-link export to an existing crawl run",
+    )
+    backlink_parser.add_argument("file", help="Backlink CSV/TSV export (UTF-8 or UTF-16)")
+    backlink_parser.add_argument(
+        "--crawl-run-id",
+        required=True,
+        help="Existing crawl run whose target URLs receive the backlink evidence",
+    )
+    backlink_parser.add_argument(
+        "--target-column",
+        default="Target URL",
+        help="Column containing the crawled-site URL (default: %(default)s)",
+    )
+    backlink_parser.add_argument(
+        "--referring-column",
+        default="Referring page URL",
+        help="Column containing the external referring URL (default: %(default)s)",
+    )
+    _add_postgres_args(backlink_parser)
 
     cmp_parser = subparsers.add_parser(
         "compare",
@@ -4372,6 +4615,9 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "intent-overlap",
         "render-report",
         "report",
+        "technical-audit",
+        "technical-audit-questions",
+        "import-backlinks",
         "compare",
         "compare-urls",
         "compare-renders",
@@ -4427,6 +4673,10 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_report(args)
     if command == "technical-audit":
         return await _run_technical_audit(args)
+    if command == "technical-audit-questions":
+        return _run_technical_audit_questions(args)
+    if command == "import-backlinks":
+        return await _run_import_backlinks(args)
     if command == "compare":
         return await _run_compare(args)
     if command == "compare-urls":

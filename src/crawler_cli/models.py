@@ -158,6 +158,7 @@ class DiscoveredLink:
     fragment: str | None = None
     url_parameters: str | None = None
     original_href: str | None = None
+    follow: bool = True
 
 
 @dataclass(slots=True)

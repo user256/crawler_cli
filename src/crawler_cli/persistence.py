@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from .amp import VARIANT_KIND_AMP, classify_amp_variants, urls_match
 from .compression import compress_html, decompress_html, is_compressed
 from .detection.analytics import AnalyticsDetectionResult
+from .extract import extract_links
 from .hashing import sha256_hash, simhash64, simhash_to_signed, simhash_to_unsigned
 from .models import (
     CrawlResult,
@@ -31,6 +32,28 @@ from .security_persistence import (
     purge_run_security_evidence,
     security_run_stats,
 )
+
+
+def _snapshot_link_inventory(result: CrawlResult) -> list[DiscoveredLink]:
+    """Return persisted links without widening the crawl frontier.
+
+    ``result.discovered_links`` is intentionally scoped by the engine. The
+    immutable run snapshot also needs external outbound links, but those must
+    remain inventory evidence rather than candidates for fetching.
+    """
+    links = list(result.discovered_links or [])
+    if not result.raw_html:
+        return links
+    source_host = urlparse(result.final_url).netloc.lower()
+    present = {(link.href, link.xpath) for link in links}
+    for link in extract_links(result.raw_html, result.final_url, same_host_only=False):
+        if urlparse(link.href).netloc.lower() == source_host:
+            continue
+        key = (link.href, link.xpath)
+        if key not in present:
+            links.append(link)
+            present.add(key)
+    return links
 
 
 # --- Query-row schemas (ticket 083) -----------------------------------------
@@ -673,7 +696,7 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS url_sources (
         url_id INTEGER NOT NULL REFERENCES urls(id),
-        source TEXT NOT NULL CHECK (source IN ('seed', 'link', 'sitemap', 'archive_org', 'robots_sitemap')),
+        source TEXT NOT NULL CHECK (source IN ('seed', 'link', 'sitemap', 'archive_org', 'backlink', 'custom_check', 'robots_sitemap')),
         detail TEXT,
         detail_key TEXT GENERATED ALWAYS AS (COALESCE(detail, '')) STORED,
         first_seen_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -682,6 +705,29 @@ SCHEMA_STATEMENTS = [
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_url_sources_source ON url_sources(source)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_url_sources (
+        run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+        url_id INTEGER NOT NULL REFERENCES urls(id) ON DELETE CASCADE,
+        source TEXT NOT NULL CHECK (source IN ('seed', 'link', 'sitemap', 'archive_org', 'backlink', 'custom_check', 'robots_sitemap')),
+        detail TEXT,
+        detail_key TEXT GENERATED ALWAYS AS (COALESCE(detail, '')) STORED,
+        first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (run_id, url_id, source, detail_key)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_url_sources_run_source
+    ON run_url_sources(run_id, source, url_id)
+    """,
+    # The original source check predates backlink imports.  Recreate it during
+    # initialisation so existing databases accept the same source vocabulary as
+    # a fresh install.
+    """ALTER TABLE url_sources DROP CONSTRAINT IF EXISTS url_sources_source_check""",
+    """
+    ALTER TABLE url_sources ADD CONSTRAINT url_sources_source_check
+    CHECK (source IN ('seed', 'link', 'sitemap', 'archive_org', 'backlink', 'custom_check', 'robots_sitemap'))
     """,
     """
     CREATE TABLE IF NOT EXISTS schema_types (
@@ -1127,6 +1173,7 @@ CRAWL_TABLES: tuple[str, ...] = SECURITY_TABLES + (
     "pages",
     "schema_data",
     "frontier",
+    "run_url_sources",
     "url_sources",
     "urls",
     "html_languages",
@@ -2004,6 +2051,14 @@ class AsyncpgStore:
                 )
                 existing_ids = {int(row["url_id"]) for row in existing_rows}
                 filtered = [item for item in frontier_data if url_to_id[item[0]] not in existing_ids]
+                if source:
+                    # A URL may already be queued when it is found through a
+                    # second channel. Preserve that channel's evidence too.
+                    await self._insert_source_rows(
+                        conn,
+                        [(url_to_id[item[0]], source, source_detail) for item in frontier_data],
+                        run_id=resolved_run_id,
+                    )
                 if not filtered:
                     return 0
 
@@ -2047,16 +2102,6 @@ class AsyncpgStore:
                     """,
                     batch_data,
                 )
-                if source:
-                    source_batch = [(url_to_id[item[0]], source, source_detail) for item in filtered]
-                    await conn.executemany(
-                        """
-                        INSERT INTO url_sources (url_id, source, detail)
-                        VALUES ($1, $2, $3)
-                        ON CONFLICT (url_id, source, detail_key) DO NOTHING
-                        """,
-                        source_batch,
-                    )
                 return len(batch_data)
 
     async def frontier_speculative_outstanding_counts(self, *, run_id: str | None = None) -> dict[str, int]:
@@ -2232,36 +2277,55 @@ class AsyncpgStore:
             )
         return int(result.split()[-1])
 
+    async def _insert_source_rows(
+        self,
+        conn: asyncpg.Connection,
+        rows: Sequence[tuple[int, str, str | None]],
+        *,
+        run_id: str,
+    ) -> None:
+        """Record source evidence globally and for one selected crawl run.
+
+        Identity-level provenance remains available to existing consumers in
+        ``url_sources``. The GUI reads ``run_url_sources`` so a later crawl
+        cannot make an earlier run appear to have used a source it never saw.
+        """
+        if not rows:
+            return
+        ordered = sorted(set(rows), key=lambda row: (row[0], row[1], row[2] or ""))
+        await conn.executemany(
+            """
+            INSERT INTO url_sources (url_id, source, detail)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (url_id, source, detail_key) DO NOTHING
+            """,
+            ordered,
+        )
+        # Library callers can make a one-off request without creating a crawl
+        # run. Keep its global provenance, while deliberately avoiding a made-up
+        # run just to satisfy this run-scoped table's foreign key.
+        await conn.executemany(
+            """
+            INSERT INTO run_url_sources (run_id, url_id, source, detail)
+            SELECT $1, $2, $3, $4
+            WHERE EXISTS (SELECT 1 FROM crawl_runs WHERE run_id = $1)
+            ON CONFLICT (run_id, url_id, source, detail_key) DO NOTHING
+            """,
+            [(run_id, url_id, source, detail) for url_id, source, detail in ordered],
+        )
+
     async def record_source(self, url_id: int, source: str, detail: str | None = None) -> None:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO url_sources (url_id, source, detail)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (url_id, source, detail_key) DO NOTHING
-                """,
-                url_id,
-                source,
-                detail,
-            )
+            await self._insert_source_rows(conn, [(url_id, source, detail)], run_id=self.active_run_id)
 
     async def record_source_by_url(self, url: str, source: str, detail: str | None = None) -> None:
         await self.connect()
         assert self.pool is not None
         async with self.pool.acquire() as conn:
             url_id = await self._get_or_create_url(conn, url)
-            await conn.execute(
-                """
-                INSERT INTO url_sources (url_id, source, detail)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (url_id, source, detail_key) DO NOTHING
-                """,
-                url_id,
-                source,
-                detail,
-            )
+            await self._insert_source_rows(conn, [(url_id, source, detail)], run_id=self.active_run_id)
 
     async def record_sources_bulk(
         self,
@@ -2289,18 +2353,9 @@ class AsyncpgStore:
             urls = [u for u, _ in url_detail_pairs]
             url_id_map = await self._bulk_get_or_create_urls(conn, urls)
             rows = [(url_id_map[url], source, detail) for url, detail in url_detail_pairs if url in url_id_map]
-            # Sort by url_id so concurrent inserts lock url_sources rows in a
-            # consistent order (deadlock avoidance).
-            rows.sort(key=lambda r: r[0])
-            if rows:
-                await conn.executemany(
-                    """
-                    INSERT INTO url_sources (url_id, source, detail)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (url_id, source, detail_key) DO NOTHING
-                    """,
-                    rows,
-                )
+            # The helper orders rows before upsert to avoid deadlocks when
+            # concurrent crawler workers discover overlapping URLs.
+            await self._insert_source_rows(conn, rows, run_id=self.active_run_id)
 
     async def persist_sitemap_hreflang_bulk(
         self,
@@ -2531,8 +2586,13 @@ class AsyncpgStore:
             robots = [*extracted.meta_robots.raw, *extracted.x_robots_tag.raw]
             schema = list(extracted.schema_data or [])
             links = [
-                {"href": link.href, "anchor_text": link.anchor_text, "xpath": link.xpath}
-                for link in (result.discovered_links or [])
+                {
+                    "href": link.href,
+                    "anchor_text": link.anchor_text,
+                    "xpath": link.xpath,
+                    "follow": link.follow,
+                }
+                for link in _snapshot_link_inventory(result)
                 if link.href
             ]
             images = [

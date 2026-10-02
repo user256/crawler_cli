@@ -26,6 +26,13 @@ _TRACKING_PARAMETERS = {
 }
 
 
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 class CrawlReports:
     def __init__(self, store: AsyncpgStore, *, run_id: str | None = None) -> None:
         self.store = store
@@ -55,6 +62,13 @@ class CrawlReports:
         snapshot_columns = {str(row["column_name"]) for row in column_rows}
         has_extraction_state = "content_extracted" in snapshot_columns
         has_images = "images_json" in snapshot_columns
+        signature_table_rows = await self._fetch(
+            """SELECT EXISTS (
+                 SELECT 1 FROM information_schema.tables
+                 WHERE table_schema = current_schema() AND table_name = 'run_intent_signatures'
+               ) AS present"""
+        )
+        has_signatures = bool(signature_table_rows and signature_table_rows[0].get("present"))
         extraction_true = "s.content_extracted IS TRUE" if has_extraction_state else "FALSE"
         extraction_false = "s.content_extracted IS FALSE" if has_extraction_state else "FALSE"
         extraction_unknown = "s.content_extracted IS NULL" if has_extraction_state else "TRUE"
@@ -87,6 +101,25 @@ class CrawlReports:
             run_id,
         )
         stats = dict(coverage[0]) if coverage else {}
+        locale_signature_count: int | None = None
+        if has_signatures:
+            signature_coverage = await self._fetch(
+                """
+                SELECT COUNT(DISTINCT sig.signature_hash)::INT AS locale_signature_count
+                FROM page_run_snapshots s
+                JOIN run_intent_signatures sig ON sig.run_id = s.run_id AND sig.url_id = s.url_id
+                WHERE s.run_id = $1
+                  AND s.overall_indexable IS TRUE
+                  AND s.content_extracted IS TRUE
+                  AND NULLIF(s.html_lang, '') IS NOT NULL
+                  AND jsonb_array_length(s.hreflang_json) > 0
+                  AND sig.signature_hash IS NOT NULL
+                """,
+                run_id,
+            )
+            locale_signature_count = (
+                _int_or_none(signature_coverage[0].get("locale_signature_count")) if signature_coverage else 0
+            )
         if not has_extraction_state:
             stats["parsed_html_count"] = None
             stats["unparsed_html_count"] = None
@@ -117,10 +150,12 @@ class CrawlReports:
                 "images_json": has_images,
                 "links_json": "links_json" in snapshot_columns,
                 "content_hash_simhash": "content_hash_simhash" in snapshot_columns,
+                "run_intent_signatures": has_signatures,
             },
             "frontier_queued": frontier[0],
             "frontier_pending": frontier[1],
             "frontier_done": frontier[2],
+            "locale_signature_count": locale_signature_count,
             **stats,
         }
 
@@ -299,6 +334,52 @@ class CrawlReports:
             """,
             run_id,
         )
+
+    async def locale_content_alignment(self) -> list[dict[str, object]]:
+        """Return cross-language pages with the same stored primary-content signature.
+
+        The signature is generated from boilerplate-reduced primary text.  A
+        match is a reproducible localisation concern, rather than a claim
+        that pages are definitely untranslated.
+        """
+        run_id = await self._run_id()
+        rows = await self._fetch(
+            """
+            SELECT u.url, s.html_lang, sig.signature_hash
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            JOIN run_intent_signatures sig ON sig.run_id = s.run_id AND sig.url_id = s.url_id
+            WHERE s.run_id = $1
+              AND s.overall_indexable IS TRUE
+              AND s.content_extracted IS TRUE
+              AND NULLIF(s.html_lang, '') IS NOT NULL
+              AND jsonb_array_length(s.hreflang_json) > 0
+              AND sig.signature_hash IS NOT NULL
+            ORDER BY sig.signature_hash, u.url
+            """,
+            run_id,
+        )
+        grouped: dict[str, list[dict[str, object]]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["signature_hash"]), []).append(dict(row))
+        findings: list[dict[str, object]] = []
+        for signature, members in grouped.items():
+            languages = sorted({str(member["html_lang"]) for member in members if member.get("html_lang")})
+            primary_languages = {language.split("-", 1)[0].casefold() for language in languages}
+            if len(primary_languages) < 2:
+                continue
+            urls = [str(member["url"]) for member in members]
+            for member in members:
+                findings.append(
+                    {
+                        "url": member["url"],
+                        "html_lang": member["html_lang"],
+                        "content_signature": signature,
+                        "languages": ", ".join(languages),
+                        "peer_urls": "\n".join(url for url in urls if url != member["url"]),
+                    }
+                )
+        return findings
 
     async def image_issues(self) -> list[dict[str, object]]:
         """Run-scoped image accessibility and layout evidence."""

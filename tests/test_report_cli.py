@@ -310,7 +310,7 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
     assert _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out)]) == 0
     payload = json.loads(out.read_text())
     assert payload["crawl_run_id"] == "run-42"
-    assert payload["schema_version"] == "crawler-cli/technical-audit/2"
+    assert payload["schema_version"] == "crawler-cli/technical-audit/3"
     assert payload["run_context"]["snapshot_consistency"] == "stable"
     assert {check["id"] for check in payload["checks"]} >= {
         "parameter-and-faceted-controls",
@@ -318,6 +318,10 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "orphan-candidates",
     }
     assert len(payload["checks"]) == 44
+    assert isinstance(payload["ticket_register"], list)
+    assert any(
+        ticket["Label"] == "Grant Search Console access or supply exports" for ticket in payload["ticket_register"]
+    )
     assert "Wrote deterministic technical audit" in capsys.readouterr().out
     called = [name for name, _ in FakeReports.instances[-1].calls]
     assert called == [
@@ -330,6 +334,8 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
         "tracking-parameter-links",
         "near-duplicates",
         "internal-authority",
+        "render-url-candidates",
+        "render-attempts",
     ]
 
 

@@ -338,6 +338,7 @@ def extract_links(
                 fragment=parsed.fragment or None,
                 url_parameters=parsed.query or None,
                 original_href=original_href,
+                follow="nofollow" not in _rel_tokens(anchor.get("rel")),
             )
         )
     return links

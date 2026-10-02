@@ -42,6 +42,7 @@ class _RecordingEngine:
         self.html = html
         self.crawled: list[str] = []
         self.follow_redirects_during_crawl: list[bool] = []
+        self.store = None
 
     async def crawl(self, url: str) -> CrawlResult:
         self.crawled.append(url)
@@ -114,6 +115,23 @@ async def test_probe_spends_exactly_one_request_on_one_invented_path():
     # what was requested on their site.
     assert result.tested_url == engine.crawled[0]
     assert result.tested_url.startswith("https://example.com/__crawler-cli-404-")
+
+
+@pytest.mark.asyncio
+async def test_probe_records_its_synthetic_url_when_engine_has_a_store():
+    class _Store:
+        def __init__(self) -> None:
+            self.records: list[tuple[str, str, str]] = []
+
+        async def record_source_by_url(self, url: str, source: str, detail: str) -> None:
+            self.records.append((url, source, detail))
+
+    engine = _RecordingEngine()
+    engine.store = _Store()
+
+    result = await soft_404_fingerprint(engine, "https://example.com")
+
+    assert engine.store.records == [(result.tested_url, "custom_check", "soft_404_fingerprint")]
 
 
 @pytest.mark.asyncio
