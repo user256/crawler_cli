@@ -1,0 +1,173 @@
+{
+  "410": {
+    "bundle_written": false,
+    "error": "Error: collection 1 (robots-txt) record 1: missing status",
+    "exit_code": 2
+  },
+  "411": {
+    "answer": {
+      "affected_count": 0,
+      "answer": "No",
+      "denominator": 7,
+      "id": "Q96",
+      "status": "Healthy",
+      "ticket": false
+    },
+    "coverage_state": "complete",
+    "exit_code": 0,
+    "hosts_eligible": 2,
+    "hosts_tested": 1
+  },
+  "412": {
+    "answer": {
+      "affected_count": 1,
+      "answer": "Yes",
+      "denominator": 1,
+      "id": "Q25",
+      "status": "Issue",
+      "ticket": true
+    },
+    "finding": "es-ES: status 200->0",
+    "spanish_raw_observation": {
+      "body_sha256": null,
+      "differences_from_no_header": [
+        "first_status_changed",
+        "final_status_changed"
+      ],
+      "final_status": 0,
+      "final_url": "https://one.example/",
+      "html_lang": null,
+      "observation_type": "accept_language_probe",
+      "observed_at": "2026-10-06T16:06:45+00:00",
+      "outcome": "fetch_error",
+      "qualification": "accept_language_probe_observation_requires_intent_and_crawler_access_review",
+      "record_type": "observation",
+      "redirect_chain": [
+        {
+          "content_language": null,
+          "location": null,
+          "set_cookies": [],
+          "skip_reason": null,
+          "status": 0,
+          "url": "https://one.example/",
+          "vary": null
+        }
+      ],
+      "request_headers": {
+        "Accept-Language": "es-ES,es;q=0.9"
+      },
+      "target_url": "https://one.example/",
+      "variant": "es-ES"
+    }
+  },
+  "413": {
+    "answer": {
+      "affected_count": 1,
+      "answer": "Yes",
+      "denominator": 1,
+      "id": "Q25",
+      "status": "Issue",
+      "ticket": true
+    },
+    "finding": "es-ES: primary content differs",
+    "spanish_raw_observation": {
+      "body_sha256": "6bca64161432dca9bc7087e260857ff27a5aeafaf50e812f740ba7b8cc2a8492",
+      "differences_from_no_header": [],
+      "final_status": 200,
+      "final_url": "https://one.example/",
+      "html_lang": "en",
+      "observation_type": "accept_language_probe",
+      "observed_at": "2026-10-06T16:06:45+00:00",
+      "outcome": "resolved",
+      "qualification": "accept_language_probe_observation_requires_intent_and_crawler_access_review",
+      "record_type": "observation",
+      "redirect_chain": [
+        {
+          "content_language": null,
+          "location": null,
+          "set_cookies": [],
+          "skip_reason": null,
+          "status": 200,
+          "url": "https://one.example/",
+          "vary": null
+        }
+      ],
+      "request_headers": {
+        "Accept-Language": "es-ES,es;q=0.9"
+      },
+      "target_url": "https://one.example/",
+      "variant": "es-ES"
+    }
+  },
+  "414": {
+    "production_projection": [
+      {
+        "host": "old.example",
+        "hsts_header": "max-age=300",
+        "ocsp_stapled": null,
+        "preload_status": null
+      }
+    ],
+    "with_response_identity": [
+      {
+        "host": "new.example",
+        "hsts_header": "max-age=300",
+        "ocsp_stapled": null,
+        "preload_status": null
+      }
+    ]
+  },
+  "415": [
+    {
+      "answer": {
+        "affected_count": 1,
+        "answer": "Yes",
+        "denominator": 1,
+        "id": "Q63",
+        "status": "Issue",
+        "ticket": true
+      },
+      "header": "max-age = 31536000; includeSubDomains; preload",
+      "shared_parser_errors": [],
+      "shared_parser_valid": true
+    },
+    {
+      "answer": {
+        "affected_count": 0,
+        "answer": "No",
+        "denominator": 1,
+        "id": "Q63",
+        "status": "Healthy",
+        "ticket": false
+      },
+      "header": "max-age=31536000; max-age=0; includeSubDomains; preload",
+      "shared_parser_errors": [
+        "duplicate_directive:max-age"
+      ],
+      "shared_parser_valid": false
+    }
+  ],
+  "416": {
+    "answer": {
+      "affected_count": 1,
+      "answer": "Yes",
+      "denominator": 1,
+      "id": "Q63",
+      "status": "Issue",
+      "ticket": true
+    },
+    "ticket_description": "Is the Strict-Transport-Security header missing or weak, the domain absent from the HSTS preload list, or OCSP stapling off? Yes: 1 hosts, across 1 pages tested in run qa.\n\nRule: HSTS max-age < 31536000 or missing includeSubDomains/preload, the preload list status is not 'preloaded', or the TLS handshake has no stapled OCSP response.\n\nHSTS preload removes the first http-to-https redirect and prevents downgrade attacks; stapling shortens the TLS handshake. The search effect is small.\n\nSee the Q63 Server performance & security tab for every row."
+  },
+  "existing_393": {
+    "affected_count": 0,
+    "answer": "No",
+    "denominator": 2,
+    "id": "Q39",
+    "status": "Healthy",
+    "ticket": false
+  },
+  "existing_406": {
+    "matching_header": false,
+    "range_cleared": "'Tickets'!A2:H10000"
+  }
+}

@@ -44,4 +44,4 @@ producer for the new runner's `host-probe`, `utility-path-probe`,
 
 ## Status
 
-implemented (local), PR #118 (Priority: **P0**). Source: master reconciliation, 2026-10-06.
+Merged in PR #118 at `72629af` (Priority: **P0**); producer follow-ups remain open. Post-merge QA reproduced the saved Rainbet answer summary exactly and filed tickets 410–417; see [QA report](./qa-new-audit-2026-10-06/README.md).

@@ -1,0 +1,154 @@
+unformatted: File would be reformatted
+   --> src/crawler_cli/archive.py:224:16
+    |
+223 |             raw_urls.extend(page_urls)
+    -             if len(
+    -                 _clean_archive_urls(
+    -                     raw_urls,
+    -                     strip_extensions=se,
+    -                     strip_paths=sp,
+    -                     force_https=force_https,
+    -                     force_www=force_www,
+224 +             if (
+225 +                 len(
+226 +                     _clean_archive_urls(
+227 +                         raw_urls,
+228 +                         strip_extensions=se,
+229 +                         strip_paths=sp,
+230 +                         force_https=force_https,
+231 +                         force_www=force_www,
+232 +                     )
+233 |                 )
+    -             ) >= config.archive_max_urls:
+234 +                 >= config.archive_max_urls
+235 +             ):
+236 |                 break
+    |
+
+unformatted: File would be reformatted
+   --> tests/test_crawler_gui_server.py:170:1
+    |
+169 |
+170 +
+171 | def test_overview_from_counts_reports_whole_run_aggregates():
+--------------------------------------------------------------------------------
+213 | def test_saved_snapshot_populates_report_categories_and_nested_schema_name():
+    -     page = server.page_from_row(_snapshot_row(
+    -         h2_tags="First\nSecond", images_json=[{"url": "https://site.example/a.png"}],
+    -         hreflang_json=[{"href": "https://site.example/fr", "hreflang": "fr"}],
+    -         schema_json=[{"type": "Organization", "parsed_data": json.dumps({"name": "Stored name"}), "is_valid": True}],
+    -         robots_json=["noarchive"],
+    -     ), has_snapshots=True)
+214 +     page = server.page_from_row(
+215 +         _snapshot_row(
+216 +             h2_tags="First\nSecond",
+217 +             images_json=[{"url": "https://site.example/a.png"}],
+218 +             hreflang_json=[{"href": "https://site.example/fr", "hreflang": "fr"}],
+219 +             schema_json=[
+220 +                 {"type": "Organization", "parsed_data": json.dumps({"name": "Stored name"}), "is_valid": True}
+221 +             ],
+222 +             robots_json=["noarchive"],
+223 +         ),
+224 +         has_snapshots=True,
+225 +     )
+226 |     assert {"structured-data", "images", "hreflang", "h2", "url", "response-codes"} <= set(page["categoryHints"])
+--------------------------------------------------------------------------------
+233 |     from crawler_cli.compression import compress_html
+    -     result = server.saved_html_evidence({"url_id": 1, "url": "https://site.example/page", "html_compressed": compress_html('''
+234 +
+235 +     result = server.saved_html_evidence(
+236 +         {
+237 +             "url_id": 1,
+238 +             "url": "https://site.example/page",
+239 +             "html_compressed": compress_html("""
+240 |       <html><head><base href="https://cdn.example/assets/">
+241 |       <meta property="og:title" content="A &amp; B"><meta name="twitter:card" content="summary">
+242 |       <meta property="og:locale:alternate" content="fr"><meta property="og:locale:alternate" content="de">
+243 |       <script src="app.js"></script><script type="application/ld+json">{}</script></head>
+    -       <body><a href="https://other.example/path" rel="nofollow">External</a></body></html>''')})
+244 +       <body><a href="https://other.example/path" rel="nofollow">External</a></body></html>"""),
+245 +         }
+246 +     )
+247 |     assert result["social"][0] == {"property": "og:title", "content": "A & B"}
+--------------------------------------------------------------------------------
+258 |     from crawler_gui.resume import resume_configuration
+259 +
+260 |     config = CrawlConfig(backend="curl_cffi", same_host_only=True, path_exclude=["/private"])
+261 |     seeds = ["https://site.example/"]
+262 |     saved = _crawl_run_config_snapshot(config, seeds)
+    -     row = {"config_json": json.dumps(saved), "seed_urls_json": json.dumps(seeds), "config_hash": _crawl_run_config_hash(saved)}
+263 +     row = {
+264 +         "config_json": json.dumps(saved),
+265 +         "seed_urls_json": json.dumps(seeds),
+266 +         "config_hash": _crawl_run_config_hash(saved),
+267 +     }
+268 |     restored, restored_seeds = resume_configuration(row)
+--------------------------------------------------------------------------------
+278 |     from unittest.mock import AsyncMock
+279 +
+280 |     store = server.LiveStore("unused")
+--------------------------------------------------------------------------------
+284 |         [{"url_id": 1, "source": "link", "detail": "parent"}],
+    -         [{"url_id": 1, "source": "link", "detail": "parent"},
+    -          {"url_id": 1, "source": "archive_org", "detail": "old import"}],
+285 +         [
+286 +             {"url_id": 1, "source": "link", "detail": "parent"},
+287 +             {"url_id": 1, "source": "archive_org", "detail": "old import"},
+288 +         ],
+289 |     ]
+--------------------------------------------------------------------------------
+300 |     from unittest.mock import AsyncMock
+301 +
+302 |     launcher = SimpleNamespace(resume=AsyncMock())
+303 |     store = SimpleNamespace(resume_plan=AsyncMock(return_value={"canResume": False, "reason": "No queued URLs"}))
+    -     request = SimpleNamespace(app={"store": store, "launcher": launcher}, match_info={"run_id": "complete-run"}, json=AsyncMock(return_value={}))
+304 +     request = SimpleNamespace(
+305 +         app={"store": store, "launcher": launcher},
+306 +         match_info={"run_id": "complete-run"},
+307 +         json=AsyncMock(return_value={}),
+308 +     )
+309 |     with pytest.raises(server.web.HTTPConflict, match="Conflict"):
+    |
+
+unformatted: File would be reformatted
+   --> tests/test_tech_audit_tickets_skill.py:28:13
+    |
+27  |     n = len(tickets) if count is None else count
+    -     return [[], ["", "", "", "Site.com – Technical SEO Audit"], ["", f"Count of tickets: {n}"], ["", "Audit performed by: A"], HEADER, *tickets]
+28  +     return [
+29  +         [],
+30  +         ["", "", "", "Site.com – Technical SEO Audit"],
+31  +         ["", f"Count of tickets: {n}"],
+32  +         ["", "Audit performed by: A"],
+33  +         HEADER,
+34  +         *tickets,
+35  +     ]
+36  |
+--------------------------------------------------------------------------------
+103 |     path.write_text(json.dumps([ticket, ticket]))
+    -     assert audit_sheet.main(["apply", "abc", str(path), "--author", "Jo", "--title", "Site.com – Technical SEO Audit"]) == 0
+104 +     assert (
+105 +         audit_sheet.main(["apply", "abc", str(path), "--author", "Jo", "--title", "Site.com – Technical SEO Audit"])
+106 +         == 0
+107 +     )
+108 |     data = {d["range"]: d["values"] for d in calls[0]["data"]}
+--------------------------------------------------------------------------------
+126 |     t[1] = "Consolidate the Google-indexed mirror host"
+    -     t[8] = "See Sportsbook routes; Missing tab\nDocumentation: https://developers.google.com/international/localized-versions"
+127 +     t[8] = (
+128 +         "See Sportsbook routes; Missing tab\nDocumentation: https://developers.google.com/international/localized-versions"
+129 +     )
+130 |     out = messages(sheet(t))
+--------------------------------------------------------------------------------
+140 |     spans = audit_sheet.note_links(text, tabs, {"BCG-02": "u#gid=3&range=A3"})
+    -     assert [text[s:e] for s, e, _ in spans] == ["Soft 404 Probes", "Reference - Archive History", "https://example.com/x", "BCG-02"]
+141 +     assert [text[s:e] for s, e, _ in spans] == [
+142 +         "Soft 404 Probes",
+143 +         "Reference - Archive History",
+144 +         "https://example.com/x",
+145 +         "BCG-02",
+146 +     ]
+147 |     runs = audit_sheet.text_runs(text, spans)
+    |
+
+3 files would be reformatted, 191 files already formatted

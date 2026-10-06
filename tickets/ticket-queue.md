@@ -4,6 +4,32 @@ A list of tickets, their status and the md file which summarises action taken fo
 **Authoritative register** for status, acceptance notes, and delivery order.
 Ticket files remain the source of truth for scope and DoD.
 
+### Post-merge audit QA (2026-10-06)
+
+PR **#118 is merged** at `72629af`; the replacement part of ticket **409** is
+complete. Probe-producer follow-ups in that ticket remain open.
+[QA report](./qa-new-audit-2026-10-06/README.md) and
+[all 104 question/ticket mappings](./qa-new-audit-2026-10-06/question-matrix.md).
+
+- Baseline: **1,866 passed, 60 skipped**; lint passes; formatting fails (417).
+- Runner: **63 registered answerers**, **40 unimplemented questions** covered
+  by existing question tickets, **1 deliberately manual/external question**.
+- Saved Rainbet bundle plus TLS observations replays exactly: **1 Issue,
+  22 Needs validation, 1 Healthy, 80 Pending**.
+- Ticket **406** remains open: missing destination Tickets headers still
+  fall back to clearing A2:H10000 instead of refusing the write.
+
+- `410` `proposed` [Keep failed robots fetches as unknown observations](./ticket-410-ai-governance-unread-robots-bundle.md) — **P1**.
+- `411` `proposed` [Keep capped AI-governance probes below Healthy](./ticket-411-ai-governance-capped-coverage.md) — **P1**.
+- `412` `proposed` [Do not turn failed language probes into confirmed locale issues](./ticket-412-locale-probe-failed-fetch-verdict.md) — **P1**.
+- `413` `proposed` [Compare primary content rather than raw HTML bytes for Q25](./ticket-413-locale-probe-primary-content.md) — **P1**.
+- `414` `proposed` [Attribute stored TLS headers to the final response host](./ticket-414-tls-final-response-identity.md) — **P1**.
+- `415` `proposed` [Use the shared HSTS parser in the Q63 answerer](./ticket-415-q63-shared-hsts-parser.md) — **P2**.
+- `416` `proposed` [Preserve denominator units in question-derived tickets](./ticket-416-question-ticket-denominator-units.md) — **P2**.
+- `417` `proposed` [Restore the pinned formatting gate](./ticket-417-postmerge-format-gate.md) — **P2**.
+
+Next unreserved ticket number: **418**. Earlier positions below are historical.
+
 ### Current position (2026-09-29)
 
 - **Review / integration:** no GitHub pull requests were open. The historical technical-audit PR stack (183–213) was already present on `origin/master`; its disposable worktrees were stale review artifacts.
@@ -823,4 +849,4 @@ reuses either range; the next unreserved number after both lineages is **410**.
 - `406` `proposed` [Finish ticket 223: template mapping, copy fallback and destination header check](./ticket-406-mapped-template-publish-gaps.md) — **P2.**
 - `407` `proposed` [Register publisher review nits](./ticket-407-register-review-nits.md) — **P3.**
 - `408` `proposed` [Port the question runner and stream collectors onto master's audit contract](./ticket-408-port-question-runner-onto-master-contract.md) — **P1:** the `feature/technical-audit-183` lineage cannot merge textually; per-check port with the Rainbet evidence matrix.
-- `409` `in progress` [Replace the old technical audit with the three-stream audit](./ticket-409-new-audit-replaces-old.md) — **P0:** merge of the question-runner lineage onto master; deletion of the old audit files and the Rainbet re-run outstanding.
+- `409` `merged; follow-ups open` [Replace the old technical audit with the three-stream audit](./ticket-409-new-audit-replaces-old.md) — **P0:** PR #118 merged; deletion and saved Rainbet replay complete. Missing probe producers remain follow-up work.
