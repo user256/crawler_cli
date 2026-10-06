@@ -1949,15 +1949,18 @@
       "question": "Does any template have p90 server response time above 600 ms or p99 above 1.5 s?",
       "issue_if": "At least one template with 20+ samples has p90 TTFB > 600 ms or p99 > 1,500 ms.",
       "unit": "templates",
-      "group": "crawl",
+      "group": "crawl+profile",
       "requires": [
-        "crawl"
+        "crawl",
+        "site-profile"
       ],
       "checks": [
         "performance-distribution"
       ],
       "new_detector": null,
-      "profile_keys": [],
+      "profile_keys": [
+        "templates"
+      ],
       "threshold": {
         "p90_ms": 600,
         "p99_ms": 1500,
@@ -1966,7 +1969,7 @@
       "classification": "Warning",
       "priority": "Medium",
       "why": "Google lowers its crawl rate when the server is slow, so fewer pages get crawled. Slow TTFB also pushes LCP out of the 'good' range.",
-      "note": "Measured from the crawler's location, not Google's.",
+      "note": "Measured from the crawler's location, not Google's. Pages matching no profile template are timed as one 'other' group; a template with fewer than min_samples timed pages keeps the answer at Needs validation.",
       "sheet_answerable_was": null
     },
     {

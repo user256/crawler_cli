@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .technical_audit import TECHNICAL_AUDIT_CHECK_CONTRACT, TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES
 from .technical_audit_tickets import _placeholders, _render, _sample_urls, ticket_sheet_table
@@ -342,8 +343,24 @@ def _duplicate_head_elements(audit: Json, question: Json, profile: Json | None) 
     )
 
 
+def _indexable_page_count(audit: Json) -> int | None:
+    """Indexable pages in the run, from the profile page facts; None when they were not collected."""
+    pages, available = _question_input(audit, "profile-indexability-pages")
+    if not available:
+        return None
+    return sum(1 for page in pages if page.get("indexable") is True)
+
+
+def _within_indexable_pages(audit: Json, evidence: Evidence) -> Evidence:
+    """Use the indexable-page count as the denominator, so an empty population cannot pass."""
+    count = _indexable_page_count(audit)
+    if not evidence.available or count is None:
+        return evidence
+    return Evidence(**{**evidence.__dict__, "denominator": count})
+
+
 def _indexable_heading_issues(audit: Json, question: Json, profile: Json | None) -> Evidence:
-    return _from_check(
+    evidence = _from_check(
         "metadata-basics",
         keep=lambda row: (
             row.get("overall_indexable") is True
@@ -351,10 +368,11 @@ def _indexable_heading_issues(audit: Json, question: Json, profile: Json | None)
         ),
         distinct_url=True,
     )(audit, question, profile)
+    return _within_indexable_pages(audit, evidence)
 
 
 def _missing_indexable_canonical(audit: Json, question: Json, profile: Json | None) -> Evidence:
-    return _from_check(
+    evidence = _from_check(
         "canonical-declarations",
         keep=lambda row: (
             str(row.get("kind", "")) == "missing-canonical"
@@ -363,6 +381,7 @@ def _missing_indexable_canonical(audit: Json, question: Json, profile: Json | No
         ),
         distinct_url=True,
     )(audit, question, profile)
+    return _within_indexable_pages(audit, evidence)
 
 
 def _header_html_parity(audit: Json, question: Json, profile: Json | None) -> Evidence:
@@ -493,24 +512,52 @@ def _question_input(audit: Json, name: str) -> tuple[list[dict[str, object]], bo
     return ([dict(row) for row in rows if isinstance(row, Mapping)] if isinstance(rows, list) else [], available)
 
 
+def _is_homepage(url: str) -> bool:
+    parsed = urlsplit(url)
+    return parsed.path in {"", "/"} and not parsed.query
+
+
+def _threshold(question: Json) -> Mapping[str, object]:
+    threshold = question.get("threshold")
+    return threshold if isinstance(threshold, Mapping) else {}
+
+
 def _crawl_depth(audit: Json, question: Json, profile: Json | None) -> Evidence:
     pages, available = _question_input(audit, "crawl-depth-pages")
     if not available or profile is None:
         return Evidence(available=False, note="crawl depth needs saved graph evidence and a site profile")
-    context = audit.get("run_context")
+    raw_context = audit.get("run_context")
+    context = raw_context if isinstance(raw_context, Mapping) else {}
     roots = [str(row["url"]) for row in pages if _int_or_none(row.get("crawl_depth")) == 0 and row.get("url")]
+    # Frontier depth is first-discovery depth. It is click depth from the
+    # homepage only when no URL entered the frontier from a sitemap (those are
+    # enqueued at depth 0) and every depth-0 URL is a homepage.
+    sitemap_sources = _int_or_none(context.get("run_sitemap_source_count"))
+    homepage_roots = bool(roots) and all(_is_homepage(root) for root in roots)
+    notes: list[str] = []
+    if sitemap_sources is None:
+        notes.append("The run context has no sitemap-sourced URL count, so saved depths are not verified click depths.")
+    elif sitemap_sources:
+        notes.append(
+            f"{sitemap_sources:,} URLs entered the frontier from sitemaps at depth 0, "
+            "so saved depths are first-discovery depths, not click depths from the homepage."
+        )
+    if roots and not homepage_roots:
+        other = sum(1 for root in roots if not _is_homepage(root))
+        notes.append(f"{other:,} depth-0 URLs are not homepages, so depths are not measured from a declared root.")
     graph = {
         "root_urls": roots,
-        "depths_from_roots": bool(roots),
-        "coverage_complete": isinstance(context, Mapping) and context.get("completion_state") == "complete",
+        "depths_from_roots": sitemap_sources == 0 and homepage_roots,
+        "coverage_complete": context.get("completion_state") == "complete",
     }
-    result = analyse_priority_crawl_depth(pages, graph, profile)
+    max_depth = _int_or_none(_threshold(question).get("max_depth"))
+    result = analyse_priority_crawl_depth(pages, graph, profile, max_depth=3 if max_depth is None else max_depth)
     return Evidence(
         rows=[fact.as_dict() for fact in result.affected],
         denominator=result.denominator,
         available=result.available and result.eligible,
         coverage_complete=result.complete,
-        note="; ".join(result.unavailable_reasons),
+        note="; ".join([*notes, *result.unavailable_reasons]),
         language_check="crawl-depth-pages",
     )
 
@@ -519,18 +566,30 @@ def _performance_distribution(audit: Json, question: Json, profile: Json | None)
     pages, available = _question_input(audit, "performance-pages")
     templates = _profile_value(profile or {}, "templates")
     if not available or not isinstance(templates, Mapping):
-        return Evidence(available=False, note="performance distribution needs saved timings and site-profile template patterns")
+        return Evidence(
+            available=False, note="performance distribution needs saved timings and site-profile template patterns"
+        )
+    patterns = [
+        (str(name), spec["pattern"])
+        for name, spec in templates.items()
+        if isinstance(spec, Mapping) and isinstance(spec.get("pattern"), str)
+    ]
     classified = []
     for page in pages:
         value = dict(page)
         path = _path_and_query(str(value.get("url", "")))
-        for name, spec in templates.items():
-            pattern = spec.get("pattern") if isinstance(spec, Mapping) else None
-            if isinstance(pattern, str) and re.search(pattern, path):
-                value["template"] = str(name)
-                break
+        # Pages matching no profile template are still timed pages; group them as "other".
+        value["template"] = next((name for name, pattern in patterns if re.search(pattern, path)), "other")
         classified.append(value)
-    result = analyse_performance_distribution(classified)
+    threshold = _threshold(question)
+    options: dict[str, float | int] = {}
+    for key, option in (("p90_ms", "p90_threshold_ms"), ("p99_ms", "p99_threshold_ms")):
+        if isinstance(threshold.get(key), (int, float)) and not isinstance(threshold.get(key), bool):
+            options[option] = float(threshold[key])  # type: ignore[arg-type]
+    min_samples = _int_or_none(threshold.get("min_samples"))
+    if min_samples is not None:
+        options["min_samples"] = min_samples
+    result = analyse_performance_distribution(classified, **options)  # type: ignore[arg-type]
     return Evidence(
         rows=[fact.as_dict() for fact in result.affected],
         denominator=result.eligible_record_count,
@@ -542,19 +601,50 @@ def _performance_distribution(audit: Json, question: Json, profile: Json | None)
 
 
 def _empty_anchors(audit: Json, question: Json, profile: Json | None) -> Evidence:
-    links, available = _question_input(audit, "empty-anchor-links")
+    pages, available = _question_input(audit, "empty-anchor-links")
     if not available:
         return Evidence(available=False, note="saved empty-anchor link facts were not collected")
+    if not pages:
+        return Evidence(available=False, note="no stored HTML page carried internal link facts")
+    links: list[dict[str, object]] = []
+    total = 0
+    truncated = False
+    for page in pages:
+        if "empty_anchors" not in page:
+            # Link-level rows (one per internal anchor).
+            links.append(page)
+            total += 1
+            continue
+        total += _int_or_none(page.get("internal_anchor_count")) or 0
+        truncated = truncated or page.get("empty_anchors_truncated") is True
+        anchors = page.get("empty_anchors")
+        for anchor in anchors if isinstance(anchors, list) else []:
+            if isinstance(anchor, Mapping):
+                links.append({"source_url": page.get("source_url"), **anchor})
     result = evaluate_empty_anchors(links)
+    raw_context = audit.get("run_context")
+    context = raw_context if isinstance(raw_context, Mapping) else {}
+    stored = _int_or_none(context.get("stored_html_count"))
+    all_pages_seen = stored is None or len(pages) >= stored
+    notes = [
+        f"unknown image-alt facts: {result.coverage.unknown_image_alt_count}; "
+        f"invalid link facts: {result.coverage.invalid_record_count}"
+    ]
+    if truncated:
+        notes.append("some pages listed more text-less anchors than the per-page cap, so counts are a lower bound")
+    if not all_pages_seen:
+        notes.append(f"{len(pages):,} of {stored:,} stored pages carried link facts")
     return Evidence(
         rows=[finding.as_dict() for finding in result.findings],
-        denominator=result.coverage.valid_record_count,
+        denominator=total,
         available=True,
-        coverage_complete=result.coverage.complete,
-        note=(
-            f"unknown image-alt facts: {result.coverage.unknown_image_alt_count}; "
-            f"invalid link facts: {result.coverage.invalid_record_count}"
+        coverage_complete=(
+            result.coverage.complete
+            and not truncated
+            and all_pages_seen
+            and context.get("completion_state") == "complete"
         ),
+        note="; ".join(notes),
         language_check="empty-anchor-links",
     )
 
@@ -714,14 +804,22 @@ def answer_questions(
     questions = [entry for entry in registry["questions"] if isinstance(entry, Mapping)]
     by_id = {str(entry["id"]): entry for entry in questions}
     gates = {qid: _answer_one(by_id[qid], audit, site_profile, gate_ok=True) for qid in ("Q26", "Q81") if qid in by_id}
-    gate_ok = bool(gates) and all(gate["status"] == "Healthy" for gate in gates.values())
+    # A gate downgrades the other answers only when it answers Yes. A gate that
+    # could not be fully tested records its own scope gap and stays below Healthy.
+    gate_ok = bool(gates) and not any(gate["answer"] == "Yes" for gate in gates.values())
+    gate_notes = [
+        f"Run gate {qid} is {gate['status']} rather than Healthy; its scope gap is recorded on {qid} "
+        "and does not downgrade this answer."
+        for qid, gate in gates.items()
+        if gate["answer"] != "Yes" and gate["status"] != "Healthy"
+    ]
     answers = []
     for entry in questions:
         qid = str(entry["id"])
         if qid in gates:
             answers.append(gates[qid])  # type: ignore[index]
         else:
-            answers.append(_answer_one(entry, audit, site_profile, gate_ok=gate_ok))
+            answers.append(_answer_one(entry, audit, site_profile, gate_ok=gate_ok, gate_notes=gate_notes))
     return answers
 
 
@@ -731,6 +829,7 @@ def _answer_one(
     profile: Json | None,
     *,
     gate_ok: bool,
+    gate_notes: Sequence[str] = (),
 ) -> dict[str, object]:
     qid = str(entry["id"])
     group = str(entry["group"])
@@ -758,6 +857,7 @@ def _answer_one(
         return answer
     evidence = answerer.answer(audit, entry, profile)
     notes.append(f"Basis: {answerer.basis}.")
+    notes.extend(gate_notes)
     if evidence.note:
         notes.append(evidence.note)
     if not evidence.available:

@@ -97,6 +97,15 @@ class FakeReports:
     async def semantic_html_facts(self):
         return []
 
+    async def crawl_depth_pages(self):
+        return []
+
+    async def performance_pages(self):
+        return []
+
+    async def empty_anchor_links(self):
+        return []
+
     async def profile_indexability_pages(self):
         return []
 

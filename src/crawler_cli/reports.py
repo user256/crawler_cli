@@ -125,6 +125,46 @@ def _int_or_none(value: object) -> int | None:
         return None
 
 
+_EMPTY_ANCHORS_PER_PAGE = 100
+
+
+def _empty_anchor_page_row(url: str, html: str) -> dict[str, object]:
+    """Count a page's internal anchors and list only those with no text, capped per page."""
+    source_host = urlparse(url).netloc.casefold()
+    soup = parse_html(html)
+    total = 0
+    empty: list[dict[str, object]] = []
+    truncated = False
+    for anchor in soup.find_all("a", href=True):
+        target_url = urljoin(url, str(anchor.get("href", "")).strip())
+        parsed = urlparse(target_url)
+        if parsed.scheme not in {"http", "https"} or parsed.netloc.casefold() != source_host:
+            continue
+        total += 1
+        anchor_text = anchor.get_text(" ", strip=True) or anchor.get("aria-label") or anchor.get("title")
+        if isinstance(anchor_text, str) and anchor_text.strip():
+            continue
+        if len(empty) >= _EMPTY_ANCHORS_PER_PAGE:
+            truncated = True
+            continue
+        empty.append(
+            {
+                "target_url": target_url.split("#", 1)[0],
+                "anchor_text": str(anchor_text) if anchor_text is not None else None,
+                "linked_image_alt_texts": [
+                    str(image.get("alt", "")).strip() if image.has_attr("alt") else None
+                    for image in anchor.find_all("img")
+                ],
+            }
+        )
+    return {
+        "source_url": url,
+        "internal_anchor_count": total,
+        "empty_anchors": empty,
+        "empty_anchors_truncated": truncated,
+    }
+
+
 class CrawlReports:
     def __init__(self, store: AsyncpgStore, *, run_id: str | None = None) -> None:
         self.store = store
@@ -344,6 +384,7 @@ class CrawlReports:
         findings: list[dict[str, object]] = []
         semantic: list[dict[str, object]] = []
         soft_404: list[dict[str, object]] = []
+        anchors: list[dict[str, object]] = []
         async for url, html in self.store.iter_run_html(run_id=run_id):
             state = page_state.get(url, {})
             findings.extend(_stored_html_rows(url, html, state))
@@ -351,7 +392,13 @@ class CrawlReports:
             candidate = _soft_404_candidate(url, html, state)
             if candidate is not None:
                 soft_404.append(candidate)
-        self._stored_html_cache = {"stored-html": findings, "semantic-html": semantic, "soft404": soft_404}
+            anchors.append(_empty_anchor_page_row(url, html))
+        self._stored_html_cache = {
+            "stored-html": findings,
+            "semantic-html": semantic,
+            "soft404": soft_404,
+            "empty-anchor-links": anchors,
+        }
         return self._stored_html_cache
 
     async def stored_html_findings(self) -> list[dict[str, object]]:
@@ -542,7 +589,7 @@ class CrawlReports:
             """
             SELECT u.url, f.depth AS crawl_depth
             FROM frontier f JOIN urls u ON u.id = f.url_id
-            WHERE f.run_id = $1
+            WHERE f.run_id = $1 AND f.discovery_kind <> 'speculative'
             ORDER BY u.url
             """,
             run_id,
@@ -561,29 +608,12 @@ class CrawlReports:
         )
 
     async def empty_anchor_links(self) -> list[dict[str, object]]:
-        """Saved raw-HTML internal-link facts, including linked-image alts."""
-        run_id = await self._run_id()
-        records: list[dict[str, object]] = []
-        for _url_id, source_url, html in await self.store.fetch_pages_for_embeddings(run_id=run_id):
-            source_host = urlparse(source_url).netloc.casefold()
-            soup = parse_html(html)
-            for anchor in soup.find_all("a", href=True):
-                target_url = urljoin(source_url, str(anchor.get("href", "")).strip())
-                if urlparse(target_url).scheme not in {"http", "https"} or urlparse(target_url).netloc.casefold() != source_host:
-                    continue
-                anchor_text = anchor.get_text(" ", strip=True) or anchor.get("aria-label") or anchor.get("title")
-                images = anchor.find_all("img")
-                records.append(
-                    {
-                        "source_url": source_url,
-                        "target_url": target_url.split("#", 1)[0],
-                        "anchor_text": str(anchor_text) if anchor_text is not None else None,
-                        "linked_image_alt_texts": [
-                            str(image.get("alt", "")).strip() if image.has_attr("alt") else None for image in images
-                        ],
-                    }
-                )
-        return records
+        """One bounded row per stored page: internal anchor count plus its text-less anchors.
+
+        Collected in the shared stored-HTML pass (ticket 379), so the audit JSON
+        grows with pages, not with every internal link on the site.
+        """
+        return (await self._stored_html_pass())["empty-anchor-links"]
 
     async def redirect_chains(self) -> list[dict[str, object]]:
         run_id = await self._run_id()

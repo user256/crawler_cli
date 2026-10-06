@@ -2190,6 +2190,9 @@ _OPT_IN_REPORTS = frozenset(
         "profile-indexability-pages",
         "soft404-error-routes",
         "discovery-source-provenance",
+        "crawl-depth-pages",
+        "performance-pages",
+        "empty-anchor-links",
     }
 )
 _REPORT_NAMES = (

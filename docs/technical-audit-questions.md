@@ -13,8 +13,8 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 
 | Group | Answerable | Ticket policy | Questions |
 |---|---|---|---|
-| crawl | Yes | on Issue, at the entry's classification | Q1, Q3, Q4, Q13, Q14, Q82, Q93, Q8, Q9, Q10, Q11, Q12, Q15, Q16, Q41, Q53, Q71, Q73, Q80, Q84, Q85, Q87, Q94, Q70, Q88, Q89, Q2, Q5, Q6, Q7, Q22, Q25, Q28, Q39, Q42, Q72, Q74, Q76, Q79, Q91, Q92, Q63 |
-| crawl+profile | Yes, with site profile | on Issue; Pending when a profile key is missing | Q97, Q23, Q40, Q44, Q46, Q48, Q49, Q75, Q98, Q100, Q20, Q21, Q36, Q37, Q57, Q59, Q62, Q78, Q24, Q34, Q101, Q27, Q43, Q77, Q102, Q103, Q96 |
+| crawl | Yes | on Issue, at the entry's classification | Q1, Q3, Q4, Q13, Q14, Q82, Q93, Q8, Q9, Q10, Q11, Q12, Q15, Q16, Q41, Q53, Q71, Q73, Q80, Q84, Q85, Q87, Q94, Q70, Q89, Q2, Q5, Q6, Q7, Q22, Q25, Q28, Q39, Q42, Q72, Q74, Q76, Q79, Q91, Q92, Q63 |
+| crawl+profile | Yes, with site profile | on Issue; Pending when a profile key is missing | Q97, Q23, Q40, Q44, Q46, Q48, Q49, Q75, Q98, Q100, Q20, Q21, Q36, Q37, Q57, Q59, Q62, Q78, Q24, Q34, Q88, Q101, Q27, Q43, Q77, Q102, Q103, Q96 |
 | best-practice | Yes | on Issue, classification capped at Improvement or Warning, priority at most Medium | Q45, Q17, Q47, Q51, Q54, Q55, Q56, Q58, Q60, Q83, Q64, Q65, Q66, Q67, Q86 |
 | heuristic | Partly | never automatic; status is at most Needs validation until a person confirms | Q38, Q95, Q99, Q32, Q52, Q61, Q35, Q33, Q29, Q68, Q69 |
 | supplied-input | With supplied data | on Issue when the input is supplied; otherwise Pending | Q18, Q31, Q90, Q30, Q50, Q19 |
@@ -867,11 +867,12 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 
 - Issue if: At least one template with 20+ samples has p90 TTFB > 600 ms or p99 > 1,500 ms.
 - Why it matters: Google lowers its crawl rate when the server is slow, so fewer pages get crawled. Slow TTFB also pushes LCP out of the 'good' range.
-- Group: crawl · Ticket: Warning / Medium · Unit: templates
-- Needs: crawl
+- Group: crawl+profile · Ticket: Warning / Medium · Unit: templates
+- Needs: crawl, site-profile
 - Runner: answered today (performance-pages template p90/p99 facts)
 - Evidence owners: `performance-distribution`
-- Note: Measured from the crawler's location, not Google's.
+- Site profile keys: `templates`
+- Note: Measured from the crawler's location, not Google's. Pages matching no profile template are timed as one 'other' group; a template with fewer than min_samples timed pages keeps the answer at Needs validation.
 - Original: What is the server response time (TTFB) distribution across page templates (mean, p90, p99), and do slow origin outliers constrain crawl capacity?
 
 ### Q89 · Conditional HTTP caching
