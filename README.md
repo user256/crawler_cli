@@ -618,89 +618,63 @@ joins the default set only when `--expected-id` is supplied. Like the other
 snapshot readers, `report` requires `--crawl-run-id` when the database holds
 multiple runs.
 
-`technical-audit` writes a run-scoped evidence bundle with crawl completion,
-extraction coverage and a registry that identifies implemented, conditional,
-unimplemented and analyst-judgement checks. Incomplete or unmeasured coverage
-cannot be reported as a clean zero:
+`technical-audit` writes a run-scoped evidence bundle: the 44-check contract
+(each check with its status, coverage state, denominator and evidence rows),
+the `question_inputs` the question runner reads, and the run context
+(completion, stored-HTML counts, rate-limit and timing facts) that gates every
+answer. Incomplete or unmeasured coverage is never reported as a clean zero:
 
 ```bash
 crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
   --out ./audit-evidence/technical-audit.json
 ```
 
-Use `--markdown-out PATH` to write a concise recipient-facing projection. The
-JSON remains the source evidence bundle; the projection does not replace the
-manual, conditional, or analyst-judgement checks listed in its registry.
-Its `skill_requirements` map traces every skill section to its requirement
-controls, implementation state, evidence boundary, test and owning ticket. That
-static map describes product support; use `checks` for what this particular run
-actually tested and its denominator.
+The bundle answers the audit template's Questions tab through
+`technical-audit-questions`. Evidence a stored crawl cannot hold (rendered
+pages, active probes, supplied Search Console records) reaches the runner as an
+observation bundle written by `technical-audit-observations`:
 
-Saved link failures remain analyst-only until explicitly rechecked. To collect
-two live attempts for up to 25 in-scope failed targets, add
-`--recheck-live --scope-manifest ./authorized-scope.json`. The recheck honours
-robots.txt, the manifest and destination guard, does not escalate challenges
-to a browser, and keeps recovered or inconclusive targets out of client action
-tabs. Robots refusals, challenges, access denials, rate limits, DNS/TLS and
-other transport errors remain distinct. The JSON publication gate stays closed for incomplete coverage or
-unvalidated candidates.
-
-For a separately reported, evidence-only sample of rendered external links,
-combine `--check-external-links` with `--compare-current-renders` and an
-explicit `--scope-manifest`. The command tests up to 25 sorted unique targets
-by default (adjust with `--external-link-max-targets`, capped at 25), honours
-the manifest, robots.txt and destination pinning, and only repeats a target
-after a transport or HTTP failure. Out-of-scope links are recorded without a
-request; results are not automatically promoted to client actions. Rendered
-links are observed after bounded scrolling only—controls are not activated.
-Private destinations remain denied unless the manifest itself permits private
-network access and the invocation also opts in with `--allow-private-network`
-and, preferably, a narrow `--allow-network-cidr`.
-
-To audit AI crawler governance, add `--audit-ai-governance`. For each run
-origin (up to `--ai-governance-max-origins`, default 10) it classifies the
-declared robots.txt posture of nine AI crawler families (GPTBot, ChatGPT-User,
-ClaudeBot/anthropic-ai, PerplexityBot, Google-Extended, Amazonbot, Bytespider,
-CCBot, Applebot-Extended) as `allowed`, `blocked`, `partially_blocked` or
-`default_wildcard`, then makes at most three GETs for `/.well-known/llms.txt`,
-`/llms.txt` and `/llms-full.txt`. It records the status, final URL, content
-type, size and title of each file and flags HTML returned with a 200 as a
-soft-404. The results appear in the `ai-crawler-governance` check (theme `AI`),
-under `ai_governance` in the JSON, and in the Markdown projection. This is
-declared policy only. CDN rules can still block a token that robots.txt allows,
-and a missing llms.txt is not a defect.
-
-To include externally known URLs in orphan review, pass one or more CSVs with
-`url,source` columns; `source` must be `search_console` or `analytics`. An
-optional `observed_at` column retains the export date/period label. URL identity
-is not rewritten, and URLs outside hosts observed in the selected crawl are
-labelled out of scope rather than fetched or counted as orphans:
-
-```csv
-url,source,observed_at
-https://example.test/landing,search_console,2026-09-01/2026-09-24
-https://example.test/promo,analytics,2026-09
+```bash
+crawler-cli technical-audit-observations --postgres-dsn ... --crawl-run-id crawl-20260716-a \
+  --html-signals --tls-probe --ai-governance --probe-accept-language \
+  --render-comparison ./renders.json --out ./audit-evidence/observed.json
+crawler-cli technical-audit-questions --audit ./audit-evidence/technical-audit.json \
+  --site-profile ./site-profile.json --observations ./audit-evidence/observed.json \
+  --out ./audit-evidence/answers.json
 ```
+
+`--ai-governance` fetches each seed origin's robots.txt and /llms.txt through
+the guarded engine; `--probe-accept-language` probes the seed and locale roots
+with a fixed Accept-Language set and persists the session; `--tls-probe` reads
+Strict-Transport-Security headers from the stored HTTPS responses. The live
+probes honour robots.txt, destination pinning and the run's allowed hosts, and
+never escalate a challenge to a browser. Every observation kind is listed in
+[`docs/technical-audit-observations.md`](docs/technical-audit-observations.md)
+and the question registry in
+[`docs/technical-audit-questions.md`](docs/technical-audit-questions.md).
+Known URLs from Search Console or backlink exports are joined by
+`reconcile-sources` (below), not by the audit.
+
+The command also builds the template-column `ticket_register` in the JSON.
+It contains evidence-backed remediation tickets and only the explicitly mapped
+Improvement tickets for material missing inputs. Publish a fresh copy of the
+Sheets template with the same run:
 
 ```bash
 crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
-  --known-url-inventory ./known-urls.csv --out ./audit-evidence/technical-audit.json
+  --search-evidence ./search-console-records.json \
+  --inventory-interaction-evidence ./listing-interactions.json \
+  --google-sheets-template 'https://docs.google.com/spreadsheets/d/.../edit' \
+  --out ./audit-evidence/technical-audit.json
 ```
 
-These are discovery candidates, not proof of indexability or an orphan defect.
-Use the existing explicitly authorized `--recheck-live --scope-manifest ...`
-path to validate supplied URLs; rechecks share the 25-URL audit limit with
-saved failures, prioritize saved failures, and record any known URLs not
-selected. Robots and scope denials are not bypassed.
-
-To explicitly copy a compatible Google Sheets v2 template after writing the
-JSON artifact, add `--publish-google-sheets --google-sheets-template SHEET_URL`.
-The default durable receipt is written beside `--out`; retain it to recover a
-partial copy. Retry with `--resume-google-sheets --google-sheets-receipt PATH`
-to reconcile that exact workbook. Publication never edits the source template,
-uses RAW cell input, and reports success only after readback. See
-[`docs/technical-audit-google-sheets.md`](docs/technical-audit-google-sheets.md)
-for OAuth and service-account setup.
+`--search-evidence` accepts dated CSV/JSON records with `url`, `source` and
+`export_date`; optional fields cover index status, Google/user canonical,
+clicks, impressions and `priority_url`. `--inventory-interaction-evidence`
+accepts source URL, action and initial/post-interaction document-link counts.
+The audit records a finding only when that completed action exposes additional
+URLs. The copied workbook receives the exact `Tickets` columns plus Overview,
+Audit Log and URL-level evidence tabs.
 
 #### Discovery source reconciliation
 
@@ -726,38 +700,6 @@ hosts the run did not crawl are listed under `out_of_scope` and not joined. The
 `coverage` block states whether the crawl fetched everything it discovered: when
 it did not, unlinked rows mean "no inlinks from crawled pages", not confirmed
 orphans.
-
-To create the client-facing ticket register instead, add
-`--publish-ticket-register`. It copies the standard ticket workbook, preserves
-its layout and `Config` tab, and populates `Tickets!B7:I` only with evidenced,
-client-actionable rows. The output includes inline URL and observation evidence
-in the Description; candidate, partial and unavailable checks stay in the
-deterministic evidence bundle unless the language mapping defines a specific
-input-request ticket. Use `--ticket-register-title`, `--ticket-register-folder`
-and `--ticket-register-receipt` to set the copy details. Use
-`--resume-ticket-register` with the same receipt after an interrupted
-publication. This is separate from the compatible-v2 evidence publisher, and
-it also requires explicit authorization to write to Google Drive.
-The command also builds the template-column `ticket_register` in the JSON.
-It contains evidence-backed remediation tickets and only the explicitly mapped
-Improvement tickets for material missing inputs. Publish a fresh copy of the
-Sheets template with the same run:
-
-```bash
-crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
-  --search-evidence ./search-console-records.json \
-  --inventory-interaction-evidence ./listing-interactions.json \
-  --google-sheets-template 'https://docs.google.com/spreadsheets/d/.../edit' \
-  --out ./audit-evidence/technical-audit.json
-```
-
-`--search-evidence` accepts dated CSV/JSON records with `url`, `source` and
-`export_date`; optional fields cover index status, Google/user canonical,
-clicks, impressions and `priority_url`. `--inventory-interaction-evidence`
-accepts source URL, action and initial/post-interaction document-link counts.
-The audit records a finding only when that completed action exposes additional
-URLs. The copied workbook receives the exact `Tickets` columns plus Overview,
-Audit Log and URL-level evidence tabs.
 
 ### Run snapshots and retention
 
