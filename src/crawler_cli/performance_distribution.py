@@ -150,9 +150,7 @@ def analyse_performance_distribution(
         samples = populations[template]
         values = sorted(value for value, _url in samples)
         slowest = tuple(
-            url
-            for _value, url in sorted(samples, key=lambda sample: (-sample[0], sample[1]))[:max_example_urls]
-            if url
+            url for _value, url in sorted(samples, key=lambda sample: (-sample[0], sample[1]))[:max_example_urls] if url
         )
         if len(values) < min_samples:
             reasons.add("insufficient_template_samples")

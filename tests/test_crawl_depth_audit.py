@@ -72,9 +72,7 @@ def test_q44_deduplicates_url_matching_priority_pattern_and_commercial_hub() -> 
         (_graph(root_urls=[]), "missing_graph_root_urls"),
     ],
 )
-def test_q44_never_calls_unknown_graph_evidence_healthy(
-    graph: dict[str, object], expected_reason: str
-) -> None:
+def test_q44_never_calls_unknown_graph_evidence_healthy(graph: dict[str, object], expected_reason: str) -> None:
     result = analyse_priority_crawl_depth(
         [
             {"url": "https://example.test/", "crawl_depth": 0},

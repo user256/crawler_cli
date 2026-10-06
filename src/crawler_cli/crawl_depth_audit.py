@@ -228,9 +228,7 @@ def _graph_complete(graph: Mapping[str, object] | None, reasons: set[str]) -> bo
     return graph.get("depths_from_roots") is True and graph.get("coverage_complete") is True
 
 
-def _verify_roots(
-    records: Mapping[str, Mapping[str, object]], roots: Sequence[str], reasons: set[str]
-) -> None:
+def _verify_roots(records: Mapping[str, Mapping[str, object]], roots: Sequence[str], reasons: set[str]) -> None:
     if not roots:
         return
     if not any(_depth(records.get(root)) == 0 for root in roots):
