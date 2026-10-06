@@ -1,41 +1,23 @@
 """Deterministic technical-audit projection over a stored crawl run.
 
 This module deliberately separates facts that can be derived from one saved
-``crawler_cli`` run from live checks and SEO judgement.  A no-row result is
-therefore reported as ``no_observations`` rather than as a claim that a check
-is healthy.
+``crawler_cli`` run from live checks and SEO judgement. A control without its
+required evidence is therefore reported as ``unavailable`` rather than as a
+claim that a check is healthy.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
-import re
-from urllib.parse import parse_qsl, urlsplit
 
 from .schema import JSON_LD_PARSER_MODE, _PARSER
-from .indexability import directive_conflicts
-from .models import RobotsDirectiveEvidence
-from .redaction import redact_url_without_digest
-from .structured_data_audit import (
-    GOOGLE_FEATURE_RULES,
-    GOOGLE_RULES_VERIFIED_ON,
-    GOOGLE_STRUCTURED_DATA_RULESET_VERSION,
-    structured_data_inventory_report,
-)
-from .performance_audit import (
-    performance_inventory_report,
-)
-from .transport_security import transport_security_report
-from .technical_audit_contract import TECHNICAL_AUDIT_CHECK_CONTRACT, project_v3_controls
-from .manual_review_questions import manual_review_answer_register
 
 
 TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/3"
-TECHNICAL_AUDIT_RULESET_VERSION = "technical-audit-rules/3"
+TECHNICAL_AUDIT_RULESET_VERSION = "technical-audit-rules/2"
 
 # The report names are run-scoped and have no dependency on a changing live
 # endpoint.  Keep this list explicit so additions are intentional and appear
@@ -45,1562 +27,396 @@ TECHNICAL_AUDIT_REPORTS = (
     "indexability",
     "redirect-chains",
     "schema-compatibility",
-    "structured-data-inventory",
     "image-issues",
     "internal-link-quality",
-    "link-graph-metrics",
     "tracking-parameter-links",
     "near-duplicates",
-    "similarity-coverage",
     "internal-authority",
-    "authority-coverage",
-    "metadata-locale-inventory",
-    "canonical-hreflang-inventory",
-    "current-robots-sitemaps",
-    "url-variant-soft404",
-    "rendered-mobile-resources",
-    "performance-inventory",
-    "conditional-get-probes",
-    "ai-governance",
-    "accept-language-probes",
+    "locale-content-alignment",
+    "render-url-candidates",
+    "render-attempts",
+    "stored-html",
+    "metadata-duplicates",
+    "nonhtml-search-assets",
+    "hreflang-validation",
+    "semantic-html",
+    "profile-indexability-pages",
+    "soft404-error-routes",
+    "discovery-source-provenance",
+    "crawl-depth-pages",
+    "performance-pages",
+    "empty-anchor-links",
+    "inventory-interactions",
+    "supplied-search-evidence",
 )
 
-# Registry is intentionally wider than the currently implemented report set.
-# A fixed count of SQL reports must never be presented as coverage of the full
-# analyst skill. Implemented reports stay candidates until their prerequisites
-# and population denominator are known.
-TECHNICAL_AUDIT_CHECK_REGISTRY = (
-    {"id": "crawl-integrity", "state": "partial", "source": "crawl run and snapshots"},
-    {"id": "indexability-directive-conflicts", "state": "implemented", "source": "indexability report"},
-    {"id": "internal-link-quality", "state": "implemented", "source": "link graph report"},
+# This is the code representation of the table in
+# skills/technical-seo-audit/SKILL.md. Every invocation emits these IDs in this
+# order. Static support metadata is deliberately separate from the per-run
+# result: an unimplemented collector still produces an explicit unavailable
+# row instead of vanishing from checks[].
+TECHNICAL_AUDIT_CHECK_CONTRACT = (
     {
-        "id": "live-link-rechecks",
-        "state": "implemented_conditional",
-        "source": "guarded crawler and authorization manifest",
+        "id": "audit-run-integrity",
+        "title": "Audit run integrity",
+        "detail_sheet": "Run integrity",
+        "required_evidence": "crawl/job metadata, run ID, timestamps, scope and counts",
+        "owner_ticket": "183",
     },
     {
-        "id": "rendered-external-link-rechecks",
-        "state": "implemented_conditional_evidence_only",
-        "source": "bounded rendered-link sample, explicit authorization manifest, robots and destination guard",
-    },
-    {"id": "tracking-parameter-links", "state": "implemented", "source": "link graph report"},
-    {"id": "orphan-candidates", "state": "implemented_candidate", "source": "orphan report"},
-    {"id": "redirect-observations", "state": "implemented_candidate", "source": "redirect report"},
-    {
-        "id": "near-duplicate-content",
-        "state": "implemented_candidate",
-        "source": "primary-content signatures and bounded similarity coverage",
-    },
-    {"id": "schema-parser-diagnostics", "state": "implemented_candidate", "source": "schema report"},
-    {"id": "image-markup", "state": "implemented_candidate", "source": "image report"},
-    {
-        "id": "internal-authority",
-        "state": "implemented_candidate",
-        "source": "canonical indexable HTML and run-scoped link graph",
+        "id": "audit-collection-safeguards",
+        "title": "Collection safeguards",
+        "detail_sheet": "Collection safeguards",
+        "required_evidence": "collection configuration and event evidence",
+        "owner_ticket": "224",
     },
     {
-        "id": "metadata-and-locale",
-        "state": "implemented_candidate",
-        "source": "run-scoped parsed HTML snapshots; sitemap membership unavailable",
+        "id": "discovery-source-provenance",
+        "title": "Discovery-source provenance",
+        "detail_sheet": "Discovery sources",
+        "required_evidence": "run-scoped discovery-source evidence",
+        "owner_ticket": "228",
     },
     {
-        "id": "canonical-targets",
-        "state": "implemented_candidate",
-        "source": "run snapshots with separate HTML/HTTP declaration evidence; uncrawled target state unknown",
+        "id": "response-status-and-redirect-history",
+        "title": "Response status and redirects",
+        "detail_sheet": "Response and redirects",
+        "required_evidence": "response and redirect evidence",
+        "owner_ticket": "218",
     },
     {
-        "id": "hreflang-clusters",
-        "state": "implemented_conditional",
-        "source": "run-scoped HTML and HTTP annotations; sitemap channel unavailable in current snapshots",
-    },
-    {
-        "id": "current-robots-and-sitemaps",
-        "state": "implemented_conditional",
-        "source": "explicit bounded current fetch; RFC 9309 rules and current sitemap parser",
-    },
-    {
-        "id": "url-variants-and-soft-404",
-        "state": "implemented_conditional",
-        "source": "explicit bounded probes with valid saved controls and authorization scope",
-    },
-    {
-        "id": "rendered-mobile-and-resource-evidence",
-        "state": "implemented_conditional",
-        "source": "explicit same-navigation desktop/mobile viewport captures and bounded browser requests",
-    },
-    {
-        "id": "feature-specific-structured-data",
-        "state": "implemented_conditional",
-        "source": "versioned Google Search Central property rules and saved active markup",
-    },
-    {
-        "id": "performance-and-conditional-requests",
-        "state": "implemented_conditional",
-        "source": "run-scoped HTTP timing distributions and explicit validator probes",
-    },
-    {
-        "id": "ai-crawler-governance",
-        "state": "implemented_conditional",
-        "source": "explicit bounded robots.txt AI-token evaluation and /llms.txt probes; declared policy only",
-    },
-    {"id": "verified-search-bot-logs", "state": "conditional", "source": "validated operator-supplied access logs"},
-    {"id": "geo-dependent-behaviour", "state": "conditional", "source": "configured regional proxy observations"},
-    {
-        "id": "accept-language-variation",
-        "state": "implemented_conditional",
-        "source": "explicit bounded Accept-Language header probes with guarded, manually followed redirects",
-    },
-    {
-        "id": "severity-content-intent-and-priority",
-        "state": "analyst_judgement",
-        "source": "site purpose and business evidence",
-    },
-    {
-        "id": "fetching-safeguards",
-        "state": "implemented_conditional",
-        "source": "robots, bounded clients, redirect/header evidence",
+        "id": "internal-link-targets",
+        "title": "Internal link targets",
+        "detail_sheet": "Internal link failures",
+        "required_evidence": "run-scoped link graph and destination evidence",
+        "owner_ticket": "186",
     },
     {
         "id": "external-link-integrity",
-        "state": "not_implemented",
-        "source": "bounded external-target checks not orchestrated",
+        "title": "External link integrity",
+        "detail_sheet": "External link rechecks",
+        "required_evidence": "explicit external-link recheck evidence",
+        "owner_ticket": "211",
     },
     {
-        "id": "image-resource-impact",
-        "state": "partial",
-        "source": "saved image markup and browser request observations; delivered impact incomplete",
-    },
-    {"id": "domain-and-host-configuration", "state": "implemented_conditional", "source": "guarded URL-variant probes"},
-    {
-        "id": "non-production-hosts-and-https",
-        "state": "not_implemented",
-        "source": "no inventory/probe for exposed non-production hosts",
+        "id": "orphan-candidates",
+        "title": "Orphan-page candidates",
+        "detail_sheet": "Orphan candidates",
+        "required_evidence": "run-scoped link and discovery evidence",
+        "owner_ticket": "222",
     },
     {
-        "id": "robots-link-purpose",
-        "state": "not_implemented",
-        "source": "blocked rendered-link purpose classification unavailable",
-    },
-    {
-        "id": "indexability-and-crawl-waste",
-        "state": "partial",
-        "source": "saved metadata/directive/link inventories; sitemap and depth populations incomplete",
-    },
-    {
-        "id": "growing-url-families",
-        "state": "partial",
-        "source": "parameter families are inventoried; repeated growth and rendered-link purpose unavailable",
-    },
-    {
-        "id": "hreflang-noindex-guidance",
-        "state": "implemented_candidate",
-        "source": "canonical/hreflang classifier excludes noindex defect allegations",
-    },
-    {
-        "id": "parameter-faceted-controls",
-        "state": "implemented_conditional",
-        "source": "run-scoped parameter links and bounded URL probes",
-    },
-    {
-        "id": "metadata-content-quality",
-        "state": "partial",
-        "source": "metadata inventory available; thin-content and page-purpose scoring unavailable",
-    },
-    {
-        "id": "access-log-analysis",
-        "state": "conditional",
-        "source": "verified operator-supplied access logs; no parser contract yet",
-    },
-    {
-        "id": "canonical-validation",
-        "state": "implemented_candidate",
-        "source": "run-scoped HTML/HTTP canonical evidence; live targets may be unknown",
-    },
-    {
-        "id": "hreflang-channel-validation",
-        "state": "partial",
-        "source": "HTML/HTTP channels saved; sitemap alternates not joined to run",
-    },
-    {
-        "id": "locale-redirect-validation",
-        "state": "conditional",
-        "source": "Accept-Language probe evidence available; matching regional proxy evidence still required",
-    },
-    {
-        "id": "rich-result-eligibility",
-        "state": "partial",
-        "source": "versioned static property rules; live eligibility remains analyst-confirmed",
-    },
-    {
-        "id": "field-versus-lab-performance",
-        "state": "partial",
-        "source": "crawl timings and conditional requests; independent traces/field CWV unavailable",
-    },
-    {
-        "id": "mobile-and-non-html",
-        "state": "partial",
-        "source": "paired viewport observations; asset inventory is not integrated",
-    },
-    {
-        "id": "conditional-cache-validation",
-        "state": "implemented_conditional",
-        "source": "real-validator conditional GET evidence",
-    },
-    {
-        "id": "transport-security",
-        "state": "implemented_candidate",
-        "source": (
-            "stored HTTPS response headers and HTTP-scheme variant probes; preload list not queried; "
-            "OCSP stapling not determinable with the available TLS stack"
-        ),
-    },
-    {
-        "id": "healthy-overview",
-        "state": "partial",
-        "source": "qualified tested denominators; depth/thin-content metrics unavailable",
-    },
-    {
-        "id": "recipient-value-reporting",
-        "state": "implemented",
-        "source": "qualified grouped actions and healthy overview projection",
-    },
-    {
-        "id": "sheets-output-contract",
-        "state": "implemented_conditional",
-        "source": "versioned v2 ranges, preflight, read-back, and recovery receipt",
-    },
-    {
-        "id": "artifact-validation",
-        "state": "partial",
-        "source": "JSON/Markdown/XLSX validation; live Sheets layout proof remains outstanding",
-    },
-)
-
-# Requirement-level map of every substantive skill heading. This is analyst
-# traceability, not a claim that the named check ran in a particular audit;
-# per-run coverage remains in ``checks`` and missing prerequisites stay unknown.
-TECHNICAL_AUDIT_SKILL_REQUIREMENTS = (
-    {
-        "id": "workflow",
-        "section": "Workflow",
-        "check_id": "crawl-integrity",
-        "requirements": [
-            "reconcile domain, seed/allowed hosts, requested/final URLs and declared canonical host",
-            "probe homepage/deep-path mirrors without rewriting historical request identities",
-            "record run ID, dates, status, configuration and URL/response totals",
-            "analyse stored data at scale",
-            "recheck unstable and failed observations live with an appropriate backend",
-            "test real conditional requests when caching is material",
-            "fetch current robots.txt and XML sitemaps independently of stored flags",
-            "render representative templates and diff indexing signals",
-            "label current and historical evidence separately",
-            "apply recipient-value filtering before output",
-            "validate the generated artifact before delivery",
-        ],
-        "state": "partial",
-        "owner_ticket": 183,
-        "evidence": "run context, report registry and output validation",
-        "test": "tests/test_technical_audit.py",
-    },
-    {
-        "id": "evidence-bundle",
-        "section": "Deterministic evidence bundle",
-        "check_id": "crawl-integrity",
-        "related_check_ids": ["sheets-output-contract"],
-        "requirements": [
-            "replay run-scoped inputs deterministically",
-            "record prerequisite and coverage state",
-            "gate and verify explicit Sheets publication",
-            "disclose supplied-source and analyst-only checks",
-        ],
-        "state": "partial",
-        "owner_ticket": 198,
-        "evidence": "versioned audit JSON, check registry, publication receipt",
-        "test": "tests/test_technical_audit.py",
-    },
-    {
-        "id": "remediation-ticket-template",
-        "section": "Default remediation-ticket template",
-        "check_id": "recipient-value-reporting",
-        "requirements": [
-            "copy the standard ticket-register workbook for each audit and never write into the source",
-            "keep its ticket fields: label, description, suggested solution, acceptance criteria, classification, priority, how to replicate, notes",
-            "add only validated, actionable remediation items and keep healthy checks in the evidence bundle",
-            "state the limitation and supply the same ticket rows locally when the sheet cannot be copied or edited",
-            "keep the ticket register separate from the v2 evidence publisher contract",
-        ],
-        "state": "analyst_judgement",
-        "owner_ticket": 199,
-        "evidence": "analyst ticket register; the v2 publisher does not implement it",
-        "test": "tests/test_technical_audit.py",
-    },
-    {
-        "id": "deterministic-ticket-language",
-        "section": "Deterministic ticket language",
-        "check_id": "sheets-output-contract",
-        "requirements": [
-            "keep the client ticket mapping in the same ordered control contract as the runtime audit",
-            "copy the source workbook before writing ticket rows",
-            "write only the declared ticket-register fields and verify the written values",
-            "include inline URL evidence in client-facing remediation rows",
-            "withhold partial, candidate and unqualified rows from remediation tickets",
-        ],
-        "state": "implemented_conditional",
-        "owner_ticket": 199,
-        "evidence": "versioned ticket-language mapping, copied workbook receipt and read-back",
-        "test": "tests/test_technical_audit_tickets.py",
-    },
-    {
-        "id": "fetching-rules",
-        "section": "Fetching Rules",
-        "check_id": "fetching-safeguards",
-        "requirements": [
-            "respect robots.txt and explicit authorization scope",
-            "use browser-like clients when ordinary clients encounter protection",
-            "never treat a spoofed search-engine user-agent challenge as verified bot blocking",
-            "compare plain, browser and spoofed-agent behavior without overclaiming identity",
-            "capture initial/final status, each redirect hop, URL, timing, content type and error",
-            "capture full response headers and reconcile HTTP directives with HTML",
-            "keep concurrency conservative and timestamp live observations",
-            "separate supplied Search Console/CDN/origin evidence from crawler observations",
-        ],
-        "state": "implemented_conditional",
-        "owner_ticket": 185,
-        "evidence": "live recheck records, scope manifest and HTTP observations",
-        "test": "tests/test_live_rechecks.py",
-    },
-    {
-        "id": "geo-proxies",
-        "section": "Geo proxies",
-        "check_id": "geo-dependent-behaviour",
-        "requirements": [
-            "require a request from the region relevant to the geo claim",
-            "load configured proxy definitions without exposing their URL or credentials",
-            "pass the proxy through the selected HTTP or browser backend",
-            "record proxy label and region with each observation",
-            "report missing regional coverage as not testable from that geo",
-            "never write proxy URLs or credentials to output, logs or committed files",
-        ],
-        "state": "conditional",
-        "owner_ticket": 194,
-        "evidence": "proxy-specific observation or explicit unavailable state",
-        "test": "tests/test_rendered_audit.py",
-    },
-    {
-        "id": "rendered-raw",
-        "section": "Rendered versus raw HTML",
-        "check_id": "rendered-mobile-and-resource-evidence",
-        "requirements": [
-            "compare indexing signals and content/links",
-            "retain requested/final URLs and access state",
-            "bound readiness and disclose template/device sample",
-            "require exact DOM and screenshot evidence for hidden-content claims",
-        ],
-        "state": "partial",
-        "owner_ticket": 194,
-        "evidence": "same-navigation raw/render capture and coverage strata",
-        "test": "tests/test_rendered_audit.py",
-    },
-    {
-        "id": "crawl-integrity",
-        "section": "Crawl Integrity",
-        "check_id": "crawl-integrity",
-        "requirements": [
-            "record run completion state and interruption reason",
-            "count crawled, blocked, skipped, failed, persisted and HTML-decoded records separately",
-            "record robots/sitemap configuration and host/path/seed restrictions",
-            "identify challenge, compression/decoding, timeout and persistence gaps",
-            "disclose material locale/template coverage differences",
-            "exclude undecoded/absent HTML from content and indexability conclusions",
-            "quantify the population excluded from parsed-content analysis",
-        ],
-        "state": "partial",
-        "owner_ticket": 183,
-        "evidence": "run metadata and extraction-state counts",
-        "test": "tests/test_technical_audit.py",
-    },
-    {
-        "id": "discovery-source",
-        "section": "Discovery-source integrity",
-        "check_id": "crawl-integrity",
-        "requirements": [
-            "count source provenance for analyst QA",
-            "avoid presenting tool gaps as client defects",
-            "verify redirects live when saved count is zero",
-        ],
-        "state": "partial",
-        "owner_ticket": 183,
-        "evidence": "run source counts and live redirect observations",
-        "test": "tests/test_technical_audit.py",
-    },
-    {
-        "id": "multi-run",
-        "section": "Multi-run and multi-site stores",
-        "check_id": "crawl-integrity",
-        "requirements": ["scope every query by immutable run id", "prevent mixed-site/run denominators"],
-        "state": "implemented",
-        "owner_ticket": 198,
-        "evidence": "run-scoped SQL snapshot queries",
-        "test": "tests/test_persistence_integration.py",
-    },
-    {
-        "id": "http-link-graph",
-        "section": "HTTP Status and Link Graph",
-        "check_id": "live-link-rechecks",
-        "related_check_ids": ["internal-link-quality", "redirect-observations"],
-        "requirements": [
-            "group non-2xx URLs by final status and template, then recheck live",
-            "distinguish persistent 404/410, recovered 5xx, redirects, challenges and fetch failures",
-            "count internal link instances and unique source pages separately",
-            "export source, target, anchor, DOM location, source indexability and status history",
-            "recommend 301 only to the closest relevant replacement and 410 only for intentional removal without substitute",
-            "remove internal/sitemap references when recommending retirement",
-            "exclude recovered targets and their links from current failure populations",
-            "summarize resolved periodic 5xx once and avoid stale URL-level recommendations",
-            "retain URL-level 5xx detail only for current, unstable or log-supported failures",
-        ],
-        "state": "implemented_conditional",
-        "owner_ticket": 185,
-        "evidence": "saved link evidence plus bounded live rechecks",
-        "test": "tests/test_live_rechecks.py",
-    },
-    {
-        "id": "soft404",
-        "section": "Soft 404s and error handling",
-        "check_id": "url-variants-and-soft-404",
-        "requirements": [
-            "compare error templates with valid controls",
-            "probe nonexistent routes per host",
-            "treat synthetic results as risk until corroborated",
-        ],
-        "state": "implemented_conditional",
-        "owner_ticket": 193,
-        "evidence": "bounded control and synthetic-path probe records",
-        "test": "tests/test_url_variant_audit.py",
-    },
-    {
-        "id": "orphan-depth",
-        "section": "Orphan pages and crawl depth",
-        "check_id": "orphan-candidates",
-        "requirements": [
-            "qualify orphans with complete run-scoped graph",
-            "join sitemap/Search Console/analytics sources when supplied",
-            "validate rendered navigation before depth claims",
-            "compare depth by template",
-        ],
-        "state": "partial",
-        "owner_ticket": 186,
-        "evidence": "same-run graph metrics and labelled discovery inputs",
-        "test": "tests/test_audit_extension_reports.py",
+        "id": "crawl-depth-distribution",
+        "title": "Crawl-depth distribution",
+        "detail_sheet": "Crawl depth",
+        "required_evidence": "root set and run-scoped graph",
+        "owner_ticket": "228",
     },
     {
         "id": "internal-authority",
-        "section": "Internal authority and link quality",
-        "check_id": "internal-authority",
-        "requirements": [
-            "score canonical indexable HTML over qualified graph",
-            "inventory empty and problematic links",
-            "use peer/template context",
-            "separate rendered-only navigation",
-        ],
-        "state": "partial",
-        "owner_ticket": 187,
-        "evidence": "run-scoped edges, authority population and rendered-link records",
-        "test": "tests/test_audit_extension_reports.py",
+        "title": "Internal authority",
+        "detail_sheet": "Internal authority",
+        "required_evidence": "run-scoped internal graph and declared calculation",
+        "owner_ticket": "187",
     },
     {
-        "id": "external-links",
-        "section": "External-link integrity",
-        "check_id": "external-link-integrity",
-        "related_check_ids": ["rendered-external-link-rechecks"],
-        "requirements": [
-            "bounded rechecks with chain/DNS/TLS evidence",
-            "confirm persistent target failures",
-            "inspect form protocols and user-supplied rel attributes",
-            "avoid blanket nofollow recommendations",
-        ],
-        "state": "not_implemented",
-        "owner_ticket": 194,
-        "evidence": "no external target collector in technical-audit",
-        "test": "tests/test_rendered_audit.py",
+        "id": "image-markup",
+        "title": "Image markup",
+        "detail_sheet": "Image issues",
+        "required_evidence": "raw or rendered image markup",
+        "owner_ticket": "210",
     },
     {
-        "id": "image-resources",
-        "section": "Image and critical-resource evidence",
-        "check_id": "image-resource-impact",
-        "related_check_ids": ["image-markup"],
-        "requirements": [
-            "inventory img/srcset/picture/lazy/CSS-background sources",
-            "preserve intentional empty alt",
-            "measure status/MIME/robots/dimensions/transfer/layout",
-            "map critical resource failures to affected pages",
-        ],
-        "state": "partial",
-        "owner_ticket": 194,
-        "evidence": "saved image markup and bounded browser resource observations",
-        "test": "tests/test_rendered_audit.py",
+        "id": "image-resource-delivery",
+        "title": "Image resource delivery",
+        "detail_sheet": "Image resources",
+        "required_evidence": "resource and performance evidence",
+        "owner_ticket": "210",
     },
     {
-        "id": "domain-variants",
-        "section": "Domain and URL Configuration",
-        "check_id": "domain-and-host-configuration",
-        "requirements": [
-            "probe HTTP/HTTPS and www/non-www on home and representative deep paths",
-            "probe trailing slash and no-slash routes across several templates",
-            "probe mixed-case/CamelCase and locale variants without assuming equivalence",
-            "probe encoded/decoded paths and duplicate query ordering when applicable",
-            "establish intended canonical HTTPS host before recommending redirects",
-            "distinguish intentional mirrors from retired host variants",
-            "flag only demonstrated multi-hop or inconsistent redirects",
-            "require observed demand before promoting defensive case/encoding probes",
-            "pair route/encoding/query probes with valid entities and nonexistent controls",
-            "preserve case-sensitive IDs, plus-vs-space semantics and locale slash conventions",
-        ],
-        "state": "implemented_conditional",
-        "owner_ticket": 193,
-        "evidence": "bounded URL-variant observations and route controls",
-        "test": "tests/test_url_variant_audit.py",
+        "id": "url-host-and-variants",
+        "title": "URL host and variants",
+        "detail_sheet": "URL variants",
+        "required_evidence": "crawl URLs, redirects, canonicals and link targets",
+        "owner_ticket": "193",
     },
     {
-        "id": "non-production-https",
-        "section": "Non-production hosts and HTTPS hygiene",
-        "check_id": "non-production-hosts-and-https",
-        "related_check_ids": ["transport-security"],
-        "requirements": [
-            "inventory non-production hosts from all evidence sources",
-            "check exposed duplicate content and certificate errors",
-            "find mixed content and insecure internal directives",
-            "avoid robots-only exposure remediation",
-        ],
-        "state": "not_implemented",
-        "owner_ticket": 202,
-        "evidence": "no non-production host inventory in current runner",
-        "test": "tests/test_technical_audit.py",
+        "id": "nonproduction-https",
+        "title": "Non-production and HTTPS",
+        "detail_sheet": "Host and HTTPS",
+        "required_evidence": "host, response, robots and indexability evidence",
+        "owner_ticket": "202",
     },
     {
-        "id": "robots-sitemaps",
-        "section": "Robots and XML Sitemaps",
-        "check_id": "current-robots-and-sitemaps",
-        "related_check_ids": ["robots-link-purpose", "ai-crawler-governance"],
-        "requirements": [
-            "fetch live sitemap indexes and every bounded child sitemap, independent of stored discovery flags",
-            "check final status and canonical/indexable/noindex state of listed URLs",
-            "check sitemap duplicates, parameter variants, locale placement and credible lastmod",
-            "stratify crawled and never-crawled live samples by material locale/template",
-            "report sample basis and imbalance; do not extrapolate a skewed sample",
-            "label live sitemap-vs-saved-crawl mismatches without implying live indexability",
-            "compare per-locale sitemap and discovered-indexable counts as corroboration only",
-            "probe bare XML URLs in robots.txt before reporting missing Sitemap syntax",
-            "check intended-page/asset blocks, utility patterns, parameter rules and user-agent conflicts",
-            "validate RFC 9309 user-agent groups, wildcard/anchors, specificity and allow-on-tie behavior",
-            "test known allowed and blocked URLs against actual rules and retain matched rule/user-agent",
-            "never fetch robots-disallowed targets to confirm status",
-            "evaluate rendered internal links against all applicable robots rules and classify purpose",
-            "report blocked-link instances, unique targets and unique sources separately",
-            "do not replace canonical/noindex/redirect/link-cleanup actions with robots blocking",
-        ],
-        "state": "partial",
-        "owner_ticket": 192,
-        "evidence": "current site-file bundle and saved crawl joins",
-        "test": "tests/test_current_site_files.py",
+        "id": "robots-controls",
+        "title": "Robots controls",
+        "detail_sheet": "Robots",
+        "required_evidence": "current robots fetch and crawl evidence",
+        "owner_ticket": "192",
     },
     {
-        "id": "indexability-waste",
-        "section": "Indexability and Crawl Waste",
-        "check_id": "metadata-and-locale",
-        "related_check_ids": ["indexability-and-crawl-waste", "indexability-directive-conflicts"],
-        "requirements": [
-            "segment successfully parsed 200 HTML by indexability, locale and template",
-            "quantify URL counts/shares, clean-vs-parameter paths, internal links and unique sources",
-            "include sitemap membership and canonical presence where evidence exists",
-            "report content depth only when extraction is reliable",
-            "distinguish intentional noindex eligibility policy from accidental suppression",
-            "reduce internal and sitemap exposure for intentionally excluded inventory",
-        ],
-        "state": "partial",
-        "owner_ticket": 190,
-        "evidence": "run-scoped metadata/directive inventory",
-        "test": "tests/test_technical_audit.py",
+        "id": "sitemap-integrity",
+        "title": "Sitemap integrity",
+        "detail_sheet": "Sitemaps",
+        "required_evidence": "current sitemap fetches and crawl evidence",
+        "owner_ticket": "192",
     },
     {
-        "id": "growing-url-families",
-        "section": "Growing URL families and crawl traps",
-        "check_id": "url-variants-and-soft-404",
-        "related_check_ids": ["growing-url-families"],
-        "requirements": [
-            "group route families and query keys",
-            "quantify internal-only denominators and device evidence",
-            "require repeated timestamps for growth rates",
-            "preserve accessible interactions when removing crawl paths",
-        ],
-        "state": "partial",
-        "owner_ticket": 193,
-        "evidence": "parameter-family inventory; repeated rendered/device evidence unavailable",
-        "test": "tests/test_url_variant_audit.py",
+        "id": "rendered-robots-links",
+        "title": "Rendered robots links",
+        "detail_sheet": "Rendered robots links",
+        "required_evidence": "initial raw/rendered links plus an explicit pre/post-interaction inventory capture",
+        "owner_ticket": "205",
+    },
+    {
+        "id": "indexability-segmentation",
+        "title": "Indexability segmentation",
+        "detail_sheet": "Index conflicts",
+        "required_evidence": "stored page directives and responses",
+        "owner_ticket": "184",
+    },
+    {
+        "id": "crawl-waste-url-families",
+        "title": "Crawl-waste URL families",
+        "detail_sheet": "URL families",
+        "required_evidence": "URL-family analysis with denominators",
+        "owner_ticket": "220",
+    },
+    {
+        "id": "parameter-and-faceted-controls",
+        "title": "Parameter and faceted controls",
+        "detail_sheet": "Tracking parameters",
+        "required_evidence": "link, canonical, indexability and URL-family evidence",
+        "owner_ticket": "193",
+    },
+    {
+        "id": "soft404-error-routes",
+        "title": "Soft 404 and error routes",
+        "detail_sheet": "Soft 404s",
+        "required_evidence": "response, title/body and template evidence",
+        "owner_ticket": "193",
+    },
+    {
+        "id": "metadata-basics",
+        "title": "Metadata basics",
+        "detail_sheet": "Metadata",
+        "required_evidence": "metadata inventory",
+        "owner_ticket": "190",
+    },
+    {
+        "id": "metadata-duplicates-aliases",
+        "title": "Metadata duplicates and aliases",
+        "detail_sheet": "Duplicate metadata",
+        "required_evidence": "metadata, canonical and alias evidence",
+        "owner_ticket": "229",
+    },
+    {
+        "id": "content-quality",
+        "title": "Content quality",
+        "detail_sheet": "Content quality",
+        "required_evidence": "extracted-content evidence and declared thresholds",
+        "owner_ticket": "190",
+    },
+    {
+        "id": "locale-html-lang",
+        "title": "Locale HTML language",
+        "detail_sheet": "Locale language",
+        "required_evidence": "HTML lang, hreflang context and run-scoped primary-content signatures",
+        "owner_ticket": "221",
+    },
+    {
+        "id": "near-duplicate-content",
+        "title": "Near-duplicate content",
+        "detail_sheet": "Near duplicates",
+        "required_evidence": "content hashes, similarity evidence and comparison population",
+        "owner_ticket": "229",
+    },
+    {
+        "id": "canonical-declarations",
+        "title": "Canonical declarations",
+        "detail_sheet": "Canonicals",
+        "required_evidence": "raw HTML canonical inventory",
+        "owner_ticket": "191",
+    },
+    {
+        "id": "canonical-target-validation",
+        "title": "Canonical target validation",
+        "detail_sheet": "Canonical targets",
+        "required_evidence": "canonical target and response/indexability evidence",
+        "owner_ticket": "231",
+    },
+    {
+        "id": "hreflang-html-http",
+        "title": "HTML and HTTP hreflang",
+        "detail_sheet": "Hreflang",
+        "required_evidence": "hreflang inventory and target evidence",
+        "owner_ticket": "191",
+    },
+    {
+        "id": "hreflang-sitemap",
+        "title": "Sitemap hreflang",
+        "detail_sheet": "Sitemap hreflang",
+        "required_evidence": "sitemap extension inventory and target evidence",
+        "owner_ticket": "164",
     },
     {
         "id": "hreflang-noindex",
-        "section": "Hreflang on noindex pages",
-        "check_id": "hreflang-clusters",
-        "related_check_ids": ["hreflang-noindex-guidance"],
-        "requirements": [
-            "exclude noindexed sources from missing/self/reciprocity defects",
-            "retain only concise guidance against hreflang on noindex pages",
-        ],
-        "state": "implemented_candidate",
-        "owner_ticket": 191,
-        "evidence": "run-scoped indexability and hreflang annotations",
-        "test": "tests/test_technical_audit.py",
-    },
-    {
-        "id": "parameters",
-        "section": "Parameter and Faceted URLs",
-        "check_id": "parameter-faceted-controls",
-        "related_check_ids": ["tracking-parameter-links"],
-        "requirements": [
-            "inventory parameter keys/combinations by intent, indexability, canonical, hreflang, uniqueness and discovery source",
-            "identify internal analytics/session parameters including utm_*, gclid, _ga and _gl",
-            "review sort/order, filters, dates/availability, tracking/internal metadata and pagination",
-            "export every internally linked canonicalized parameter target with complete source/anchor/location evidence",
-            "treat canonicalized state links as the primary crawl-path issue rather than relying on canonical/noindex",
-            "remove crawlable anchors for state-only controls while preserving accessible button/select behavior",
-            "use POST only where interaction semantics and architecture require it",
-            "preserve keyboard access, labels, focus behavior and functional interaction",
-            "retain useful crawlable pagination and stable self-canonicals when needed for discovery",
-            "avoid robots/noindex/nofollow combinations that conflict with crawl/index intent",
-        ],
-        "state": "partial",
-        "owner_ticket": 193,
-        "evidence": "run-scoped parameter links and canonical joins",
-        "test": "tests/test_url_variant_audit.py",
-    },
-    {
-        "id": "metadata-content",
-        "section": "Metadata and Content",
-        "check_id": "metadata-and-locale",
-        "related_check_ids": ["metadata-content-quality", "near-duplicate-content"],
-        "requirements": [
-            "analyse successfully parsed indexable pages first",
-            "check blank/missing title, description and H1, and semantically problematic multiple H1s",
-            "treat title/description length as guidance rather than automatic defect",
-            "segment duplicate metadata by locale and inspect pagination/alias clusters",
-            "apply template-aware thin/empty-content thresholds only when extraction is reliable",
-            "compare html lang with locale path",
-            "do not infer indexing failure from absent H1; inspect visible primary heading and purpose",
-            "avoid expected cross-locale duplicate allegations and include all affected URLs",
-            "use normalized main-content fingerprints and keep exact/near duplicates distinct",
-            "exclude exact duplicates from near-duplicate population and report pairs/evidence/context",
-            "label optional all-URL crawl-waste analysis separately",
-        ],
-        "state": "partial",
-        "owner_ticket": 190,
-        "evidence": "metadata inventory and primary-content signatures",
-        "test": "tests/test_technical_audit.py",
-    },
-    {
-        "id": "access-logs",
-        "section": "Conditional Access-Log Analysis",
-        "check_id": "verified-search-bot-logs",
-        "related_check_ids": ["access-log-analysis"],
-        "requirements": [
-            "validate bot identity by IP/DNS or published ranges",
-            "verify log completeness",
-            "keep access-log evidence separate from crawler observations",
-        ],
-        "state": "conditional",
-        "owner_ticket": 196,
-        "evidence": "operator-supplied logs not yet supported by a source contract",
-        "test": "tests/test_performance_audit.py",
-    },
-    {
-        "id": "canonicals",
-        "section": "Canonicals",
-        "check_id": "canonical-targets",
-        "related_check_ids": ["canonical-validation"],
-        "requirements": [
-            "classify canonical declarations/channels",
-            "check missing, multiple, malformed, non-HTTPS, cross-host, parameterized and non-self canonical candidates",
-            "confirm non-self targets resolve directly or through an intentional redirect",
-            "confirm the target returns 200 and is indexable",
-            "confirm the target is the intended equivalent and is not canonicalized elsewhere",
-            "detect header-versus-meta directive conflicts",
-            "preserve non-HTML header directives",
-        ],
-        "state": "partial",
-        "owner_ticket": 191,
-        "evidence": "saved HTML/HTTP canonical evidence; live targets can be unknown",
-        "test": "tests/test_technical_audit.py",
-    },
-    {
-        "id": "hreflang",
-        "section": "Hreflang on Indexable Pages",
-        "check_id": "hreflang-clusters",
-        "related_check_ids": ["hreflang-channel-validation"],
-        "requirements": [
-            "validate language/region syntax on indexable source pages",
-            "check self-reference",
-            "check reciprocal references",
-            "require canonical, indexable, 200 targets",
-            "review matching content purpose",
-            "check one intended x-default",
-            "preserve equivalence of parameter/page variants",
-            "reconcile HTML, XML sitemap and HTTP Link declaration channels",
-        ],
-        "state": "partial",
-        "owner_ticket": 191,
-        "evidence": "saved HTML/HTTP annotations; sitemap channel unavailable",
-        "test": "tests/test_technical_audit.py",
+        "title": "Hreflang noindex conflicts",
+        "detail_sheet": "Hreflang noindex",
+        "required_evidence": "hreflang, canonical and indexability evidence",
+        "owner_ticket": "206",
     },
     {
         "id": "locale-redirects",
-        "section": "Locale auto-redirects",
-        "check_id": "geo-dependent-behaviour",
-        "related_check_ids": ["locale-redirect-validation", "accept-language-variation"],
-        "requirements": [
-            "test alternate URL with no Accept-Language and relevant geo",
-            "flag forced redirects only with regional evidence",
-            "state limitations when regional proxy is unavailable",
-        ],
-        "state": "conditional",
-        "owner_ticket": 194,
-        "evidence": "configured regional proxy observations required",
-        "test": "tests/test_rendered_audit.py",
+        "title": "Locale redirects",
+        "detail_sheet": "Locale redirects",
+        "required_evidence": "authorised geo/locale probe evidence",
+        "owner_ticket": "194",
     },
     {
-        "id": "structured-data",
-        "section": "Structured Data and Rich Results",
-        "check_id": "feature-specific-structured-data",
-        "related_check_ids": ["rich-result-eligibility", "schema-parser-diagnostics"],
-        "requirements": [
-            "separate syntax/schema validity from Google feature eligibility",
-            "use dated/versioned feature rules",
-            "scan ItemList corpus and exact positions",
-            "exclude inert markup and distinguish required/recommended fields",
-        ],
-        "state": "partial",
-        "owner_ticket": 195,
-        "evidence": "active saved markup plus versioned static rules",
-        "test": "tests/test_structured_data_audit.py",
+        "id": "schema-parser-diagnostics",
+        "title": "Schema parser diagnostics",
+        "detail_sheet": "Schema diagnostics",
+        "required_evidence": "structured-data parser evidence",
+        "owner_ticket": "214",
     },
     {
-        "id": "performance",
-        "section": "Performance as a Crawl-Budget Signal",
-        "check_id": "performance-and-conditional-requests",
-        "related_check_ids": ["field-versus-lab-performance", "conditional-cache-validation", "transport-security"],
-        "requirements": [
-            "report timing distribution and qualified population",
-            "separate lab and field metrics",
-            "measure resource/DOM findings before client action",
-        ],
-        "state": "partial",
-        "owner_ticket": 196,
-        "evidence": "run timing distributions; independent traces and field CWV unavailable",
-        "test": "tests/test_performance_audit.py",
+        "id": "structured-data-feature-rules",
+        "title": "Structured-data feature rules",
+        "detail_sheet": "Structured data",
+        "required_evidence": "typed structured-data evidence and documented rule set",
+        "owner_ticket": "232",
     },
     {
-        "id": "mobile-nonhtml",
-        "section": "Conditional Mobile and Non-HTML Checks",
-        "check_id": "rendered-mobile-and-resource-evidence",
-        "related_check_ids": ["mobile-and-non-html"],
-        "requirements": [
-            "pair desktop/mobile when relevant",
-            "record overlays that block primary content",
-            "audit material searchable non-HTML assets only",
-        ],
-        "state": "partial",
-        "owner_ticket": 194,
-        "evidence": "paired viewport observations; non-HTML asset integration unavailable",
-        "test": "tests/test_rendered_audit.py",
+        "id": "rendered-indexing-parity",
+        "title": "Rendered indexing parity",
+        "detail_sheet": "Rendered parity",
+        "required_evidence": "paired raw/rendered evidence",
+        "owner_ticket": "194",
     },
     {
-        "id": "conditional-requests",
-        "section": "Conditional Requests and 304 Rechecks",
-        "check_id": "performance-and-conditional-requests",
-        "requirements": [
-            "select deterministic public canonical samples",
-            "send only real validators",
-            "report eligible 304 rate and unchanged 200s",
-            "avoid claiming faults for changed bodies",
-        ],
-        "state": "implemented_conditional",
-        "owner_ticket": 196,
-        "evidence": "ordinary and conditional response records",
-        "test": "tests/test_performance_audit.py",
+        "id": "mobile-rendering-parity",
+        "title": "Mobile rendering parity",
+        "detail_sheet": "Mobile rendering",
+        "required_evidence": "explicit mobile render evidence",
+        "owner_ticket": "233",
+    },
+    {
+        "id": "critical-resource-impact",
+        "title": "Critical resource impact",
+        "detail_sheet": "Critical resources",
+        "required_evidence": "render trace and resource evidence",
+        "owner_ticket": "233",
+    },
+    {
+        "id": "nonhtml-search-assets",
+        "title": "Non-HTML search assets",
+        "detail_sheet": "Non-HTML assets",
+        "required_evidence": "supplied or collected asset inventory",
+        "owner_ticket": "194",
+    },
+    {
+        "id": "performance-distribution",
+        "title": "Performance distribution",
+        "detail_sheet": "Performance",
+        "required_evidence": "performance samples, percentiles and denominators",
+        "owner_ticket": "196",
+    },
+    {
+        "id": "conditional-cache-behaviour",
+        "title": "Conditional cache behaviour",
+        "detail_sheet": "Conditional requests",
+        "required_evidence": "ETag/Last-Modified and conditional-request evidence",
+        "owner_ticket": "235",
+    },
+    {
+        "id": "validated-bot-log-analysis",
+        "title": "Validated bot-log analysis",
+        "detail_sheet": "Bot logs",
+        "required_evidence": "supplied logs with verified bot identity",
+        "owner_ticket": "196",
+    },
+    {
+        "id": "supplied-search-evidence",
+        "title": "Supplied search evidence",
+        "detail_sheet": "Supplied search evidence",
+        "required_evidence": "dated Search Console performance/indexing and URL Inspection records",
+        "owner_ticket": "204",
+    },
+    {
+        "id": "recipient-action-eligibility",
+        "title": "Recipient action eligibility",
+        "detail_sheet": "Recipient actions",
+        "required_evidence": "audit finding records and supplied context",
+        "owner_ticket": "227",
     },
     {
         "id": "healthy-overview",
-        "section": "Report What Is Healthy",
-        "check_id": "metadata-and-locale",
-        "related_check_ids": ["healthy-overview"],
-        "requirements": [
-            "report healthy indexable-population denominators",
-            "retain actual zeros while unavailable remains unknown",
-            "report depth/thin-content only from qualified sources",
-        ],
-        "state": "partial",
-        "owner_ticket": 197,
-        "evidence": "Overview projection and per-check denominators",
-        "test": "tests/test_technical_audit.py",
+        "title": "Healthy overview",
+        "detail_sheet": "Healthy controls",
+        "required_evidence": "qualified pass or not-applicable rows",
+        "owner_ticket": "227",
     },
     {
-        "id": "reporting",
-        "section": "Reporting",
-        "check_id": "recipient-value-reporting",
-        "related_check_ids": ["severity-content-intent-and-priority"],
-        "requirements": [
-            "lead with evidence and impact",
-            "use qualified severity defaults",
-            "keep action and evidence detail reconcilable",
-        ],
-        "state": "implemented",
-        "owner_ticket": 197,
-        "evidence": "grouped action and Overview projections",
-        "test": "tests/test_technical_audit.py",
-    },
-    {
-        "id": "recipient-filter",
-        "section": "Recipient-value filter",
-        "check_id": "recipient-value-reporting",
-        "requirements": [
-            "include only verified current defects, persistently confirmed historical defects, quantified systemic risks, or requested material warnings",
-            "exclude crawler implementation details, resume behavior, provenance gaps and parser/fetch-client diagnostics without a site action",
-            "exclude zero-result checks and unassessed-area inventories from client action tabs",
-            "exclude defensive case/encoding variants without demonstrated demand",
-            "exclude resolved transient targets and links from current-failure tabs",
-            "aggregate healthy page inventories into overview metrics",
-            "keep necessary caveats to one concise Overview/scope note",
-            "keep analyst diagnostics outside client deliverables unless needed to interpret a result",
-            "summarize healthy checks in Overview without large all-clear detail tabs",
-            "include only Audit Log and Overview as XLSX summary sheets",
-            "omit duplicate methodology/summary sheets and create focused evidence tabs only when useful",
-            "format sheets with green headers, filters, frozen headings, readable widths and clickable URLs",
-            "include Problem, Explanation, Fix, SEO Impact, Action Needed and Resolved in Audit Log",
-            "record team, supplied owner or unassigned state, acceptance criteria, retest and exact evidence reference",
-            "never claim resolution without deployed-fix verification",
-            "keep historical and live status in separate columns",
-            "exclude recovered 5xx targets from failed tabs and summarize periodic events once",
-            "include 304 detail only when recipient-relevant; otherwise keep it in analyst evidence",
-            "respect spreadsheet row limits and label samples alongside complete per-target evidence",
-            "include scope/date, priorities, counts, examples, recommendations and caveats in Markdown",
-        ],
-        "state": "implemented",
-        "owner_ticket": 197,
-        "evidence": "qualified client-action projection",
-        "test": "tests/test_technical_audit.py",
-    },
-    {
-        "id": "validation",
-        "section": "Validation",
-        "check_id": "artifact-validation",
-        "requirements": [
-            "recheck every historical failure live and remove recovered 5xx targets/links",
-            "document relevant conditional-request results without inventing defects",
-            "confirm current sitemap and robots responses",
-            "apply recipient-value filtering and remove crawler noise",
-            "open generated XLSX with a spreadsheet parser",
-            "verify sheet names, headers, hyperlinks, representative rows and file size",
-            "reconcile Overview counts with detail tabs or explain sampling",
-            "remove stale claims superseded by live evidence",
-            "state only uncertainty material to interpretation",
-            "verify coverage prerequisites, samples, owner/retest fields and acceptance criteria",
-            "keep optional optimization notes separate from remediation totals",
-            "trace every client allegation to an exact observation and reproduction path",
-            "remove superseded wording from summary and detail outputs",
-            "review interpretation, severity and recommendation independently of formatting/count checks",
-        ],
-        "state": "partial",
-        "owner_ticket": 198,
-        "evidence": "acceptance log plus current audit/read-back validation",
-        "test": "docs/technical-audit-acceptance-2026-09.md",
+        "id": "artifact-validation",
+        "title": "Artifact validation",
+        "detail_sheet": "Artifact validation",
+        "required_evidence": "artifact validation evidence",
+        "owner_ticket": "198",
     },
 )
 
-# A section digest makes edits to the skill fail the mapping test until their
-# requirement controls, status, evidence and owner are reviewed together.
-TECHNICAL_AUDIT_SKILL_SECTION_DIGESTS = {
-    "Canonicals": "d04583dc29e554f3d47686418ae578b794625b46524e3c7321ec5e95bdc3c975",
-    "Conditional Access-Log Analysis": "e6dbf8e552f67f1d144a0f8e85430ad0e3185f9703c94df474f89ce682952033",
-    "Conditional Mobile and Non-HTML Checks": "fa308c6b4274c63bb048e0c93a0b93ec244dffac281e2f0a05fbe444753f52d8",
-    "Conditional Requests and 304 Rechecks": "f16221988faf291c29d654d6820ecd73ae7e1615d67e0db5f33c703d394bc091",
-    "Crawl Integrity": "a6dbeeb0703aeb85633fff3ef9950da7aca861d5984d4a46154d4a5043ddfffe",
-    "Deterministic ticket language": "2d3312890ba3cdbc80cffddbb98c3dc9825796fd366de2b2f4dc8db2549b8f32",
-    "Deterministic evidence bundle": "746ddb583ff7de4ccbed7a178868122d87a4019afe9f73b894d468dd14bc0a5e",
-    "Default remediation-ticket template": "c95f8b0621a20c854c0d17eeefa0ca78e2ab5cfde910c09bc1f375269daa64a9",
-    "Discovery-source integrity": "c9131c1fa6cc702a9d3bd8e6212132c471cd485d4e1d0f089c220c6d0e6cf38b",
-    "Domain and URL Configuration": "a587c2d3576f610525d07a99d7dcd7888d8694fac708b297fd90c45ec452e297",
-    "External-link integrity": "194db369fca02e9fb651b44f7ab465cecd028b5455e8ff3f5adfc2d0ff3850a8",
-    "Fetching Rules": "005d908cc0d7bc8313b392871b472af93a1a9ea2b49f9b15e73e3a73c0352dcf",
-    "Geo proxies": "8559395e4181b69fb7f8d2199d43062b12b5cf7d932f305cb92221ff979b3ca0",
-    "Growing URL families and crawl traps": "0021eccac26fc19ca7b2c13715a4feb19f25912cc9f2d7fefa25c9f25768df3c",
-    "HTTP Status and Link Graph": "b180fd4fa70550d04f6839319968f8b7dbe52cbeef1cae7242e606916505e1e4",
-    "Hreflang on Indexable Pages": "558a8653574d77dd8b068076162422c547eb2fd25e4f13ec3c572c02f0d9167a",
-    "Hreflang on noindex pages": "6455dd7d5d78dd37a2997b183d91dc25ae62e6e526664a5ab59ed4bb3ecead96",
-    "Image and critical-resource evidence": "026fac4b08776ce449bc09aaf6174ae075de72bfd2d301f2999d6acd105353e2",
-    "Indexability and Crawl Waste": "a32c71d80a32393c1d68d1e8b76755aad561ad65fe0ed1617946edf082bf5765",
-    "Internal authority and link quality": "379170d750d46cd7af469b618994905d0de4a44bc76b3ebbd84f3dabb8de5fb5",
-    "Locale auto-redirects": "8dcecc9f328412dd7ee9747c14046b1ba8c54e9cdd4ae4d2ec0b3d41c3d72dcb",
-    "Metadata and Content": "d9b4aedf1abf304fe3220db9e4688e2749c0321b93a0d76ae0b3e638f032057e",
-    "Multi-run and multi-site stores": "b1b6cb6fc3bd525295296250c8c45a95f98fd8dde32c694626d755bca2a8e5b6",
-    "Non-production hosts and HTTPS hygiene": "d1a9b7786f92a0db3f0e42fcaf470d940f67f4d0461c3ddf90c4eb1d37e2fbc1",
-    "Orphan pages and crawl depth": "1a186bb0a4a0d56b6302a0b31666773a5d3b6f6c19d2c8c7beb2ba6dbfab013a",
-    "Parameter and Faceted URLs": "0613715599b58351359851a7e8aef137ce2706f30eb12c1c1f0be1937a7ee129",
-    "Performance as a Crawl-Budget Signal": "f2b5d965eb1db3a10482adcfcf5c7553eedb507095b8fad4b9a2e706bbeff97b",
-    "Recipient-value filter": "261b1c0c153567b86464df913acb1365bf81a5b88dd00b221d6596aba72f1534",
-    "Rendered versus raw HTML": "afc59ed542c61e15141a26eb68e5b25ffd9bd0a692a7dfdfc74d65b71bf0e407",
-    "Report What Is Healthy": "f44f6a1141e6358ca71bbada39dd77125d174e110c630a6f2dc312973f7ce5c8",
-    "Reporting": "93a9724b780998ad164429e7525b359ba3c206b2d9ad57da1076ba5286dd01d9",
-    "Robots and XML Sitemaps": "69cde69e5c0c18f1a26455be25caff53bf4ab8e79218bbefe0c1a17233aa04c8",
-    "Soft 404s and error handling": "e22b39c9d2dcfebbaf62c4ec33c0bd8d3bed8101de46bc5e6a4e9e3b67e172ae",
-    "Structured Data and Rich Results": "93912a43a11e40ae624c4186b59ca72175bd0331b50454f3634c158768fc87b5",
-    "Validation": "c918617a394eac6d2b2c98aceb1aed737f2dd55fd6b20ee6632e0a2274af7dc7",
-    "Workflow": "71f023547ea68dbe04c1739dd345be25ae1fb84dfa300d7652f42d7223471f35",
+_IMPLEMENTED_CHECK_REPORTS = {
+    "indexability-segmentation": ("indexability", "stored-html"),
+    "internal-link-targets": ("internal-link-quality",),
+    "orphan-candidates": ("orphans",),
+    "response-status-and-redirect-history": ("redirect-chains",),
+    "parameter-and-faceted-controls": ("tracking-parameter-links",),
+    "near-duplicate-content": ("near-duplicates",),
+    "schema-parser-diagnostics": ("schema-compatibility",),
+    "image-markup": ("image-issues",),
+    "internal-authority": ("internal-authority",),
+    "metadata-basics": ("stored-html",),
+    "metadata-duplicates-aliases": ("metadata-duplicates",),
+    "locale-html-lang": ("locale-content-alignment",),
+    "canonical-declarations": ("stored-html",),
+    "canonical-target-validation": ("stored-html",),
+    "soft404-error-routes": ("soft404-error-routes",),
+    "discovery-source-provenance": ("discovery-source-provenance",),
+    "hreflang-html-http": ("hreflang-validation",),
+    "hreflang-noindex": ("hreflang-validation",),
+    "nonhtml-search-assets": ("nonhtml-search-assets",),
+    "rendered-robots-links": ("render-url-candidates", "render-attempts", "inventory-interactions"),
+    "supplied-search-evidence": ("supplied-search-evidence",),
 }
 
-TECHNICAL_AUDIT_REQUIREMENT_DENOMINATORS = {
-    "crawl-integrity": "selected-run snapshots; successful/decoded HTML counts are separate populations",
-    "fetching-safeguards": "authorized in-scope targets selected for bounded live requests",
-    "geo-dependent-behaviour": "relevant alternate URLs requested from configured target regions",
-    "accept-language-variation": "seed-origin roots and saved locale-root pages, each probed with a fixed Accept-Language set",
-    "rendered-mobile-and-resource-evidence": "sampled URL/template/locale/device strata and observed browser requests",
-    "live-link-rechecks": "unique eligible historical failure targets selected within the configured cap",
-    "url-variants-and-soft-404": "valid route controls, bounded variant probes and per-host synthetic paths",
-    "orphan-candidates": "crawled HTML URLs in the selected run with graph completeness reported separately",
-    "internal-authority": "canonical indexable HTML pages and same-run graph edges",
-    "external-link-integrity": "not collected; external-target population and failures are unavailable",
-    "image-resource-impact": "saved image references and sampled browser resource requests; page impact is not measured",
-    "domain-and-host-configuration": "bounded homepage/deep-path route controls and configured host variants",
-    "non-production-hosts-and-https": "not collected; host exposure and mixed-content population are unavailable",
-    "current-robots-and-sitemaps": "fetched robots documents, sitemap documents/URLs and selected live samples",
-    "ai-crawler-governance": "recognised AI crawler families per origin plus bounded /llms.txt probe locations",
-    "metadata-and-locale": "eligible parsed 200 HTML pages; exclusions and unknown extraction states are separate",
-    "growing-url-families": "observed rendered/internal link instances and unique targets; growth needs repeated timestamps",
-    "hreflang-noindex-guidance": "indexable source pages; noindexed-source defect checks are excluded",
-    "parameter-faceted-controls": "internal parameter link instances, unique targets and unique source pages",
-    "metadata-content-quality": "eligible parsed indexable HTML pages by available locale/template strata",
-    "verified-search-bot-logs": "validated complete operator-supplied access-log records; unavailable when not supplied",
-    "canonical-targets": "successfully parsed indexable pages and saved/live canonical targets",
-    "hreflang-clusters": "indexable source pages and available HTML/XML/HTTP declaration channels",
-    "locale-redirect-validation": "sampled alternate URLs across requested language and configured geo strata",
-    "feature-specific-structured-data": "active detected structured-data items and supported feature-rule population",
-    "field-versus-lab-performance": "valid stored timing samples by template/locale; field and browser-trace populations separate",
-    "mobile-and-non-html": "paired device samples when relevant and material searchable asset URLs when supplied",
-    "performance-and-conditional-requests": "valid stored timing rows; validator-eligible sampled pages for conditional rates",
-    "healthy-overview": "qualified indexable population for each metric; unknown metrics retain null denominators",
-    "recipient-value-reporting": "qualified grouped actions and their linked evidence instances",
-    "sheets-output-contract": "declared v2 managed tabs/ranges and copied workbook read-back cells",
-    "artifact-validation": "generated summary/detail counts, linked evidence and artifact-level read-back checks",
+TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES = {
+    "indexability-directive-conflicts": "indexability-segmentation",
+    "internal-link-failures": "internal-link-targets",
+    "tracking-parameter-links": "parameter-and-faceted-controls",
+    "redirect-chains": "response-status-and-redirect-history",
+    "schema-parser-defects": "schema-parser-diagnostics",
+    "image-markup-candidates": "image-markup",
+    "internal-authority-inventory": "internal-authority",
+    "parameterized-canonical-links": "parameter-and-faceted-controls",
+    "feature-specific-structured-data": "structured-data-feature-rules",
+    "performance-and-conditional-requests": "conditional-cache-behaviour",
+    "metadata-and-locale": "locale-html-lang",
+    "canonical-consistency": "canonical-target-validation",
+    "hreflang-consistency": "hreflang-html-http",
+    "current-robots-and-sitemaps": "sitemap-integrity",
+    "url-variants-and-soft-404": "url-host-and-variants",
+    "rendered-mobile-and-resource-evidence": "rendered-indexing-parity",
 }
 
-
-def metadata_locale_report(source_rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """Classify saved metadata facts without converting incomplete evidence into defects."""
-    eligible: list[dict[str, object]] = []
-    excluded: dict[str, int] = {}
-    all_segments: dict[str, int] = {}
-    indexable_segments: dict[str, int] = {}
-    required = ("url", "kind", "final_status_code", "content_extracted", "overall_indexable")
-    for source in source_rows:
-        row = dict(source)
-        reason = None
-        if any(key not in row for key in required):
-            reason = "required_field_unavailable"
-        elif row.get("kind") != "html":
-            reason = "non_html"
-        elif row.get("challenge"):
-            reason = "challenged"
-        elif row.get("final_status_code") != 200:
-            reason = "status_not_200"
-        elif row.get("content_extracted") is not True:
-            reason = "content_not_extracted_or_unknown"
-        elif row.get("overall_indexable") not in (True, False):
-            reason = "indexability_unknown"
-        if reason:
-            excluded[reason] = excluded.get(reason, 0) + 1
-            if reason == "indexability_unknown":
-                url = str(row.get("url") or "")
-                unknown_context: dict[str, object] = {
-                    "locale": _clean_metadata(row.get("html_lang")) or "missing_locale",
-                    "template": _clean_metadata(row.get("template")) or "not_stored",
-                    "query_parameter_names": sorted(
-                        {key for key, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)}
-                    ),
-                    "canonical_state": _canonical_state(row.get("canonical_urls_json"), url),
-                    "indexability": "unknown",
-                }
-                segment = _segment_key(unknown_context)
-                all_segments[segment] = all_segments.get(segment, 0) + 1
-            continue
-        url = str(row.get("url") or "")
-        locale = _clean_metadata(row.get("html_lang"))
-        query_names = sorted({key for key, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)})
-        page_context: dict[str, object] = {
-            "url": _metadata_url(url),
-            "url_digest_sha256": hashlib.sha256(url.encode()).hexdigest(),
-            "locale": locale,
-            "indexable": row.get("overall_indexable"),
-            "template": _clean_metadata(row.get("template")) or "not_stored",
-            "variant_kind": _clean_metadata(row.get("variant_kind")) or "unknown",
-            "query_parameter_names": query_names,
-            "pagination_parameter_candidates": [
-                key for key in query_names if key.lower() in {"page", "paged", "p", "offset", "cursor"}
-            ],
-            "alias_url": _metadata_url(str(row["final_url"]))
-            if row.get("final_url") and row.get("final_url") != url
-            else None,
-            "canonical_state": _canonical_state(row.get("canonical_urls_json"), url),
-            "sitemap_inclusion": "unavailable_not_run_scoped",
-            "title_length": len(_clean_metadata(row.get("title")) or ""),
-            "description_length": len(_clean_metadata(row.get("meta_description")) or ""),
-            "h1_count": len([value for value in str(row.get("h1_tags") or "").splitlines() if value.strip()]),
-        }
-        eligible.append({**row, "_context": page_context})
-        segment = _segment_key(page_context)
-        all_segments[segment] = all_segments.get(segment, 0) + 1
-        if row.get("overall_indexable") is True:
-            segment = _segment_key(page_context)
-            indexable_segments[segment] = indexable_segments.get(segment, 0) + 1
-
-    candidates: list[dict[str, object]] = []
-    duplicate_groups: dict[tuple[str, str, str], list[dict[str, object]]] = {}
-    for row in eligible:
-        raw_context = row["_context"]
-        assert isinstance(raw_context, dict)
-        context: dict[str, object] = raw_context
-        if row.get("overall_indexable") is not True:
-            continue
-        title = _clean_metadata(row.get("title"))
-        description = _clean_metadata(row.get("meta_description"))
-        h1s = [value.strip() for value in str(row.get("h1_tags") or "").splitlines() if value.strip()]
-        for field, value in (
-            ("title", title),
-            ("description", description),
-            ("h1", "\n".join(h1s)),
-            ("html_lang", context["locale"]),
-        ):
-            if not value:
-                candidates.append(
-                    {
-                        "record_type": "candidate",
-                        "candidate_type": f"missing_{field}",
-                        **context,
-                        "visible_content_state": "unknown_without_rendered_confirmation" if field == "h1" else None,
-                    }
-                )
-        if len(h1s) > 1:
-            candidates.append({"record_type": "candidate", "candidate_type": "multiple_h1_markup", **context})
-        for field, value in (("title", title), ("description", description)):
-            if value and context["locale"]:
-                normalized = re.sub(r"\s+", " ", value).strip().casefold()
-                duplicate_groups.setdefault((field, str(context["locale"]).casefold(), normalized), []).append(
-                    {
-                        **context,
-                        "metadata_value": value,
-                    }
-                )
-    for (field, locale, normalized), members in sorted(duplicate_groups.items()):
-        if len(members) < 2:
-            continue
-        group_id = hashlib.sha256(f"{field}\0{locale}\0{normalized}".encode()).hexdigest()
-        for member in members:
-            candidates.append(
-                {
-                    "record_type": "candidate",
-                    "candidate_type": f"duplicate_{field}_same_locale",
-                    "duplicate_group_id": group_id,
-                    "affected_count": len(members),
-                    **member,
-                }
-            )
-    indexable_count = sum(row.get("overall_indexable") is True for row in eligible)
-    coverage = {
-        "record_type": "coverage",
-        "inventory_complete": not excluded.get("required_field_unavailable"),
-        "source_row_count": len(source_rows),
-        "eligible_count": len(eligible),
-        "eligible_indexable_count": indexable_count,
-        "eligible_noindex_count": len(eligible) - indexable_count,
-        "excluded_count": sum(excluded.values()),
-        "excluded_by_reason": excluded,
-        "segments": all_segments,
-        "indexable_segments": indexable_segments,
-        "sitemap_inclusion": "unavailable_not_run_scoped",
-        "locale_missing_count": sum(not _clean_metadata(row.get("html_lang")) for row in eligible),
-        "threshold_scoring": "not_configured; lengths are contextual only",
-        "thin_text_scoring": "unavailable_no_saved_primary_content_extraction_or_template_thresholds",
-        "eligible_length_ranges": _length_ranges(eligible),
+TECHNICAL_AUDIT_CHECK_REGISTRY = tuple(
+    {
+        **item,
+        "support_state": "implemented" if item["id"] in _IMPLEMENTED_CHECK_REPORTS else "not_implemented",
+        "source": item["required_evidence"],
     }
-    return [coverage, *candidates]
-
-
-def parameterized_canonical_link_inventory(
-    source_rows: Sequence[Mapping[str, object]],
-) -> list[dict[str, object]]:
-    """Group internally linked parameter URLs with saved non-self canonicals."""
-    findings: list[dict[str, object]] = []
-    counts: dict[str, int] = {}
-    targets: dict[str, set[str]] = {}
-    sources: dict[str, set[str]] = {}
-    keys_by_family: dict[str, set[str]] = {}
-    canonicalized_instances: dict[str, int] = {}
-    canonicalized_targets: dict[str, set[str]] = {}
-    for source in source_rows:
-        issues = source.get("issues", [])
-        if isinstance(issues, str):
-            try:
-                issues = json.loads(issues)
-            except ValueError:
-                issues = []
-        if not isinstance(issues, list) or "parameter_target" not in issues:
-            continue
-        target = str(source.get("target_url") or "")
-        query = urlsplit(target).query
-        keys = sorted({key for key, _ in parse_qsl(query, keep_blank_values=True)})
-        if not keys:
-            continue
-        key_set = {key.casefold() for key in keys}
-        if key_set <= {"page", "paged", "p", "offset", "cursor"}:
-            family = "pagination"
-        elif key_set & {"sort", "order", "filter", "status", "theme", "country", "location", "search", "date"}:
-            family = "ui_state_or_search_review"
-        elif all(key.casefold().startswith("utm_") or key.casefold() in {"gclid", "_ga", "_gl"} for key in keys):
-            family = "tracking"
-        else:
-            family = "content_or_unknown_parameter"
-        target_digest = hashlib.sha256(target.encode()).hexdigest()
-        source_url = str(source.get("source_url") or "")
-        counts[family] = counts.get(family, 0) + 1
-        targets.setdefault(family, set()).add(target_digest)
-        sources.setdefault(family, set()).add(hashlib.sha256(source_url.encode()).hexdigest())
-        keys_by_family.setdefault(family, set()).update(keys)
-        if "noncanonical_target" not in issues:
-            continue
-        canonicalized_instances[family] = canonicalized_instances.get(family, 0) + 1
-        canonicalized_targets.setdefault(family, set()).add(target_digest)
-        findings.append(
-            {
-                "record_type": "candidate",
-                "candidate_type": "internally_linked_noncanonical_parameter_url",
-                "parameter_family": family,
-                "parameter_keys": keys,
-                "source_url": _metadata_url(str(source.get("source_url") or "")),
-                "source_url_digest_sha256": hashlib.sha256(source_url.encode()).hexdigest(),
-                "source_indexable": source.get("source_indexable"),
-                "target_url": _metadata_url(target),
-                "target_url_digest_sha256": target_digest,
-                "canonical_url": _metadata_url(str(source.get("target_canonical_url") or "")),
-                "anchor_text": _clean_metadata(source.get("anchor_text")),
-                "xpath": _clean_metadata(source.get("xpath")),
-                "qualification": "saved_link_and_canonical_evidence; parameter_purpose_requires_review",
-            }
-        )
-    coverage = [
-        {
-            "record_type": "coverage",
-            "parameter_family": family,
-            "link_instances": count,
-            "unique_targets": len(targets[family]),
-            "unique_sources": len(sources[family]),
-            "parameter_keys": sorted(keys_by_family[family]),
-            "canonicalized_link_instances": canonicalized_instances.get(family, 0),
-            "canonicalized_unique_targets": len(canonicalized_targets.get(family, set())),
-        }
-        for family, count in sorted(counts.items())
-    ]
-    return [*coverage, *findings]
-
-
-def _clean_metadata(value: object) -> str | None:
-    if value is None:
-        return None
-    normalized = re.sub(r"\s+", " ", str(value)).strip()
-    return normalized or None
-
-
-def _metadata_url(url: str) -> str:
-    """Keep query names for segmentation while never exporting query values."""
-    parts = urlsplit(url)
-    query_names = sorted({key for key, _ in parse_qsl(parts.query, keep_blank_values=True)})
-    return redact_url_without_digest(parts._replace(query="&".join(query_names)).geturl())
-
-
-def _segment_key(context: Mapping[str, object]) -> str:
-    query_state = "query" if context.get("query_parameter_names") else "clean"
-    return "|".join(
-        (
-            str(context.get("indexable", "noindex" if context.get("indexable") is False else "unknown")),
-            str(context.get("locale") or "missing_locale"),
-            str(context.get("template")),
-            query_state,
-            str(context.get("canonical_state")),
-            "sitemap_unavailable",
-        )
-    )
-
-
-def _length_ranges(rows: Sequence[Mapping[str, object]]) -> dict[str, dict[str, int | None]]:
-    values: dict[str, list[int]] = {"title": [], "description": [], "h1": []}
-    for row in rows:
-        context = row.get("_context")
-        if not isinstance(context, Mapping):
-            continue
-        for field in values:
-            number = context.get(f"{field}_length" if field != "h1" else "h1_count")
-            if isinstance(number, int):
-                values[field].append(number)
-    return {
-        field: {"min": min(numbers) if numbers else None, "max": max(numbers) if numbers else None}
-        for field, numbers in values.items()
-    }
-
-
-def _canonical_state(value: object, url: str) -> str:
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except (TypeError, ValueError):
-            value = [value] if value else []
-    if not isinstance(value, list) or not value:
-        return "implicit_or_unavailable"
-    canonicals = [str(item) for item in value if item]
-    if not canonicals:
-        return "implicit_or_unavailable"
-    return "declared_self" if canonicals[0].split("#", 1)[0] == url.split("#", 1)[0] else "declared_nonself"
-
-
-def canonical_hreflang_report(source_rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """Check saved canonical and hreflang declarations without guessing at uncrawled targets."""
-    pages: dict[str, dict[str, object]] = {}
-    excluded: dict[str, int] = {}
-    canonical_rows: list[dict[str, object]] = []
-    hreflang_rows: list[dict[str, object]] = []
-    for source in source_rows:
-        row = dict(source)
-        url = str(row.get("url") or "")
-        if url:
-            pages[url] = row
-        if row.get("kind") != "html":
-            excluded["non_html"] = excluded.get("non_html", 0) + 1
-            continue
-        if row.get("challenge"):
-            excluded["challenged"] = excluded.get("challenged", 0) + 1
-            continue
-        if row.get("final_status_code") != 200:
-            excluded["status_not_200"] = excluded.get("status_not_200", 0) + 1
-            continue
-        if row.get("content_extracted") is not True:
-            excluded["content_not_extracted_or_unknown"] = excluded.get("content_not_extracted_or_unknown", 0) + 1
-            continue
-    eligible_urls = {
-        url
-        for url, row in pages.items()
-        if row.get("kind") == "html"
-        and not row.get("challenge")
-        and row.get("final_status_code") == 200
-        and row.get("content_extracted") is True
-    }
-    for url, row in pages.items():
-        if url not in eligible_urls:
-            continue
-        indexable = row.get("overall_indexable")
-        canonical_values = _json_items(row.get("canonical_evidence_json"))
-        if not canonical_values:
-            legacy = _json_values(row.get("canonical_urls_json"))
-            canonical_values = [
-                {
-                    "href": str(value),
-                    "source": "legacy_channel_unknown",
-                    "well_formed_http_url": _valid_http_url(str(value)),
-                }
-                for value in legacy
-                if value
-            ]
-        if indexable is True:
-            if not canonical_values:
-                canonical_rows.append(_audit_url_context(url, row) | {"candidate_type": "missing_canonical"})
-            by_channel: dict[str, list[str]] = {}
-            for declaration in canonical_values:
-                href = str(declaration.get("href") or "")
-                channel = str(declaration.get("source") or "unknown_channel")
-                by_channel.setdefault(channel, []).append(href)
-                context = _audit_url_context(url, row)
-                if declaration.get("well_formed_http_url") is False or not _valid_http_url(href):
-                    canonical_rows.append(context | {"candidate_type": "malformed_canonical", "channel": channel})
-                    continue
-                parsed_target = urlsplit(href)
-                parsed_source_url = urlsplit(url)
-                if parsed_target.scheme.lower() != "https":
-                    canonical_rows.append(
-                        context
-                        | {
-                            "candidate_type": "non_https_canonical",
-                            "channel": channel,
-                            "canonical_url": _metadata_url(href),
-                        }
-                    )
-                if parsed_target.netloc.lower() != parsed_source_url.netloc.lower():
-                    canonical_rows.append(
-                        context
-                        | {
-                            "candidate_type": "cross_host_canonical_review",
-                            "channel": channel,
-                            "canonical_url": _metadata_url(href),
-                            "qualification": "intentional_consolidation_must_be_reviewed",
-                        }
-                    )
-                if parsed_target.query:
-                    canonical_rows.append(
-                        context
-                        | {
-                            "candidate_type": "parameterized_canonical_review",
-                            "channel": channel,
-                            "canonical_url": _metadata_url(href),
-                        }
-                    )
-                if _same_url(href, url):
-                    continue
-                canonical_rows.append(
-                    context
-                    | {
-                        "candidate_type": "non_self_canonical_candidate",
-                        "channel": channel,
-                        "canonical_url": _metadata_url(href),
-                        "canonical_target_state": _canonical_target_state(href, pages),
-                    }
-                )
-            for channel, declarations in by_channel.items():
-                if len(declarations) > 1:
-                    canonical_rows.append(
-                        _audit_url_context(url, row)
-                        | {
-                            "candidate_type": "multiple_canonicals",
-                            "channel": channel,
-                            "declaration_count": len(declarations),
-                        }
-                    )
-            if len({target for values in by_channel.values() for target in values}) > 1:
-                canonical_rows.append(
-                    _audit_url_context(url, row)
-                    | {
-                        "candidate_type": "canonical_channel_disagreement",
-                        "channels": sorted(by_channel),
-                        "qualification": "compare_html_and_http_declarations",
-                    }
-                )
-
-        links = [item for item in _json_items(row.get("hreflang_json")) if item.get("href")]
-        if indexable is not True:
-            if indexable is False and links:
-                hreflang_rows.append(
-                    _audit_url_context(url, row)
-                    | {
-                        "candidate_type": "noindex_source_hreflang_guidance",
-                        "qualification": "advisory_remove_hreflang_from_noindex_source",
-                    }
-                )
-            continue
-        channel_sets: dict[str, set[tuple[str, str]]] = {}
-        seen_codes: dict[str, set[str]] = {}
-        x_default_counts: dict[str, int] = {}
-        for link in links:
-            code = str(link.get("hreflang") or "").strip().lower()
-            href = str(link.get("href") or "")
-            channel = str(link.get("source") or "unknown_channel")
-            channel_sets.setdefault(channel, set()).add((code, href))
-            context = _audit_url_context(url, row)
-            if not _valid_hreflang(code):
-                hreflang_rows.append(
-                    context | {"candidate_type": "invalid_hreflang_syntax", "hreflang": code, "channel": channel}
-                )
-            if code == "x-default":
-                x_default_counts[channel] = x_default_counts.get(channel, 0) + 1
-            channel_codes = seen_codes.setdefault(channel, set())
-            if code in channel_codes:
-                hreflang_rows.append(
-                    context | {"candidate_type": "duplicate_hreflang_language", "hreflang": code, "channel": channel}
-                )
-            channel_codes.add(code)
-            if not _valid_http_url(href):
-                hreflang_rows.append(
-                    context | {"candidate_type": "malformed_hreflang_target", "hreflang": code, "channel": channel}
-                )
-            elif urlsplit(url).scheme.lower() == "https" and urlsplit(href).scheme.lower() != "https":
-                hreflang_rows.append(
-                    context
-                    | {
-                        "candidate_type": "non_https_hreflang_target",
-                        "hreflang": code,
-                        "channel": channel,
-                        "alternate_url": _metadata_url(href),
-                    }
-                )
-            if _same_url(href, url) and code not in {"", "x-default"}:
-                continue
-            alternate_page = _find_target(href, pages)
-            if alternate_page is None:
-                hreflang_rows.append(
-                    context
-                    | {
-                        "candidate_type": "hreflang_target_unknown_not_crawled",
-                        "hreflang": code,
-                        "channel": channel,
-                        "alternate_url": _metadata_url(href),
-                        "qualification": "not_a_confirmed_defect",
-                    }
-                )
-                continue
-            if alternate_page.get("final_status_code") != 200 or alternate_page.get("overall_indexable") is not True:
-                hreflang_rows.append(
-                    context
-                    | {
-                        "candidate_type": "hreflang_target_not_indexable_200",
-                        "hreflang": code,
-                        "channel": channel,
-                        "alternate_url": _metadata_url(href),
-                        "target_status": alternate_page.get("final_status_code"),
-                        "target_indexable": alternate_page.get("overall_indexable"),
-                    }
-                )
-            target_canonical_state = _canonical_target_state(href, pages)
-            if target_canonical_state == "canonicalized_elsewhere":
-                hreflang_rows.append(
-                    context
-                    | {
-                        "candidate_type": "hreflang_target_canonicalized_elsewhere",
-                        "hreflang": code,
-                        "channel": channel,
-                        "alternate_url": _metadata_url(href),
-                        "target_canonical_state": target_canonical_state,
-                    }
-                )
-            reciprocal = [
-                item for item in _json_items(alternate_page.get("hreflang_json")) if str(item.get("href") or "") == url
-            ]
-            if not reciprocal:
-                hreflang_rows.append(
-                    context
-                    | {
-                        "candidate_type": "hreflang_reciprocity_candidate",
-                        "hreflang": code,
-                        "channel": channel,
-                        "alternate_url": _metadata_url(href),
-                        "qualification": "target_crawled_but_no_saved_return_annotation",
-                    }
-                )
-        for channel, x_default_count in x_default_counts.items():
-            if x_default_count > 1:
-                hreflang_rows.append(
-                    _audit_url_context(url, row)
-                    | {"candidate_type": "multiple_x_default", "channel": channel, "declaration_count": x_default_count}
-                )
-        self_references = [item for item in links if _same_url(str(item.get("href") or ""), url)]
-        if links and not self_references:
-            hreflang_rows.append(_audit_url_context(url, row) | {"candidate_type": "missing_hreflang_self_reference"})
-        if len(channel_sets) > 1 and len({tuple(sorted(items)) for items in channel_sets.values()}) > 1:
-            hreflang_rows.append(
-                _audit_url_context(url, row)
-                | {
-                    "candidate_type": "hreflang_channel_disagreement",
-                    "channels": sorted(channel_sets),
-                    "sitemap_channel": "not_available_in_run_snapshot",
-                }
-            )
-
-    coverage = {
-        "record_type": "coverage",
-        "snapshot_count": len(source_rows),
-        "parsed_html_count": len(eligible_urls),
-        "indexable_count": sum(pages[url].get("overall_indexable") is True for url in eligible_urls),
-        "noindex_count": sum(pages[url].get("overall_indexable") is False for url in eligible_urls),
-        "unknown_indexability_count": sum(pages[url].get("overall_indexable") is None for url in eligible_urls),
-        "excluded_by_reason": excluded,
-        "canonical_target_unknown_count": sum(
-            row.get("candidate_type") == "non_self_canonical_candidate"
-            and row.get("canonical_target_state") == "unknown_not_crawled"
-            for row in canonical_rows
-        ),
-        "hreflang_target_unknown_count": sum(
-            row.get("candidate_type") == "hreflang_target_unknown_not_crawled" for row in hreflang_rows
-        ),
-        "canonical_channel_coverage": "html_and_http_header_link_on_new_snapshots; legacy_values_unattributed",
-        "hreflang_channels": ["html_head", "http_header"],
-        "sitemap_channel": "unavailable_not_in_run_snapshot",
-        "uncrawled_target_policy": "unknown_not_a_pass_or_finding",
-    }
-    return [coverage, *canonical_rows, *hreflang_rows]
-
-
-def _json_items(value: object) -> list[dict[str, object]]:
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return []
-    if not isinstance(value, list):
-        return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
-
-
-def _json_values(value: object) -> list[object]:
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return []
-    return value if isinstance(value, list) else []
-
-
-def _valid_http_url(value: str) -> bool:
-    parsed = urlsplit(value)
-    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
-
-
-def _valid_hreflang(value: str) -> bool:
-    return value == "x-default" or bool(re.fullmatch(r"(?:[a-z]{2,3}|[a-z]{4}|[a-z]{5,8})(?:-[a-z0-9]{1,8})*", value))
-
-
-def _same_url(left: str, right: str) -> bool:
-    left_parts = urlsplit(left)
-    right_parts = urlsplit(right)
-    return (
-        left_parts.scheme.lower() == right_parts.scheme.lower()
-        and left_parts.netloc.lower() == right_parts.netloc.lower()
-        and (left_parts.path or "/") == (right_parts.path or "/")
-        and left_parts.query == right_parts.query
-    )
-
-
-def _audit_url_context(url: str, row: Mapping[str, object]) -> dict[str, object]:
-    return {
-        "url": _metadata_url(url),
-        "url_digest_sha256": hashlib.sha256(url.encode()).hexdigest(),
-        "locale": _clean_metadata(row.get("html_lang")),
-        "indexable": row.get("overall_indexable"),
-    }
-
-
-def _canonical_target_state(target: str, pages: Mapping[str, Mapping[str, object]]) -> str:
-    row = _find_target(target, pages)
-    if row is None:
-        return "unknown_not_crawled"
-    if row.get("final_status_code") != 200:
-        return f"status_{row.get('final_status_code')}"
-    if row.get("overall_indexable") is not True:
-        return "noindex_or_unknown"
-    canonicals = _json_items(row.get("canonical_evidence_json"))
-    if not canonicals:
-        canonicals = [{"href": value} for value in _json_values(row.get("canonical_urls_json")) if value]
-    if not canonicals:
-        return "canonical_missing_or_unavailable"
-    if not any(_same_url(str(item.get("href") or ""), target) for item in canonicals):
-        return "canonicalized_elsewhere"
-    return "indexable_200_in_selected_run"
-
-
-def _find_target(target: str, pages: Mapping[str, Mapping[str, object]]) -> Mapping[str, object] | None:
-    direct = pages.get(target)
-    if direct is not None:
-        return direct
-    return next((row for row in pages.values() if row.get("final_url") == target), None)
+    for item in TECHNICAL_AUDIT_CHECK_CONTRACT
+)
 
 
 def build_technical_audit(
@@ -1608,7 +424,6 @@ def build_technical_audit(
     crawl_run_id: str,
     reports: Mapping[str, Sequence[Mapping[str, object]]],
     run_context: Mapping[str, object] | None = None,
-    live_rechecks: Mapping[str, Mapping[str, object]] | None = None,
 ) -> dict[str, object]:
     """Build a stable audit payload from run-scoped report rows.
 
@@ -1618,15 +433,6 @@ def build_technical_audit(
     """
 
     rows = {name: [dict(row) for row in reports.get(name, ())] for name in TECHNICAL_AUDIT_REPORTS}
-    external_link_rechecks = [dict(row) for row in reports.get("external-link-rechecks", ())]
-    for row in rows["orphans"]:
-        url = str(row.get("url", ""))
-        recheck = _lookup_recheck(live_rechecks, url)
-        if isinstance(recheck, Mapping):
-            row["live_validation_state"] = str(recheck.get("state", "incomplete"))
-            row["live_validation"] = dict(recheck)
-        elif live_rechecks is not None and row.get("source_labels"):
-            row["live_validation_state"] = "not_selected_by_recheck_limit"
     source_coverage = {}
     for name in TECHNICAL_AUDIT_REPORTS:
         source_rows = rows[name]
@@ -1641,216 +447,193 @@ def build_technical_audit(
     if _PARSER == "lxml":
         parser_versions["lxml"] = _package_version("lxml")
     parsed_html_count = _optional_int(context.get("parsed_html_count"))
+    hashed_count = _optional_int(context.get("hashed_count"))
     completion_state = str(context.get("completion_state", "unavailable"))
-    graph_complete = bool(rows["link-graph-metrics"] and rows["link-graph-metrics"][0].get("graph_complete") is True)
-    known_url_inventory = [row for row in rows["orphans"] if row.get("source_labels")]
-    orphan_candidates = [
-        row
-        for row in rows["orphans"]
-        if row.get("candidate_type")
-        in {
-            "crawled_html_zero_observed_inlinks",
-            "source_known_zero_observed_inlinks",
-        }
-    ]
 
-    capabilities = context.get("schema_capabilities", {})
-    if not isinstance(capabilities, Mapping):
-        capabilities = {}
-    has_directive_evidence = capabilities.get("indexability_evidence_json") is True
     indexability_rows = [row for row in rows["indexability"] if row.get("content_extracted") is True]
-    directive_data_complete = has_directive_evidence and all(
-        row.get("directive_evidence") is not None for row in indexability_rows
-    )
-    indexability_conflicts = []
-    if has_directive_evidence:
-        for row in indexability_rows:
-            declarations = _parse_directive_evidence(row.get("directive_evidence"))
-            conflicts = directive_conflicts(declarations)
-            if conflicts:
-                indexability_conflicts.append({**row, "conflicts": conflicts})
+    indexability_conflicts = [
+        row
+        for row in indexability_rows
+        if row.get("html_meta_allows") is not None
+        and row.get("http_header_allows") is not None
+        and row.get("html_meta_allows") != row.get("http_header_allows")
+    ]
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
-    rendered_schema_rows = [
-        row for row in rows["rendered-mobile-resources"] if row.get("record_kind") == "structured_data_item"
-    ]
-    structured_data_report = structured_data_inventory_report(
-        rows["structured-data-inventory"], rendered_rows=rendered_schema_rows
-    )
-    structured_data_coverage = structured_data_report[0] if structured_data_report else {}
-    structured_data_items = [
-        row for row in structured_data_report[1:] if row.get("record_kind") == "structured_data_item"
-    ]
-    structured_data_candidates = [
+    link_failures = _link_target_failures(rows["internal-link-quality"])
+    locale_signature_count = _optional_int(context.get("locale_signature_count"))
+    locale_alignment = rows["locale-content-alignment"]
+    interaction_rows = rows["inventory-interactions"]
+    inventory_issues = [
         row
-        for row in structured_data_report[1:]
-        if row.get("record_type") == "candidate"
-        and row.get("candidate_type") != "google_feature_eligibility_not_evaluated"
+        for row in interaction_rows
+        if row.get("requires_interaction") is True
+        or (_optional_int(row.get("post_interaction_document_url_count")) or 0)
+        > (_optional_int(row.get("initial_document_url_count")) or 0)
     ]
-    performance_report = performance_inventory_report(rows["performance-inventory"])
-    performance_coverage = performance_report[0] if performance_report else {}
-    conditional_input = rows["conditional-get-probes"]
-    conditional_coverage = (
-        dict(conditional_input[0])
-        if conditional_input and conditional_input[0].get("record_type") == "coverage"
-        else {
-            "record_type": "coverage",
-            "state": "not_requested",
-            "conditional_requests_attempted": 0,
-            "not_modified_304_count": 0,
-            "not_modified_304_rate": None,
-            "efficiency_warning_count": 0,
-            "qualification": "explicit_conditional_probe_not_requested",
-        }
-    )
-    conditional_findings = (
-        [row for row in conditional_input[1:] if row.get("record_type") == "candidate"]
-        if conditional_input and conditional_input[0].get("record_type") == "coverage"
-        else []
-    )
-    transport_report = transport_security_report(rows["performance-inventory"], rows["url-variant-soft404"])
-    transport_coverage = transport_report[0]
-    transport_findings = [row for row in transport_report[1:] if row.get("record_type") == "candidate"]
-    similarity = rows["similarity-coverage"][0] if rows["similarity-coverage"] else {}
-    similarity_complete = (
-        source_coverage["similarity-coverage"]["available"] is True
-        and similarity.get("truncated") is False
-        and similarity.get("findings_truncated") is False
-        and similarity.get("missing_primary_hashes") == 0
-    )
-    authority = rows["authority-coverage"][0] if rows["authority-coverage"] else {}
-    authority_complete = (
-        source_coverage["authority-coverage"]["available"] is True and authority.get("graph_complete") is True
-    )
-    saved_link_failures = [row for row in rows["internal-link-quality"] if row.get("issue") == "error_target"]
-    confirmed_link_failures = []
-    analyst_link_failures = []
-    for row in saved_link_failures:
-        target_url = str(row.get("target_url", ""))
-        recheck = _lookup_recheck(live_rechecks, target_url)
-        if isinstance(recheck, Mapping) and recheck.get("state") in {
-            "persistent_http_failure",
-            "persistent_server_error",
-        }:
-            confirmed_link_failures.append({**row, "live_recheck": dict(recheck)})
-        else:
-            analyst_link_failures.append(
-                {
-                    **row,
-                    "recheck_state": recheck.get("state") if isinstance(recheck, Mapping) else "not_checked",
-                    **({"live_recheck": dict(recheck)} if isinstance(recheck, Mapping) else {}),
-                }
-            )
-    all_saved_failures_rechecked = (
-        all(_lookup_recheck(live_rechecks, str(row.get("target_url", ""))) is not None for row in saved_link_failures)
-        if live_rechecks is not None
-        else not saved_link_failures
-    )
-
-    metadata_rows = rows["metadata-locale-inventory"]
-    metadata_coverage = metadata_rows[0] if metadata_rows and metadata_rows[0].get("record_type") == "coverage" else {}
-    metadata_evidence = [row for row in metadata_rows if row.get("record_type") == "candidate"]
-    canonical_hreflang_rows = rows["canonical-hreflang-inventory"]
-    canonical_hreflang_coverage = (
-        canonical_hreflang_rows[0]
-        if canonical_hreflang_rows and canonical_hreflang_rows[0].get("record_type") == "coverage"
-        else {}
-    )
-    current_site_files_rows = rows["current-robots-sitemaps"]
-    current_site_files_coverage = (
-        current_site_files_rows[0]
-        if current_site_files_rows and current_site_files_rows[0].get("record_type") == "coverage"
-        else {}
-    )
-    current_site_files_evidence = [
-        {**row, "qualification": "analyst_only"}
-        for row in current_site_files_rows
-        if row.get("record_type") == "candidate"
-    ]
-    parameterized_link_rows = parameterized_canonical_link_inventory(rows["internal-link-quality"])
-    parameterized_link_coverage = [row for row in parameterized_link_rows if row.get("record_type") == "coverage"]
-    parameterized_link_evidence = [
-        {**row, "qualification": "analyst_only"}
-        for row in parameterized_link_rows
-        if row.get("record_type") == "candidate"
-    ]
-    url_variant_rows = rows["url-variant-soft404"]
-    url_variant_coverage = (
-        url_variant_rows[0] if url_variant_rows and url_variant_rows[0].get("record_type") == "coverage" else {}
-    )
-    url_variant_evidence = [row for row in url_variant_rows if row.get("record_type") == "candidate"]
-    ai_rows = rows["ai-governance"]
-    ai_coverage = ai_rows[0] if ai_rows and ai_rows[0].get("record_type") == "coverage" else {}
-    ai_bot_posture = [row for row in ai_rows if row.get("record_type") == "bot_posture"]
-    ai_llms_files = [row for row in ai_rows if row.get("record_type") == "llms_file"]
-    ai_evidence = [row for row in ai_rows if row.get("record_type") == "candidate"]
-    accept_language_rows = rows["accept-language-probes"]
-    accept_language_coverage = (
-        accept_language_rows[0]
-        if accept_language_rows and accept_language_rows[0].get("record_type") == "coverage"
-        else {}
-    )
-    accept_language_evidence = [row for row in accept_language_rows if row.get("record_type") == "candidate"]
-    render_rows = rows["rendered-mobile-resources"]
-    render_coverage = render_rows[0] if render_rows and render_rows[0].get("record_type") == "coverage" else {}
-    render_evidence = [row for row in render_rows if row.get("record_type") == "candidate"]
-    canonical_evidence = [
+    search_records = rows["supplied-search-evidence"]
+    search_issues = [row for row in search_records if row.get("is_issue") is True]
+    stored_html = rows["stored-html"]
+    stored_html_denominator = _optional_int(context.get("stored_html_count"))
+    nonhtml_document_count = _optional_int(context.get("nonhtml_document_count"))
+    metadata_rows = [
         row
-        for row in canonical_hreflang_rows
-        if str(row.get("candidate_type", "")).startswith("canonical_")
-        or row.get("candidate_type")
+        for row in stored_html
+        if row.get("kind")
         in {
-            "missing_canonical",
-            "multiple_canonicals",
-            "malformed_canonical",
-            "non_https_canonical",
-            "cross_host_canonical_review",
-            "parameterized_canonical_review",
-            "non_self_canonical_candidate",
+            "duplicate-title",
+            "duplicate-meta-description",
+            "duplicate-meta-robots",
+            "head-only-element-in-body",
+            "missing-h1",
+            "multiple-h1",
+            "heading-level-skip",
+            "missing-html-lang",
+            "invalid-html-lang",
+            "html-lang-self-hreflang-mismatch",
         }
     ]
-    hreflang_evidence = [
+    canonical_rows = [
         row
-        for row in canonical_hreflang_rows
-        if str(row.get("candidate_type", "")).startswith("hreflang_")
-        or row.get("candidate_type")
-        in {
-            "invalid_hreflang_syntax",
-            "duplicate_hreflang_language",
-            "multiple_x_default",
-            "missing_hreflang_self_reference",
-            "noindex_source_hreflang_guidance",
-        }
+        for row in stored_html
+        if row.get("kind")
+        in {"missing-canonical", "duplicate-canonical", "relative-canonical", "html-header-canonical-mismatch"}
     ]
+    canonical_target_rows = [row for row in stored_html if row.get("kind") == "canonical-to-homepage"]
+    hreflang_rows = rows["hreflang-validation"]
+    hreflang_noindex_rows = [row for row in hreflang_rows if row.get("kind") == "hreflang-target-noindex"]
+    hreflang_html_rows = [row for row in hreflang_rows if row.get("kind") != "hreflang-target-noindex"]
+    # Q82 compares sitemap and link discovery; a run that recorded no sitemap
+    # sources cannot show a sitemap-only population.
+    sitemap_sources_recorded = (_optional_int(context.get("run_sitemap_source_count")) or 0) > 0
 
-    checks = (
+    detector_checks = (
         _check(
-            "indexability-directive-conflicts",
-            "Indexability directive conflicts",
+            "metadata-basics",
+            "Metadata basics",
+            "Metadata",
+            metadata_rows,
+            "finding",
+            "Saved raw HTML contains duplicate metadata, invalid html lang markup or an invalid heading outline.",
+            available=source_coverage["stored-html"]["available"] is True,
+            denominator=stored_html_denominator,
+            completion_state=completion_state,
+        ),
+        _check(
+            "canonical-declarations",
+            "Canonical declarations",
+            "Canonicals",
+            canonical_rows,
+            "finding",
+            "Saved raw HTML has a missing, duplicate or relative canonical declaration.",
+            available=source_coverage["stored-html"]["available"] is True,
+            denominator=stored_html_denominator,
+            completion_state=completion_state,
+        ),
+        _check(
+            "metadata-duplicates-aliases",
+            "Metadata duplicates and aliases",
+            "Duplicate metadata",
+            rows["metadata-duplicates"],
+            "finding",
+            "Two or more indexable self-canonical pages share a saved title or H1.",
+            available=source_coverage["metadata-duplicates"]["available"] is True,
+            denominator=parsed_html_count,
+            completion_state=completion_state,
+        ),
+        _check(
+            "canonical-target-validation",
+            "Canonical target validation",
+            "Canonical targets",
+            canonical_target_rows,
+            "finding",
+            "A non-homepage saved URL declares the homepage as its canonical target.",
+            available=source_coverage["stored-html"]["available"] is True,
+            denominator=stored_html_denominator,
+            completion_state=completion_state,
+        ),
+        _check(
+            "soft404-error-routes",
+            "Soft 404 and error routes",
+            "Soft 404s",
+            rows["soft404-error-routes"],
+            "finding",
+            "A saved 200 response has an error-page title or H1; confirm the route and intended content live.",
+            available=source_coverage["soft404-error-routes"]["available"] is True,
+            denominator=stored_html_denominator,
+            completion_state=completion_state,
+            qualification="review_required",
+        ),
+        _check(
+            "discovery-source-provenance",
+            "Discovery-source provenance",
+            "Discovery sources",
+            rows["discovery-source-provenance"] if sitemap_sources_recorded else [],
+            "finding",
+            "Saved sitemap and internal-link discovery sources disagree; confirm whether the population is intentionally excluded from one source.",
+            available=source_coverage["discovery-source-provenance"]["available"] is True and sitemap_sources_recorded,
+            denominator=parsed_html_count,
+            completion_state=completion_state,
+            qualification="review_required",
+        ),
+        _check(
+            "hreflang-html-http",
+            "HTML and HTTP hreflang",
+            "Hreflang",
+            hreflang_html_rows,
+            "finding",
+            "A saved HTML or HTTP hreflang edge is non-reciprocal, targets an invalid canonical/status, or exceeds the HTML alternates bound.",
+            available=source_coverage["hreflang-validation"]["available"] is True,
+            denominator=parsed_html_count,
+            completion_state=completion_state,
+        ),
+        _check(
+            "hreflang-noindex",
+            "Hreflang noindex conflicts",
+            "Hreflang noindex",
+            hreflang_noindex_rows,
+            "finding",
+            "A saved hreflang edge targets a known noindex page.",
+            available=source_coverage["hreflang-validation"]["available"] is True,
+            denominator=parsed_html_count,
+            completion_state=completion_state,
+        ),
+        _check(
+            "nonhtml-search-assets",
+            "Non-HTML search assets",
+            "Non-HTML assets",
+            rows["nonhtml-search-assets"],
+            "finding",
+            "A saved 200 document response has neither an X-Robots-Tag nor a Link canonical header.",
+            available=source_coverage["nonhtml-search-assets"]["available"] is True,
+            denominator=nonhtml_document_count,
+            completion_state=completion_state,
+        ),
+        _check(
+            "indexability-segmentation",
+            "Indexability segmentation",
             "Index conflicts",
             indexability_conflicts,
             "finding",
             "HTML and HTTP indexing directives disagree on the same saved response.",
-            available=source_coverage["indexability"]["available"] is True and directive_data_complete,
+            available=source_coverage["indexability"]["available"] is True,
             denominator=parsed_html_count,
             completion_state=completion_state,
         ),
         _check(
-            "internal-link-failures",
+            "internal-link-targets",
             "Internal links to failed targets",
             "Internal link failures",
-            confirmed_link_failures,
+            link_failures,
             "finding",
-            "Saved-crawl failures must be rechecked live before client reporting.",
-            available=source_coverage["internal-link-quality"]["available"] is True and all_saved_failures_rechecked,
+            "Saved internal links point to an error, redirect, noindex or non-canonical target; recheck material paths live before client reporting.",
+            available=source_coverage["internal-link-quality"]["available"] is True,
             denominator=parsed_html_count,
             completion_state=completion_state,
-            qualification=(
-                "live_confirmed" if confirmed_link_failures else ("recheck_required" if saved_link_failures else None)
-            ),
+            qualification="recheck_required",
         ),
         _check(
-            "tracking-parameter-links",
-            "Internal tracking-parameter links",
+            "parameter-and-faceted-controls",
+            "Parameter and faceted controls",
             "Tracking parameters",
             rows["tracking-parameter-links"],
             "finding",
@@ -1860,36 +643,20 @@ def build_technical_audit(
             completion_state=completion_state,
         ),
         _check(
-            "parameterized-canonical-links",
-            "Internally linked parameter URLs with non-self canonicals",
-            "Parameter URL Families",
-            parameterized_link_evidence,
-            "finding",
-            "Saved link and canonical evidence identify candidates; parameter purpose and route intent remain analyst-reviewed.",
-            available=source_coverage["internal-link-quality"]["available"] is True,
-            denominator=parsed_html_count,
-            completion_state=completion_state,
-            qualification="analyst_only",
-        ),
-        _check(
             "orphan-candidates",
             "Orphan-page candidates",
             "Orphan candidates",
-            orphan_candidates if graph_complete else [],
+            rows["orphans"],
             "finding",
             "Zero observed parent does not prove an orphan without graph-coverage evidence.",
-            available=(
-                source_coverage["orphans"]["available"] is True
-                and source_coverage["link-graph-metrics"]["available"] is True
-                and graph_complete
-            ),
+            available=source_coverage["orphans"]["available"] is True,
             denominator=parsed_html_count,
             completion_state=completion_state,
             qualification="coverage_required",
         ),
         _check(
-            "redirect-chains",
-            "Redirect observations",
+            "response-status-and-redirect-history",
+            "Response status and redirects",
             "Redirect chains",
             rows["redirect-chains"],
             "finding",
@@ -1906,14 +673,14 @@ def build_technical_audit(
             rows["near-duplicates"],
             "finding",
             "Similarity is evidence for review, not proof of a duplicate-content defect.",
-            available=source_coverage["similarity-coverage"]["available"] is True,
-            denominator=_optional_int(similarity.get("eligible_population")),
+            available=source_coverage["near-duplicates"]["available"] is True,
+            denominator=hashed_count,
             completion_state=completion_state,
             qualification="review_required",
         ),
         _check(
-            "schema-parser-defects",
-            "Structured-data parser defects",
+            "schema-parser-diagnostics",
+            "Schema parser diagnostics",
             "Schema diagnostics",
             schema_defects,
             "finding",
@@ -1923,51 +690,8 @@ def build_technical_audit(
             completion_state=completion_state,
         ),
         _check(
-            "feature-specific-structured-data",
-            "Structured-data feature candidates",
-            "Structured Data",
-            structured_data_candidates,
-            "finding",
-            "Property completeness and ItemList shape are static candidates; feature eligibility needs live Google tooling and content review.",
-            available=(
-                source_coverage["structured-data-inventory"]["available"] is True
-                and capabilities.get("schema_json") is True
-            ),
-            denominator=sum(
-                row.get("schema_type") in {"Recipe", "Event", "Product", "BreadcrumbList", "ItemList"}
-                for row in structured_data_items
-            ),
-            completion_state=completion_state,
-            qualification="analyst_only",
-        ),
-        _check(
-            "performance-and-conditional-requests",
-            "Performance timing and conditional GETs",
-            "Conditional GET",
-            conditional_findings,
-            "finding",
-            "Timing distributions are crawler-lab evidence. Unchanged 200 responses after real validators are efficiency candidates; changed 200 content is not a defect.",
-            available=source_coverage["performance-inventory"]["available"] is True,
-            denominator=_optional_int(performance_coverage.get("eligible_canonical_indexable_html_count")),
-            completion_state=completion_state,
-            qualification="analyst_only",
-        ),
-        _check(
-            "transport-security",
-            "HSTS preload and OCSP stapling",
-            "Transport security",
-            transport_findings,
-            "finding",
-            "HSTS preload eligibility covers only criteria observable from saved HTTPS headers and HTTP-scheme probes; "
-            "preload-list membership is not queried and OCSP stapling is informational and not determinable here.",
-            available=source_coverage["performance-inventory"]["available"] is True,
-            denominator=_optional_int(transport_coverage.get("https_host_count")),
-            completion_state=completion_state,
-            qualification="analyst_only; transport optimization, not a TTFB defect claim",
-        ),
-        _check(
-            "image-markup-candidates",
-            "Image markup candidates",
+            "image-markup",
+            "Image markup",
             "Image issues",
             rows["image-issues"],
             "finding",
@@ -1978,326 +702,70 @@ def build_technical_audit(
             qualification="review_required",
         ),
         _check(
-            "internal-authority-inventory",
-            "Internal authority inventory",
+            "internal-authority",
+            "Internal authority",
             "Internal authority",
             rows["internal-authority"],
-            "inventory",
+            "partial",
             "Relative scores require template and business-priority comparison.",
-            available=source_coverage["authority-coverage"]["available"] is True,
-            denominator=_optional_int(authority.get("canonical_indexable_population")),
+            available=source_coverage["internal-authority"]["available"] is True,
+            denominator=parsed_html_count,
             completion_state=completion_state,
         ),
         _check(
-            "metadata-and-locale",
-            "Metadata and locale inventory",
-            "Metadata & locale",
-            metadata_evidence,
+            "locale-html-lang",
+            "Locale language and substantive content",
+            "Locale language",
+            locale_alignment,
             "finding",
-            "Saved parsed-HTML metadata candidates; rendered visibility and business impact are not inferred.",
-            available=(
-                source_coverage["metadata-locale-inventory"]["available"] is True
-                and metadata_coverage.get("inventory_complete") is True
-            ),
-            denominator=_optional_int(metadata_coverage.get("eligible_indexable_count")),
+            "The same primary-content signature occurs on pages that declare different languages; confirm the page purpose before treating this as untranslated locale content.",
+            available=source_coverage["locale-content-alignment"]["available"] is True
+            and locale_signature_count is not None
+            and locale_signature_count > 0,
+            denominator=locale_signature_count,
             completion_state=completion_state,
-            qualification="analyst_only",
+            qualification="review_required",
         ),
         _check(
-            "canonical-consistency",
-            "Canonical consistency candidates",
-            "Canonical checks",
-            canonical_evidence,
+            "rendered-robots-links",
+            "Inventory discovery without interaction",
+            "Rendered robots links",
+            inventory_issues,
             "finding",
-            "Saved declarations are compared with this run; uncrawled targets and intentional cross-host consolidation require review.",
-            available=(
-                source_coverage["canonical-hreflang-inventory"]["available"] is True
-                and canonical_hreflang_coverage.get("record_type") == "coverage"
-            ),
-            denominator=_optional_int(canonical_hreflang_coverage.get("indexable_count")),
-            completion_state=completion_state,
-            qualification="analyst_only",
-        ),
-        _check(
-            "hreflang-consistency",
-            "Hreflang consistency candidates",
-            "Hreflang checks",
-            hreflang_evidence,
-            "finding",
-            "Only parsed indexable sources are checked for cluster defects; unknown targets/channels and noindex guidance are not defect claims.",
-            available=(
-                source_coverage["canonical-hreflang-inventory"]["available"] is True
-                and canonical_hreflang_coverage.get("record_type") == "coverage"
-            ),
-            denominator=_optional_int(canonical_hreflang_coverage.get("indexable_count")),
-            completion_state=completion_state,
-            qualification="analyst_only",
-        ),
-        _check(
-            "current-robots-and-sitemaps",
-            "Current robots and sitemap evidence",
-            "Robots & sitemaps",
-            current_site_files_evidence,
-            "finding",
-            "Explicit current fetch; sitemap matches are compared with the selected historical run and remain analyst evidence.",
-            available=(
-                source_coverage["current-robots-sitemaps"]["available"] is True
-                and current_site_files_coverage.get("record_type") == "coverage"
-            ),
-            denominator=_optional_int(current_site_files_coverage.get("sitemap_entry_count")),
-            completion_state=completion_state,
-            qualification="analyst_only",
-        ),
-        _check(
-            "url-variants-and-soft-404",
-            "Current URL variant and soft-404 probes",
-            "URL Variant Probes",
-            [{**row, "qualification": "analyst_only"} for row in url_variant_evidence],
-            "finding",
-            "Explicit synthetic probes use saved valid controls; demand, route intent, and rendered behavior must be verified.",
-            available=(
-                source_coverage["url-variant-soft404"]["available"] is True
-                and url_variant_coverage.get("record_type") == "coverage"
-            ),
-            denominator=_optional_int(url_variant_coverage.get("variant_probe_count")),
-            completion_state=completion_state,
-            qualification="analyst_only",
-        ),
-        _check(
-            "accept-language-variation",
-            "Accept-Language variation and language redirects",
-            "Locale Redirects",
-            [{**row, "qualification": "analyst_only"} for row in accept_language_evidence],
-            "finding",
-            "Header-only probes show what the origin does when Accept-Language changes; crawlers usually send none. "
-            "Intent, geo-IP behaviour and alternate discoverability must be reviewed.",
-            available=(
-                source_coverage["accept-language-probes"]["available"] is True
-                and accept_language_coverage.get("record_type") == "coverage"
-            ),
-            denominator=_optional_int(accept_language_coverage.get("target_count")),
-            completion_state=completion_state,
-            qualification="analyst_only",
-        ),
-        _check(
-            "rendered-mobile-and-resource-evidence",
-            "Rendered, mobile, and resource observations",
-            "Rendered & Resources",
-            [{**row, "qualification": "analyst_only"} for row in render_evidence],
-            "finding",
-            "Same-navigation browser evidence is a candidate; incomplete readiness and unmeasured resource impact are not defects.",
-            available=(
-                source_coverage["rendered-mobile-resources"]["available"] is True
-                and render_coverage.get("record_type") == "coverage"
-            ),
-            denominator=_optional_int(render_coverage.get("sample_size")),
-            completion_state=completion_state,
-            qualification="analyst_only",
-        ),
-        _check(
-            "ai-crawler-governance",
-            "AI crawler governance and /llms.txt",
-            "AI Governance",
-            [{**row, "qualification": row.get("qualification") or "analyst_only"} for row in ai_evidence],
-            "finding",
-            "Declared robots.txt posture for recognised AI crawler families and current /llms.txt availability; "
-            "blocking an AI token is a business decision and llms.txt absence is not a defect.",
-            available=(
-                source_coverage["ai-governance"]["available"] is True and ai_coverage.get("record_type") == "coverage"
-            ),
-            denominator=_optional_int(ai_coverage.get("tested_count")),
-            completion_state=completion_state,
-            qualification="analyst_only",
-            theme="AI",
-        ),
-        _check(
-            "external-link-rechecks",
-            "External link rechecks",
-            "External Link Rechecks",
-            [
-                {**row, "qualification": "bounded_external_link_sample"}
-                for row in external_link_rechecks
-                if row.get("record_type") == "observation" and row.get("state") in _EXTERNAL_LINK_FAILURE_STATES
-            ],
-            "finding",
-            "Bounded live rechecks of outbound destinations linked from the sample; only hard failures are findings. "
-            "Redirects, challenges, timeouts and untested targets stay in the recheck tab for review.",
-            available=bool(external_link_rechecks) and external_link_rechecks[0].get("record_type") == "coverage",
-            denominator=_optional_int(external_link_rechecks[0].get("attempted_target_count"))
-            if external_link_rechecks
+            "A documented interaction exposes additional document URLs that were absent from the initial rendered DOM.",
+            available=source_coverage["inventory-interactions"]["available"] is True,
+            denominator=len(interaction_rows)
+            if source_coverage["inventory-interactions"]["available"] is True
             else None,
             completion_state=completion_state,
-            qualification="bounded_external_link_sample",
+            verified_evidence=interaction_rows,
+        ),
+        _check(
+            "supplied-search-evidence",
+            "Google indexing, canonical and performance evidence",
+            "Supplied search evidence",
+            search_issues,
+            "finding",
+            "Supplied Search Console or URL Inspection records show an indexing, canonical-selection or priority-URL impression issue.",
+            available=source_coverage["supplied-search-evidence"]["available"] is True,
+            denominator=len(search_records)
+            if source_coverage["supplied-search-evidence"]["available"] is True
+            else None,
+            completion_state=completion_state,
+            verified_evidence=search_records,
         ),
     )
-    for check in checks:
-        if check["id"] == "external-link-rechecks" and check["status"] == "pass":
-            coverage_state = external_link_rechecks[0].get("state") if external_link_rechecks else None
-            if coverage_state != "complete":
-                check["status"] = "partial"
-                check["qualification"] = "bounded_or_incomplete_external_link_recheck"
-        if check["id"] == "near-duplicate-content" and not similarity_complete:
-            check["status"] = "partial" if source_coverage["similarity-coverage"]["available"] else "unavailable"
-            check["tested_count"] = _optional_int(similarity.get("sampled_population"))
-            check["qualification"] = "bounded_or_incomplete_coverage"
-        if check["id"] == "internal-authority-inventory" and not authority_complete:
-            check["status"] = "partial" if source_coverage["authority-coverage"]["available"] else "unavailable"
-            check["qualification"] = "incomplete_graph"
-        if check["id"] == "metadata-and-locale" and metadata_coverage.get("inventory_complete") is not True:
-            check["status"] = "partial" if source_coverage["metadata-locale-inventory"]["available"] else "unavailable"
-            check["qualification"] = "incomplete_or_unknown_population"
-        if check["id"] in {"canonical-consistency", "hreflang-consistency"}:
-            unknown_key = (
-                "canonical_target_unknown_count"
-                if check["id"] == "canonical-consistency"
-                else "hreflang_target_unknown_count"
-            )
-            channel_unavailable = (
-                check["id"] == "hreflang-consistency"
-                and canonical_hreflang_coverage.get("sitemap_channel") != "available"
-            )
-            if (
-                not canonical_hreflang_coverage
-                or channel_unavailable
-                or _optional_int(canonical_hreflang_coverage.get(unknown_key))
-            ):
-                check["status"] = (
-                    "partial" if source_coverage["canonical-hreflang-inventory"]["available"] else "unavailable"
-                )
-                check["qualification"] = "saved_channels_or_targets_incomplete"
-        if check["id"] == "current-robots-and-sitemaps":
-            if current_site_files_coverage.get("record_type") != "coverage":
-                check["status"] = "unavailable"
-                check["qualification"] = "requires_explicit_current_fetch"
-            elif current_site_files_coverage.get("complete") is not True:
-                check["status"] = "partial"
-                check["qualification"] = "bounded_or_incomplete_current_fetch"
-        if check["id"] == "url-variants-and-soft-404":
-            if url_variant_coverage.get("record_type") != "coverage":
-                check["status"] = "unavailable"
-                check["qualification"] = "requires_explicit_current_probe"
-            elif url_variant_coverage.get("complete") is not True:
-                check["status"] = "partial"
-                check["qualification"] = "bounded_or_incomplete_current_probe"
-        if check["id"] == "accept-language-variation":
-            if accept_language_coverage.get("record_type") != "coverage":
-                check["status"] = "unavailable"
-                check["qualification"] = "requires_explicit_accept_language_probe"
-            elif accept_language_coverage.get("complete") is not True:
-                check["status"] = "partial"
-                check["qualification"] = "bounded_accept_language_target_sample"
-        if check["id"] == "rendered-mobile-and-resource-evidence":
-            if render_coverage.get("record_type") != "coverage":
-                check["status"] = "unavailable"
-                check["qualification"] = "requires_explicit_browser_collection"
-            elif render_coverage.get("complete") is not True:
-                check["status"] = "partial"
-                check["qualification"] = "unsettled_or_incomplete_render_sample"
-        if check["id"] == "ai-crawler-governance":
-            if ai_coverage.get("record_type") != "coverage":
-                check["status"] = "unavailable"
-                check["qualification"] = "requires_explicit_ai_governance_probe"
-            elif ai_coverage.get("complete") is not True:
-                check["status"] = "partial"
-                check["qualification"] = "bounded_or_incomplete_ai_governance_probe"
-        if check["id"] == "feature-specific-structured-data" and capabilities.get("schema_json") is not True:
-            check["status"] = "unavailable"
-            check["qualification"] = "structured_data_snapshot_capability_unavailable"
-        if check["id"] == "performance-and-conditional-requests":
-            if conditional_coverage.get("state") == "not_requested":
-                check["status"] = "partial"
-                check["qualification"] = "conditional_get_probe_not_requested; stored timing evidence is separate"
-            elif conditional_coverage.get("state") == "not_testable":
-                check["status"] = "unavailable"
-                check["qualification"] = "no_validator_eligible_conditional_request"
 
-    # Keep the detector rows for diagnostic tabs and legacy integrations, but
-    # make the public check list the product contract used by the skill and the
-    # client-ticket language.  ``project_v3_controls`` never upgrades a
-    # detector candidate into a pass or a finding.
-    detector_checks = list(checks)
-    checks = project_v3_controls(detector_checks, run_context=context)
+    checks = _complete_contract_checks(detector_checks, source_coverage)
 
     audit_log = [
         *_indexability_actions(indexability_conflicts),
         *_tracking_actions(rows["tracking-parameter-links"]),
         *_schema_actions(schema_defects),
+        *_locale_actions(locale_alignment),
+        *_inventory_actions(inventory_issues),
+        *_search_evidence_actions(search_issues),
     ]
-    audit_log = _aggregate_actions(audit_log)
-    client_actions = _link_actions(confirmed_link_failures)
-    evidence_index = _evidence_index(detector_checks)
-    _bundle_action_evidence([*audit_log, *client_actions], evidence_index)
-    unresolved_link_failures = [row for row in analyst_link_failures if row.get("recheck_state") not in {"recovered"}]
-    checks_complete = all(
-        check["status"] not in {"partial", "unavailable", "error"}
-        for check in detector_checks
-        # Current robots/sitemap fetching is an explicit opt-in. Its absence
-        # should remain visible in the coverage matrix without blocking
-        # unrelated, current-validated actions from other checks.
-        if not (
-            check["id"] == "current-robots-and-sitemaps"
-            and check["status"] == "unavailable"
-            and current_site_files_coverage.get("record_type") != "coverage"
-        )
-        and not (
-            check["id"] == "url-variants-and-soft-404"
-            and check["status"] == "unavailable"
-            and url_variant_coverage.get("record_type") != "coverage"
-        )
-        and not (
-            check["id"] == "accept-language-variation"
-            and check["status"] == "unavailable"
-            and accept_language_coverage.get("record_type") != "coverage"
-        )
-        and not (
-            check["id"] == "rendered-mobile-and-resource-evidence"
-            and check["status"] == "unavailable"
-            and render_coverage.get("record_type") != "coverage"
-        )
-        and not (
-            check["id"] == "ai-crawler-governance"
-            and check["status"] == "unavailable"
-            and ai_coverage.get("record_type") != "coverage"
-        )
-        and not (
-            check["id"] == "feature-specific-structured-data"
-            and check["status"] == "unavailable"
-            and capabilities.get("schema_json") is not True
-        )
-        and not (
-            check["id"] == "performance-and-conditional-requests"
-            and check["status"] in {"partial", "unavailable"}
-            and conditional_coverage.get("state") in {"not_requested", "not_testable"}
-        )
-        # External-link rechecks are an explicit, bounded session; a run that
-        # never requested one is not an incomplete check.
-        and not (
-            check["id"] == "external-link-rechecks" and check["status"] == "unavailable" and not external_link_rechecks
-        )
-        # Transport-security evidence is an informational optimization check;
-        # unobservable preload/OCSP criteria must not block client publication.
-        and check["id"] != "transport-security"
-    )
-    publication_ready = (
-        completion_state == "complete"
-        and live_rechecks is not None
-        and checks_complete
-        and not unresolved_link_failures
-    )
-    publishable_actions = client_actions if publication_ready else []
-    analyst_evidence = [
-        *[{"check_id": "internal-link-failures", **row} for row in analyst_link_failures],
-        *[{"check_id": "saved-run-candidate", **row} for row in audit_log],
-    ]
-    publication_reasons = []
-    if completion_state != "complete":
-        publication_reasons.append("crawl run is incomplete")
-    if live_rechecks is None:
-        publication_reasons.append("live rechecks were not requested")
-    if not checks_complete:
-        publication_reasons.append("one or more deterministic checks have incomplete coverage")
-    if unresolved_link_failures:
-        publication_reasons.append("some saved link failures are unverified or not publishable")
     return {
         "schema_version": TECHNICAL_AUDIT_SCHEMA_VERSION,
         "ruleset_version": TECHNICAL_AUDIT_RULESET_VERSION,
@@ -2307,101 +775,25 @@ def build_technical_audit(
         "crawl_run_id": crawl_run_id,
         "run_context": context,
         "source_coverage": source_coverage,
-        "known_url_inventory": known_url_inventory,
-        "metadata_locale_coverage": dict(metadata_coverage),
-        "canonical_hreflang_coverage": dict(canonical_hreflang_coverage),
-        "current_site_files_coverage": dict(current_site_files_coverage),
-        "parameterized_link_coverage": parameterized_link_coverage,
-        "url_variant_coverage": dict(url_variant_coverage),
-        "accept_language_coverage": dict(accept_language_coverage),
-        "rendered_coverage": dict(render_coverage),
-        "ai_governance": {
-            "theme": "AI",
-            "coverage": dict(ai_coverage),
-            "bot_posture": ai_bot_posture,
-            "llms_files": ai_llms_files,
-            "findings": ai_evidence,
+        "question_inputs": {
+            "semantic-html": rows["semantic-html"],
+            "profile-indexability-pages": rows["profile-indexability-pages"],
+            "crawl-depth-pages": rows["crawl-depth-pages"],
+            "performance-pages": rows["performance-pages"],
+            "empty-anchor-links": rows["empty-anchor-links"],
         },
-        "structured_data_coverage": dict(structured_data_coverage),
-        "structured_data_report": structured_data_report,
-        "structured_data_rules": {
-            "ruleset_version": GOOGLE_STRUCTURED_DATA_RULESET_VERSION,
-            "verified_on": GOOGLE_RULES_VERIFIED_ON,
-            "features": [asdict(rule) for rule in GOOGLE_FEATURE_RULES],
-            "source_policy": "Google Search Central feature docs are authoritative for Google-specific requirements.",
-        },
-        "performance_coverage": dict(performance_coverage),
-        "performance_report": performance_report,
-        "conditional_get_coverage": conditional_coverage,
-        "transport_security_coverage": dict(transport_coverage),
-        "transport_security_report": transport_report[1:],
-        "external_link_recheck_coverage": (
-            dict(external_link_rechecks[0])
-            if external_link_rechecks and external_link_rechecks[0].get("record_type") == "coverage"
-            else {}
-        ),
-        "external_link_rechecks": [row for row in external_link_rechecks if row.get("record_type") == "observation"],
         "status_vocabulary": [
-            "tested",
             "pass",
             "finding",
             "partial",
             "unavailable",
             "not_applicable",
-            "error",
-            "no_observations",
         ],
-        "check_registry": [dict(item) for item in TECHNICAL_AUDIT_CHECK_CONTRACT],
-        "detector_registry": [dict(item) for item in TECHNICAL_AUDIT_CHECK_REGISTRY],
-        "skill_requirements": [
-            {
-                **dict(item),
-                "denominator_basis": TECHNICAL_AUDIT_REQUIREMENT_DENOMINATORS[str(item["check_id"])],
-            }
-            for item in TECHNICAL_AUDIT_SKILL_REQUIREMENTS
-        ],
+        "check_contract": [dict(item) for item in TECHNICAL_AUDIT_CHECK_CONTRACT],
+        "check_registry": [dict(item) for item in TECHNICAL_AUDIT_CHECK_REGISTRY],
+        "check_id_aliases": dict(TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES),
         "checks": list(checks),
-        "detector_checks": detector_checks,
         "audit_log": audit_log,
-        "evidence_index": evidence_index,
-        "recipient_projection": recipient_report_projection(
-            crawl_run_id=crawl_run_id,
-            run_context=context,
-            checks=detector_checks,
-            actions=publishable_actions,
-            known_url_inventory=known_url_inventory,
-            metadata_coverage=metadata_coverage,
-            canonical_coverage=canonical_hreflang_coverage,
-            performance_report=performance_report,
-            ai_bot_posture=ai_bot_posture,
-            ai_llms_files=ai_llms_files,
-        ),
-        "analyst_evidence": analyst_evidence,
-        "live_rechecks": [
-            {
-                "target_url": redact_url_without_digest(url),
-                "url_digest_sha256": hashlib.sha256(url.encode()).hexdigest(),
-                **dict(recheck),
-            }
-            for url, recheck in sorted((live_rechecks or {}).items())
-        ],
-        "live_rechecks_by_digest": {
-            "sha256:" + hashlib.sha256(url.encode()).hexdigest(): dict(recheck)
-            for url, recheck in sorted((live_rechecks or {}).items())
-        },
-        "client_publication_gate": {
-            "ready": publication_ready,
-            "eligible_action_count": len(publishable_actions),
-            "candidate_count": len(analyst_evidence),
-            "blocked_reasons": publication_reasons,
-            "client_actions": publishable_actions,
-        },
-        "manual_review_answers": manual_review_answer_register(
-            checks,
-            collected_evidence=context.get("manual_review_evidence")
-            if isinstance(context.get("manual_review_evidence"), Mapping)
-            else None,
-        ),
         "manual_checks": _manual_checks(),
     }
 
@@ -2415,197 +807,39 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
 
     checks = audit.get("checks", [])
     assert isinstance(checks, list)
-    detector_checks = audit.get("detector_checks", checks)
-    assert isinstance(detector_checks, list)
     raw_context = audit.get("run_context", {})
     context = raw_context if isinstance(raw_context, Mapping) else {}
-    raw_gate = audit.get("client_publication_gate", {})
-    gate = raw_gate if isinstance(raw_gate, Mapping) else {}
-    external_link_coverage = audit.get("external_link_recheck_coverage", {})
-    external_link_coverage = external_link_coverage if isinstance(external_link_coverage, Mapping) else {}
+    raw_coverage = audit.get("source_coverage", {})
+    source_coverage = raw_coverage if isinstance(raw_coverage, Mapping) else {}
+    registry = audit.get("check_registry", [])
+    audit_log = audit.get("audit_log", [])
+    ticket_register = audit.get("ticket_register", [])
     overview = [
         ["Metric", "Value"],
+        ["Audit schema", str(audit["schema_version"])],
+        ["Ruleset version", str(audit.get("ruleset_version", "unknown"))],
         ["Crawl run", str(audit["crawl_run_id"])],
         ["Run status", str(context.get("run_status", "unknown"))],
         ["Completion state", str(context.get("completion_state", "unavailable"))],
         ["Parsed HTML denominator", context.get("parsed_html_count", "unknown")],
         [
-            "Client publication ready",
-            gate.get("ready", False),
+            "Source reports available",
+            sum(bool(item["available"]) for item in source_coverage.values() if isinstance(item, Mapping)),
         ],
+        ["Registry checks", len(registry) if isinstance(registry, list) else 0],
+        ["Candidate/action rows", len(audit_log) if isinstance(audit_log, list) else 0],
     ]
-    projection = audit.get("recipient_projection", {})
-    projection = projection if isinstance(projection, Mapping) else {}
-    overview.extend([[str(row[0]), _sheet_value(row[1])] for row in projection.get("health_metrics", [])])
-    for check in detector_checks:
+    for check in checks:
         assert isinstance(check, Mapping)
-        title = str(check["title"])
-        overview.append([title, str(check["status"])])
-        eligible = check.get("denominator")
-        tested = check.get("tested_count")
-        affected = check.get("affected_count", 0)
-        overview.append(
-            [
-                f"{title} — affected / tested / eligible",
-                f"{affected} / {tested if tested is not None else 'unknown'} / {eligible if eligible is not None else 'unknown'}",
-            ]
-        )
-    structured_rules = audit.get("structured_data_rules", {})
-    if isinstance(structured_rules, Mapping):
-        overview.extend(
-            [
-                ["Structured-data ruleset", structured_rules.get("ruleset_version", "unknown")],
-                ["Structured-data rules verified", structured_rules.get("verified_on", "unknown")],
-            ]
-        )
-    performance_coverage = audit.get("performance_coverage", {})
-    if isinstance(performance_coverage, Mapping) and performance_coverage:
-        conditional_coverage = audit.get("conditional_get_coverage", {})
-        conditional_summary = conditional_coverage if isinstance(conditional_coverage, Mapping) else {}
-        overview.extend(
-            [
-                ["Timing source", performance_coverage.get("source", "unknown")],
-                [
-                    "Canonical indexable HTML timing population",
-                    performance_coverage.get("eligible_canonical_indexable_html_count", 0),
-                ],
-                ["Conditional GET state", conditional_summary.get("state", "not_requested")],
-                ["Conditional GET eligible validators", conditional_summary.get("validator_eligible_count", 0)],
-                ["Conditional GET 304 rate", conditional_summary.get("not_modified_304_rate", "not_testable")],
-                ["Field CWV source", performance_coverage.get("field_cwv", "unavailable")],
-            ]
-        )
-    transport_coverage = audit.get("transport_security_coverage", {})
-    if isinstance(transport_coverage, Mapping) and transport_coverage.get("https_host_count"):
-        overview.extend(
-            [
-                ["HTTPS hosts assessed for HSTS", transport_coverage.get("https_host_count", 0)],
-                ["HSTS preload-eligible hosts", transport_coverage.get("hsts_preload_eligible_count", 0)],
-                ["HSTS preload not-eligible hosts", transport_coverage.get("hsts_preload_not_eligible_count", 0)],
-                ["HSTS preload list membership", transport_coverage.get("hsts_preload_list_membership", "unknown")],
-                [
-                    "OCSP stapling states",
-                    _sheet_value(transport_coverage.get("ocsp_stapling_state_counts", {})),
-                ],
-            ]
-        )
-    overview.extend(
-        [
-            ["Run scope", _sheet_value(projection.get("scope", "unknown"))],
-            ["Audit date", projection.get("run_date", "unknown")],
-            ["Coverage caveats", projection.get("coverage_caveats", "unknown")],
-        ]
-    )
-    if external_link_coverage:
-        overview.extend(
-            [
-                ["Rendered external-link coverage", external_link_coverage.get("state", "unknown")],
-                ["Rendered external-link targets attempted", external_link_coverage.get("attempted_target_count", 0)],
-                [
-                    "Rendered external-link targets out of scope",
-                    external_link_coverage.get("out_of_scope_target_count", 0),
-                ],
-            ]
-        )
+        overview.append([str(check["title"]), str(check["status"])])
 
-    canonical_coverage = audit.get("canonical_hreflang_coverage", {})
-    if isinstance(canonical_coverage, Mapping) and canonical_coverage:
-        overview.extend(
-            [
-                ["Canonical/hreflang indexable denominator", canonical_coverage.get("indexable_count", "unknown")],
-                ["Canonical targets not crawled", canonical_coverage.get("canonical_target_unknown_count", 0)],
-                ["Hreflang targets not crawled", canonical_coverage.get("hreflang_target_unknown_count", 0)],
-                ["Hreflang sitemap channel", canonical_coverage.get("sitemap_channel", "unknown")],
-            ]
-        )
-    current_files_coverage = audit.get("current_site_files_coverage", {})
-    if isinstance(current_files_coverage, Mapping) and current_files_coverage:
-        samples = current_files_coverage.get("live_samples", [])
-        overview.extend(
-            [
-                ["Current sitemap entries", current_files_coverage.get("sitemap_entry_count", 0)],
-                ["Current sitemap documents", current_files_coverage.get("sitemap_document_count", 0)],
-                ["Current file coverage complete", current_files_coverage.get("complete", False)],
-                ["Current live page samples", len(samples) if isinstance(samples, list) else 0],
-            ]
-        )
-    parameter_coverage = audit.get("parameterized_link_coverage", [])
-    parameter_coverage_rows = (
-        [dict(row) for row in parameter_coverage if isinstance(row, Mapping)]
-        if isinstance(parameter_coverage, list)
-        else []
-    )
-    if parameter_coverage_rows:
-        overview.extend(
-            [
-                [
-                    "Internal parameter link instances",
-                    sum((_optional_int(row.get("link_instances")) or 0) for row in parameter_coverage_rows),
-                ],
-                [
-                    "Internal parameter URL targets",
-                    sum((_optional_int(row.get("unique_targets")) or 0) for row in parameter_coverage_rows),
-                ],
-                [
-                    "Noncanonical parameter link instances",
-                    sum(
-                        (_optional_int(row.get("canonicalized_link_instances")) or 0) for row in parameter_coverage_rows
-                    ),
-                ],
-                [
-                    "Noncanonical parameter URL targets",
-                    sum(
-                        (_optional_int(row.get("canonicalized_unique_targets")) or 0) for row in parameter_coverage_rows
-                    ),
-                ],
-            ]
-        )
-    variant_coverage = audit.get("url_variant_coverage", {})
-    if isinstance(variant_coverage, Mapping) and variant_coverage:
-        overview.extend(
-            [
-                ["Current URL-variant probes", variant_coverage.get("variant_probe_count", 0)],
-                ["Synthetic 404 hosts", variant_coverage.get("soft404_host_count", 0)],
-                ["URL-variant probe coverage complete", variant_coverage.get("complete", False)],
-            ]
-        )
-    accept_language_coverage = audit.get("accept_language_coverage", {})
-    if isinstance(accept_language_coverage, Mapping) and accept_language_coverage:
-        language_counts = accept_language_coverage.get("candidate_counts", {})
-        language_counts = language_counts if isinstance(language_counts, Mapping) else {}
-        overview.extend(
-            [
-                ["Accept-Language probe targets", accept_language_coverage.get("target_count", 0)],
-                ["Accept-Language probes", accept_language_coverage.get("probe_count", 0)],
-                ["Language redirects detected", language_counts.get("language_redirect_detected", 0)],
-                ["Language variation without Vary", language_counts.get("missing_vary_header", 0)],
-                ["No-header crawler traps", language_counts.get("bot_trap", 0)],
-                ["Accept-Language probe coverage complete", accept_language_coverage.get("complete", False)],
-            ]
-        )
-    rendered_coverage = audit.get("rendered_coverage", {})
-    if isinstance(rendered_coverage, Mapping) and rendered_coverage:
-        overview.extend(
-            [
-                ["Rendered same-navigation samples", rendered_coverage.get("sample_size", 0)],
-                ["Rendered sample complete", rendered_coverage.get("complete", False)],
-            ]
-        )
-
-    tables: dict[str, list[list[object]]] = {"Overview": overview}
-    client_actions = gate.get("client_actions", [])
-    if gate.get("ready") is True and isinstance(client_actions, list) and client_actions:
-        tables["Audit Log"] = _table(
-            client_actions,
+    tables: dict[str, list[list[object]]] = {
+        "Overview": overview,
+        "Audit Log": _table(
+            audit.get("audit_log", []),
             (
                 "Problem",
-                "Affected URL",
-                "Affected URL Count",
-                "Finding Count",
-                "Unique Source Pages",
-                "Link Instances",
-                "Severity",
-                "Severity Rationale",
+                "URL",
                 "Explanation",
                 "Fix",
                 "SEO Impact",
@@ -2614,72 +848,48 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
                 "Owner",
                 "Acceptance Criteria",
                 "Retest Status",
-                "Retest Date",
-                "Resolution Evidence",
-                "Historical Status",
-                "Live Status",
                 "Evidence Reference",
                 "Resolved",
             ),
-        )
-    failing_targets = projection.get("failing_target_inventory", [])
-    if gate.get("ready") is True and isinstance(failing_targets, list) and failing_targets:
-        tables["Failing Link Targets"] = _table(failing_targets)
-    known_urls = projection.get("known_url_inventory", [])
-    if isinstance(known_urls, list) and known_urls:
-        tables["Orphan candidates"] = _table(known_urls)
-    conditional_coverage = audit.get("conditional_get_coverage", {})
-    conditional_coverage = conditional_coverage if isinstance(conditional_coverage, Mapping) else {}
-    conditional_candidates: list[dict[str, object]] = []
-    for check in detector_checks:
-        if not isinstance(check, Mapping) or check.get("id") != "performance-and-conditional-requests":
-            continue
-        evidence = check.get("evidence", [])
-        if isinstance(evidence, list):
-            conditional_candidates.extend(
-                dict(row) for row in evidence if isinstance(row, Mapping) and row.get("record_type") == "candidate"
-            )
-    if conditional_coverage.get("state") == "tested" and conditional_candidates:
-        tables["304 Recheck"] = _table(
-            conditional_candidates,
-            (
-                "record_type",
-                "url",
-                "url_digest_sha256",
-                "stratum",
-                "locale",
-                "template",
-                "ruleset_version",
-                "observed_at",
-                "ordinary_status",
-                "ordinary_headers",
-                "ordinary_ttfb_seconds",
-                "ordinary_duration_seconds",
-                "ordinary_wire_bytes",
-                "ordinary_decoded_bytes",
-                "ordinary_representation_sha256",
-                "ordinary_state",
-                "validator_kind",
-                "validator_digest_sha256",
-                "conditional_status",
-                "conditional_headers",
-                "conditional_ttfb_seconds",
-                "conditional_duration_seconds",
-                "conditional_wire_bytes",
-                "conditional_decoded_bytes",
-                "conditional_representation_sha256",
-                "representation_equal",
-                "outcome",
-                "qualification",
-            ),
-        )
-    external_link_rows = audit.get("external_link_rechecks", [])
-    if isinstance(external_link_rows, list) and external_link_rows:
-        tables["External Link Rechecks"] = _table(external_link_rows)
+        ),
+    }
+    if "ticket_register" in audit and isinstance(ticket_register, list):
+        from .technical_audit_tickets import ticket_sheet_table
+
+        tables["Tickets"] = ticket_sheet_table([row for row in ticket_register if isinstance(row, Mapping)])
+    for check in checks:
+        assert isinstance(check, Mapping)
+        evidence = check["evidence"]
+        assert isinstance(evidence, list)
+        verified_evidence = check.get("verified_evidence", [])
+        assert isinstance(verified_evidence, list)
+        if evidence or verified_evidence:
+            tables[str(check["detail_sheet"])] = _table(evidence or verified_evidence)
     return tables
 
 
-_EXTERNAL_LINK_FAILURE_STATES = frozenset({"http_failure", "dns_error", "tls_error", "transport_error"})
+_LINK_FAILURE_PRIORITY = ("error_target", "redirect_target", "noncanonical_target", "non_indexable_target")
+
+
+def _link_target_failures(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """One row per link (source, target, position) with its most serious target state first."""
+
+    edges: dict[tuple[object, object, object], dict[str, object]] = {}
+    for row in rows:
+        issue = row.get("issue")
+        if issue not in _LINK_FAILURE_PRIORITY:
+            continue
+        key = (row.get("source_url"), row.get("target_url"), row.get("xpath"))
+        edge = edges.setdefault(key, {**row, "issues": []})
+        issues = edge["issues"]
+        assert isinstance(issues, list)
+        issues.append(issue)
+    for edge in edges.values():
+        issues = edge["issues"]
+        assert isinstance(issues, list)
+        issues.sort(key=_LINK_FAILURE_PRIORITY.index)
+        edge["issue"] = issues[0]
+    return list(edges.values())
 
 
 def _check(
@@ -2694,14 +904,17 @@ def _check(
     denominator: int | None,
     completion_state: str,
     qualification: str | None = None,
-    theme: str | None = None,
+    verified_evidence: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     if evidence:
         status = positive_status
     elif not available or denominator is None or completion_state != "complete":
         status = "partial" if available else "unavailable"
     elif denominator == 0:
-        status = "no_observations"
+        # A zero collection population is not proof that this control does
+        # not apply.  It commonly means that hashing, rendering or another
+        # collector never produced a usable population.
+        status = "unavailable"
     else:
         status = "pass"
     return {
@@ -2717,11 +930,81 @@ def _check(
         "excluded_count": None,
         "denominator": denominator,
         "detail_sheet": detail_sheet,
-        "theme": theme,
         "interpretation": interpretation,
         "qualification": qualification,
         "evidence": evidence,
+        "verified_evidence": verified_evidence or [],
     }
+
+
+def _complete_contract_checks(
+    detector_checks: Sequence[Mapping[str, object]],
+    source_coverage: Mapping[str, Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Return exactly one result per contract control in contract order."""
+
+    by_id = {str(check["id"]): dict(check) for check in detector_checks}
+    unexpected_ids = set(by_id).difference(item["id"] for item in TECHNICAL_AUDIT_CHECK_CONTRACT)
+    if unexpected_ids:
+        raise ValueError(f"detector checks outside contract: {sorted(unexpected_ids)}")
+    if len(by_id) != len(detector_checks):
+        raise ValueError("duplicate detector check IDs")
+
+    aliases_by_contract_id: dict[str, list[str]] = {}
+    for legacy_id, contract_id in TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES.items():
+        aliases_by_contract_id.setdefault(contract_id, []).append(legacy_id)
+
+    completed: list[dict[str, object]] = []
+    for contract in TECHNICAL_AUDIT_CHECK_CONTRACT:
+        identifier = contract["id"]
+        check = by_id.get(identifier)
+        if check is None:
+            check = _unavailable_contract_check(contract)
+        check["title"] = contract["title"]
+        check["detail_sheet"] = contract["detail_sheet"]
+        check["required_evidence"] = contract["required_evidence"]
+        check["owner_ticket"] = contract["owner_ticket"]
+        check["input_provenance"] = _input_provenance(identifier, source_coverage)
+        legacy_ids = aliases_by_contract_id.get(identifier)
+        if legacy_ids:
+            check["legacy_check_ids"] = legacy_ids
+        completed.append(check)
+    return completed
+
+
+def _unavailable_contract_check(contract: Mapping[str, str]) -> dict[str, object]:
+    """Describe absent collection without replacing it with an empty pass."""
+
+    return _check(
+        contract["id"],
+        contract["title"],
+        contract["detail_sheet"],
+        [],
+        "finding",
+        "The deterministic collector for this control did not run.",
+        available=False,
+        denominator=None,
+        completion_state="unavailable",
+        qualification=f"missing_required_evidence: {contract['required_evidence']}",
+    )
+
+
+def _input_provenance(
+    identifier: str,
+    source_coverage: Mapping[str, Mapping[str, object]],
+) -> list[dict[str, object]]:
+    report_names = _IMPLEMENTED_CHECK_REPORTS.get(identifier, ())
+    if not report_names:
+        return []
+    return [
+        {
+            "kind": "saved_run_report",
+            "report": report_name,
+            "available": source_coverage[report_name]["available"],
+            "source_digest_sha256": source_coverage[report_name]["source_digest_sha256"],
+        }
+        for report_name in report_names
+    ]
 
 
 def _optional_int(value: object) -> int | None:
@@ -2729,41 +1012,6 @@ def _optional_int(value: object) -> int | None:
         return int(value) if isinstance(value, (int, float, str)) else None
     except (TypeError, ValueError):
         return None
-
-
-def _lookup_recheck(
-    live_rechecks: Mapping[str, Mapping[str, object]] | None,
-    url: str,
-) -> Mapping[str, object] | None:
-    if live_rechecks is None:
-        return None
-    direct = live_rechecks.get(url)
-    if direct is not None:
-        return direct
-    digest_key = "sha256:" + hashlib.sha256(url.encode()).hexdigest()
-    return live_rechecks.get(digest_key)
-
-
-def _parse_directive_evidence(value: object) -> list[RobotsDirectiveEvidence]:
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return []
-    if not isinstance(value, list):
-        return []
-    result = []
-    for item in value:
-        if not isinstance(item, Mapping):
-            continue
-        channel, agent, raw = item.get("channel"), item.get("user_agent"), item.get("raw_value")
-        directives = item.get("directives")
-        if channel not in {"html_meta", "http_header"} or not isinstance(agent, str) or not isinstance(raw, str):
-            continue
-        if not isinstance(directives, list) or not all(isinstance(token, str) for token in directives):
-            continue
-        result.append(RobotsDirectiveEvidence(channel, agent, raw, list(directives)))
-    return result
 
 
 def _package_version(name: str) -> str:
@@ -2774,472 +1022,108 @@ def _package_version(name: str) -> str:
 
 
 def _action(*, problem: str, url: object, explanation: str, fix: str, impact: str, evidence: str) -> dict[str, object]:
-    url_text = str(url or "")
     return {
         "Problem": problem,
-        "Affected URL": redact_url_without_digest(url_text) if url_text else "",
-        "Affected URL Count": 1 if url_text else 0,
-        "Unique Source Pages": 0,
-        "Link Instances": 1,
-        "Severity": "Medium",
-        "Severity Rationale": "A deterministic defect is present in the saved crawl evidence; business value was not supplied.",
+        "URL": url,
         "Explanation": explanation,
         "Fix": fix,
         "SEO Impact": impact,
         "Action Needed": "Yes",
         "Responsible Team": "Engineering",
         "Owner": "Unassigned",
-        "Acceptance Criteria": f"Re-run the applicable check for {redact_url_without_digest(url_text) if url_text else 'the affected page'}; confirm the defect is absent and intended page behaviour is preserved.",
-        "Retest Status": "Remediation not retested",
-        "Retest Date": "",
-        "Resolution Evidence": "",
-        "Evidence Reference": _evidence_id(evidence, {"url": url_text, "explanation": explanation}),
+        "Acceptance Criteria": "Deploy the change and recheck the exact URL live.",
+        "Retest Status": "Not retested",
+        "Evidence Reference": evidence,
         "Resolved": "No",
     }
 
 
 def _indexability_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     return [
-        {
-            **_action(
-                problem="Conflicting indexability directives",
-                url=row.get("url", ""),
-                explanation=f"Explicit HTML and HTTP directives contradict: {row.get('conflicts', [])}.",
-                fix="Choose one intended indexability state and make header and HTML directives agree.",
-                impact="Conflicting signals can lead to unintended indexation handling.",
-                evidence="indexability-directive-conflicts",
-            ),
-            "Evidence Reference": _evidence_id("indexability-directive-conflicts", row),
-            "Acceptance Criteria": "On the exact page, the intended robots state is declared consistently in HTTP headers and HTML; re-run the directive comparison.",
-        }
+        _action(
+            problem="Conflicting indexability directives",
+            url=row.get("url", ""),
+            explanation="The saved HTML meta and HTTP header directives disagree.",
+            fix="Choose one intended indexability state and make header and HTML directives agree.",
+            impact="Conflicting signals can lead to unintended indexation handling.",
+            evidence="indexability-segmentation",
+        )
         for row in rows
     ]
 
 
-def _link_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    by_target: dict[str, list[Mapping[str, object]]] = {}
-    for row in rows:
-        target = str(row.get("target_url") or "")
-        if target:
-            by_target.setdefault(target, []).append(row)
-    actions: list[dict[str, object]] = []
-    for target, members in sorted(by_target.items()):
-        source_urls = sorted({str(row.get("source_url") or "") for row in members if row.get("source_url")})
-        statuses = sorted(
-            {
-                str(live.get("status") or row.get("target_status") or "unknown")
-                for row in members
-                for live in [row.get("live_recheck")]
-                if isinstance(live, Mapping)
-            }
-        )
-        instance_count = sum(_optional_int(row.get("link_instances")) or 1 for row in members)
-        action = _action(
-            problem="Internal links target a repeatedly failing URL",
-            url=target,
-            explanation=(
-                f"The target failed bounded live rechecks (status {', '.join(statuses) or 'unknown'}); "
-                f"{instance_count} link instances from {len(source_urls)} unique source pages point to it."
-            ),
-            fix="Restore the destination or update internal links to its intended working URL.",
-            impact="Repeatedly failing internal destinations interrupt navigation and waste crawl paths.",
-            evidence="internal-link-failures",
-        )
-        evidence_ids = sorted({_evidence_id("internal-link-failures", row) for row in members})
-        action.update(
-            {
-                "Problem": "Internal links target a repeatedly failing URL",
-                "Affected URL Count": 1,
-                "Unique Source Pages": len(source_urls),
-                "Link Instances": instance_count,
-                "Severity": "Medium",
-                "Severity Rationale": (
-                    f"{len(source_urls)} unique internal source pages still link to a live-confirmed failure; "
-                    "business value was not supplied."
-                ),
-                "Acceptance Criteria": (
-                    "The target returns the intended successful page or the internal links are changed to the "
-                    "approved replacement; recheck every affected source/target pair and confirm no repeat failure."
-                ),
-                "Evidence Reference": ";".join(evidence_ids),
-                "Historical Status": ", ".join(sorted({str(row.get("target_status") or "unknown") for row in members})),
-                "Live Status": ", ".join(statuses),
-                "Retest Status": "Live failure confirmed; remediation not retested",
-            }
-        )
-        actions.append(action)
-    return actions
-
-
-def _aggregate_actions(actions: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """Collapse repeated saved candidates by finding and affected target."""
-    groups: dict[tuple[str, str], list[Mapping[str, object]]] = {}
-    for action in actions:
-        key = (str(action.get("Problem") or ""), str(action.get("Affected URL") or ""))
-        groups.setdefault(key, []).append(action)
-    aggregated = []
-    for (problem, url), members in sorted(groups.items()):
-        first = dict(members[0])
-        first["Finding Count"] = len(members)
-        first["Affected URL Count"] = 1 if url else 0
-        sources = {str(row.get("Source URL")) for row in members if row.get("Source URL")}
-        first["Unique Source Pages"] = (
-            len(sources)
-            if sources
-            else max((_optional_int(row.get("Unique Source Pages")) or 0 for row in members), default=0)
-        )
-        first["Link Instances"] = sum(_optional_int(row.get("Link Instances")) or 1 for row in members)
-        first["Evidence Reference"] = ";".join(sorted({str(row.get("Evidence Reference") or "") for row in members}))
-        first["Explanation"] = (
-            f"{len(members)} matching evidence records for this affected target. {first.get('Explanation', '')}"
-        )
-        aggregated.append(first)
-    return aggregated
-
-
-def _evidence_id(check_id: str, row: Mapping[str, object]) -> str:
-    payload = json.dumps({"check_id": check_id, "evidence": row}, sort_keys=True, separators=(",", ":"), default=str)
-    return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
-
-
-def _evidence_index(checks: Sequence[Mapping[str, object]]) -> dict[str, dict[str, object]]:
-    index: dict[str, dict[str, object]] = {}
-    for check in checks:
-        evidence = check.get("evidence", [])
-        if not isinstance(evidence, list):
-            continue
-        for row in evidence:
-            if isinstance(row, Mapping):
-                reference = _evidence_id(str(check.get("id") or "unknown"), row)
-                index[reference] = {"check_id": check.get("id"), "evidence": dict(row)}
-    return dict(sorted(index.items()))
-
-
-def _bundle_action_evidence(actions: Sequence[dict[str, object]], evidence_index: dict[str, dict[str, object]]) -> None:
-    """Replace long member-ID lists with one stable, resolvable group ID."""
-    for action in actions:
-        reference = str(action.get("Evidence Reference") or "")
-        if ";" not in reference:
-            continue
-        members = sorted(set(reference.split(";")))
-        grouped_reference = _evidence_id("grouped-action", {"members": members})
-        evidence_index[grouped_reference] = {
-            "record_type": "grouped_action_evidence",
-            "evidence_ids": members,
-            "evidence_count": len(members),
-        }
-        action["Evidence Reference"] = grouped_reference
-
-
-def recipient_report_projection(
-    *,
-    crawl_run_id: str,
-    run_context: Mapping[str, object],
-    checks: Sequence[Mapping[str, object]],
-    actions: Sequence[Mapping[str, object]],
-    known_url_inventory: Sequence[Mapping[str, object]],
-    metadata_coverage: Mapping[str, object],
-    canonical_coverage: Mapping[str, object],
-    performance_report: Sequence[Mapping[str, object]],
-    ai_bot_posture: Sequence[Mapping[str, object]] = (),
-    ai_llms_files: Sequence[Mapping[str, object]] = (),
-) -> dict[str, object]:
-    """Build the concise recipient view while retaining unknowns as unknown."""
-    check_map = {str(check.get("id")): check for check in checks}
-    metadata_check = check_map.get("metadata-and-locale", {})
-    metadata_rows = metadata_check.get("evidence", [])
-    metadata_rows = (
-        [row for row in metadata_rows if isinstance(row, Mapping)] if isinstance(metadata_rows, list) else []
-    )
-    type_counts: dict[str, int] = {}
-    for row in metadata_rows:
-        candidate_type = str(row.get("candidate_type") or "")
-        type_counts[candidate_type] = type_counts.get(candidate_type, 0) + 1
-    complete = metadata_coverage.get("inventory_complete") is True
-    raw_scope = run_context.get("seed_origins", [])
-    scope = ", ".join(str(value) for value in raw_scope if value) if isinstance(raw_scope, list) else "unknown"
-    internal_check = check_map.get("internal-link-failures", {})
-    raw_internal_evidence = internal_check.get("evidence", []) if isinstance(internal_check, Mapping) else []
-    internal_evidence = raw_internal_evidence if isinstance(raw_internal_evidence, list) else []
-    metrics: list[list[object]] = [
-        ["Indexable HTML pages tested", metadata_coverage.get("eligible_indexable_count", "unknown")],
-    ]
-    for label, key in (
-        ("Indexable pages missing title", "missing_title"),
-        ("Indexable pages missing meta description", "missing_description"),
-        ("Indexable pages missing H1", "missing_h1"),
-        ("Same-locale duplicate title pages", "duplicate_title_same_locale"),
-        ("Same-locale duplicate description pages", "duplicate_description_same_locale"),
-    ):
-        metrics.append([label, type_counts.get(key, 0) if complete else "unknown (inventory incomplete)"])
-    source_counts: dict[str, int] = {}
-    for row in known_url_inventory:
-        labels = row.get("source_labels", [])
-        if not isinstance(labels, list):
-            continue
-        for label in labels:
-            source_counts[str(label)] = source_counts.get(str(label), 0) + 1
-    for label, count in sorted(source_counts.items()):
-        metrics.append([f"Known URLs from {label}", count])
-    for check_id, label in (
-        ("canonical-consistency", "Canonical issue records"),
-        ("hreflang-consistency", "Hreflang issue records"),
-    ):
-        check = check_map.get(check_id, {})
-        status = check.get("status")
-        value = (
-            check.get("row_count", 0)
-            if status in {"pass", "finding", "no_observations"}
-            else "unknown (coverage incomplete)"
-        )
-        metrics.append([label, value])
-    for group in performance_report[1:]:
-        if not isinstance(group, Mapping):
-            continue
-        ttfb = group.get("ttfb_seconds", {})
-        duration = group.get("total_duration_seconds", {})
-        ttfb_p90 = ttfb.get("p90") if isinstance(ttfb, Mapping) else None
-        duration_p90 = duration.get("p90") if isinstance(duration, Mapping) else None
-        stratum = f"{group.get('locale', 'unknown')} / {group.get('template', 'unknown')}"
-        metrics.append([f"Lab TTFB p90 ({stratum})", ttfb_p90 if ttfb_p90 is not None else "unknown"])
-        metrics.append([f"Lab total-duration p90 ({stratum})", duration_p90 if duration_p90 is not None else "unknown"])
-    metrics.extend(
-        [
-            ["Canonical/hreflang eligible pages", canonical_coverage.get("indexable_count", "unknown")],
-            ["Average crawl depth", "unknown (not available in this run projection)"],
-            ["Thin-content pages", "unknown (not measured by this audit bundle)"],
-            ["Run scope", scope],
-            ["Audit date", str(run_context.get("finished_at") or run_context.get("started_at") or "unknown")],
-            ["Qualified client actions", len(actions)],
-        ]
-    )
-    incomplete_checks = [
-        f"{check.get('title')} ({check.get('status')})"
-        for check in checks
-        if check.get("status") in {"partial", "unavailable", "error"}
-    ]
-    coverage_caveats = "; ".join(incomplete_checks) if incomplete_checks else "No partial/unavailable check states"
-    targets = []
-    for action in actions:
-        target = action.get("Affected URL")
-        source_rows = [
-            row
-            for row in internal_evidence
-            if isinstance(row, Mapping) and redact_url_without_digest(str(row.get("target_url") or "")) == target
-        ]
-        sources = sorted(
-            {
-                redact_url_without_digest(str(row.get("source_url") or ""))
-                for row in source_rows
-                if row.get("source_url")
-            }
-        )
-        link_samples = [
-            {
-                "source_url": redact_url_without_digest(str(row.get("source_url") or "")),
-                "anchor_text": row.get("anchor_text"),
-                "xpath": row.get("xpath"),
-            }
-            for row in sorted(
-                source_rows, key=lambda row: (str(row.get("source_url") or ""), str(row.get("xpath") or ""))
-            )[:10]
-        ]
-        targets.append(
-            {
-                "target_url": target,
-                "link_instances": action.get("Link Instances", 0),
-                "unique_source_pages": action.get("Unique Source Pages", 0),
-                "source_page_samples": sources[:10],
-                "source_sample_count": min(len(sources), 10),
-                "source_sample_complete": len(sources) <= 10,
-                "link_samples": link_samples,
-                "evidence_reference": action.get("Evidence Reference", ""),
-            }
-        )
-    projected_known_urls = []
-    for row in known_url_inventory:
-        projected = dict(row)
-        if projected.get("url"):
-            projected["url"] = redact_url_without_digest(str(projected["url"]))
-        sitemaps = projected.get("source_sitemaps")
-        if isinstance(sitemaps, list):
-            projected["source_sitemaps"] = [redact_url_without_digest(str(url)) for url in sitemaps]
-        observations = projected.get("source_observations")
-        if isinstance(observations, list):
-            safe_observations = []
-            for observation in observations:
-                if not isinstance(observation, Mapping):
-                    continue
-                item = dict(observation)
-                if item.get("source_sitemap"):
-                    item["source_sitemap"] = redact_url_without_digest(str(item["source_sitemap"]))
-                safe_observations.append(item)
-            projected["source_observations"] = safe_observations
-        projected_known_urls.append(projected)
-    return {
-        "crawl_run_id": crawl_run_id,
-        "run_date": run_context.get("finished_at") or run_context.get("started_at"),
-        "scope": run_context.get("seed_origins", []),
-        "health_metrics": metrics,
-        "coverage_caveats": coverage_caveats,
-        "actions": [dict(action) for action in actions],
-        "failing_target_inventory": targets,
-        "known_url_inventory": projected_known_urls,
-        "qualified_action_count": len(actions),
-        "ai_governance": _ai_governance_projection(
-            check_map.get("ai-crawler-governance", {}), ai_bot_posture, ai_llms_files
-        ),
-    }
-
-
-def _ai_governance_projection(
-    check: Mapping[str, object],
-    bot_posture: Sequence[Mapping[str, object]],
-    llms_files: Sequence[Mapping[str, object]],
-) -> dict[str, object]:
-    """Summarise the AI theme: declared posture per family and AI context-file state."""
-    return {
-        "theme": "AI",
-        "status": check.get("status", "unavailable"),
-        "finding_count": check.get("row_count", 0),
-        "bot_posture": [
-            {
-                key: row.get(key)
-                for key in ("origin", "family", "operator", "role", "posture", "effective_access", "governing_token")
-            }
-            for row in bot_posture
-        ],
-        "llms_files": [
-            {
-                key: row.get(key)
-                for key in ("origin", "path", "state", "http_status", "content_type", "byte_size", "title", "final_url")
-            }
-            for row in llms_files
-        ],
-    }
-
-
-def render_technical_audit_markdown(audit: Mapping[str, object]) -> str:
-    """Render the same recipient projection as a concise Markdown report."""
-    projection = audit.get("recipient_projection", {})
-    projection = projection if isinstance(projection, Mapping) else {}
-    lines = [
-        "# Technical SEO audit",
-        "",
-        f"- Crawl run: {projection.get('crawl_run_id', audit.get('crawl_run_id', 'unknown'))}",
-        f"- Date: {projection.get('run_date') or 'unknown'}",
-        f"- Scope: {', '.join(str(value) for value in projection.get('scope', []) if value) if isinstance(projection.get('scope', []), list) else 'unknown'}",
-        "",
-        "## Evidence summary",
-        "",
-        "| Metric | Value |",
-        "|---|---:|",
-    ]
-    for metric in projection.get("health_metrics", []):
-        if isinstance(metric, list) and len(metric) >= 2:
-            lines.append(f"| {_markdown_cell(metric[0])} | {_markdown_cell(metric[1])} |")
-    lines.extend(["", "## Priorities", ""])
-    actions = projection.get("actions", [])
-    if not isinstance(actions, list) or not actions:
-        lines.append("No live-confirmed client actions are ready from this run.")
-    else:
-        for action in actions:
-            if not isinstance(action, Mapping):
-                continue
-            lines.extend(
-                [
-                    f"### {action.get('Severity', 'Unrated')}: {action.get('Problem', 'Finding')}",
-                    "",
-                    f"- Affected URL: {action.get('Affected URL', 'unknown')}",
-                    f"- Scope: {action.get('Link Instances', 0)} link instances from {action.get('Unique Source Pages', 0)} source pages.",
-                    f"- Evidence: `{action.get('Evidence Reference', 'unavailable')}`",
-                    f"- Why it matters: {action.get('SEO Impact', 'Impact not evaluated.')}",
-                    f"- Recommended action: {action.get('Fix', 'Review the evidence.')}",
-                    f"- Acceptance: {action.get('Acceptance Criteria', 'Retest required.')}",
-                    "",
-                ]
-            )
-    ai_governance = projection.get("ai_governance", {})
-    ai_governance = ai_governance if isinstance(ai_governance, Mapping) else {}
-    if ai_governance.get("status") not in {None, "unavailable"}:
-        lines.extend(
-            [
-                "## AI crawler governance",
-                "",
-                f"Theme: AI. Status: {ai_governance.get('status')}. Declared robots.txt policy only; "
-                "llms.txt is a proposal and its absence is not a defect.",
-                "",
-                "| Origin | AI crawler | Operator | Posture |",
-                "|---|---|---|---|",
-            ]
-        )
-        for row in ai_governance.get("bot_posture", []) if isinstance(ai_governance.get("bot_posture"), list) else []:
-            if isinstance(row, Mapping):
-                lines.append(
-                    f"| {_markdown_cell(row.get('origin'))} | {_markdown_cell(row.get('governing_token') or row.get('family'))} "
-                    f"| {_markdown_cell(row.get('operator'))} | {_markdown_cell(row.get('posture'))} |"
-                )
-        lines.extend(
-            ["", "| Origin | File | State | HTTP | Content-Type | Bytes | Title |", "|---|---|---|---:|---|---:|---|"]
-        )
-        for row in ai_governance.get("llms_files", []) if isinstance(ai_governance.get("llms_files"), list) else []:
-            if isinstance(row, Mapping):
-                cells = [
-                    row.get(key)
-                    for key in ("origin", "path", "state", "http_status", "content_type", "byte_size", "title")
-                ]
-                lines.append("| " + " | ".join(_markdown_cell("" if cell is None else cell) for cell in cells) + " |")
-        lines.append("")
-    reasons = audit.get("client_publication_gate", {})
-    reasons = reasons if isinstance(reasons, Mapping) else {}
-    caveats = reasons.get("blocked_reasons", [])
-    coverage_caveat = projection.get("coverage_caveats")
-    caveat_lines = [f"- {reason}" for reason in caveats] if isinstance(caveats, list) else []
-    if coverage_caveat:
-        caveat_lines.insert(0, f"- Coverage: {coverage_caveat}")
-    if caveat_lines:
-        lines.extend(["## Scope caveats", "", *caveat_lines, ""])
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _markdown_cell(value: object) -> str:
-    return str(value).replace("|", "\\|").replace("\n", " ")
-
-
 def _tracking_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     return [
-        {
-            **_action(
-                problem="Internal link publishes tracking parameters",
-                url=row.get("target_url", ""),
-                explanation=f"Source: {row.get('source_url', '')}; parameters: {row.get('tracking_parameters', '')}.",
-                fix="Change the internal link to the clean canonical URL.",
-                impact="Crawlable tracking variants waste crawl paths and can overwrite attribution.",
-                evidence="tracking-parameter-links",
-            ),
-            "Evidence Reference": _evidence_id("tracking-parameter-links", row),
-            "Acceptance Criteria": "The source page links to the intended clean URL without analytics/session parameters; verify all affected link instances.",
-            "Unique Source Pages": 1 if row.get("source_url") else 0,
-            "Source URL": redact_url_without_digest(str(row.get("source_url") or "")),
-        }
+        _action(
+            problem="Internal link publishes tracking parameters",
+            url=row.get("target_url", ""),
+            explanation=f"Source: {row.get('source_url', '')}; parameters: {row.get('tracking_parameters', '')}.",
+            fix="Change the internal link to the clean canonical URL.",
+            impact="Crawlable tracking variants waste crawl paths and can overwrite attribution.",
+            evidence="parameter-and-faceted-controls",
+        )
         for row in rows
     ]
 
 
 def _schema_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     return [
-        {
-            **_action(
-                problem="Structured-data parser defect",
-                url=row.get("url", ""),
-                explanation=f"{row.get('diagnostic_code', 'Unknown parser diagnostic')}: {row.get('evidence', '')}",
-                fix=str(row.get("remediation", "Correct the structured-data markup and validate it again.")),
-                impact="Invalid markup can prevent eligible structured-data features from being understood.",
-                evidence="schema-parser-defects",
+        _action(
+            problem="Structured-data parser defect",
+            url=row.get("url", ""),
+            explanation=f"{row.get('diagnostic_code', 'Unknown parser diagnostic')}: {row.get('evidence', '')}",
+            fix=str(row.get("remediation", "Correct the structured-data markup and validate it again.")),
+            impact="Invalid markup can prevent eligible structured-data features from being understood.",
+            evidence="schema-parser-diagnostics",
+        )
+        for row in rows
+    ]
+
+
+def _locale_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    return [
+        _action(
+            problem="Locale pages reuse the same primary-content signature",
+            url=row.get("url", ""),
+            explanation=(
+                f"Declared language: {row.get('html_lang', '')}; the same signature appears in "
+                f"{row.get('languages', '')}. Confirm whether this page is intentionally shared before assignment."
             ),
-            "Evidence Reference": _evidence_id("schema-parser-defects", row),
-            "Acceptance Criteria": "The affected structured-data item parses without this diagnostic; feature eligibility is evaluated separately.",
-        }
+            fix="Translate and localise the page's primary content, or remove the locale URL from indexation and hreflang.",
+            impact="Untranslated locale pages can compete with the intended language version and give users an irrelevant result.",
+            evidence="locale-html-lang",
+        )
+        for row in rows
+    ]
+
+
+def _inventory_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    return [
+        _action(
+            problem="Inventory URLs require a user interaction to appear",
+            url=row.get("source_url", row.get("url", "")),
+            explanation=(
+                f"Action {row.get('action', 'interaction')} increased document URLs from "
+                f"{row.get('initial_document_url_count', '')} to {row.get('post_interaction_document_url_count', '')}."
+            ),
+            fix="Publish crawlable pagination or ordinary links for the additional inventory URLs in the initial response or initial rendered DOM.",
+            impact="URLs exposed only after interaction can remain undiscovered or receive weak internal discovery signals.",
+            evidence="rendered-robots-links",
+        )
+        for row in rows
+    ]
+
+
+def _search_evidence_actions(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    return [
+        _action(
+            problem="Google evidence conflicts with the intended technical state",
+            url=row.get("url", ""),
+            explanation=str(row.get("issue_reason", "The supplied search record requires review.")),
+            fix="Resolve the recorded indexing, canonical or performance cause, then validate the URL through URL Inspection and the next Search Console export.",
+            impact="Google may exclude the URL, select another canonical, or show no demand for a declared priority page.",
+            evidence="supplied-search-evidence",
+        )
         for row in rows
     ]
 
@@ -3248,50 +1132,37 @@ def _table(rows: object, columns: tuple[str, ...] | None = None) -> list[list[ob
     materialised = [dict(row) for row in rows if isinstance(row, Mapping)] if isinstance(rows, list) else []
     if columns is None:
         columns = tuple(dict.fromkeys(key for row in materialised for key in row))
-    return [
-        list(columns),
-        *[[_sheet_value(row.get(column, "")) for column in columns] for row in materialised],
-    ]
-
-
-def _sheet_value(value: object) -> object:
-    if isinstance(value, (Mapping, list, tuple)):
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return value
+    return [list(columns), *[[row.get(column, "") for column in columns] for row in materialised]]
 
 
 def _manual_checks() -> list[dict[str, str]]:
     return [
         {
-            "id": "robots-and-sitemaps",
-            "reason": "Use --fetch-current-robots-sitemaps for bounded live collection; fetches are not requested otherwise.",
+            "id": "internal-link-targets",
+            "reason": "Current status, redirect paths, and intermittent failures change after a crawl.",
         },
         {
-            "id": "url-variants-and-soft-404",
-            "reason": "Use --probe-url-variants for bounded probes; synthetic-only results remain analyst candidates pending route-demand and rendered validation.",
+            "id": "robots-controls",
+            "reason": "Fetch current robots.txt independently from the saved crawl.",
         },
         {
-            "id": "rendered-parity",
-            "reason": "Use --compare-current-renders for bounded same-navigation desktop and optional mobile-viewport evidence; interactions, geo, screenshots, and primary-content impact still require review.",
+            "id": "sitemap-integrity",
+            "reason": "Fetch every current XML sitemap independently from the saved crawl.",
         },
         {
-            "id": "geo-and-language",
-            "reason": "Geo/locale checks are unavailable without a matching regional proxy; a local request is not substituted.",
+            "id": "rendered-indexing-parity",
+            "reason": "Raw and rendered DOM signals require representative browser evidence.",
         },
         {
-            "id": "rich-result-eligibility",
-            "reason": "Static required-property checks are not final eligibility: confirm current Google policy, page-content equivalence, indexability, and Rich Results Test/Search Console evidence.",
+            "id": "locale-redirects",
+            "reason": "Locale redirects require the relevant proxy regions and request headers.",
         },
         {
-            "id": "performance-and-conditional-requests",
-            "reason": "Timing and crawler CWV are lab evidence, not field performance. Use --probe-conditional-gets for bounded validator requests; field CWV, independent browser traces, and access-log verification are unavailable unless separately supplied.",
+            "id": "structured-data-feature-rules",
+            "reason": "Google feature requirements and site intent need current, contextual validation.",
         },
         {
-            "id": "search-bot-log-verification",
-            "reason": "No access logs were supplied. A spoofable User-Agent alone is never treated as verified Googlebot evidence; identity requires source-IP reverse/forward DNS or Google's published IP ranges and an operator-validated complete log source.",
-        },
-        {
-            "id": "severity-and-priority",
+            "id": "recipient-action-eligibility",
             "reason": "Business value, template purpose, and recipient-value filtering remain analyst decisions.",
         },
     ]

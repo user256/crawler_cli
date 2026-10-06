@@ -14,7 +14,6 @@ from crawler_cli.accept_language_audit import (
 from crawler_cli.config import CrawlConfig
 from crawler_cli.engine import CrawlEngine
 from crawler_cli.models import CrawlResult, ExtractedContent, RobotsDirectives
-from crawler_cli.technical_audit import TECHNICAL_AUDIT_REPORTS, audit_sheet_tables, build_technical_audit
 
 Response = tuple[int, dict[str, str], str]
 Handler = Callable[[str, str | None], Response]
@@ -318,40 +317,3 @@ async def test_real_engine_sends_each_accept_language_over_loopback():
     assert redirects[0]["redirect_targets"] == {"es-ES": f"http://127.0.0.1:{port}/es/"}
     assert _by_type(rows, "missing_vary_header")[0]["variants_missing_vary"] == ["none", "es-ES"]
     assert engine.config.follow_redirects is True
-
-
-def _audit(reports: dict[str, list[dict[str, object]]]) -> dict[str, object]:
-    return build_technical_audit(
-        crawl_run_id="run-1",
-        reports={name: [] for name in TECHNICAL_AUDIT_REPORTS if name != "accept-language-probes"} | reports,
-        run_context={"completion_state": "complete", "parsed_html_count": 1},
-    )
-
-
-@pytest.mark.asyncio
-async def test_audit_surfaces_accept_language_check_as_analyst_evidence():
-    audit = _audit({})
-    check = next(item for item in audit["detector_checks"] if item["id"] == "accept-language-variation")
-    assert check["status"] == "unavailable"
-    assert check["qualification"] == "requires_explicit_accept_language_probe"
-    # Not requested stays visible without gating publication; the ready-gate
-    # fixture in tests/test_live_rechecks.py covers the non-blocking path.
-
-    def handler(url: str, language: str | None) -> Response:
-        if language and language.startswith("es"):
-            return 302, {"Location": "/es/"}, ""
-        return 200, {}, _EN
-
-    rows = await collect_accept_language_evidence(_FakeEngine(handler), ["https://example.com/"])
-    audit = _audit({"accept-language-probes": rows})
-    check = next(item for item in audit["detector_checks"] if item["id"] == "accept-language-variation")
-    assert check["status"] == "finding"
-    assert check["denominator"] == 1
-    assert {row["candidate_type"] for row in check["evidence"]} == {
-        "language_redirect_detected",
-        "missing_vary_header",
-    }
-    assert all(row["qualification"] == "analyst_only" for row in check["evidence"])
-    overview = dict((row[0], row[1]) for row in audit_sheet_tables(audit)["Overview"])
-    assert overview["Language redirects detected"] == 1
-    assert overview["Accept-Language probe coverage complete"] is True

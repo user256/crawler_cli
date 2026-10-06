@@ -92,6 +92,8 @@ ann = [
 viz = [
   "umap-learn>=0.5",
 ]
+# Used only by `technical-audit --google-sheets-template`; the audit evidence
+# generator has no Google dependency and remains reproducible offline.
 google-sheets = [
   "google-api-python-client>=2.0",
   "google-auth>=2.0",

@@ -364,6 +364,10 @@ button.ghost {
   overflow: auto;
 }
 
+.grid-note { margin: 0; padding: .4rem .6rem; font-size: 12px; border-bottom: 1px solid var(--border-soft); }
+
+#detail-body table.data td { white-space: normal; overflow-wrap: anywhere; }
+
 table.data {
   width: 100%;
   border-collapse: collapse;
@@ -388,6 +392,32 @@ table.data th {
   color: var(--text-dim);
   font-weight: 600;
   z-index: 1;
+}
+
+button.sort-header {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+}
+
+button.sort-header:hover,
+button.sort-header:focus-visible,
+button.sort-header.active {
+  color: var(--text);
+}
+
+button.sort-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 table.data tbody tr {

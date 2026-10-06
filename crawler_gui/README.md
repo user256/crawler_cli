@@ -128,6 +128,33 @@ bridge, not the `crawler_api` control plane — do not expose it.
 
 ## Managing crawls (ticket 124)
 
+### Saved-result views
+
+The live GUI reads H2s, images, hreflang, robots directives, and structured
+data from the selected run's snapshots. Social Metadata, JavaScript script
+references, and external outlinks are recovered on demand from stored HTML,
+in batches, without contacting the original site. Selecting a row opens its
+evidence in the lower detail panel. JavaScript references are not the optional
+JavaScript URL-discovery inventory.
+
+`Load all` loads the remaining saved URL windows. Header sorting and text
+filtering apply to loaded URLs. Source evidence is labelled `This run` or
+`Database-wide`; the latter can come from another run/import and is not proof
+of discovery during the selected run. Internal inlinks still use the latest
+stored link graph, and that limitation is labelled in the detail panel.
+
+`Resume crawl…` first reads the saved frontier. Only a separate `Start resume`
+action starts requests. Completed runs with no queued/pending URLs cannot be
+resumed, and resume does not retry already-recorded HTTP errors. Eligible open
+runs restore their saved scope and verify the existing configuration hash;
+runtime backend/concurrency/limit settings are reviewed in the dialog. Runs
+marked running, or requiring a scope manifest/Portal policy, must be handled
+through their original worker/CLI. No configuration-mismatch bypass is used.
+
+Unsupported schedule/delete controls are disabled in live mode.
+
+### Crawl submission
+
 **Boundary decision.** This bridge was read-only by design, with crawl
 submission reserved for `crawler_api`. Ticket 124 consciously relaxes that for
 local-first use: submission runs here, over loopback. **Delete stays out** —

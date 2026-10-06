@@ -1,12 +1,9 @@
 {
-  "version": "crawler-cli/technical-audit-ticket-language/2",
+  "version": "crawler-cli/technical-audit-ticket-language/1",
   "target_template": {
     "name": "Technical SEO Audit - Template",
     "url": "https://docs.google.com/spreadsheets/d/1T9BRLgaFDZ99Lx3q53Av75eZZM32BIJc0nahVPQpGmU/edit?gid=0#gid=0",
     "tab": "Tickets",
-    "header_row": 6,
-    "start_column": "B",
-    "first_data_row": 7,
     "columns": [
       "Label",
       "Description",
@@ -39,41 +36,22 @@
     "{affected_pct}": "affected_count / denominator as a whole-number percentage. Omit the sentence when denominator is null.",
     "{unit}": "The check's unit word: pages, URLs, links, images, clusters, sitemaps, blocks.",
     "{sample_urls}": "Up to five example URLs from check.evidence, one per line.",
-    "{inline_evidence}": "Up to three redaction-safe evidence lines rendered from the affected rows, including the affected URL and observed condition.",
     "{evidence_tab}": "check.detail_sheet, the workbook tab that holds the full evidence export.",
     "{missing_evidence}": "check.required_evidence when the state is unavailable.",
     "{qualification}": "check.qualification mapped through qualification_text below; empty when absent."
   },
-  "ticket_eligibility": {
-    "states": [
-      "finding"
-    ],
-    "blocked_qualifications": [
-      "analyst_only",
-      "review_required",
-      "recheck_required",
-      "coverage_required",
-      "incomplete_graph",
-      "bounded_or_incomplete_coverage",
-      "bounded_or_incomplete_current_probe",
-      "recheck_partial",
-      "combined_v2_detectors",
-      "unscoped_detector_evidence",
-      "required_detector_missing"
-    ],
-    "rule": "A client ticket needs a finding state, affected evidence, and no blocking qualification. Partial and analyst-only rows remain in the evidence workbook until a detector or reviewer provides the missing proof."
-  },
   "state_policy": {
-    "finding": "Write a ticket only when ticket_eligibility permits it. Put the specific URLs and observed condition in the Description; do not describe the collection command or call an unqualified candidate a defect.",
-    "partial": "Do not write a client ticket by default. Keep the row in the Overview and its evidence tab with the coverage limitation. A later mapping version may explicitly permit a proven partial result.",
+    "finding": "Write a ticket from the entry below. Fill every placeholder from the check row.",
+    "partial": "Write the ticket only when affected_count > 0. When tested_count < denominator append partial_suffix to the Description and to Notes / Documentation; otherwise append the qualification text, which explains why coverage is incomplete. Never present counts as complete.",
     "pass": "No ticket. Report in the Overview as healthy with the tested denominator and run ID.",
     "not_applicable": "No ticket. Report in the Overview with the reason the control does not apply.",
     "unavailable": "No ticket unless the entry has an unavailable_ticket block, in which case write that block as an Improvement ticket. Always list the control in the Overview as not tested with its missing evidence."
   },
   "shared_text": {
-    "partial_suffix": "Coverage is incomplete: {tested_count} of {denominator} {unit} were assessed. This row is an evidence lead, not a client remediation ticket.",
-    "evidence_ref": "Evidence tab: {evidence_tab}; {affected_count} recorded {unit}; captured {crawl_date}.",
-    "client_verification": "Verify the URLs and condition listed in the Description after deployment, then compare the same fields in the evidence tab."
+    "partial_suffix": "Coverage caveat: only {tested_count} of {denominator} {unit} were tested in run {run_id}, so the counts above are a lower bound, not a site total.",
+    "recheck_note": "Statuses come from a historical crawl on {crawl_date}. Recheck the sampled URLs live before starting work; intermittent failures and already-fixed items are excluded once a live recheck confirms them.",
+    "replicate_prefix": "Run `crawler-cli technical-audit --crawl-run-id {run_id}` and open the {evidence_tab} tab of the published workbook. Each row carries the source URL and the observed value.",
+    "evidence_ref": "Evidence: {evidence_tab} tab ({affected_count} rows), run {run_id}."
   },
   "qualification_text": {
     "recheck_required": "Saved-crawl statuses must be rechecked live before this ticket is assigned.",
@@ -82,21 +60,15 @@
     "analyst_only": "This row is analyst evidence; it reaches the client register only after manual qualification.",
     "live_confirmed": "Every listed failure was confirmed by a live recheck on the audit date.",
     "missing_required_evidence": "The required input for this control was not collected in this run.",
-    "incomplete_graph": "The available link graph is incomplete, so scores and inlink counts are indicative.",
+    "incomplete_graph": "The internal link graph for this run is incomplete (some pages were not extracted), so scores and inlink counts are indicative.",
     "bounded_or_incomplete_coverage": "Comparison was bounded by the page limit or extraction gaps; pairs outside the compared set are not reported.",
-    "requires_explicit_current_probe": "Not tested: no current URL-variant probe evidence is available.",
-    "requires_explicit_current_fetch": "Not tested: no current robots.txt or sitemap fetch evidence is available.",
-    "requires_explicit_browser_collection": "Not tested: no rendered browser evidence is available.",
-    "saved_channels_or_targets_incomplete": "The available evidence does not cover every channel or target needed for this control, so it is reported as not tested rather than healthy.",
-    "conditional_get_probe_not_requested": "Not tested: no conditional-request evidence is available.",
+    "requires_explicit_current_probe": "Not tested: current URL variant probes were not requested for this run.",
+    "requires_explicit_current_fetch": "Not tested: a current robots.txt and sitemap fetch was not requested for this run.",
+    "requires_explicit_browser_collection": "Not tested: rendered browser evidence was not collected for this run.",
+    "saved_channels_or_targets_incomplete": "The saved run does not hold every channel or target needed for this control, so it is reported as not tested rather than healthy.",
+    "conditional_get_probe_not_requested": "Not tested: conditional GET probes were not requested for this run.",
     "combined_v2_detectors": "This row combines two earlier detectors (tracking-parameter links and parameterised canonical links).",
-    "recheck_partial": "Only part of the saved failures could be rechecked live within the audit limit.",
-    "unscoped_detector_evidence": "The source detector recorded evidence that could not be attributed to one control, so this row stays in the evidence workbook until it is separated.",
-    "required_detector_missing": "One of the detectors this control requires was not available in this run, so the result is incomplete.",
-    "detector_finding_outside_control_scope": "The source detector reported evidence for a related control only; this control's own result was not recorded separately.",
-    "contract_evidence_not_collected": "Not tested: this run did not collect the evidence this control requires.",
-    "bounded_external_link_sample": "Outbound destinations were rechecked for a bounded sample of linked pages; untested targets are not confirmed healthy.",
-    "bounded_or_incomplete_external_link_recheck": "The external-link recheck session did not cover its full sample, so a clean result is not a pass."
+    "recheck_partial": "Only part of the saved failures could be rechecked live within the audit limit."
   },
   "priority_rules": [
     "Start from the check's default priority.",
@@ -161,9 +133,9 @@
         "label": "Authorise an external-link recheck",
         "classification": "Improvement",
         "priority": "Low",
-        "description": "The available evidence contains no verified sample of outbound destinations. This is an evidence gap; it does not establish that any external link is broken or unsafe.",
-        "suggested_solution": "Agree a bounded sample of outbound destinations from priority and indexable pages. Record the source page, destination, final URL, response and observation date for each link.",
-        "acceptance_criteria": "- A defined external-link sample is recorded with source and destination URLs.\n- The evidence separates live failures from redirects, challenges, timeouts and untested targets."
+        "description": "External link integrity was not tested because the audit ran without the external recheck option. Outbound link failures cannot be inferred from the saved crawl.",
+        "suggested_solution": "Approve a bounded external-link recheck and rerun the audit with `--check-external-links`.",
+        "acceptance_criteria": "- The external-link-integrity row reports a tested count greater than zero."
       }
     },
     "orphan-candidates": {
@@ -189,8 +161,6 @@
       "notes": "Depth counts only crawlable HTML links. Pages reachable only through JavaScript navigation appear deeper than users experience them, which is itself the point."
     },
     "internal-authority": {
-      "ticket": false,
-      "client_ticket_prerequisite": "An agreed priority-page list and a complete graph with populated authority scores.",
       "unit": "pages",
       "classification": "Improvement",
       "priority": "Medium",
@@ -202,8 +172,6 @@
       "notes": "This is an inventory, not a defect list. Which pages count as priority is a business decision and must be agreed before this ticket is raised."
     },
     "image-markup": {
-      "ticket": false,
-      "client_ticket_prerequisite": "Image evidence grouped by distinct element and issue type, with decorative-image intent reviewed.",
       "unit": "images",
       "classification": "Warning",
       "priority": "Low",
@@ -226,8 +194,6 @@
       "notes": "Requires rendered resource evidence; the raw crawl records references only."
     },
     "url-host-and-variants": {
-      "ticket": false,
-      "client_ticket_prerequisite": "A detector that records only harmful, confirmed variants rather than every synthetic probe response.",
       "unit": "URLs",
       "classification": "Issue",
       "priority": "Medium",
@@ -272,15 +238,23 @@
       "notes": "Sitemap files are fetched live on the audit date; the crawl statuses they are compared with come from run {run_id} on {crawl_date}. Reference: https://developers.google.com/search/docs/crawling-indexing/sitemaps/build-sitemap"
     },
     "rendered-robots-links": {
-      "unit": "links",
+      "unit": "pages",
       "classification": "Warning",
       "priority": "Medium",
-      "label": "Rendered pages expose links that robots.txt blocks",
-      "description": "{affected_count} links that appear only after JavaScript renders point at URLs that robots.txt disallows or that the crawl could not follow. Googlebot renders the page, finds the links, and is then refused; the linked pages can be indexed with no content, and the links themselves leak equity into a dead end.\n\nSee the {evidence_tab} tab for each source page, the rendered link and the blocking rule.\n\nExamples:\n{sample_urls}",
-      "suggested_solution": "Either allow the blocked paths (if the pages should be crawled) or stop rendering them as <a href> links and use buttons or plain elements instead. Add noindex on the target pages if they must remain blocked from indexing.",
-      "acceptance_criteria": "- No rendered link on the sampled pages points at a disallowed URL.\n- Blocked targets that remain linked are converted to non-anchor controls.",
-      "how_to_replicate": "Run the audit with `--compare-current-renders` and open the {evidence_tab} tab; links are extracted from the rendered DOM and evaluated against the fetched robots.txt.",
-      "notes": "Requires both rendered evidence and a current robots.txt fetch."
+      "label": "Game or product inventory requires a user interaction",
+      "description": "On {affected_count} of {tested_count} tested listing pages, a documented action such as Load more, Show more or the next pagination control revealed additional document URLs after the initial rendered DOM. Those URLs are not exposed to a crawler before interaction, so discovery depends on a behaviour Google is not guaranteed to perform.\n\nSee the {evidence_tab} tab for the page, action and before/after document-link counts.\n\nExamples:\n{sample_urls}",
+      "suggested_solution": "Publish ordinary crawlable links or paginated URLs for the additional inventory in the initial response or initial rendered DOM. Keep the interaction as an enhancement, but do not make it the only way to discover the URLs.",
+      "acceptance_criteria": "- Every tested listing exposes links to its inventory or to crawlable paginated pages before a user action.\n- Repeating the initial-render capture shows no additional document URLs solely after Load more or equivalent controls.\n- A homepage crawl reaches the inventory without scripted clicks.",
+      "how_to_replicate": "Supply `--inventory-interaction-evidence` with one pre-interaction and post-interaction link count per tested listing; open the {evidence_tab} tab for the captured evidence.",
+      "notes": "The audit records initial browser navigation separately from a user action. Hydration alone is not treated as an interaction failure.",
+      "unavailable_ticket": {
+        "label": "Capture inventory discovery before and after interaction",
+        "classification": "Improvement",
+        "priority": "Low",
+        "description": "The audit has no explicit pre-interaction versus post-interaction capture for game or product listings, so it cannot establish whether the inventory is discoverable without Load more, infinite scroll or pagination clicks.",
+        "suggested_solution": "Capture representative listing pages before interaction, then after each inventory-expanding action, and provide the counts to `--inventory-interaction-evidence`.",
+        "acceptance_criteria": "- The rendered-robots-links row reports a completed pre/post-interaction capture for each agreed listing template."
+      }
     },
     "indexability-segmentation": {
       "unit": "pages",
@@ -305,8 +279,6 @@
       "notes": "Canonical tags reduce duplicate indexing but do not stop the crawl waste; the links themselves have to go."
     },
     "parameter-and-faceted-controls": {
-      "ticket": false,
-      "client_ticket_prerequisite": "A qualified distinction between unwanted crawlable parameters and intentional interface state.",
       "unit": "links",
       "classification": "Issue",
       "priority": "Medium",
@@ -329,8 +301,6 @@
       "notes": "Reference: https://developers.google.com/search/docs/crawling-indexing/http-network-errors#soft-404-errors"
     },
     "metadata-basics": {
-      "ticket": false,
-      "client_ticket_prerequisite": "Separate ticket rows by candidate type (for example title, description, or H1) with evidence that matches the label.",
       "unit": "pages",
       "classification": "Warning",
       "priority": "Medium",
@@ -367,16 +337,22 @@
       "unit": "pages",
       "classification": "Warning",
       "priority": "Low",
-      "label": "Missing or wrong HTML lang attribute",
-      "description": "{affected_count} of {denominator} pages in run {run_id} have no <html lang> attribute, an invalid value, or a value that does not match the locale in the URL (for example /fr/ pages declaring lang=\"en\"). Browsers, assistive technology and some search features use this attribute to pick the right language handling; a mismatch also hints that locale pages are untranslated copies.\n\nSee the {evidence_tab} tab for each URL, its declared lang and the expected locale.\n\nExamples:\n{sample_urls}",
-      "suggested_solution": "Set <html lang> from the page's locale using a valid BCP 47 tag (en, en-GB, fr, pt-BR). Where locale pages still show English content, either translate them or stop publishing them until they are translated.",
-      "acceptance_criteria": "- Every page declares a valid lang attribute.\n- The declared lang matches the URL locale convention on every locale page.",
-      "how_to_replicate": "{replicate_prefix} The expected locale is derived from the run's declared URL locale rule.",
-      "notes": "Untranslated locale pages are usually also flagged under duplicate metadata and hreflang; treat them as one problem."
+      "label": "Locale pages reuse primary content across languages",
+      "description": "{affected_count} of {denominator} indexable locale pages in run {run_id} share the same boilerplate-reduced primary-content signature with a page declaring a different language. Matching <html lang> values do not prove the pages are meaningfully localised; this evidence identifies pages that need a content and business-purpose review.\n\nSee the {evidence_tab} tab for each URL, declared language, matching languages and peer URLs.\n\nExamples:\n{sample_urls}",
+      "suggested_solution": "Translate and localise the primary content, offers, supporting metadata and internal links for each market. If a locale is not intended to serve a distinct audience, consolidate it or remove it from indexation and hreflang rather than publishing a duplicate.",
+      "acceptance_criteria": "- Every retained locale page has market-appropriate primary content and metadata, confirmed by editorial review.\n- No retained cross-language locale pair shares the same primary-content signature unless the shared content is documented as intentionally language-neutral.\n- Hreflang includes only indexable, self-canonical locale pages with distinct intended audiences.",
+      "how_to_replicate": "Run the signature collector for the selected run, then run the deterministic audit and open the {evidence_tab} tab. Review the peer URLs side by side before assignment.",
+      "notes": "{qualification} A matching content signature is reproducible evidence, but an analyst confirms whether a shared legal, game or brand page is intentionally language-neutral.",
+      "unavailable_ticket": {
+        "label": "Generate locale primary-content signatures",
+        "classification": "Improvement",
+        "priority": "Low",
+        "description": "The run has no boilerplate-reduced primary-content signatures for locale pages, so matching HTML lang and hreflang values cannot establish whether the pages are actually localised.",
+        "suggested_solution": "Generate run-scoped primary-content signatures for the locale pages and rerun the deterministic audit.",
+        "acceptance_criteria": "- The locale-html-lang row reports a non-zero tested signature population for indexable locale pages."
+      }
     },
     "near-duplicate-content": {
-      "ticket": false,
-      "client_ticket_prerequisite": "Re-hashed, reproducible pair evidence with sufficient coverage and confirmed main-content extraction.",
       "unit": "pages",
       "classification": "Warning",
       "priority": "Medium",
@@ -456,9 +432,9 @@
         "label": "Provide regional access for locale redirect testing",
         "classification": "Improvement",
         "priority": "Low",
-        "description": "Regional and language-based routing has not been tested from the markets that matter to the business. No conclusion can yet be made about whether a visitor or search crawler can reach each requested locale directly.",
-        "suggested_solution": "Agree the markets and locale URLs to test, then provide permitted access from those markets. Record the request locale, region, redirect path, final URL and response for each test case.",
-        "acceptance_criteria": "- Every agreed market and locale pair has a recorded request and response.\n- The evidence distinguishes an intended suggestion from a redirect that prevents access to the requested locale."
+        "description": "Locale and geo redirect behaviour was not tested because no regional proxy matrix was configured for the audit.",
+        "suggested_solution": "Approve the regions to test and configure the proxy matrix, then rerun the audit.",
+        "acceptance_criteria": "- The locale-redirects row reports a tested probe count for every agreed region."
       }
     },
     "schema-parser-diagnostics": {
@@ -563,9 +539,9 @@
         "label": "Supply verified search-bot access logs",
         "classification": "Improvement",
         "priority": "Low",
-        "description": "No verified search-bot request evidence has been supplied. The workbook cannot determine which URL families search engines actually request or whether those requests reach errors, redirects or non-indexable pages.",
-        "suggested_solution": "Provide at least 30 days of origin or CDN access logs with source IP, user agent, requested URL, timestamp and response status. Preserve the fields needed to verify genuine search-bot requests by reverse and forward DNS.",
-        "acceptance_criteria": "- The evidence identifies the log source and date range.\n- Verified bot requests are separated from unverified user-agent claims.\n- Requests can be grouped by URL family and response status."
+        "description": "Bot-log analysis was not performed because no server or CDN access logs were supplied. Crawl-budget conclusions from the crawl alone are indirect.",
+        "suggested_solution": "Export at least 30 days of raw access logs (or CDN logs) including source IP, user agent, URL and status, and provide them with the next audit request.",
+        "acceptance_criteria": "- The validated-bot-log-analysis row reports a verified request count greater than zero."
       }
     },
     "supplied-search-evidence": {
@@ -573,7 +549,7 @@
       "classification": "Issue",
       "priority": "Medium",
       "label": "Search Console reports issues the crawl cannot see",
-      "description": "The supplied Search Console, URL Inspection or analytics exports add {affected_count} records that change or extend the crawl conclusions: URLs Google reports as excluded, crawled-not-indexed, or with server errors that were not visible in the crawl. These reflect Google's own view of the site and take precedence over inferred crawl findings.\n\nSee the {evidence_tab} tab for each record, its source, date range and how it maps to a contract check.\n\nExamples:\n{sample_urls}",
+      "description": "The supplied Search Console and URL Inspection records contain {affected_count} actionable records: Google excludes a URL, selects a different canonical, or a declared priority URL has no impressions in the supplied period. These records test whether important template and locale URLs are actually discovered, indexed as intended and visible in search.\n\nSee the {evidence_tab} tab for each URL, source, export date, indexing state, canonical comparison and performance values.\n\nExamples:\n{sample_urls}",
       "suggested_solution": "Work through the records by Google's reason category, linking each to its matching ticket in this register. Use URL Inspection to confirm fixes and request indexing for high-value URLs once corrected.",
       "acceptance_criteria": "- Every record in the {evidence_tab} tab is linked to a ticket or documented as accepted.\n- The relevant Search Console report shows the excluded count falling on the next export.",
       "how_to_replicate": "Supply the exports to the audit; the tab records the source and export date for each record.",
@@ -582,9 +558,9 @@
         "label": "Grant Search Console access or supply exports",
         "classification": "Improvement",
         "priority": "Low",
-        "description": "No Search Console or URL Inspection export has been supplied. The workbook cannot compare the observed pages with Google's indexed, excluded or crawling view of the property.",
-        "suggested_solution": "Grant read-only access to the Search Console property, or provide dated exports of the Pages indexing report, Crawl stats report and relevant URL Inspection results for priority URLs.",
-        "acceptance_criteria": "- Each export identifies its Search Console property and date range.\n- Priority URLs can be matched to an indexing state or inspection result.\n- Crawl stats and indexing evidence are available for comparison with the technical findings."
+        "description": "No dated Search Console performance/indexing records or URL Inspection records were supplied, so the audit cannot confirm whether Google discovers important pages, chooses their intended canonical, indexes them, or gives priority pages impressions.",
+        "suggested_solution": "Grant read access to the Search Console property, or export Page indexing and performance records for the last 90 days plus URL Inspection records for representative templates and locale pages. Supply URL, source and export date for every record.",
+        "acceptance_criteria": "- The supplied-search-evidence row reports dated records for Page indexing, performance and representative URL Inspection checks."
       }
     },
     "recipient-action-eligibility": {

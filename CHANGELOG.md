@@ -5,6 +5,10 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- The technical audit is now the three-stream question-runner audit (ticket 409): `technical-audit` writes the deterministic bundle, `technical-audit-observations` adds run-scoped observations (including the re-attached AI-governance, Accept-Language and TLS probes) and `technical-audit-questions` answers the Q1-Q104 registry. The previous contract projection, manual-review register and ticket-register publisher are removed.
+
 ## [Unreleased]
 
 ### Added
@@ -44,6 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking for artifact consumers:** saved crawl artifacts advance to
   `crawler-cli/crawl-artifact/9` and add scoped robots declaration evidence.
   Version 8 and earlier artifacts remain loadable.
+  `crawler-cli/crawl-artifact/8` and add `extracted.image_references`. Version 7
+  and earlier artifacts remain loadable.
 
 - **Breaking for artifact consumers:** saved crawl artifacts are stamped
   `crawler-cli/crawl-artifact/7`, carrying the speculative-discovery evidence

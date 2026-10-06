@@ -11,7 +11,7 @@ from .models import ExtractedContent, FetchResponse
 async def fetch_page(
     url: str,
     *,
-    user_agent: str = "crawler_cli/0.1",
+    user_agent: str = "canonicalbot/0.1",
     headers: Mapping[str, str] | None = None,
     timeout_seconds: float = 30.0,
     follow_redirects: bool = True,

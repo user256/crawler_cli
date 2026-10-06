@@ -1,0 +1,57 @@
+{
+  "site": "example.com",
+  "canonical_host": "https://example.com",
+  "default_locale": "en",
+  "templates": {
+    "home": {"pattern": "^/$", "indexable": true},
+    "listing": {"pattern": "^/(?:[a-z]{2}/)?casino(?:/[a-z-]+)?/?$", "indexable": true},
+    "inventory": {"pattern": "^/(?:[a-z]{2}/)?casino/games/[^/]+/?$", "indexable": true},
+    "commercial": {"pattern": "^/(?:[a-z]{2}/)?(?:best|top)-[a-z-]+/?$", "indexable": true},
+    "comparison": {"pattern": "^/(?:[a-z]{2}/)?(?:best|top)-[a-z-]+/?$", "indexable": true, "toplist_selector": "[data-toplist]"},
+    "review": {"pattern": "^/(?:[a-z]{2}/)?reviews/[^/]+/?$", "indexable": true},
+    "guide": {"pattern": "^/(?:[a-z]{2}/)?guides/[^/]+/?$", "indexable": true},
+    "article": {"pattern": "^/(?:[a-z]{2}/)?news/[^/]+/?$", "indexable": true},
+    "taxonomy": {"pattern": "^/(?:[a-z]{2}/)?(?:tag|category|author)/[^/]+/?$", "indexable": true},
+    "profile": {"pattern": "^/user/[^/]+/?$", "indexable": true},
+    "profile_subtab": {"pattern": "^/user/[^/]+/(?:updates|reviews|winners)/?$", "indexable": false},
+    "search": {"pattern": "^/search(?:/|$)|[?&]s=", "indexable": false},
+    "priority": {"pattern": "^/(?:[a-z]{2}/)?(?:casino|sports|reviews|best-[a-z-]+)/?$", "indexable": true}
+  },
+  "commercial_hubs": [
+    "https://example.com/casino/",
+    "https://example.com/sports/",
+    "https://example.com/reviews/"
+  ],
+  "hub_clusters": {
+    "https://example.com/guides/": [
+      "https://example.com/guides/blackjack/",
+      "https://example.com/guides/roulette/"
+    ]
+  },
+  "parameter_families": {
+    "betId": {"parameter": "betId", "expected_max_urls": 0, "should_be_indexable": false}
+  },
+  "empty_profile_rule": {"max_main_content_words": 40, "empty_state_selector": "[data-empty-profile]"},
+  "lifecycle": {
+    "expired_markers": ["This promotion has ended", "Offer expired"],
+    "expired_selector": "[data-status=expired]"
+  },
+  "affiliate": {
+    "redirect_path_prefixes": ["/go/", "/visit/"],
+    "domains": ["partner-casino.example"]
+  },
+  "allowed_external_domains": ["example-group.com"],
+  "nonproduction_hosts": ["staging.example.com", "dev.example.com", "preview.example.com", "cache.example.com"],
+  "generic_anchor_phrases": ["read review", "read more", "click here", "learn more", "visit", "more"],
+  "disclaimer_phrases": ["18+", "Gamble responsibly", "We may earn a commission"],
+  "ai_crawler_policy": {
+    "GPTBot": "allow",
+    "OAI-SearchBot": "allow",
+    "ClaudeBot": "allow",
+    "Claude-SearchBot": "allow",
+    "PerplexityBot": "allow",
+    "Google-Extended": "allow",
+    "CCBot": "disallow"
+  },
+  "thresholds": {}
+}
