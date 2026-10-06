@@ -598,3 +598,12 @@ Deferred lanes remain below.
 - `241` `proposed` [ticket-241-v3-control-projection-evidence-scoping.md](./ticket-241-v3-control-projection-evidence-scoping.md) — **P0:** one detector finding fans out into several client tickets; controls pass without contract evidence; denominators double-counted
 - `242` `proposed` [ticket-242-manual-review-evidence-keys.md](./ticket-242-manual-review-evidence-keys.md) — **P1:** stable evidence keys instead of prose, evidence references instead of booleans, status-rule tests
 - `243` `proposed` [ticket-243-restore-detector-check-tests.md](./ticket-243-restore-detector-check-tests.md) — **P1:** repair five tests broken by the v3 `checks` projection
+
+### Master reconciliation (2026-10-06)
+
+Numbering note: the `feature/technical-audit-183` lineage reserved 240-246 and
+263-399 for different tickets than this queue's 240-243 and 264-266. Nothing below
+reuses either range; the next unreserved number after both lineages is **402**.
+
+- `400` `proposed` [Map the AI governance, Accept-Language and transport detectors to v3 controls](./ticket-400-map-post-contract-detectors-to-controls.md) — **P2:** the three post-contract detectors stay analyst-only until a control consumes them.
+- `401` `implemented (local)` [Decode persisted language-probe evidence and stop the placeholder posing as coverage](./ticket-401-language-probe-read-path.md) — **P1, QA fix for 264.**

@@ -18,7 +18,17 @@ def test_manual_review_register_covers_every_explicit_question_without_inferred_
 
     assert len(answers) == 18
     assert {row["id"] for row in answers if row["status"] == "unavailable"} >= {
-        "Q1", "Q4", "Q5", "Q10", "Q12", "Q13", "Q14", "Q15", "Q16", "Q17", "Q31"
+        "Q1",
+        "Q4",
+        "Q5",
+        "Q10",
+        "Q12",
+        "Q13",
+        "Q14",
+        "Q15",
+        "Q16",
+        "Q17",
+        "Q31",
     }
     assert all(row["control_ids"] for row in answers)
 
@@ -30,12 +40,13 @@ def test_audit_emits_the_manual_review_register_in_contract_order():
         run_context={"completion_state": "complete", "snapshot_consistency": "stable"},
     )
 
-    assert [row["id"] for row in audit["manual_review_answers"]] == [
-        row["id"] for row in MANUAL_REVIEW_QUESTIONS
-    ]
+    assert [row["id"] for row in audit["manual_review_answers"]] == [row["id"] for row in MANUAL_REVIEW_QUESTIONS]
     assert all(row["status"] != "pass" for row in audit["manual_review_answers"])
     assert [row["id"] for row in audit["checks"]] == [row["id"] for row in TECHNICAL_AUDIT_CHECK_CONTRACT]
-    assert len(audit["detector_checks"]) == 18
+    # 18 detectors from the v3 projection plus the three analyst-level detectors
+    # (AI governance, Accept-Language, transport security) that are not yet mapped
+    # to a v3 control (ticket 400).
+    assert len(audit["detector_checks"]) == 21
 
 
 NO_EXTRA_EVIDENCE_QUESTIONS = ("Q2", "Q3", "Q6", "Q7", "Q8", "Q9", "Q11")
@@ -59,17 +70,13 @@ def _answer(question_id, controls, collected_evidence=None):
 
 def test_every_extra_evidence_requirement_has_a_unique_stable_key_and_description():
     keyed = [row for row in MANUAL_REVIEW_QUESTIONS if row["additional_evidence_key"] is not None]
-    assert {row["id"] for row in keyed} == {
-        "Q1", "Q4", "Q5", "Q10", "Q12", "Q13", "Q14", "Q15", "Q16", "Q17", "Q31"
-    }
+    assert {row["id"] for row in keyed} == {"Q1", "Q4", "Q5", "Q10", "Q12", "Q13", "Q14", "Q15", "Q16", "Q17", "Q31"}
     keys = [row["additional_evidence_key"] for row in keyed]
     assert len(keys) == len(set(keys))
     assert all(key.isidentifier() and key == key.lower() for key in keys)
     assert all(row["additional_evidence"] for row in keyed)
     assert all(
-        row["additional_evidence"] is None
-        for row in MANUAL_REVIEW_QUESTIONS
-        if row["additional_evidence_key"] is None
+        row["additional_evidence"] is None for row in MANUAL_REVIEW_QUESTIONS if row["additional_evidence_key"] is None
     )
 
 
@@ -94,8 +101,7 @@ def test_status_precedence_unavailable_over_finding_over_partial_over_pass():
     assert _answer("Q9", _controls({first: "not_applicable"}))["status"] == "partial"
     assert _answer("Q9", _controls({first: "partial", second: "finding"}))["status"] == "finding"
     assert (
-        _answer("Q9", _controls({first: "partial", second: "finding", third: "unavailable"}))["status"]
-        == "unavailable"
+        _answer("Q9", _controls({first: "partial", second: "finding", third: "unavailable"}))["status"] == "unavailable"
     )
 
 

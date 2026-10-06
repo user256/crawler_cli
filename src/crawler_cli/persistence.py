@@ -1482,6 +1482,14 @@ class MemoryStore:
         return queued, pending, done
 
 
+def _language_probe_evidence_row(value: object) -> dict[str, object]:
+    """Decode one persisted evidence record; asyncpg returns JSONB as text unless a codec is set."""
+    decoded = json.loads(value) if isinstance(value, (str, bytes)) else value
+    if not isinstance(decoded, dict):
+        raise ValueError("language probe evidence_json is not a JSON object")
+    return dict(decoded)
+
+
 class AsyncpgStore:
     def __init__(
         self,
@@ -1784,7 +1792,7 @@ class AsyncpgStore:
                 """,
                 run_id,
             )
-        return [dict(row["evidence_json"]) for row in rows]
+        return [_language_probe_evidence_row(row["evidence_json"]) for row in rows]
 
     async def fetch_render_comparison_candidates(self, *, run_id: str) -> list[RenderComparisonCandidate]:
         """Return only stored, successful HTML snapshots from one crawl run.

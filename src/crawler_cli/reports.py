@@ -45,9 +45,10 @@ class CrawlReports:
         rows = await self.store.latest_language_probe_evidence(await self._run_id())
         if rows:
             return rows
+        # Not a "coverage" record: the audit treats a coverage row as a probe that ran.
         return [
             {
-                "record_type": "coverage",
+                "record_type": "not_recorded",
                 "state": "not_recorded",
                 "complete": False,
                 "qualification": "no_explicit_accept_language_probe_session_for_selected_run",
