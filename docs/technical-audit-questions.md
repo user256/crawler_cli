@@ -241,6 +241,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: URLs that Google or other sites know about but the site no longer links or lists are unmanaged: old, parameter or orphan URLs that still use crawl budget and can stay indexed.
 - Group: crawl · Ticket: Warning / Medium · Unit: URLs
 - Needs: crawl, sitemaps
+- Runner: answered today (discovery-source-provenance sitemap/internal-link rows)
 - Evidence owners: `discovery-source-provenance`
 - Sheet said answerable: No (changed)
 - Note: Crawl and sitemap sources are always available; Search Console and backlink exports widen the comparison when supplied.
@@ -329,6 +330,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Conflicting language signals make it unclear which locale a page targets. Google does not use html lang for targeting, but Bing and assistive tools do, and a mismatch almost always shows a template bug that also affects hreflang.
 - Group: crawl · Ticket: Warning / Medium · Unit: pages
 - Needs: crawl
+- Runner: answered today (locale-html-lang saved markup rows)
 - Evidence owners: `locale-html-lang`, `hreflang-html-http`
 - Original: Do the page hreflang and html lang declarations make sense and agree?
 
@@ -351,6 +353,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: With several canonicals Google may ignore them all; with several robots tags it applies the most restrictive one; with several titles it chooses one unpredictably. Each usually means two systems (theme and plugin) are writing the same tag.
 - Group: crawl · Ticket: Issue / High · Unit: pages
 - Needs: crawl, stored-html
+- Runner: answered today (raw HTML duplicate head elements)
 - Evidence owners: `metadata-basics`, `canonical-declarations`
 - Note: Header-vs-HTML conflicts are Q94.
 - Original: Do any pages declare the title, description, canonical or robots tag more than once?
@@ -363,6 +366,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Duplicate titles make pages compete for the same queries and lower click-through. They usually come from a template default that was never overridden.
 - Group: crawl · Ticket: Warning / Medium · Unit: clusters
 - Needs: crawl
+- Runner: answered today (metadata-duplicates-aliases clusters)
 - Evidence owners: `metadata-duplicates-aliases`
 - Original: Do multiple pages share the same title or H1?
 
@@ -374,6 +378,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Google stops reading the head at the first element that does not belong there. A canonical, robots or hreflang tag that ends up in the body is ignored.
 - Group: crawl · Ticket: Error / High · Unit: pages
 - Needs: crawl, stored-html
+- Runner: answered today (metadata-basics head-only elements inside body)
 - Evidence owners: new detector `head-elements-in-body`
 - Original: Are any head elements (canonical etc.) placed in the body instead of the head?
 
@@ -385,6 +390,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Headings give the page its outline. A missing H1 or broken hierarchy makes the main topic less clear to search engines and screen readers. The ranking effect is small; the fix is usually one template change.
 - Group: crawl · Ticket: Warning / Low · Unit: pages
 - Needs: crawl, stored-html
+- Runner: answered today (metadata-basics H1 and heading-sequence rows)
 - Evidence owners: `metadata-basics`, new detector `heading-sequence`
 - Original: Are headings out of sequence on any pages?
 
@@ -419,6 +425,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: An unintended noindex removes the page from search completely. Noindex pages in sitemaps or navigation send contradictory signals and waste crawl.
 - Group: crawl+profile · Ticket: Error / High · Unit: pages
 - Needs: crawl, sitemaps, site-profile
+- Runner: answered today (profile-indexability policy facts)
 - Evidence owners: `indexability-segmentation`
 - Site profile keys: `templates`
 - Note: Without a profile the noindex inventory by template is still produced, and the status is Needs validation.
@@ -483,6 +490,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Each tab multiplies the number of thin, near-identical URLs per profile, which splits signals and uses crawl budget on pages that should not rank on their own.
 - Group: crawl+profile · Ticket: Warning / Medium · Unit: URLs
 - Needs: crawl, site-profile
+- Runner: answered today (profile-indexability policy facts)
 - Evidence owners: `parameter-and-faceted-controls`, `indexability-segmentation`, new detector `profile-subtab-indexability`
 - Site profile keys: `templates.profile_subtab`
 - Original: Do user profile tabs (e.g. updates, reviews, winners) generate unnecessary indexable sub-URLs instead of consolidating authority onto the primary profile?
@@ -495,6 +503,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Empty user profiles are thin pages in bulk, and they are a common target for spam sign-ups. Indexing them lowers perceived site quality.
 - Group: crawl+profile · Ticket: Warning / Medium · Unit: pages
 - Needs: crawl, sitemaps, site-profile
+- Runner: answered today (profile-indexability policy facts)
 - Evidence owners: `indexability-segmentation`, `content-quality`, new detector `empty-profile-indexability`
 - Site profile keys: `templates.profile`, `empty_profile_rule`
 - Original: Are newly created, inactive, or empty user profiles noindexed until they publish substantive, active public content?
@@ -507,6 +516,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Mixed-language folders stop per-locale reporting in Search Console and make hreflang mapping and geotargeting error-prone.
 - Group: crawl · Ticket: Warning / Medium · Unit: pages
 - Needs: crawl
+- Runner: answered today (locale-html-lang locale-folder mismatches)
 - Evidence owners: `locale-html-lang`, new detector `locale-path-consistency`
 - Note: A root-level default language is valid if it is consistent; the site profile can declare it.
 - Original: Do all localized pages reside in dedicated locale folders (e.g. /en/, /es/) rather than mixing languages under root directories?
@@ -544,6 +554,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Landmarks help parsers separate the main content from navigation and boilerplate. The search effect is small; the main benefit is accessibility and cleaner extraction by AI crawlers.
 - Group: best-practice · Ticket: Improvement / Low · Unit: templates
 - Needs: stored-html
+- Runner: answered today (semantic-html landmark facts)
 - Evidence owners: new detector `semantic-landmarks`
 - Original: Does the page template leverage semantic landmark elements (<header>, <main>, <article>, <aside>, <footer>) to clearly define core vs boilerplate content?
 
@@ -579,6 +590,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Captions give image search extra context next to alt text. The effect is small and mostly on image search.
 - Group: best-practice · Ticket: Improvement / Low · Unit: images
 - Needs: stored-html
+- Runner: answered today (semantic-html figure and figcaption facts)
 - Evidence owners: `image-markup`, new detector `figure-markup`
 - Original: Are contextual images, infographics, and charts wrapped in <figure> and <figcaption> elements for enhanced accessibility and image search indexing?
 
@@ -626,6 +638,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: In-page jump links help users and can appear as 'Jump to' links in search results.
 - Group: best-practice · Ticket: Improvement / Low · Unit: pages
 - Needs: crawl, stored-html
+- Runner: answered today (semantic-html long-page H2 fragment facts)
 - Evidence owners: new detector `toc-presence`
 - Original: Do long-form guide and toplist pages include an anchor-linked Table of Contents (TOC) to generate rich SERP sitelinks and improve navigation?
 
@@ -684,6 +697,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Without a declared canonical, Google picks one itself among parameter, case and trailing-slash variants, and may choose the wrong URL.
 - Group: crawl · Ticket: Warning / Medium · Unit: pages
 - Needs: crawl
+- Runner: answered today (canonical-declarations missing indexable canonical rows)
 - Evidence owners: `canonical-declarations`
 - Original: Does every public HTML page—including the homepage, category roots, and schedule pages—explicitly output a canonical link tag?
 
@@ -695,6 +709,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Google treats a canonical to the homepage from unrelated pages as a soft 404 and ignores it. Retired pages should return 404/410 or 301 to a relevant replacement.
 - Group: crawl · Ticket: Error / High · Unit: URLs
 - Needs: crawl
+- Runner: answered today (canonical-target-validation homepage canonical rows)
 - Evidence owners: `canonical-target-validation`, `soft404-error-routes`
 - Original: Are deleted, deprecated, or orphan URLs mistakenly canonicalised to the homepage (soft 404s) instead of returning a 404/410 status or a relevant 301 redirect?
 
@@ -706,6 +721,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Noindexing a hub removes its own chance to rank, and over time Google also crawls its links less, so the pages beneath it lose discovery.
 - Group: crawl+profile · Ticket: Issue / Medium · Unit: pages
 - Needs: crawl, site-profile
+- Runner: answered today (profile-indexability policy facts)
 - Evidence owners: `indexability-segmentation`, `internal-authority`
 - Site profile keys: `templates.taxonomy`
 - Original: Does the indexing strategy for taxonomy archives (tags, categories, author pages) avoid applying noindex to pages that serve as key navigational hubs?
@@ -718,6 +734,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Relative canonicals resolve against whatever host served the page, so staging mirrors, http variants and proxies all declare themselves canonical.
 - Group: crawl · Ticket: Warning / Low · Unit: pages
 - Needs: crawl, stored-html
+- Runner: answered today (canonical-declarations relative canonical rows)
 - Evidence owners: `canonical-declarations`
 - Original: Are canonical URL link tags declared as fully-qualified absolute URLs (including protocol and domain) rather than relative paths?
 
@@ -763,6 +780,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Without these headers, documents that duplicate an HTML page can outrank it, and documents that should stay private can be indexed.
 - Group: crawl · Ticket: Warning / Low · Unit: documents
 - Needs: crawl
+- Runner: answered today (nonhtml-search-assets header inventory)
 - Evidence owners: `nonhtml-search-assets`
 - Original: Do indexable non-HTML documents (e.g. PDFs, Word docs, spreadsheets) deliver HTTP Link canonical headers and appropriate X-Robots-Tag indexation directives?
 
@@ -774,7 +792,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: When the header and the HTML disagree, Google may ignore both canonicals and applies the most restrictive robots directive, which can deindex a page by accident.
 - Group: crawl · Ticket: Error / High · Unit: pages
 - Needs: crawl
-- Runner: answered today (indexability-segmentation header/meta robots conflicts)
+- Runner: answered today (indexability-segmentation header/HTML canonical and robots conflicts)
 - Evidence owners: `canonical-declarations`, `indexability-segmentation`
 - Original: Do HTTP response headers (Link: rel="canonical", X-Robots-Tag) agree with in-page HTML <link rel="canonical"> and <meta name="robots"> declarations without conflicting directives?
 
@@ -837,6 +855,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: This is about the audit crawler's own settings, not a site defect. Rate-limited responses do not show the site's normal behaviour, so affected rows are rechecked rather than ticketed.
 - Group: run-gate · Ticket: no ticket · Unit: run
 - Needs: crawl
+- Runner: answered today (run_context 429/503 rate-limit count)
 - Evidence owners: `audit-collection-safeguards`
 - Sheet said answerable: No (changed)
 - Original: Are crawler request rates and concurrency configured safely to avoid triggering origin 429 rate limits or server degradation during deep audits?
@@ -945,7 +964,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Broken links waste crawl and frustrate users. Links to redirects, noindex or non-canonical URLs pass weaker signals and make Google crawl two URLs to reach one page.
 - Group: crawl · Ticket: Issue / Medium · Unit: links
 - Needs: crawl
-- Runner: answered today (internal-link-targets error targets)
+- Runner: answered today (internal-link-targets error, redirect, noindex and canonical-target rows)
 - Evidence owners: `internal-link-targets`
 - Note: Priority rises to High for 4xx/5xx targets linked from navigation.
 - Original: Do internal links point at 404s, redirects, noindex or non-canonical URLs?
@@ -1027,6 +1046,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Soft 404s are reported as errors in Search Console, waste crawl, and keep dead pages indexed.
 - Group: crawl · Ticket: Error / High · Unit: pages
 - Needs: crawl, probes
+- Runner: answered today (soft404-error-routes saved-source candidates)
 - Evidence owners: `soft404-error-routes`
 - Original: Do error pages return proper HTTP status codes (404/410/500) at the server level rather than returning 200 OK with client-rendered error notices?
 
@@ -1051,6 +1071,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Each such link costs an extra redirect for users and crawlers, and usually comes from one template or a menu setting.
 - Group: crawl · Ticket: Warning / Low · Unit: links
 - Needs: crawl
+- Runner: answered today (internal-link-targets trailing-slash redirect rows)
 - Evidence owners: `internal-link-targets`, `url-host-and-variants`
 - Original: Do all internal links strictly match the site's trailing-slash URL convention to eliminate unnecessary 301/308 redirect hops?
 

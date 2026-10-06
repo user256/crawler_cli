@@ -2179,6 +2179,14 @@ class _SavedJob(TypedDict, total=False):
 _REPORT_NAMES = (
     "orphans",
     "indexability",
+    "stored-html",
+    "metadata-duplicates",
+    "nonhtml-search-assets",
+    "hreflang-validation",
+    "semantic-html",
+    "profile-indexability-pages",
+    "soft404-error-routes",
+    "discovery-source-provenance",
     "redirect-chains",
     "hub-pages",
     "slowest",
@@ -2204,6 +2212,22 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.orphan_pages()
     if name == "indexability":
         return await reports.indexability_reasons()
+    if name == "stored-html":
+        return await reports.stored_html_findings()
+    if name == "metadata-duplicates":
+        return await reports.duplicate_metadata()
+    if name == "nonhtml-search-assets":
+        return await reports.nonhtml_search_assets()
+    if name == "hreflang-validation":
+        return await reports.hreflang_validation()
+    if name == "semantic-html":
+        return await reports.semantic_html_facts()
+    if name == "profile-indexability-pages":
+        return await reports.profile_indexability_pages()
+    if name == "soft404-error-routes":
+        return await reports.soft404_error_routes()
+    if name == "discovery-source-provenance":
+        return await reports.discovery_source_provenance()
     if name == "redirect-chains":
         return await reports.redirect_chains()
     if name == "hub-pages":

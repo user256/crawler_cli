@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, cast
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, urljoin, urlparse
 
+from .amp import urls_match
 from .hashing import hamming64
+from .html_audit import canonical_targets, inspect_stored_html
+from .hreflang_audit import hreflang_facts
+from .semantic_html_audit import inspect_semantic_html
 from .persistence import AsyncpgStore
 
 
@@ -24,6 +29,8 @@ _TRACKING_PARAMETERS = {
     "utm_term",
     "wbraid",
 }
+_LINK_CANONICAL = re.compile(r"<([^>]+)>[^,]*\brel\s*=\s*\"?canonical\"?", re.IGNORECASE)
+_SOFT_404_SIGNATURE = re.compile(r"\b(?:404|page\s+not\s+found|not\s+found|error\s+page)\b", re.IGNORECASE)
 
 
 def _int_or_none(value: object) -> int | None:
@@ -90,7 +97,16 @@ class CrawlReports:
                 COUNT(*) FILTER (
                     WHERE u.kind = 'html' AND {extraction_unknown}
                 )::INT AS extraction_state_unknown_html_count,
+                COUNT(*) FILTER (
+                    WHERE u.kind = 'html' AND s.html_compressed IS NOT NULL
+                )::INT AS stored_html_count,
+                COUNT(*) FILTER (
+                    WHERE u.kind <> 'html'
+                      AND lower(regexp_replace(u.url, '[?#].*$', ''))
+                            ~ '\\.(pdf|docx?|xlsx?|pptx?)$'
+                )::INT AS nonhtml_document_count,
                 COUNT(*) FILTER (WHERE s.challenge IS NOT NULL)::INT AS challenged_count,
+                COUNT(*) FILTER (WHERE s.final_status_code IN (429, 503))::INT AS rate_limited_count,
                 COUNT(*) FILTER (WHERE s.content_hash_simhash IS NOT NULL)::INT AS hashed_count,
                 {image_count} AS image_reference_count,
                 MAX(s.fetched_at)::BIGINT AS last_snapshot_at
@@ -188,6 +204,237 @@ class CrawlReports:
             FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
             WHERE s.run_id = $1
             ORDER BY u.url
+            """,
+            run_id,
+        )
+
+    async def stored_html_findings(self) -> list[dict[str, object]]:
+        """Inspect saved source for raw-markup facts lost by normal extraction."""
+        run_id = await self._run_id()
+        pages = await self.store.fetch_pages_for_embeddings(run_id=run_id)
+        page_state = {
+            str(row["url"]): row
+            for row in await self._fetch(
+                """
+                SELECT u.url, s.overall_indexable, s.final_status_code, s.headers_json
+                FROM page_run_snapshots s
+                JOIN urls u ON u.id = s.url_id
+                WHERE s.run_id = $1 AND s.html_compressed IS NOT NULL
+                """,
+                run_id,
+            )
+        }
+        findings: list[dict[str, object]] = []
+        for _url_id, url, html in pages:
+            state = page_state.get(url, {})
+            headers = state.get("headers_json")
+            header_values = headers.values() if isinstance(headers, dict) else ()
+            header_canonicals = [
+                target
+                for value in header_values
+                for target in _LINK_CANONICAL.findall(str(value))
+            ]
+            has_link_canonical = any(
+                "rel=canonical" in str(value).replace('"', "").replace("'", "").replace(" ", "").casefold()
+                for value in header_values
+            )
+            for finding in inspect_stored_html(url, html):
+                # Either an HTML canonical or an HTTP Link canonical satisfies
+                # Q71.  The header/HTML consistency comparison is Q94.
+                if finding["kind"] == "missing-canonical" and has_link_canonical:
+                    continue
+                finding["overall_indexable"] = state.get("overall_indexable")
+                finding["final_status_code"] = state.get("final_status_code")
+                findings.append(finding)
+            html_canonicals = canonical_targets(url, html)
+            parsed_url = urlparse(url)
+            homepage = f"{parsed_url.scheme}://{parsed_url.netloc}/"
+            for canonical in [*html_canonicals, *(urljoin(url, target) for target in header_canonicals)]:
+                if not urls_match(url, homepage) and urls_match(canonical, homepage):
+                    findings.append(
+                        {
+                            "url": url,
+                            "kind": "canonical-to-homepage",
+                            "canonical": canonical,
+                            "overall_indexable": state.get("overall_indexable"),
+                            "final_status_code": state.get("final_status_code"),
+                        }
+                    )
+            for header_canonical in header_canonicals:
+                if html_canonicals and not any(urls_match(header_canonical, html_canonical) for html_canonical in html_canonicals):
+                    findings.append(
+                        {
+                            "url": url,
+                            "kind": "html-header-canonical-mismatch",
+                            "html_canonicals": html_canonicals,
+                            "header_canonical": header_canonical,
+                            "overall_indexable": state.get("overall_indexable"),
+                            "final_status_code": state.get("final_status_code"),
+                        }
+                    )
+        return findings
+
+    async def duplicate_metadata(self) -> list[dict[str, object]]:
+        """Find duplicate titles or H1s among indexable self-canonical pages."""
+        run_id = await self._run_id()
+        pages = await self._fetch(
+            """
+            SELECT u.url, s.title, s.h1_tags, s.canonical_urls_json
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1
+              AND s.overall_indexable IS TRUE
+              AND s.final_status_code = 200
+              AND s.content_extracted IS TRUE
+            ORDER BY u.url
+            """,
+            run_id,
+        )
+        values: dict[tuple[str, str], list[str]] = {}
+        for page in pages:
+            url = str(page["url"])
+            canonicals = page.get("canonical_urls_json")
+            if not isinstance(canonicals, list) or not any(urls_match(url, str(item)) for item in canonicals if item):
+                continue
+            for field, raw_value in (("title", page.get("title")), ("h1", page.get("h1_tags"))):
+                value = str(raw_value or "").strip()
+                if value:
+                    values.setdefault((field, value), []).append(url)
+        findings = []
+        for (field, value), urls in sorted(values.items()):
+            if len(urls) > 1:
+                findings.append({"field": field, "value": value, "count": len(urls), "urls": urls, "url": "\n".join(urls)})
+        return findings
+
+    async def nonhtml_search_assets(self) -> list[dict[str, object]]:
+        """Return fetched office/PDF documents without an index-control header."""
+        run_id = await self._run_id()
+        rows = await self._fetch(
+            """
+            SELECT u.url, s.final_status_code, s.headers_json
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1
+              AND u.kind <> 'html'
+              AND lower(regexp_replace(u.url, '[?#].*$', ''))
+                    ~ '\\.(pdf|docx?|xlsx?|pptx?)$'
+            ORDER BY u.url
+            """,
+            run_id,
+        )
+        findings = []
+        for row in rows:
+            headers = row.get("headers_json")
+            values = headers.values() if isinstance(headers, dict) else ()
+            joined_headers = "\n".join(str(value) for value in values).casefold()
+            if row.get("final_status_code") == 200 and "x-robots-tag" not in joined_headers and "rel=canonical" not in joined_headers.replace('"', "").replace("'", "").replace(" ", ""):
+                findings.append({"url": row["url"], "final_status_code": 200, "headers_present": bool(headers)})
+        return findings
+
+    async def hreflang_validation(self) -> list[dict[str, object]]:
+        """Validate saved HTML/header hreflang edges against saved targets."""
+        run_id = await self._run_id()
+        pages = await self._fetch(
+            """
+            SELECT u.url, s.hreflang_json, s.final_status_code, s.overall_indexable,
+                   s.canonical_urls_json, s.html_lang
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1 AND s.content_extracted IS TRUE
+            ORDER BY u.url
+            """,
+            run_id,
+        )
+        return hreflang_facts(pages)
+
+    async def semantic_html_facts(self) -> list[dict[str, object]]:
+        """Return one bounded source-HTML semantic fact row per stored page."""
+        run_id = await self._run_id()
+        pages = await self.store.fetch_pages_for_embeddings(run_id=run_id)
+        return [inspect_semantic_html(url, html).as_dict() for _url_id, url, html in pages]
+
+    async def profile_indexability_pages(self) -> list[dict[str, object]]:
+        """Saved page facts for profile policy evaluation; no policy is inferred here."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            WITH page_facts AS (
+                SELECT u.id, u.url, u.is_from_sitemap, s.final_status_code AS status,
+                       s.overall_indexable AS indexable,
+                       (s.html_meta_allows IS FALSE OR s.http_header_allows IS FALSE) AS noindex,
+                       s.canonical_urls_json ->> 0 AS canonical, s.word_count,
+                       COUNT(f.parent_id)::INT AS inlink_count
+                FROM page_run_snapshots s
+                JOIN urls u ON u.id = s.url_id
+                LEFT JOIN frontier f ON f.run_id = s.run_id AND f.url_id = s.url_id AND f.parent_id IS NOT NULL
+                WHERE s.run_id = $1 AND u.kind = 'html' AND s.content_extracted IS TRUE
+                GROUP BY u.id, u.url, u.is_from_sitemap, s.final_status_code,
+                         s.overall_indexable, s.html_meta_allows, s.http_header_allows,
+                         s.canonical_urls_json, s.word_count
+            )
+            SELECT url, is_from_sitemap AS in_sitemap, status, indexable, noindex,
+                   canonical, word_count, inlink_count,
+                   percent_rank() OVER (ORDER BY inlink_count)::DOUBLE PRECISION AS inlink_percentile
+            FROM page_facts
+            ORDER BY url
+            """,
+            run_id,
+        )
+
+    async def soft404_error_routes(self) -> list[dict[str, object]]:
+        """Conservative saved-source candidates for 200 error pages."""
+        run_id = await self._run_id()
+        states = {
+            str(row["url"]): row
+            for row in await self._fetch(
+                """
+                SELECT u.url, s.final_status_code, s.title
+                FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+                WHERE s.run_id = $1 AND s.html_compressed IS NOT NULL
+                """,
+                run_id,
+            )
+        }
+        findings: list[dict[str, object]] = []
+        for _url_id, url, html in await self.store.fetch_pages_for_embeddings(run_id=run_id):
+            state = states.get(url, {})
+            if state.get("final_status_code") != 200:
+                continue
+            title = str(state.get("title") or "")
+            source_text = re.sub(r"<[^>]+>", " ", html)
+            title_match = _SOFT_404_SIGNATURE.search(title)
+            body_match = _SOFT_404_SIGNATURE.search(source_text)
+            if title_match or body_match:
+                findings.append(
+                    {
+                        "url": url,
+                        "final_status_code": 200,
+                        "title": title,
+                        "signature_source": "title" if title_match else "source_text",
+                        "signature": (title_match or body_match).group(0),
+                    }
+                )
+        return findings
+
+    async def discovery_source_provenance(self) -> list[dict[str, object]]:
+        """Saved sitemap-vs-internal-link discovery differences for review."""
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            WITH sources AS (
+                SELECT u.url, u.is_from_sitemap,
+                       EXISTS (
+                         SELECT 1 FROM frontier f
+                         WHERE f.run_id = $1 AND f.url_id = u.id AND f.parent_id IS NOT NULL
+                       ) AS found_from_internal_link
+                FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+                WHERE s.run_id = $1 AND u.kind = 'html'
+            )
+            SELECT url, is_from_sitemap, found_from_internal_link,
+                   CASE WHEN is_from_sitemap THEN 'sitemap_only' ELSE 'internal_link_only' END AS issue
+            FROM sources
+            WHERE is_from_sitemap <> found_from_internal_link
+            ORDER BY url
             """,
             run_id,
         )
@@ -423,19 +670,26 @@ class CrawlReports:
             SELECT edges.source_url, edges.target_url, edges.anchor_text, edges.xpath,
                    target.final_status_code AS target_status,
                    target.overall_indexable AS target_indexable,
+                   target.canonical_urls_json ->> 0 AS target_canonical,
+                   final_url.url AS final_url,
                    CASE
                      WHEN edges.anchor_text IS NULL THEN 'empty_anchor'
                      WHEN target.final_status_code BETWEEN 300 AND 399 THEN 'redirect_target'
                      WHEN target.final_status_code >= 400 THEN 'error_target'
                      WHEN target.overall_indexable = FALSE THEN 'non_indexable_target'
+                     WHEN target.canonical_urls_json ->> 0 IS NOT NULL
+                          AND target.canonical_urls_json ->> 0 <> edges.target_url THEN 'noncanonical_target'
                    END AS issue
             FROM edges
             LEFT JOIN urls target_url ON target_url.url = edges.target_url
             LEFT JOIN page_run_snapshots target
               ON target.run_id = $1 AND target.url_id = target_url.id
+            LEFT JOIN urls final_url ON final_url.id = target.final_url_id
             WHERE edges.anchor_text IS NULL
                OR target.final_status_code >= 300
                OR target.overall_indexable = FALSE
+               OR (target.canonical_urls_json ->> 0 IS NOT NULL
+                   AND target.canonical_urls_json ->> 0 <> edges.target_url)
             ORDER BY edges.source_url, edges.target_url
             """,
             run_id,

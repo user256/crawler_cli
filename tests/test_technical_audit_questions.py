@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from crawler_cli.__main__ import _run_technical_audit_questions
+from crawler_cli.html_audit import inspect_stored_html
 from crawler_cli.technical_audit import build_technical_audit
 from crawler_cli.technical_audit_questions import (
     QuestionRegistryError,
@@ -68,6 +69,7 @@ def _context(**overrides: object) -> dict[str, object]:
         "hashed_count": 100,
         "unparsed_html_count": 0,
         "challenged_count": 0,
+        "rate_limited_count": 0,
         "frontier_pending": 0,
         "seed_hosts": ["example.com"],
         "created_at": "2026-10-01T00:00:00",
@@ -131,7 +133,7 @@ def test_complete_run_answers_implemented_questions_and_leaves_the_rest_pending(
     )
     assert answers["Q104"]["status"] == "Pending" and answers["Q104"]["notes"][0].startswith("Outside crawler_cli")
     # A scope-limited answer with no rows cannot be called healthy.
-    assert answers["Q94"]["status"] == "Needs validation" and answers["Q94"]["answer"] == "No (partial)"
+    assert answers["Q94"]["status"] == "Pending"
 
 
 def test_failed_run_gate_downgrades_every_crawl_answer() -> None:
@@ -146,6 +148,199 @@ def test_failed_run_gate_downgrades_every_crawl_answer() -> None:
     }
     assert (answers["Q16"]["status"], answers["Q16"]["ticket"]) == ("Needs validation", True)
     assert "Healthy" not in {answer["status"] for answer in answers.values()}
+
+
+def test_rate_limit_gate_downgrades_crawl_answers_without_a_ticket() -> None:
+    answers = _by_id(answer_questions(_audit(rate_limited_count=2), load_question_registry()))
+
+    assert (answers["Q81"]["answer"], answers["Q81"]["status"], answers["Q81"]["ticket"]) == ("Yes", "Issue", False)
+    assert answers["Q16"]["status"] == "Needs validation"
+
+
+def test_internal_link_redirect_and_canonical_rows_answer_q22_and_q72() -> None:
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "internal-link-quality": [
+                {
+                    "issue": "redirect_target",
+                    "source_url": f"{SITE}/source",
+                    "target_url": f"{SITE}/guide/",
+                    "final_url": f"{SITE}/guide",
+                },
+                {
+                    "issue": "noncanonical_target",
+                    "source_url": f"{SITE}/other",
+                    "target_url": f"{SITE}/old",
+                    "target_canonical": f"{SITE}/new",
+                },
+            ]
+        },
+        run_context=_context(),
+    )
+    answers = _by_id(answer_questions(audit, load_question_registry()))
+    assert (answers["Q22"]["answer"], answers["Q22"]["status"], answers["Q22"]["affected_count"]) == ("Yes", "Issue", 2)
+    assert (answers["Q72"]["answer"], answers["Q72"]["status"], answers["Q72"]["affected_count"]) == ("Yes", "Issue", 1)
+
+
+def test_soft404_source_candidates_need_validation() -> None:
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "soft404-error-routes": [
+                {"url": f"{SITE}/missing", "final_status_code": 200, "signature_source": "title", "signature": "404"}
+            ]
+        },
+        run_context=_context(stored_html_count=1),
+    )
+    answer = _by_id(answer_questions(audit, load_question_registry()))["Q42"]
+    assert (answer["answer"], answer["status"], answer["ticket"]) == ("Yes", "Needs validation", False)
+
+
+def test_discovery_source_difference_is_a_review_candidate() -> None:
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "discovery-source-provenance": [
+                {"url": f"{SITE}/legacy", "is_from_sitemap": True, "found_from_internal_link": False, "issue": "sitemap_only"}
+            ]
+        },
+        run_context=_context(),
+    )
+    answer = _by_id(answer_questions(audit, load_question_registry()))["Q82"]
+    assert (answer["answer"], answer["status"], answer["ticket"]) == ("Yes", "Needs validation", False)
+
+
+def test_raw_html_questions_are_answered_from_stored_source() -> None:
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "stored-html": [
+                {"url": f"{SITE}/lang", "kind": "html-lang-self-hreflang-mismatch"},
+                {"url": f"{SITE}/duplicate", "kind": "duplicate-title"},
+                {"url": f"{SITE}/body", "kind": "head-only-element-in-body"},
+                {"url": f"{SITE}/outline", "kind": "heading-level-skip", "overall_indexable": True},
+                {
+                    "url": f"{SITE}/canonical",
+                    "kind": "missing-canonical",
+                    "overall_indexable": True,
+                    "final_status_code": 200,
+                },
+                {"url": f"{SITE}/relative", "kind": "relative-canonical", "canonical": "/relative"},
+                {"url": f"{SITE}/retired", "kind": "canonical-to-homepage", "canonical": f"{SITE}/"},
+                {"url": f"{SITE}/parity", "kind": "html-header-canonical-mismatch"},
+            ],
+            "metadata-duplicates": [
+                {
+                    "url": f"{SITE}/title-a\n{SITE}/title-b",
+                    "field": "title",
+                    "value": "Shared title",
+                    "count": 2,
+                }
+            ],
+            "indexability": [],
+            "nonhtml-search-assets": [{"url": f"{SITE}/guide.pdf", "final_status_code": 200}],
+            "hreflang-validation": [
+                {"url": f"{SITE}/en/page", "kind": "locale-path-language-mismatch", "locale_folder": "en"}
+            ],
+        },
+        run_context=_context(stored_html_count=6, nonhtml_document_count=1),
+    )
+
+    answers = _by_id(answer_questions(audit, load_question_registry()))
+    for qid in ("Q8", "Q10", "Q11", "Q12", "Q15", "Q41", "Q71", "Q73", "Q80", "Q87", "Q94"):
+        assert (answers[qid]["answer"], answers[qid]["status"], answers[qid]["affected_count"]) == ("Yes", "Issue", 1)
+
+
+def test_raw_html_questions_distinguish_clean_and_unavailable_evidence() -> None:
+    clean = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "stored-html": [],
+            "metadata-duplicates": [],
+            "indexability": [],
+            "nonhtml-search-assets": [],
+            "hreflang-validation": [],
+        },
+        run_context=_context(stored_html_count=2, nonhtml_document_count=1),
+    )
+    clean_answers = _by_id(answer_questions(clean, load_question_registry()))
+    for qid in ("Q8", "Q10", "Q11", "Q12", "Q15", "Q41", "Q71", "Q73", "Q80", "Q87", "Q94"):
+        assert (clean_answers[qid]["answer"], clean_answers[qid]["status"]) == ("No", "Healthy")
+
+    unavailable = build_technical_audit(crawl_run_id="run-1", reports={}, run_context=_context())
+    unavailable_answers = _by_id(answer_questions(unavailable, load_question_registry()))
+    for qid in ("Q8", "Q10", "Q11", "Q12", "Q15", "Q41", "Q71", "Q73", "Q80", "Q87", "Q94"):
+        assert unavailable_answers[qid]["status"] == "Pending"
+
+
+def test_raw_html_inspector_preserves_source_only_findings() -> None:
+    findings = inspect_stored_html(
+        f"{SITE}/page",
+        """
+        <html lang="en"><head>
+          <title>One</title><title>Two</title>
+          <meta name="description" content="one"><meta name="description" content="two">
+          <link rel="canonical" href="/page"><link rel="alternate" hreflang="fr" href="https://example.com/page">
+        </head><body><h1>One</h1><h3>Skipped</h3><meta name="robots" content="noindex"></body></html>
+        """,
+    )
+    kinds = {str(row["kind"]) for row in findings}
+    assert {"duplicate-title", "duplicate-meta-description", "relative-canonical"} <= kinds
+    assert {"head-only-element-in-body", "heading-level-skip", "html-lang-self-hreflang-mismatch"} <= kinds
+
+
+def test_semantic_question_inputs_answer_toc_and_landmark_questions() -> None:
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "semantic-html": [
+                {"url": f"{SITE}/shell", "landmark_eligible": True, "missing_required_landmarks": True, "toc_eligible": False},
+                {"url": f"{SITE}/guide", "landmark_eligible": True, "missing_required_landmarks": False, "toc_eligible": True, "missing_h2_fragment_toc": True},
+            ]
+        },
+        run_context=_context(stored_html_count=2),
+    )
+    answers = _by_id(answer_questions(audit, load_question_registry()))
+    assert (answers["Q51"]["answer"], answers["Q51"]["status"]) == ("Yes", "Needs validation")
+    assert (answers["Q58"]["answer"], answers["Q58"]["status"], answers["Q58"]["affected_count"]) == ("Yes", "Issue", 1)
+
+
+def test_profile_and_image_question_inputs_preserve_policy_coverage() -> None:
+    profile = {
+        "templates": {
+            "listing": {"pattern": r"^/listing/$", "indexable": True},
+            "profile_subtab": {"pattern": r"^/user/[^/]+/reviews/$", "indexable": False},
+            "profile": {"pattern": r"^/user/[^/]+/$", "indexable": True},
+            "taxonomy": {"pattern": r"^/category/[^/]+/$", "indexable": True},
+        },
+        "empty_profile_rule": {"max_main_content_words": 40},
+    }
+    audit = build_technical_audit(
+        crawl_run_id="run-1",
+        reports={
+            "profile-indexability-pages": [
+                {"url": f"{SITE}/listing/", "noindex": True, "in_sitemap": False},
+                {"url": f"{SITE}/user/a/reviews/", "status": 200, "indexable": True, "canonical": f"{SITE}/user/a/reviews/"},
+                {"url": f"{SITE}/user/a/", "word_count": 10, "indexable": True, "in_sitemap": False},
+                {"url": f"{SITE}/category/a/", "noindex": True, "inlink_percentile": 0.95},
+            ],
+            "semantic-html": [
+                {
+                    "url": f"{SITE}/images",
+                    "main_image_eligible": True,
+                    "main_image_count": 3,
+                    "main_images_without_figure_and_figcaption": 2,
+                }
+            ],
+        },
+        run_context=_context(stored_html_count=1),
+    )
+    answers = _by_id(answer_questions(audit, load_question_registry(), profile))
+    assert (answers["Q20"]["answer"], answers["Q20"]["status"]) == ("Yes", "Needs validation")
+    for qid in ("Q36", "Q37", "Q78"):
+        assert (answers[qid]["answer"], answers[qid]["status"], answers[qid]["affected_count"]) == ("Yes", "Issue", 1)
+    assert (answers["Q54"]["answer"], answers["Q54"]["status"], answers["Q54"]["affected_count"]) == ("Yes", "Needs validation", 2)
 
 
 def test_profile_template_scopes_inventory_question() -> None:

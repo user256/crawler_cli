@@ -35,6 +35,14 @@ TECHNICAL_AUDIT_REPORTS = (
     "locale-content-alignment",
     "render-url-candidates",
     "render-attempts",
+    "stored-html",
+    "metadata-duplicates",
+    "nonhtml-search-assets",
+    "hreflang-validation",
+    "semantic-html",
+    "profile-indexability-pages",
+    "soft404-error-routes",
+    "discovery-source-provenance",
     "inventory-interactions",
     "supplied-search-evidence",
 )
@@ -356,7 +364,7 @@ TECHNICAL_AUDIT_CHECK_CONTRACT = (
 )
 
 _IMPLEMENTED_CHECK_REPORTS = {
-    "indexability-segmentation": ("indexability",),
+    "indexability-segmentation": ("indexability", "stored-html"),
     "internal-link-targets": ("internal-link-quality",),
     "orphan-candidates": ("orphans",),
     "response-status-and-redirect-history": ("redirect-chains",),
@@ -365,7 +373,16 @@ _IMPLEMENTED_CHECK_REPORTS = {
     "schema-parser-diagnostics": ("schema-compatibility",),
     "image-markup": ("image-issues",),
     "internal-authority": ("internal-authority",),
-    "locale-html-lang": ("locale-content-alignment",),
+    "metadata-basics": ("stored-html",),
+    "metadata-duplicates-aliases": ("metadata-duplicates",),
+    "locale-html-lang": ("locale-content-alignment", "stored-html", "hreflang-validation"),
+    "canonical-declarations": ("stored-html",),
+    "canonical-target-validation": ("stored-html",),
+    "soft404-error-routes": ("soft404-error-routes",),
+    "discovery-source-provenance": ("discovery-source-provenance",),
+    "hreflang-html-http": ("hreflang-validation",),
+    "hreflang-noindex": ("hreflang-validation",),
+    "nonhtml-search-assets": ("nonhtml-search-assets",),
     "rendered-robots-links": ("render-url-candidates", "render-attempts", "inventory-interactions"),
     "supplied-search-evidence": ("supplied-search-evidence",),
 }
@@ -439,7 +456,11 @@ def build_technical_audit(
         and row.get("html_meta_allows") != row.get("http_header_allows")
     ]
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
-    link_failures = [row for row in rows["internal-link-quality"] if row.get("issue") == "error_target"]
+    link_failures = [
+        row
+        for row in rows["internal-link-quality"]
+        if row.get("issue") in {"error_target", "redirect_target", "non_indexable_target", "noncanonical_target"}
+    ]
     locale_signature_count = _optional_int(context.get("locale_signature_count"))
     locale_alignment = rows["locale-content-alignment"]
     interaction_rows = rows["inventory-interactions"]
@@ -452,8 +473,148 @@ def build_technical_audit(
     ]
     search_records = rows["supplied-search-evidence"]
     search_issues = [row for row in search_records if row.get("is_issue") is True]
+    stored_html = rows["stored-html"]
+    stored_html_denominator = _optional_int(context.get("stored_html_count"))
+    nonhtml_document_count = _optional_int(context.get("nonhtml_document_count"))
+    metadata_rows = [
+        row
+        for row in stored_html
+        if row.get("kind")
+        in {
+            "duplicate-title",
+            "duplicate-meta-description",
+            "duplicate-meta-robots",
+            "head-only-element-in-body",
+            "missing-h1",
+            "multiple-h1",
+            "heading-level-skip",
+        }
+    ]
+    canonical_rows = [
+        row
+        for row in stored_html
+        if row.get("kind") in {"missing-canonical", "duplicate-canonical", "relative-canonical"}
+    ]
+    canonical_target_rows = [row for row in stored_html if row.get("kind") == "canonical-to-homepage"]
+    hreflang_rows = rows["hreflang-validation"]
+    hreflang_noindex_rows = [row for row in hreflang_rows if row.get("kind") == "hreflang-target-noindex"]
+    hreflang_html_rows = [row for row in hreflang_rows if row.get("kind") != "hreflang-target-noindex"]
+    locale_markup_rows = [
+        row
+        for row in stored_html
+        if row.get("kind") in {"missing-html-lang", "invalid-html-lang", "html-lang-self-hreflang-mismatch"}
+    ]
+    locale_evidence = [
+        *locale_alignment,
+        *locale_markup_rows,
+        *(row for row in hreflang_rows if row.get("kind") == "locale-path-language-mismatch"),
+    ]
+    indexability_conflicts.extend(
+        row for row in stored_html if row.get("kind") == "html-header-canonical-mismatch"
+    )
 
     detector_checks = (
+        _check(
+            "metadata-basics",
+            "Metadata basics",
+            "Metadata",
+            metadata_rows,
+            "finding",
+            "Saved raw HTML contains duplicate metadata or an invalid heading outline.",
+            available=source_coverage["stored-html"]["available"] is True,
+            denominator=stored_html_denominator,
+            completion_state=completion_state,
+        ),
+        _check(
+            "canonical-declarations",
+            "Canonical declarations",
+            "Canonicals",
+            canonical_rows,
+            "finding",
+            "Saved raw HTML has a missing, duplicate or relative canonical declaration.",
+            available=source_coverage["stored-html"]["available"] is True,
+            denominator=stored_html_denominator,
+            completion_state=completion_state,
+        ),
+        _check(
+            "metadata-duplicates-aliases",
+            "Metadata duplicates and aliases",
+            "Duplicate metadata",
+            rows["metadata-duplicates"],
+            "finding",
+            "Two or more indexable self-canonical pages share a saved title or H1.",
+            available=source_coverage["metadata-duplicates"]["available"] is True,
+            denominator=parsed_html_count,
+            completion_state=completion_state,
+        ),
+        _check(
+            "canonical-target-validation",
+            "Canonical target validation",
+            "Canonical targets",
+            canonical_target_rows,
+            "finding",
+            "A non-homepage saved URL declares the homepage as its canonical target.",
+            available=source_coverage["stored-html"]["available"] is True,
+            denominator=stored_html_denominator,
+            completion_state=completion_state,
+        ),
+        _check(
+            "soft404-error-routes",
+            "Soft 404 and error routes",
+            "Soft 404s",
+            rows["soft404-error-routes"],
+            "finding",
+            "A saved 200 response contains a clear error-page signature; confirm the route and intended content live.",
+            available=source_coverage["soft404-error-routes"]["available"] is True,
+            denominator=stored_html_denominator,
+            completion_state=completion_state,
+            qualification="review_required",
+        ),
+        _check(
+            "discovery-source-provenance",
+            "Discovery-source provenance",
+            "Discovery sources",
+            rows["discovery-source-provenance"],
+            "finding",
+            "Saved sitemap and internal-link discovery sources disagree; confirm whether the population is intentionally excluded from one source.",
+            available=source_coverage["discovery-source-provenance"]["available"] is True,
+            denominator=parsed_html_count,
+            completion_state=completion_state,
+            qualification="review_required",
+        ),
+        _check(
+            "hreflang-html-http",
+            "HTML and HTTP hreflang",
+            "Hreflang",
+            hreflang_html_rows,
+            "finding",
+            "A saved HTML or HTTP hreflang edge is non-reciprocal, targets an invalid canonical/status, or exceeds the HTML alternates bound.",
+            available=source_coverage["hreflang-validation"]["available"] is True,
+            denominator=parsed_html_count,
+            completion_state=completion_state,
+        ),
+        _check(
+            "hreflang-noindex",
+            "Hreflang noindex conflicts",
+            "Hreflang noindex",
+            hreflang_noindex_rows,
+            "finding",
+            "A saved hreflang edge targets a known noindex page.",
+            available=source_coverage["hreflang-validation"]["available"] is True,
+            denominator=parsed_html_count,
+            completion_state=completion_state,
+        ),
+        _check(
+            "nonhtml-search-assets",
+            "Non-HTML search assets",
+            "Non-HTML assets",
+            rows["nonhtml-search-assets"],
+            "finding",
+            "A saved 200 document response has neither an X-Robots-Tag nor a Link canonical header.",
+            available=source_coverage["nonhtml-search-assets"]["available"] is True,
+            denominator=nonhtml_document_count,
+            completion_state=completion_state,
+        ),
         _check(
             "indexability-segmentation",
             "Indexability segmentation",
@@ -471,7 +632,7 @@ def build_technical_audit(
             "Internal link failures",
             link_failures,
             "finding",
-            "Saved-crawl failures must be rechecked live before client reporting.",
+            "Saved internal links point to an error, redirect, noindex or non-canonical target; recheck material paths live before client reporting.",
             available=source_coverage["internal-link-quality"]["available"] is True,
             denominator=parsed_html_count,
             completion_state=completion_state,
@@ -522,7 +683,6 @@ def build_technical_audit(
             available=source_coverage["near-duplicates"]["available"] is True,
             denominator=hashed_count,
             completion_state=completion_state,
-            qualification="review_required",
         ),
         _check(
             "schema-parser-diagnostics",
@@ -562,15 +722,20 @@ def build_technical_audit(
             "locale-html-lang",
             "Locale language and substantive content",
             "Locale language",
-            locale_alignment,
+            locale_evidence,
             "finding",
-            "The same primary-content signature occurs on pages that declare different languages; confirm the page purpose before treating this as untranslated locale content.",
-            available=source_coverage["locale-content-alignment"]["available"] is True
-            and locale_signature_count is not None
-            and locale_signature_count > 0,
-            denominator=locale_signature_count,
+            "Saved source has invalid language markup or the same primary-content signature occurs on pages that declare different languages; confirm page purpose before treating content as untranslated.",
+            available=(
+                source_coverage["stored-html"]["available"] is True
+                or source_coverage["hreflang-validation"]["available"] is True
+                or (
+                    source_coverage["locale-content-alignment"]["available"] is True
+                    and locale_signature_count is not None
+                    and locale_signature_count > 0
+                )
+            ),
+            denominator=stored_html_denominator or locale_signature_count,
             completion_state=completion_state,
-            qualification="review_required",
         ),
         _check(
             "rendered-robots-links",
@@ -621,6 +786,10 @@ def build_technical_audit(
         "crawl_run_id": crawl_run_id,
         "run_context": context,
         "source_coverage": source_coverage,
+        "question_inputs": {
+            "semantic-html": rows["semantic-html"],
+            "profile-indexability-pages": rows["profile-indexability-pages"],
+        },
         "status_vocabulary": [
             "pass",
             "finding",
