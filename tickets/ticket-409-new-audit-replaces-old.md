@@ -38,10 +38,10 @@ producer for the new runner's `host-probe`, `utility-path-probe`,
 ## Tasks
 
 - [x] Merge, resolve, re-attach, suite green (old-audit test files excluded).
-- [ ] Delete the old-audit modules, tests, docs and templates listed above (left to the operator).
+- [x] Deleted the old-audit modules, tests, docs and templates listed above (commit 2ca2e9b); full suite 1866 passed, 60 skipped with nothing ignored.
 - [x] Rebuilt the Rainbet bundle with the merged code (11 min, 1.3 GB peak; the lineage's run peaked at 3.9 GB). 104 answers: Issue 1, Needs validation 22, Healthy 1, Pending 80 against the lineage's 1/20/1/82. Only Q13 (orphans now graph-based: 8,761 of 10,852 vs 7,716), Q91 (500 confirmed empty anchors over 627,923 internal anchors, previously Pending) and Q63 (answered from `--tls-probe`: rainbet.com sends no Strict-Transport-Security header) changed.
 - [ ] Write producers for the observation kinds that lost their probe (follow-up tickets).
 
 ## Status
 
-in progress (Priority: **P0**). Source: master reconciliation, 2026-10-06.
+implemented (local), PR #118 (Priority: **P0**). Source: master reconciliation, 2026-10-06.
