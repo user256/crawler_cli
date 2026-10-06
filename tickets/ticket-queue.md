@@ -14,7 +14,12 @@ Ticket files remain the source of truth for scope and DoD.
   a saved audit JSON; the rest are Pending with the reason. Detector batches
   **264** (stored HTML), **265** (site profile) and **266** (render, probes,
   external) move the remainder. Numbers 258–262 are skipped because they are
-  in git history. Next unreserved ticket number is **267**.
+  in git history. Tickets 267–370 are the question-level queue; next unreserved
+  ticket number is **371**.
+- The question-level queue is assigned to three agents by implementation seam:
+  [Stream A: crawl and HTTP](./technical-audit-stream-a-crawl-http-2026-10-06.md),
+  [Stream B: page indexability](./technical-audit-stream-b-page-indexability-2026-10-06.md)
+  and [Stream C: render, probes and supplied evidence](./technical-audit-stream-c-render-probe-evidence-2026-10-06.md).
 
 ### Current position (2026-09-28, Rainbet audit delivery)
 
@@ -807,6 +812,7 @@ existing-ticket reuse and review finding coverage.
 - `264` `proposed` [Stored-HTML detectors for the question runner](./ticket-264-question-detectors-stored-html.md) — **P1, depends on 263:** 17 HTML-only detectors plus answerers over contract checks as their collectors land.
 - `265` `proposed` [Site-profile detectors for the question runner](./ticket-265-question-detectors-site-profile.md) — **P1, depends on 263:** template/hub/parameter/affiliate/host/AI-policy rules; Rainbet profile first.
 - `266` `proposed` [Render, probe and external detectors for the question runner](./ticket-266-question-detectors-render-probe-external.md) — **P2, depends on 263:** rendered, mobile, probe and third-party evidence; heuristics capped at Needs validation.
+- Tickets **267–370** create one local implementation record for every Questions-tab row, Q1–Q104. See [the question-level implementation queue](./technical-audit-question-implementation-queue-2026-10-06.md). It refines detector batches 264–266; the 11 existing answerers are marked implemented locally (four partial, three without tests) and the rest are proposed; priorities follow the registry. Q104 is a supplied-evidence/manual workflow, not a crawler-only detector. Next unreserved ticket number is **371**.
 
 Deferred lanes remain below.
 

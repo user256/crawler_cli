@@ -14,11 +14,11 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 | Group | Answerable | Ticket policy | Questions |
 |---|---|---|---|
 | crawl | Yes | on Issue, at the entry's classification | Q1, Q3, Q4, Q13, Q14, Q82, Q93, Q8, Q9, Q10, Q11, Q12, Q15, Q16, Q41, Q53, Q71, Q73, Q80, Q84, Q85, Q87, Q94, Q70, Q88, Q89, Q2, Q5, Q6, Q7, Q22, Q25, Q28, Q39, Q42, Q72, Q74, Q76, Q79, Q91, Q92, Q63 |
-| crawl+profile | Yes, with site profile | on Issue; Pending when a profile key is missing | Q23, Q40, Q44, Q46, Q48, Q49, Q75, Q20, Q21, Q36, Q37, Q57, Q59, Q62, Q78, Q24, Q34, Q27, Q43, Q77, Q96 |
+| crawl+profile | Yes, with site profile | on Issue; Pending when a profile key is missing | Q97, Q23, Q40, Q44, Q46, Q48, Q49, Q75, Q98, Q100, Q20, Q21, Q36, Q37, Q57, Q59, Q62, Q78, Q24, Q34, Q101, Q27, Q43, Q77, Q102, Q103, Q96 |
 | best-practice | Yes | on Issue, classification capped at Improvement or Warning, priority at most Medium | Q45, Q17, Q47, Q51, Q54, Q55, Q56, Q58, Q60, Q83, Q64, Q65, Q66, Q67, Q86 |
-| heuristic | Partly | never automatic; status is at most Needs validation until a person confirms | Q38, Q95, Q32, Q52, Q61, Q35, Q33, Q29, Q68, Q69 |
+| heuristic | Partly | never automatic; status is at most Needs validation until a person confirms | Q38, Q95, Q99, Q32, Q52, Q61, Q35, Q33, Q29, Q68, Q69 |
 | supplied-input | With supplied data | on Issue when the input is supplied; otherwise Pending | Q90, Q30, Q19 |
-| external | No | never; always Pending with the tool needed | Q18, Q31, Q50 |
+| external | No | never; always Pending with the tool needed | Q18, Q31, Q50, Q104 |
 | run-gate | Yes | never; a failure downgrades every other crawl answer to Needs validation | Q26, Q81 |
 
 ## Crawlability
@@ -34,6 +34,18 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Evidence owners: `robots-controls`, `critical-resource-impact`
 - Note: Resource-level blocking needs a rendered crawl (--js); without it only HTML URLs are tested.
 - Original: Are any important paths blocked by robots.txt, including paths needed to build or populate page copy?
+
+### Q97 · Robots.txt
+
+**Does any discovered URL fail its approved crawl, noindex or authentication policy?**
+
+- Issue if: A URL designated for crawl blocking is allowed by robots.txt; a public URL designated for noindex lacks the directive or is Disallowed; or a protected path exposes its content without authentication.
+- Why it matters: Uncontrolled search, account, preview and other low-value URL paths can waste crawl capacity and expose pages not intended for discovery. robots.txt alone does not prevent a linked URL appearing in search.
+- Group: crawl+profile · Ticket: Warning / Medium · Unit: URLs
+- Needs: crawl, robots, probes, site-profile
+- Evidence owners: `robots-controls`, `indexability-segmentation`, new detector `unwanted-path-policy`
+- Note: Planned: no dedicated answerer yet. Requires an approved per-path policy, with distinct crawl-block, public-noindex and authentication routes. A saved crawl cannot establish undiscovered paths or live authentication; missing inputs remain Pending.
+- Original: Are there any paths we should be blocking via robots.txt such as /search /admin or other paths found in the crawl we wouldn't want indexed?
 
 ### Q3 · Sitemaps
 
@@ -264,6 +276,42 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Evidence owners: `mobile-rendering-parity`, new detector `interstitial-coverage`
 - Note: Legally required cookie and age gates are allowed if they are reasonably sized and the content remains in the DOM.
 - Original: Do mobile cookie consent dialogs, age gates, or promotional overlays comply with Google's intrusive interstitial guidelines by keeping underlying primary content crawlable?
+
+### Q98 · Robots.txt
+
+**Does a host's robots.txt fail its approved availability, syntax, sitemap-declaration or broad-rule policy?**
+
+- Issue if: For a host required to publish robots.txt, the response is not a usable 200 file, a recognised directive is malformed, an approved sitemap declaration is missing or a broad Disallow rule violates the approved policy.
+- Why it matters: An unavailable, malformed or over-broad robots.txt file can stop intended crawling and hide the sitemap routes that guide controlled discovery.
+- Group: crawl+profile · Ticket: Warning / Medium · Unit: hosts
+- Needs: crawl, robots, sitemaps, site-profile
+- Evidence owners: `robots-controls`, `sitemap-integrity`, new detector `robots-file-policy`
+- Note: Planned: no dedicated answerer yet. Needs raw robots response/body and approved host rules and sitemap declarations. Absence of robots.txt or of a Sitemap directive is not inherently a crawl failure; report policy non-compliance separately from observed blocking.
+- Original: Does robots.txt return 200, parse correctly, declare the intended XML sitemap index and avoid broad accidental Disallow rules?
+
+### Q99 · Directory and file exposure
+
+**Does any tested document, upload or asset directory expose an unintended generated file listing?**
+
+- Issue if: A scoped directory probe returns a generated file listing that exposes file or child-directory links and is not an approved public directory.
+- Why it matters: Browsable directory listings can expose unpublished files, create low-value crawl paths and allow documents to be enumerated outside an intentional content journey.
+- Group: heuristic · Ticket: Warning / Medium · Unit: directories
+- Needs: crawl, stored-html, probes, site-profile
+- Evidence owners: new detector `directory-listing-exposure`
+- Note: Planned: no dedicated answerer yet. Listing fingerprints are candidates for manual confirmation against approved directories. Only scoped directory responses are tested; disabling listings does not prove that sensitive files cannot be fetched directly. Public document discovery belongs to Q100.
+- Original: Are public document, upload and asset directories protected against unintended directory listings (auto-index) and file enumeration?
+
+### Q100 · Document discovery
+
+**Does any document in the approved search inventory lack its designated crawlable HTML hub link or required sitemap entry?**
+
+- Issue if: An approved inventory document has no crawlable link from its designated HTML hub, or is marked for sitemap inclusion but is absent from its designated XML sitemap.
+- Why it matters: Unlinked documents can be discovered inconsistently, while documents without a curated hub give users and crawlers little context about their purpose or relationship.
+- Group: crawl+profile · Ticket: Warning / Medium · Unit: documents
+- Needs: crawl, sitemaps, site-profile
+- Evidence owners: `nonhtml-search-assets`, `discovery-source-provenance`, new detector `document-discovery-inventory`
+- Note: Planned: no dedicated answerer yet. Requires an approved document inventory naming each HTML hub, whether sitemap inclusion is required, and the designated sitemap. Incomplete HTML, document or sitemap coverage cannot establish a Healthy result.
+- Original: Are documents intended to appear in search linked from crawlable HTML hubs and included in the relevant XML sitemap?
 
 ## Indexability
 
@@ -807,6 +855,18 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Sheet said answerable: No (changed)
 - Original: Does the web server support conditional HTTP requests (ETag / If-None-Match and Last-Modified / If-Modified-Since) returning 304 Not Modified to optimize search crawler efficiency?
 
+### Q101 · Crawl traps
+
+**Does any discovered navigation-state family exceed its approved finite URL, date-range or traversal-depth limit?**
+
+- Issue if: A calendar, pagination, sort or filter family exceeds its documented URL-count, date-range or traversal-depth bound, or exposes a next-state link beyond that bound.
+- Why it matters: Unbounded navigation states can create near-duplicate URL populations that consume crawl capacity without adding useful indexable content.
+- Group: crawl+profile · Ticket: Warning / Medium · Unit: URL families
+- Needs: crawl, site-profile
+- Evidence owners: `crawl-waste-url-families`, `parameter-and-faceted-controls`, new detector `bounded-navigation-states`
+- Note: Planned: no dedicated answerer yet. Requires approved finite limits for each family; a finite saved crawl cannot prove an infinite URL space. Report observed bound violations, qualify partial coverage and never traverse indefinitely.
+- Original: Do calendars, pagination, sort orders, filters and other state combinations create uncontrolled crawl paths or infinite URL spaces?
+
 ## Maintenance (broken links etc.)
 
 ### Q2 · URL variants
@@ -1046,6 +1106,42 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Needs: stored-html
 - Evidence owners: `nonproduction-https`, new detector `insecure-form-actions`
 - Original: Do interactive HTML <form action="..."> attributes submit exclusively to secure https:// URLs to avoid browser mixed-content warnings?
+
+### Q102 · Preview and draft exposure
+
+**Does any preview, draft, admin or CMS utility URL violate its approved access or indexing policy?**
+
+- Issue if: An unauthenticated request exposes protected content, or an intentionally public utility URL lacks its required noindex or crawl control; a public noindex directive is not readable because robots.txt blocks the URL.
+- Why it matters: Public preview and utility URLs can expose unfinished content, create duplicate pages and introduce low-value or sensitive crawl paths.
+- Group: crawl+profile · Ticket: Warning / High · Unit: URLs
+- Needs: crawl, probes, robots, site-profile
+- Evidence owners: `robots-controls`, `indexability-segmentation`, new detector `utility-path-access-policy`
+- Note: Planned: no dedicated answerer yet. Needs approved protected/public path classes and scoped unauthenticated probes. A login page returning 200 is not by itself evidence of exposed protected content; crawl-only absence is not proof of protection.
+- Original: Are preview, draft, admin and CMS utility paths protected from public access and governed correctly for crawling and indexing?
+
+### Q103 · Redirect integrity
+
+**Does any internal, sitemap or approved legacy URL violate its direct-destination or permanent-redirect policy?**
+
+- Issue if: An internal or sitemap URL redirects; or an approved legacy redirect loops, takes more than one hop, uses a temporary response where a permanent move is required, or fails to reach its approved canonical destination.
+- Why it matters: Redirect chains and loops waste crawl capacity, delay users and weaken consolidation signals to the intended canonical URL.
+- Group: crawl+profile · Ticket: Warning / Medium · Unit: URLs
+- Needs: crawl, sitemaps, probes, site-profile
+- Evidence owners: `response-status-and-redirect-history`, `internal-link-targets`, new detector `redirect-policy-integrity`
+- Note: Planned: no dedicated answerer yet. Needs full redirect histories, internal and sitemap membership, and approved legacy targets. Temporary redirects are not inherently defects; evaluate the approved intent. Missing history or incomplete populations remain Pending or qualified.
+- Original: Do internal, sitemap and priority legacy URLs avoid redirect chains, loops and temporary redirects where a permanent destination is intended?
+
+### Q104 · Search-result host hygiene
+
+**Does Google Search show any unapproved alternate-host URL in the reviewed performance data or search results?**
+
+- Issue if: A dated GSC domain-property export records impressions for an unapproved hostname during the agreed review period, or a documented SERP check finds an unapproved alternate-host URL.
+- Why it matters: Alternate-host results can divide visibility, expose non-production content and send users to the wrong version of the site even when the production host is healthy.
+- Group: external · Ticket: Warning / Medium · Unit: URLs
+- Needs: gsc, external-api
+- Evidence owners: outside crawler_cli
+- Note: Manual review required: segment GSC page URLs by hostname and record the date range, permitted hosts, queries, location and review date for SERP checks. No impressions or site: matches does not prove universal absence from Google's index. Always Pending in the automatic runner; no automatic ticket.
+- Original: Do Google search results rank staging, development, cache, preview or other alternate-host versions instead of the intended production URLs?
 
 ## Performance
 

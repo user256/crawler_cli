@@ -27,7 +27,7 @@ DOC = Path(__file__).parents[1] / "docs" / "technical-audit-questions.md"
 def test_registry_covers_every_template_question_once() -> None:
     registry = load_question_registry()
     ids = [entry["id"] for entry in registry["questions"]]
-    assert sorted(ids, key=lambda qid: int(qid[1:])) == [f"Q{number}" for number in range(1, 97)]
+    assert sorted(ids, key=lambda qid: int(qid[1:])) == [f"Q{number}" for number in range(1, 105)]
 
 
 def test_example_site_profile_satisfies_every_profile_key() -> None:
@@ -162,7 +162,7 @@ def test_sheet_tables_link_questions_to_tickets_and_data_tabs() -> None:
     tables = questions_sheet_tables(audit, registry, answers, tickets)
 
     questions = {row[1]: row for row in tables["Questions"][1:]}
-    assert len(questions) == 96
+    assert len(questions) == 104
     assert questions["Q16"][4:6] == ["Yes", "Issue"]
     assert questions["Q16"][11] == "Q16 Structured data" and "Q16 Structured data" in tables
     assert tables["Tickets"][int(questions["Q16"][12])][0].startswith("Q16 Structured data: 1 pages")
@@ -190,7 +190,23 @@ def test_cli_writes_answers_without_database(tmp_path: Path) -> None:
 
     assert _run_technical_audit_questions(args) == 0
     payload = json.loads(out.read_text(encoding="utf-8"))
-    assert len(payload["answers"]) == 96 and payload["crawl_run_id"] == "run-1"
+    assert len(payload["answers"]) == 104 and payload["crawl_run_id"] == "run-1"
+
+
+def test_new_questions_remain_pending_without_dedicated_answerers() -> None:
+    registry = load_question_registry()
+    audit = _audit()
+    answers = answer_questions(audit, registry)
+    by_id = _by_id(answers)
+    for number in range(97, 105):
+        answer = by_id[f"Q{number}"]
+        assert answer["status"] == "Pending"
+        assert answer["answer"] == "" and answer["affected_count"] is None
+        assert answer["rows"] == [] and answer["ticket"] is False
+        reason = "Outside crawler_cli" if number == 104 else "Not answered by the runner yet"
+        assert answer["notes"][0].startswith(reason)
+    tickets = question_ticket_rows(audit, registry, answers, load_ticket_language())
+    assert not {ticket["question_id"] for ticket in tickets} & {f"Q{n}" for n in range(97, 105)}
 
 
 def test_ticket_percentages_survive_thousands_separated_denominators() -> None:

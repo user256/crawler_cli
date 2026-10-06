@@ -92,6 +92,36 @@
       "sheet_answerable_was": null
     },
     {
+      "id": "Q97",
+      "theme": "Crawlability",
+      "area": "Robots.txt",
+      "original_question": "Are there any paths we should be blocking via robots.txt such as /search /admin or other paths found in the crawl we wouldn't want indexed?",
+      "question": "Does any discovered URL fail its approved crawl, noindex or authentication policy?",
+      "issue_if": "A URL designated for crawl blocking is allowed by robots.txt; a public URL designated for noindex lacks the directive or is Disallowed; or a protected path exposes its content without authentication.",
+      "unit": "URLs",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "robots",
+        "probes",
+        "site-profile"
+      ],
+      "checks": [
+        "robots-controls",
+        "indexability-segmentation"
+      ],
+      "new_detector": "unwanted-path-policy",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Uncontrolled search, account, preview and other low-value URL paths can waste crawl capacity and expose pages not intended for discovery. robots.txt alone does not prevent a linked URL appearing in search.",
+      "note": "Planned: no dedicated answerer yet. Requires an approved per-path policy, with distinct crawl-block, public-noindex and authentication routes. A saved crawl cannot establish undiscovered paths or live authentication; missing inputs remain Pending.",
+      "sheet_answerable_was": null
+    },
+    {
       "id": "Q3",
       "theme": "Crawlability",
       "area": "Sitemaps",
@@ -623,6 +653,92 @@
       "priority": "Medium",
       "why": "Intrusive interstitials count against page experience on mobile, and a gate that removes the content from the DOM stops it being indexed at all.",
       "note": "Legally required cookie and age gates are allowed if they are reasonably sized and the content remains in the DOM.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q98",
+      "theme": "Crawlability",
+      "area": "Robots.txt",
+      "original_question": "Does robots.txt return 200, parse correctly, declare the intended XML sitemap index and avoid broad accidental Disallow rules?",
+      "question": "Does a host's robots.txt fail its approved availability, syntax, sitemap-declaration or broad-rule policy?",
+      "issue_if": "For a host required to publish robots.txt, the response is not a usable 200 file, a recognised directive is malformed, an approved sitemap declaration is missing or a broad Disallow rule violates the approved policy.",
+      "unit": "hosts",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "robots",
+        "sitemaps",
+        "site-profile"
+      ],
+      "checks": [
+        "robots-controls",
+        "sitemap-integrity"
+      ],
+      "new_detector": "robots-file-policy",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "An unavailable, malformed or over-broad robots.txt file can stop intended crawling and hide the sitemap routes that guide controlled discovery.",
+      "note": "Planned: no dedicated answerer yet. Needs raw robots response/body and approved host rules and sitemap declarations. Absence of robots.txt or of a Sitemap directive is not inherently a crawl failure; report policy non-compliance separately from observed blocking.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q99",
+      "theme": "Crawlability",
+      "area": "Directory and file exposure",
+      "original_question": "Are public document, upload and asset directories protected against unintended directory listings (auto-index) and file enumeration?",
+      "question": "Does any tested document, upload or asset directory expose an unintended generated file listing?",
+      "issue_if": "A scoped directory probe returns a generated file listing that exposes file or child-directory links and is not an approved public directory.",
+      "unit": "directories",
+      "group": "heuristic",
+      "requires": [
+        "crawl",
+        "stored-html",
+        "probes",
+        "site-profile"
+      ],
+      "checks": [],
+      "new_detector": "directory-listing-exposure",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Browsable directory listings can expose unpublished files, create low-value crawl paths and allow documents to be enumerated outside an intentional content journey.",
+      "note": "Planned: no dedicated answerer yet. Listing fingerprints are candidates for manual confirmation against approved directories. Only scoped directory responses are tested; disabling listings does not prove that sensitive files cannot be fetched directly. Public document discovery belongs to Q100.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q100",
+      "theme": "Crawlability",
+      "area": "Document discovery",
+      "original_question": "Are documents intended to appear in search linked from crawlable HTML hubs and included in the relevant XML sitemap?",
+      "question": "Does any document in the approved search inventory lack its designated crawlable HTML hub link or required sitemap entry?",
+      "issue_if": "An approved inventory document has no crawlable link from its designated HTML hub, or is marked for sitemap inclusion but is absent from its designated XML sitemap.",
+      "unit": "documents",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "sitemaps",
+        "site-profile"
+      ],
+      "checks": [
+        "nonhtml-search-assets",
+        "discovery-source-provenance"
+      ],
+      "new_detector": "document-discovery-inventory",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Unlinked documents can be discovered inconsistently, while documents without a curated hub give users and crawlers little context about their purpose or relationship.",
+      "note": "Planned: no dedicated answerer yet. Requires an approved document inventory naming each HTML hub, whether sitemap inclusion is required, and the designated sitemap. Incomplete HTML, document or sitemap coverage cannot establish a Healthy result.",
       "sheet_answerable_was": null
     },
     {
@@ -1880,6 +1996,34 @@
       "sheet_answerable_was": "No"
     },
     {
+      "id": "Q101",
+      "theme": "Crawl Budget",
+      "area": "Crawl traps",
+      "original_question": "Do calendars, pagination, sort orders, filters and other state combinations create uncontrolled crawl paths or infinite URL spaces?",
+      "question": "Does any discovered navigation-state family exceed its approved finite URL, date-range or traversal-depth limit?",
+      "issue_if": "A calendar, pagination, sort or filter family exceeds its documented URL-count, date-range or traversal-depth bound, or exposes a next-state link beyond that bound.",
+      "unit": "URL families",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "crawl-waste-url-families",
+        "parameter-and-faceted-controls"
+      ],
+      "new_detector": "bounded-navigation-states",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Unbounded navigation states can create near-duplicate URL populations that consume crawl capacity without adding useful indexable content.",
+      "note": "Planned: no dedicated answerer yet. Requires approved finite limits for each family; a finite saved crawl cannot prove an infinite URL space. Report observed bound violations, qualify partial coverage and never traverse indefinitely.",
+      "sheet_answerable_was": null
+    },
+    {
       "id": "Q2",
       "theme": "Maintenance (broken links etc.)",
       "area": "URL variants",
@@ -2415,6 +2559,91 @@
       "priority": "Medium",
       "why": "Browsers warn users on insecure form submissions, and the data goes over an unencrypted connection. This is a security issue before it is an SEO one.",
       "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q102",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Preview and draft exposure",
+      "original_question": "Are preview, draft, admin and CMS utility paths protected from public access and governed correctly for crawling and indexing?",
+      "question": "Does any preview, draft, admin or CMS utility URL violate its approved access or indexing policy?",
+      "issue_if": "An unauthenticated request exposes protected content, or an intentionally public utility URL lacks its required noindex or crawl control; a public noindex directive is not readable because robots.txt blocks the URL.",
+      "unit": "URLs",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "probes",
+        "robots",
+        "site-profile"
+      ],
+      "checks": [
+        "robots-controls",
+        "indexability-segmentation"
+      ],
+      "new_detector": "utility-path-access-policy",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "High",
+      "why": "Public preview and utility URLs can expose unfinished content, create duplicate pages and introduce low-value or sensitive crawl paths.",
+      "note": "Planned: no dedicated answerer yet. Needs approved protected/public path classes and scoped unauthenticated probes. A login page returning 200 is not by itself evidence of exposed protected content; crawl-only absence is not proof of protection.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q103",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Redirect integrity",
+      "original_question": "Do internal, sitemap and priority legacy URLs avoid redirect chains, loops and temporary redirects where a permanent destination is intended?",
+      "question": "Does any internal, sitemap or approved legacy URL violate its direct-destination or permanent-redirect policy?",
+      "issue_if": "An internal or sitemap URL redirects; or an approved legacy redirect loops, takes more than one hop, uses a temporary response where a permanent move is required, or fails to reach its approved canonical destination.",
+      "unit": "URLs",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "sitemaps",
+        "probes",
+        "site-profile"
+      ],
+      "checks": [
+        "response-status-and-redirect-history",
+        "internal-link-targets"
+      ],
+      "new_detector": "redirect-policy-integrity",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Redirect chains and loops waste crawl capacity, delay users and weaken consolidation signals to the intended canonical URL.",
+      "note": "Planned: no dedicated answerer yet. Needs full redirect histories, internal and sitemap membership, and approved legacy targets. Temporary redirects are not inherently defects; evaluate the approved intent. Missing history or incomplete populations remain Pending or qualified.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q104",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Search-result host hygiene",
+      "original_question": "Do Google search results rank staging, development, cache, preview or other alternate-host versions instead of the intended production URLs?",
+      "question": "Does Google Search show any unapproved alternate-host URL in the reviewed performance data or search results?",
+      "issue_if": "A dated GSC domain-property export records impressions for an unapproved hostname during the agreed review period, or a documented SERP check finds an unapproved alternate-host URL.",
+      "unit": "URLs",
+      "group": "external",
+      "requires": [
+        "gsc",
+        "external-api"
+      ],
+      "checks": [],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Alternate-host results can divide visibility, expose non-production content and send users to the wrong version of the site even when the production host is healthy.",
+      "note": "Manual review required: segment GSC page URLs by hostname and record the date range, permitted hosts, queries, location and review date for SERP checks. No impressions or site: matches does not prove universal absence from Google's index. Always Pending in the automatic runner; no automatic ticket.",
       "sheet_answerable_was": null
     },
     {
