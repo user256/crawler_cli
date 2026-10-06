@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 import asyncpg
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -2321,6 +2322,8 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return metadata_locale_report(await reports.metadata_locale_inventory())
     if name == "canonical-hreflang-inventory":
         return canonical_hreflang_report(await reports.canonical_hreflang_inventory())
+    if name == "accept-language-probes":
+        return await reports.accept_language_probes()
     raise ValueError(f"unknown report: {name}")
 
 
@@ -2636,7 +2639,19 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
     if args.publish_google_sheets and not args.google_sheets_template:
         print("Error: --publish-google-sheets requires --google-sheets-template", file=sys.stderr)
         return EXIT_VALIDATION
-    if not args.publish_google_sheets and any(
+    if args.resume_ticket_register and not args.publish_ticket_register:
+        print("Error: --resume-ticket-register requires --publish-ticket-register", file=sys.stderr)
+        return EXIT_VALIDATION
+    if not args.publish_ticket_register and any(
+        (
+            args.ticket_register_title,
+            args.ticket_register_folder,
+            args.ticket_register_receipt,
+        )
+    ):
+        print("Error: ticket-register options require --publish-ticket-register", file=sys.stderr)
+        return EXIT_VALIDATION
+    if not (args.publish_google_sheets or args.publish_ticket_register) and any(
         (
             args.google_sheets_template,
             args.google_sheets_folder,
@@ -2739,7 +2754,6 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 "rendered-mobile-resources",
                 "conditional-get-probes",
                 "ai-governance",
-                "accept-language-probes",
             }:
                 continue
             required_capabilities = capabilities_by_report.get(name, ())
@@ -2952,7 +2966,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 )
             )
             try:
-                evidence["accept-language-probes"] = await collect_accept_language_evidence(
+                language_evidence = await collect_accept_language_evidence(
                     language_engine,
                     language_targets,
                     eligible_population=language_population,
@@ -2960,6 +2974,10 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 )
             finally:
                 await language_engine.close()
+            await store.persist_language_probe_evidence(
+                await reports._run_id(), language_evidence, session_id=str(uuid.uuid4())
+            )
+            evidence["accept-language-probes"] = await reports.accept_language_probes()
         if args.probe_conditional_gets:
             if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
                 print(
@@ -3367,6 +3385,34 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             return EXIT_VALIDATION
         print(f"Published technical audit to {sheet_url}")
         print(f"Publication receipt: {receipt_path}")
+
+    if args.publish_ticket_register:
+        from .google_sheets import GoogleSheetsTicketRegisterPublisher, credential_path, google_services
+
+        receipt_path = args.ticket_register_receipt or f"{args.out}.ticket-register-receipt.json"
+        try:
+            credentials = credential_path(args.google_sheets_credentials)
+            drive, sheets = google_services(credentials)
+            sheet_url = GoogleSheetsTicketRegisterPublisher(drive, sheets).publish(
+                audit=audit,
+                title=args.ticket_register_title or f"Technical SEO audit tickets {run_id}",
+                folder_id=args.ticket_register_folder,
+                receipt_path=receipt_path,
+                resume=args.resume_ticket_register,
+            )
+        except (ValueError, RuntimeError, OSError) as exc:
+            print(f"Ticket-register publication failed: {exc}", file=sys.stderr)
+            return EXIT_VALIDATION
+        except Exception as exc:
+            status = getattr(getattr(exc, "resp", None), "status", None)
+            status_text = f" (HTTP {status})" if status else ""
+            print(
+                f"Ticket-register publication failed: {type(exc).__name__}{status_text}; receipt: {receipt_path}",
+                file=sys.stderr,
+            )
+            return EXIT_VALIDATION
+        print(f"Published client ticket register to {sheet_url}")
+        print(f"Ticket-register publication receipt: {receipt_path}")
 
     return EXIT_SUCCESS
 
@@ -5014,11 +5060,26 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Explicitly copy and populate the selected compatible v2 Google Sheets template",
     )
+    audit_parser.add_argument(
+        "--publish-ticket-register",
+        action="store_true",
+        help="Explicitly copy the standard client ticket register and populate evidenced remediation rows",
+    )
     audit_parser.add_argument("--google-sheets-template", help="Google Sheets URL or ID for a compatible v2 template")
     audit_parser.add_argument("--google-sheets-title", help="Title for the copied audit workbook")
     audit_parser.add_argument("--google-sheets-folder", help="Destination Google Drive folder ID")
     audit_parser.add_argument("--google-sheets-credentials", help="Optional service-account JSON credentials file")
     audit_parser.add_argument("--google-sheets-receipt", help="Local publication receipt path (defaults beside --out)")
+    audit_parser.add_argument("--ticket-register-title", help="Title for the copied client ticket register")
+    audit_parser.add_argument(
+        "--ticket-register-folder", help="Destination Google Drive folder ID for the ticket register"
+    )
+    audit_parser.add_argument("--ticket-register-receipt", help="Local ticket-register publication receipt path")
+    audit_parser.add_argument(
+        "--resume-ticket-register",
+        action="store_true",
+        help="Resume the ticket-register copy recorded in --ticket-register-receipt",
+    )
     audit_parser.add_argument(
         "--resume-google-sheets",
         action="store_true",

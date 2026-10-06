@@ -384,6 +384,30 @@ SCHEMA_STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_page_run_snapshots_run_status
     ON page_run_snapshots(run_id, final_status_code)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS language_probe_sessions (
+        session_id TEXT PRIMARY KEY,
+        session_order BIGSERIAL UNIQUE,
+        run_id TEXT NOT NULL REFERENCES crawl_runs(run_id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        record_count INTEGER NOT NULL,
+        coverage_json JSONB NOT NULL DEFAULT '{}'::jsonb
+    )
+    """,
+    """ALTER TABLE language_probe_sessions ADD COLUMN IF NOT EXISTS session_order BIGSERIAL""",
+    """
+    CREATE TABLE IF NOT EXISTS language_probe_records (
+        session_id TEXT NOT NULL REFERENCES language_probe_sessions(session_id) ON DELETE CASCADE,
+        record_order INTEGER NOT NULL,
+        record_type TEXT NOT NULL,
+        evidence_json JSONB NOT NULL,
+        PRIMARY KEY (session_id, record_order)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_language_probe_sessions_run_created
+    ON language_probe_sessions(run_id, created_at DESC)
+    """,
     # Ticket 160: render parity is a live, same-navigation observation, so
     # retain only its bounded, already-redacted evidence. It is deliberately
     # not a second HTML store. Tying a session to its source crawl run makes
@@ -1105,6 +1129,8 @@ SCHEMA_STATEMENTS.extend(SECURITY_SCHEMA_STATEMENTS)
 
 # Tables owned by crawler_cli (used for truncate / row-count summaries).
 CRAWL_TABLES: tuple[str, ...] = SECURITY_TABLES + (
+    "language_probe_records",
+    "language_probe_sessions",
     "render_comparison_findings",
     "render_comparison_results",
     "render_comparison_sessions",
@@ -1456,6 +1482,14 @@ class MemoryStore:
         return queued, pending, done
 
 
+def _language_probe_evidence_row(value: object) -> dict[str, object]:
+    """Decode one persisted evidence record; asyncpg returns JSONB as text unless a codec is set."""
+    decoded = json.loads(value) if isinstance(value, (str, bytes)) else value
+    if not isinstance(decoded, dict):
+        raise ValueError("language probe evidence_json is not a JSON object")
+    return dict(decoded)
+
+
 class AsyncpgStore:
     def __init__(
         self,
@@ -1697,6 +1731,68 @@ class AsyncpgStore:
         if not rows:
             raise ValueError("no crawl runs found")
         raise ValueError("multiple crawl runs exist; pass --crawl-run-id to select one")
+
+    async def persist_language_probe_evidence(
+        self, run_id: str, records: list[dict[str, object]], *, session_id: str
+    ) -> None:
+        """Persist a bounded language-probe session without touching crawl state."""
+        await self.connect()
+        assert self.pool is not None
+        coverage = next((row for row in records if row.get("record_type") == "coverage"), {})
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                exists = await conn.fetchval("SELECT 1 FROM crawl_runs WHERE run_id = $1", run_id)
+                if exists is None:
+                    raise ValueError(f"crawl run not found: {run_id}")
+                await conn.execute(
+                    """
+                    INSERT INTO language_probe_sessions (session_id, run_id, created_at, record_count, coverage_json)
+                    VALUES ($1, $2, EXTRACT(EPOCH FROM NOW())::INTEGER, $3, $4::jsonb)
+                    """,
+                    session_id,
+                    run_id,
+                    len(records),
+                    json.dumps(coverage, sort_keys=True, default=str),
+                )
+                await conn.executemany(
+                    """
+                    INSERT INTO language_probe_records (session_id, record_order, record_type, evidence_json)
+                    VALUES ($1, $2, $3, $4::jsonb)
+                    """,
+                    [
+                        (
+                            session_id,
+                            order,
+                            str(record.get("record_type", "observation")),
+                            json.dumps(record, sort_keys=True, default=str),
+                        )
+                        for order, record in enumerate(records)
+                    ],
+                )
+
+    async def latest_language_probe_evidence(self, run_id: str) -> list[dict[str, object]]:
+        """Return the latest persisted session for exactly one crawl run."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn:
+            exists = await conn.fetchval("SELECT to_regclass('language_probe_sessions') IS NOT NULL")
+            if not exists:
+                return []
+            rows = await conn.fetch(
+                """
+                SELECT record.evidence_json
+                FROM language_probe_sessions session
+                JOIN language_probe_records record ON record.session_id = session.session_id
+                WHERE session.run_id = $1
+                  AND session.session_id = (
+                    SELECT session_id FROM language_probe_sessions
+                    WHERE run_id = $1 ORDER BY session_order DESC LIMIT 1
+                  )
+                ORDER BY record.record_order
+                """,
+                run_id,
+            )
+        return [_language_probe_evidence_row(row["evidence_json"]) for row in rows]
 
     async def fetch_render_comparison_candidates(self, *, run_id: str) -> list[RenderComparisonCandidate]:
         """Return only stored, successful HTML snapshots from one crawl run.

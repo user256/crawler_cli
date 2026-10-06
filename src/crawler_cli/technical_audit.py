@@ -30,9 +30,11 @@ from .performance_audit import (
     performance_inventory_report,
 )
 from .transport_security import transport_security_report
+from .technical_audit_contract import TECHNICAL_AUDIT_CHECK_CONTRACT, project_v3_controls
+from .manual_review_questions import manual_review_answer_register
 
 
-TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/2"
+TECHNICAL_AUDIT_SCHEMA_VERSION = "crawler-cli/technical-audit/3"
 TECHNICAL_AUDIT_RULESET_VERSION = "technical-audit-rules/3"
 
 # The report names are run-scoped and have no dependency on a changing live
@@ -331,6 +333,22 @@ TECHNICAL_AUDIT_SKILL_REQUIREMENTS = (
         "owner_ticket": 199,
         "evidence": "analyst ticket register; the v2 publisher does not implement it",
         "test": "tests/test_technical_audit.py",
+    },
+    {
+        "id": "deterministic-ticket-language",
+        "section": "Deterministic ticket language",
+        "check_id": "sheets-output-contract",
+        "requirements": [
+            "keep the client ticket mapping in the same ordered control contract as the runtime audit",
+            "copy the source workbook before writing ticket rows",
+            "write only the declared ticket-register fields and verify the written values",
+            "include inline URL evidence in client-facing remediation rows",
+            "withhold partial, candidate and unqualified rows from remediation tickets",
+        ],
+        "state": "implemented_conditional",
+        "owner_ticket": 199,
+        "evidence": "versioned ticket-language mapping, copied workbook receipt and read-back",
+        "test": "tests/test_technical_audit_tickets.py",
     },
     {
         "id": "fetching-rules",
@@ -905,8 +923,9 @@ TECHNICAL_AUDIT_SKILL_SECTION_DIGESTS = {
     "Conditional Mobile and Non-HTML Checks": "fa308c6b4274c63bb048e0c93a0b93ec244dffac281e2f0a05fbe444753f52d8",
     "Conditional Requests and 304 Rechecks": "f16221988faf291c29d654d6820ecd73ae7e1615d67e0db5f33c703d394bc091",
     "Crawl Integrity": "a6dbeeb0703aeb85633fff3ef9950da7aca861d5984d4a46154d4a5043ddfffe",
+    "Deterministic ticket language": "2d3312890ba3cdbc80cffddbb98c3dc9825796fd366de2b2f4dc8db2549b8f32",
     "Deterministic evidence bundle": "746ddb583ff7de4ccbed7a178868122d87a4019afe9f73b894d468dd14bc0a5e",
-    "Default remediation-ticket template": "bce0d1948cf1e91998fd3688dc53e9b6281011e9d7d0e1e8fe0e64befc272230",
+    "Default remediation-ticket template": "c95f8b0621a20c854c0d17eeefa0ca78e2ab5cfde910c09bc1f375269daa64a9",
     "Discovery-source integrity": "c9131c1fa6cc702a9d3bd8e6212132c471cd485d4e1d0f089c220c6d0e6cf38b",
     "Domain and URL Configuration": "a587c2d3576f610525d07a99d7dcd7888d8694fac708b297fd90c45ec452e297",
     "External-link integrity": "194db369fca02e9fb651b44f7ab465cecd028b5455e8ff3f5adfc2d0ff3850a8",
@@ -2091,8 +2110,32 @@ def build_technical_audit(
             qualification="analyst_only",
             theme="AI",
         ),
+        _check(
+            "external-link-rechecks",
+            "External link rechecks",
+            "External Link Rechecks",
+            [
+                {**row, "qualification": "bounded_external_link_sample"}
+                for row in external_link_rechecks
+                if row.get("record_type") == "observation" and row.get("state") in _EXTERNAL_LINK_FAILURE_STATES
+            ],
+            "finding",
+            "Bounded live rechecks of outbound destinations linked from the sample; only hard failures are findings. "
+            "Redirects, challenges, timeouts and untested targets stay in the recheck tab for review.",
+            available=bool(external_link_rechecks) and external_link_rechecks[0].get("record_type") == "coverage",
+            denominator=_optional_int(external_link_rechecks[0].get("attempted_target_count"))
+            if external_link_rechecks
+            else None,
+            completion_state=completion_state,
+            qualification="bounded_external_link_sample",
+        ),
     )
     for check in checks:
+        if check["id"] == "external-link-rechecks" and check["status"] == "pass":
+            coverage_state = external_link_rechecks[0].get("state") if external_link_rechecks else None
+            if coverage_state != "complete":
+                check["status"] = "partial"
+                check["qualification"] = "bounded_or_incomplete_external_link_recheck"
         if check["id"] == "near-duplicate-content" and not similarity_complete:
             check["status"] = "partial" if source_coverage["similarity-coverage"]["available"] else "unavailable"
             check["tested_count"] = _optional_int(similarity.get("sampled_population"))
@@ -2168,6 +2211,13 @@ def build_technical_audit(
                 check["status"] = "unavailable"
                 check["qualification"] = "no_validator_eligible_conditional_request"
 
+    # Keep the detector rows for diagnostic tabs and legacy integrations, but
+    # make the public check list the product contract used by the skill and the
+    # client-ticket language.  ``project_v3_controls`` never upgrades a
+    # detector candidate into a pass or a finding.
+    detector_checks = list(checks)
+    checks = project_v3_controls(detector_checks, run_context=context)
+
     audit_log = [
         *_indexability_actions(indexability_conflicts),
         *_tracking_actions(rows["tracking-parameter-links"]),
@@ -2175,12 +2225,12 @@ def build_technical_audit(
     ]
     audit_log = _aggregate_actions(audit_log)
     client_actions = _link_actions(confirmed_link_failures)
-    evidence_index = _evidence_index(checks)
+    evidence_index = _evidence_index(detector_checks)
     _bundle_action_evidence([*audit_log, *client_actions], evidence_index)
     unresolved_link_failures = [row for row in analyst_link_failures if row.get("recheck_state") not in {"recovered"}]
     checks_complete = all(
         check["status"] not in {"partial", "unavailable", "error"}
-        for check in checks
+        for check in detector_checks
         # Current robots/sitemap fetching is an explicit opt-in. Its absence
         # should remain visible in the coverage matrix without blocking
         # unrelated, current-validated actions from other checks.
@@ -2218,6 +2268,11 @@ def build_technical_audit(
             check["id"] == "performance-and-conditional-requests"
             and check["status"] in {"partial", "unavailable"}
             and conditional_coverage.get("state") in {"not_requested", "not_testable"}
+        )
+        # External-link rechecks are an explicit, bounded session; a run that
+        # never requested one is not an incomplete check.
+        and not (
+            check["id"] == "external-link-rechecks" and check["status"] == "unavailable" and not external_link_rechecks
         )
         # Transport-security evidence is an informational optimization check;
         # unobservable preload/OCSP criteria must not block client publication.
@@ -2296,7 +2351,8 @@ def build_technical_audit(
             "error",
             "no_observations",
         ],
-        "check_registry": [dict(item) for item in TECHNICAL_AUDIT_CHECK_REGISTRY],
+        "check_registry": [dict(item) for item in TECHNICAL_AUDIT_CHECK_CONTRACT],
+        "detector_registry": [dict(item) for item in TECHNICAL_AUDIT_CHECK_REGISTRY],
         "skill_requirements": [
             {
                 **dict(item),
@@ -2305,12 +2361,13 @@ def build_technical_audit(
             for item in TECHNICAL_AUDIT_SKILL_REQUIREMENTS
         ],
         "checks": list(checks),
+        "detector_checks": detector_checks,
         "audit_log": audit_log,
         "evidence_index": evidence_index,
         "recipient_projection": recipient_report_projection(
             crawl_run_id=crawl_run_id,
             run_context=context,
-            checks=checks,
+            checks=detector_checks,
             actions=publishable_actions,
             known_url_inventory=known_url_inventory,
             metadata_coverage=metadata_coverage,
@@ -2339,6 +2396,12 @@ def build_technical_audit(
             "blocked_reasons": publication_reasons,
             "client_actions": publishable_actions,
         },
+        "manual_review_answers": manual_review_answer_register(
+            checks,
+            collected_evidence=context.get("manual_review_evidence")
+            if isinstance(context.get("manual_review_evidence"), Mapping)
+            else None,
+        ),
         "manual_checks": _manual_checks(),
     }
 
@@ -2352,6 +2415,8 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
 
     checks = audit.get("checks", [])
     assert isinstance(checks, list)
+    detector_checks = audit.get("detector_checks", checks)
+    assert isinstance(detector_checks, list)
     raw_context = audit.get("run_context", {})
     context = raw_context if isinstance(raw_context, Mapping) else {}
     raw_gate = audit.get("client_publication_gate", {})
@@ -2372,7 +2437,7 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     projection = audit.get("recipient_projection", {})
     projection = projection if isinstance(projection, Mapping) else {}
     overview.extend([[str(row[0]), _sheet_value(row[1])] for row in projection.get("health_metrics", [])])
-    for check in checks:
+    for check in detector_checks:
         assert isinstance(check, Mapping)
         title = str(check["title"])
         overview.append([title, str(check["status"])])
@@ -2566,7 +2631,7 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     conditional_coverage = audit.get("conditional_get_coverage", {})
     conditional_coverage = conditional_coverage if isinstance(conditional_coverage, Mapping) else {}
     conditional_candidates: list[dict[str, object]] = []
-    for check in checks:
+    for check in detector_checks:
         if not isinstance(check, Mapping) or check.get("id") != "performance-and-conditional-requests":
             continue
         evidence = check.get("evidence", [])
@@ -2612,6 +2677,9 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     if isinstance(external_link_rows, list) and external_link_rows:
         tables["External Link Rechecks"] = _table(external_link_rows)
     return tables
+
+
+_EXTERNAL_LINK_FAILURE_STATES = frozenset({"http_failure", "dns_error", "tls_error", "transport_error"})
 
 
 def _check(

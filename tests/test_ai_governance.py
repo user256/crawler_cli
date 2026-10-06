@@ -312,7 +312,7 @@ async def test_technical_audit_surfaces_ai_findings_under_ai_theme():
 
     audit = build_technical_audit(crawl_run_id="run-1", reports=_audit_reports(rows), run_context=context)
 
-    check = next(item for item in audit["checks"] if item["id"] == "ai-crawler-governance")
+    check = next(item for item in audit["detector_checks"] if item["id"] == "ai-crawler-governance")
     assert check["theme"] == "AI"
     assert check["status"] == "finding"
     assert check["denominator"] == 12
@@ -347,7 +347,7 @@ def test_unrequested_ai_probe_is_unavailable_and_hidden_from_the_report():
     # tests/test_live_rechecks.py, whose ready-gate fixture has no AI rows.
     context = {"completion_state": "complete", "parsed_html_count": 1}
     without = build_technical_audit(crawl_run_id="run-1", reports=_audit_reports([]), run_context=context)
-    check = next(item for item in without["checks"] if item["id"] == "ai-crawler-governance")
+    check = next(item for item in without["detector_checks"] if item["id"] == "ai-crawler-governance")
 
     assert check["status"] == "unavailable"
     assert check["qualification"] == "requires_explicit_ai_governance_probe"
@@ -362,7 +362,7 @@ def test_incomplete_ai_probe_is_partial_not_pass():
         reports=_audit_reports(rows),
         run_context={"completion_state": "complete", "parsed_html_count": 1},
     )
-    check = next(item for item in audit["checks"] if item["id"] == "ai-crawler-governance")
+    check = next(item for item in audit["detector_checks"] if item["id"] == "ai-crawler-governance")
 
     assert check["status"] == "partial"
     assert check["qualification"] == "bounded_or_incomplete_ai_governance_probe"

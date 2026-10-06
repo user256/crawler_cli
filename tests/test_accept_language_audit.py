@@ -331,7 +331,7 @@ def _audit(reports: dict[str, list[dict[str, object]]]) -> dict[str, object]:
 @pytest.mark.asyncio
 async def test_audit_surfaces_accept_language_check_as_analyst_evidence():
     audit = _audit({})
-    check = next(item for item in audit["checks"] if item["id"] == "accept-language-variation")
+    check = next(item for item in audit["detector_checks"] if item["id"] == "accept-language-variation")
     assert check["status"] == "unavailable"
     assert check["qualification"] == "requires_explicit_accept_language_probe"
     # Not requested stays visible without gating publication; the ready-gate
@@ -344,7 +344,7 @@ async def test_audit_surfaces_accept_language_check_as_analyst_evidence():
 
     rows = await collect_accept_language_evidence(_FakeEngine(handler), ["https://example.com/"])
     audit = _audit({"accept-language-probes": rows})
-    check = next(item for item in audit["checks"] if item["id"] == "accept-language-variation")
+    check = next(item for item in audit["detector_checks"] if item["id"] == "accept-language-variation")
     assert check["status"] == "finding"
     assert check["denominator"] == 1
     assert {row["candidate_type"] for row in check["evidence"]} == {

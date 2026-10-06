@@ -210,7 +210,7 @@ def test_audit_surfaces_transport_evidence_without_blocking_publication():
         run_context={"completion_state": "complete", "parsed_html_count": 1},
     )
 
-    check = next(row for row in audit["checks"] if row["id"] == "transport-security")
+    check = next(row for row in audit["detector_checks"] if row["id"] == "transport-security")
     assert check["status"] == "finding"
     assert check["denominator"] == 1
     evidence = check["evidence"][0]
@@ -233,7 +233,7 @@ def test_transport_findings_do_not_block_an_otherwise_publishable_audit():
         live_rechecks={"https://example.test/failed": {"state": "persistent_server_error", "attempts": []}},
     )
 
-    check = next(row for row in audit["checks"] if row["id"] == "transport-security")
+    check = next(row for row in audit["detector_checks"] if row["id"] == "transport-security")
     assert check["status"] == "finding"
     assert audit["client_publication_gate"]["ready"] is True
     assert all(action.get("check_id") != "transport-security" for action in audit["audit_log"])

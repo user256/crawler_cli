@@ -40,6 +40,21 @@ class CrawlReports:
         """Resolve the selected report run without silently choosing one."""
         return await self.store.resolve_reporting_run_id(self.run_id)
 
+    async def accept_language_probes(self) -> list[dict[str, object]]:
+        """Return persisted language evidence or an explicit no-session state."""
+        rows = await self.store.latest_language_probe_evidence(await self._run_id())
+        if rows:
+            return rows
+        # Not a "coverage" record: the audit treats a coverage row as a probe that ran.
+        return [
+            {
+                "record_type": "not_recorded",
+                "state": "not_recorded",
+                "complete": False,
+                "qualification": "no_explicit_accept_language_probe_session_for_selected_run",
+            }
+        ]
+
     async def technical_audit_context(self) -> dict[str, object]:
         """Return scope, completion and extraction denominators for one run.
 

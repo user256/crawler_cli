@@ -97,9 +97,11 @@ def test_unknown_feature_and_recommendation_candidates_never_enter_client_action
             "schema_capabilities": {"schema_json": True},
         },
     )
-    feature_check = next(row for row in audit["checks"] if row["id"] == "feature-specific-structured-data")
+    feature_check = next(row for row in audit["detector_checks"] if row["id"] == "feature-specific-structured-data")
+    feature_control = next(row for row in audit["checks"] if row["id"] == "structured-data-feature-rules")
     assert feature_check["qualification"] == "analyst_only"
     assert feature_check["status"] == "pass"
+    assert feature_control["status"] != "finding"
     assert audit["client_publication_gate"]["client_actions"] == []
     assert any(
         row.get("candidate_type") == "google_feature_eligibility_not_evaluated"
