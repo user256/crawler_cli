@@ -73,8 +73,10 @@ def test_locale_folder_compares_primary_language_for_html_lang_and_self_hreflang
         html_lang="fr-FR",
         annotations=(HreflangAnnotation("de-DE", "/en-gb/page"),),
     )
+    # Another page declares English, so /en-gb/ is a locale folder of this site.
+    english = _page("/other", html_lang="en")
 
-    facts = hreflang_facts([page])
+    facts = hreflang_facts([page, english])
 
     assert [fact["kind"] for fact in facts] == [
         "locale-path-language-mismatch",
@@ -84,6 +86,14 @@ def test_locale_folder_compares_primary_language_for_html_lang_and_self_hreflang
         ("html_lang", "en"),
         ("self_hreflang", "en"),
     }
+
+
+def test_language_shaped_segments_are_not_locale_folders_unless_declared() -> None:
+    # "aml" (anti-money-laundering) looks like an ISO 639 code but no page declares it.
+    pages = [_page("/aml", html_lang="en"), _page("/faq", html_lang="en"), _page("/es/x", html_lang="en")]
+    facts = hreflang_facts([*pages, _page("/es/y", html_lang="es")])
+
+    assert [(fact["url"], fact["locale_folder"]) for fact in facts] == [(pages[2].url, "es")]
 
 
 def test_root_level_default_language_is_not_inferred_to_be_a_locale_failure() -> None:

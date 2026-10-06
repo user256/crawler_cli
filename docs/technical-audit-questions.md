@@ -330,8 +330,8 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Conflicting language signals make it unclear which locale a page targets. Google does not use html lang for targeting, but Bing and assistive tools do, and a mismatch almost always shows a template bug that also affects hreflang.
 - Group: crawl · Ticket: Warning / Medium · Unit: pages
 - Needs: crawl
-- Runner: answered today (locale-html-lang saved markup rows)
-- Evidence owners: `locale-html-lang`, `hreflang-html-http`
+- Runner: answered today (metadata-basics html lang markup rows)
+- Evidence owners: `metadata-basics`, `hreflang-html-http`
 - Original: Do the page hreflang and html lang declarations make sense and agree?
 
 ### Q9 · International
@@ -516,8 +516,8 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Mixed-language folders stop per-locale reporting in Search Console and make hreflang mapping and geotargeting error-prone.
 - Group: crawl · Ticket: Warning / Medium · Unit: pages
 - Needs: crawl
-- Runner: answered today (locale-html-lang locale-folder mismatches)
-- Evidence owners: `locale-html-lang`, new detector `locale-path-consistency`
+- Runner: answered today (hreflang-html-http locale-folder mismatches)
+- Evidence owners: `hreflang-html-http`, new detector `locale-path-consistency`
 - Note: A root-level default language is valid if it is consistent; the site profile can declare it.
 - Original: Do all localized pages reside in dedicated locale folders (e.g. /en/, /es/) rather than mixing languages under root directories?
 
@@ -1033,7 +1033,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Section-heading links usually point to the most important related pages. When they redirect or break, the link that matters most on the page passes the least.
 - Group: crawl · Ticket: Warning / Low · Unit: links
 - Needs: crawl
-- Runner: answered today (internal-link-targets error targets linked from an H2/H3)
+- Runner: answered today (internal-link-targets error, redirect and non-canonical targets linked from an H2/H3)
 - Evidence owners: `internal-link-targets`
 - Note: A subset of Q22 reported separately because it is usually a separate content fix.
 - Original: Do content headings (H2/H3) or section titles link to outdated, redirecting, or mismatched slugs rather than direct canonical destinations?

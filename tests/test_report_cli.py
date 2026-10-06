@@ -82,6 +82,30 @@ class FakeReports:
             }
         ]
 
+    async def stored_html_findings(self):
+        return []
+
+    async def duplicate_metadata(self):
+        return []
+
+    async def nonhtml_search_assets(self):
+        return []
+
+    async def hreflang_validation(self):
+        return []
+
+    async def semantic_html_facts(self):
+        return []
+
+    async def profile_indexability_pages(self):
+        return []
+
+    async def soft404_error_routes(self):
+        return []
+
+    async def discovery_source_provenance(self):
+        return []
+
     async def site_hub_pages(self, min_outlinks=5):
         self.calls.append(("hub-pages", {"min_outlinks": min_outlinks}))
         return [{"parent_url": "https://example.com/", "outlinks": 12}]

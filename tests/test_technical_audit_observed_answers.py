@@ -44,6 +44,10 @@ def _context(**overrides: object) -> dict[str, object]:
         "unparsed_html_count": 0,
         "challenged_count": 0,
         "frontier_pending": 0,
+        "rate_limited_count": 0,
+        "ttfb_sample_count": 100,
+        "ttfb_early_median_ms": 120.0,
+        "ttfb_late_median_ms": 130.0,
     }
     context.update(overrides)
     return context
@@ -526,7 +530,7 @@ def test_q30_supplied_search_evidence() -> None:
     assert partial["status"] == "Needs validation"
 
 
-def test_q39_heading_links_scope_is_explicit() -> None:
+def test_q39_heading_links_cover_error_redirect_and_noncanonical_targets() -> None:
     def answer(rows: list[dict[str, object]] | None) -> dict[str, object]:
         reports = {"internal-link-quality": rows} if rows is not None else {}
         return next(item for item in answer_questions(_audit(reports), REGISTRY) if item["id"] == "Q39")
@@ -537,12 +541,19 @@ def test_q39_heading_links_scope_is_explicit() -> None:
         "target_url": f"{SITE}/x",
         "xpath": "/html/body/h2/a",
     }
+    redirect = {**heading, "issue": "redirect_target", "target_url": f"{SITE}/moved", "xpath": "/html/body/h3/a"}
+    noindex = {
+        **heading,
+        "issue": "non_indexable_target",
+        "target_url": f"{SITE}/private",
+        "xpath": "/html/body/h2[2]/a",
+    }
     body = {**heading, "xpath": "/html/body/p/a"}
-    found = answer([heading, body])
-    assert (found["status"], found["affected_count"]) == ("Issue", 1)
-    # Redirecting and non-canonical heading targets are not tested yet, so no rows is not Healthy.
-    clean = answer([body])
-    assert (clean["status"], clean["answer"]) == ("Needs validation", "No (partial)")
+    found = answer([heading, redirect, noindex, body])
+    # A noindex 200 heading target is outside Q39's non-200/non-canonical rule.
+    assert (found["status"], found["affected_count"]) == ("Issue", 2)
+    clean = answer([body, noindex])
+    assert (clean["status"], clean["answer"]) == ("Healthy", "No")
     assert answer(None)["status"] == "Pending"
 
 

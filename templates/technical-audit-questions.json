@@ -754,7 +754,7 @@
         "crawl"
       ],
       "checks": [
-        "locale-html-lang",
+        "metadata-basics",
         "hreflang-html-http"
       ],
       "new_detector": null,
@@ -1170,7 +1170,7 @@
         "crawl"
       ],
       "checks": [
-        "locale-html-lang"
+        "hreflang-html-http"
       ],
       "new_detector": "locale-path-consistency",
       "profile_keys": [],

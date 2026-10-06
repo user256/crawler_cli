@@ -375,7 +375,7 @@ _IMPLEMENTED_CHECK_REPORTS = {
     "internal-authority": ("internal-authority",),
     "metadata-basics": ("stored-html",),
     "metadata-duplicates-aliases": ("metadata-duplicates",),
-    "locale-html-lang": ("locale-content-alignment", "stored-html", "hreflang-validation"),
+    "locale-html-lang": ("locale-content-alignment",),
     "canonical-declarations": ("stored-html",),
     "canonical-target-validation": ("stored-html",),
     "soft404-error-routes": ("soft404-error-routes",),
@@ -456,11 +456,7 @@ def build_technical_audit(
         and row.get("html_meta_allows") != row.get("http_header_allows")
     ]
     schema_defects = [row for row in rows["schema-compatibility"] if row.get("is_valid") is False]
-    link_failures = [
-        row
-        for row in rows["internal-link-quality"]
-        if row.get("issue") in {"error_target", "redirect_target", "non_indexable_target", "noncanonical_target"}
-    ]
+    link_failures = _link_target_failures(rows["internal-link-quality"])
     locale_signature_count = _optional_int(context.get("locale_signature_count"))
     locale_alignment = rows["locale-content-alignment"]
     interaction_rows = rows["inventory-interactions"]
@@ -488,30 +484,24 @@ def build_technical_audit(
             "missing-h1",
             "multiple-h1",
             "heading-level-skip",
+            "missing-html-lang",
+            "invalid-html-lang",
+            "html-lang-self-hreflang-mismatch",
         }
     ]
     canonical_rows = [
         row
         for row in stored_html
-        if row.get("kind") in {"missing-canonical", "duplicate-canonical", "relative-canonical"}
+        if row.get("kind")
+        in {"missing-canonical", "duplicate-canonical", "relative-canonical", "html-header-canonical-mismatch"}
     ]
     canonical_target_rows = [row for row in stored_html if row.get("kind") == "canonical-to-homepage"]
     hreflang_rows = rows["hreflang-validation"]
     hreflang_noindex_rows = [row for row in hreflang_rows if row.get("kind") == "hreflang-target-noindex"]
     hreflang_html_rows = [row for row in hreflang_rows if row.get("kind") != "hreflang-target-noindex"]
-    locale_markup_rows = [
-        row
-        for row in stored_html
-        if row.get("kind") in {"missing-html-lang", "invalid-html-lang", "html-lang-self-hreflang-mismatch"}
-    ]
-    locale_evidence = [
-        *locale_alignment,
-        *locale_markup_rows,
-        *(row for row in hreflang_rows if row.get("kind") == "locale-path-language-mismatch"),
-    ]
-    indexability_conflicts.extend(
-        row for row in stored_html if row.get("kind") == "html-header-canonical-mismatch"
-    )
+    # Q82 compares sitemap and link discovery; a run that recorded no sitemap
+    # sources cannot show a sitemap-only population.
+    sitemap_sources_recorded = (_optional_int(context.get("run_sitemap_source_count")) or 0) > 0
 
     detector_checks = (
         _check(
@@ -520,7 +510,7 @@ def build_technical_audit(
             "Metadata",
             metadata_rows,
             "finding",
-            "Saved raw HTML contains duplicate metadata or an invalid heading outline.",
+            "Saved raw HTML contains duplicate metadata, invalid html lang markup or an invalid heading outline.",
             available=source_coverage["stored-html"]["available"] is True,
             denominator=stored_html_denominator,
             completion_state=completion_state,
@@ -564,7 +554,7 @@ def build_technical_audit(
             "Soft 404s",
             rows["soft404-error-routes"],
             "finding",
-            "A saved 200 response contains a clear error-page signature; confirm the route and intended content live.",
+            "A saved 200 response has an error-page title or H1; confirm the route and intended content live.",
             available=source_coverage["soft404-error-routes"]["available"] is True,
             denominator=stored_html_denominator,
             completion_state=completion_state,
@@ -574,10 +564,10 @@ def build_technical_audit(
             "discovery-source-provenance",
             "Discovery-source provenance",
             "Discovery sources",
-            rows["discovery-source-provenance"],
+            rows["discovery-source-provenance"] if sitemap_sources_recorded else [],
             "finding",
             "Saved sitemap and internal-link discovery sources disagree; confirm whether the population is intentionally excluded from one source.",
-            available=source_coverage["discovery-source-provenance"]["available"] is True,
+            available=source_coverage["discovery-source-provenance"]["available"] is True and sitemap_sources_recorded,
             denominator=parsed_html_count,
             completion_state=completion_state,
             qualification="review_required",
@@ -683,6 +673,7 @@ def build_technical_audit(
             available=source_coverage["near-duplicates"]["available"] is True,
             denominator=hashed_count,
             completion_state=completion_state,
+            qualification="review_required",
         ),
         _check(
             "schema-parser-diagnostics",
@@ -722,20 +713,15 @@ def build_technical_audit(
             "locale-html-lang",
             "Locale language and substantive content",
             "Locale language",
-            locale_evidence,
+            locale_alignment,
             "finding",
-            "Saved source has invalid language markup or the same primary-content signature occurs on pages that declare different languages; confirm page purpose before treating content as untranslated.",
-            available=(
-                source_coverage["stored-html"]["available"] is True
-                or source_coverage["hreflang-validation"]["available"] is True
-                or (
-                    source_coverage["locale-content-alignment"]["available"] is True
-                    and locale_signature_count is not None
-                    and locale_signature_count > 0
-                )
-            ),
-            denominator=stored_html_denominator or locale_signature_count,
+            "The same primary-content signature occurs on pages that declare different languages; confirm the page purpose before treating this as untranslated locale content.",
+            available=source_coverage["locale-content-alignment"]["available"] is True
+            and locale_signature_count is not None
+            and locale_signature_count > 0,
+            denominator=locale_signature_count,
             completion_state=completion_state,
+            qualification="review_required",
         ),
         _check(
             "rendered-robots-links",
@@ -874,6 +860,30 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
         if evidence or verified_evidence:
             tables[str(check["detail_sheet"])] = _table(evidence or verified_evidence)
     return tables
+
+
+_LINK_FAILURE_PRIORITY = ("error_target", "redirect_target", "noncanonical_target", "non_indexable_target")
+
+
+def _link_target_failures(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """One row per link (source, target, position) with its most serious target state first."""
+
+    edges: dict[tuple[object, object, object], dict[str, object]] = {}
+    for row in rows:
+        issue = row.get("issue")
+        if issue not in _LINK_FAILURE_PRIORITY:
+            continue
+        key = (row.get("source_url"), row.get("target_url"), row.get("xpath"))
+        edge = edges.setdefault(key, {**row, "issues": []})
+        issues = edge["issues"]
+        assert isinstance(issues, list)
+        issues.append(issue)
+    for edge in edges.values():
+        issues = edge["issues"]
+        assert isinstance(issues, list)
+        issues.sort(key=_LINK_FAILURE_PRIORITY.index)
+        edge["issue"] = issues[0]
+    return list(edges.values())
 
 
 def _check(

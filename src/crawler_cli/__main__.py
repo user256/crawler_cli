@@ -2176,6 +2176,22 @@ class _SavedJob(TypedDict, total=False):
     results: list[_SavedResult]
 
 
+_OPT_IN_REPORTS = frozenset(
+    {
+        "js-url-candidates",
+        "css-url-candidates",
+        "render-url-candidates",
+        "render-attempts",
+        "stored-html",
+        "metadata-duplicates",
+        "nonhtml-search-assets",
+        "hreflang-validation",
+        "semantic-html",
+        "profile-indexability-pages",
+        "soft404-error-routes",
+        "discovery-source-provenance",
+    }
+)
 _REPORT_NAMES = (
     "orphans",
     "indexability",
@@ -2327,18 +2343,12 @@ async def _run_report(args: argparse.Namespace) -> int:
     if not requested:
         # missing-expected-id needs an identifier, so it only joins the default
         # set when --expected-id makes it answerable. JS candidates are an
-        # opt-in, potentially high-volume inventory and stay explicitly named.
+        # opt-in, potentially high-volume inventory and stay explicitly named,
+        # as do the technical-audit inputs, which scan every stored page.
         requested = [
             name
             for name in _REPORT_NAMES
-            if (name != "missing-expected-id" or args.expected_id)
-            and name
-            not in {
-                "js-url-candidates",
-                "css-url-candidates",
-                "render-url-candidates",
-                "render-attempts",
-            }
+            if (name != "missing-expected-id" or args.expected_id) and name not in _OPT_IN_REPORTS
         ]
     if "missing-expected-id" in requested and not args.expected_id:
         print("Error: report 'missing-expected-id' requires --expected-id", file=sys.stderr)

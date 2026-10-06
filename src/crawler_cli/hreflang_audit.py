@@ -153,15 +153,19 @@ def _language_primary(value: str | None) -> str | None:
     return primary if primary.isalpha() and 2 <= len(primary) <= 3 else None
 
 
-def _locale_folder(url: str) -> str | None:
-    """Return a leading locale-looking segment, never infer one at root.
+def _locale_folder(url: str, languages: frozenset[str]) -> str | None:
+    """Return a leading path segment that is one of the run's declared languages.
 
-    Q41 cannot know that a non-locale path (``/products/``) should have been
-    ``/en/products/`` without a site's locale profile.  It can deterministically
-    flag a declared ``fr`` page under ``/en/`` (and vice versa).
+    Shape alone is not enough: ``/aml`` (anti-money-laundering) or ``/faq``
+    look like language codes.  A segment counts as a locale folder only when
+    its language is declared somewhere in the run, by hreflang or html lang.
+    Q41 cannot know that ``/products/`` should have been ``/en/products/``
+    without a site's locale profile; it can flag a declared ``fr`` page under
+    ``/en/`` (and vice versa).
     """
     first = next((segment for segment in urlparse(normalise_url(url)).path.split("/") if segment), "")
-    return _language_primary(first)
+    primary = _language_primary(first)
+    return primary if primary in languages else None
 
 
 def _fact_key(fact: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
@@ -202,9 +206,7 @@ def iter_hreflang_facts(
     pages_by_url = {normalise_url(page.url): page for page in pages if normalise_url(page.url)}
     if sitemap_hreflang_present is None:
         sitemap_hreflang_present = any(
-            _source_name(annotation) == SITEMAP_HREFLANG_SOURCE
-            for page in pages
-            for annotation in page.annotations
+            _source_name(annotation) == SITEMAP_HREFLANG_SOURCE for page in pages for annotation in page.annotations
         )
 
     edge_pairs = {
@@ -213,6 +215,15 @@ def iter_hreflang_facts(
         for annotation in page.annotations
         if normalise_url(page.url) and _resolved_target_url(page.url, annotation.href)
     }
+    languages = frozenset(
+        language
+        for page in pages
+        for language in (
+            _language_primary(page.html_lang),
+            *(_language_primary(annotation.hreflang) for annotation in page.annotations),
+        )
+        if language
+    )
     facts: list[dict[str, object]] = []
 
     for page in pages:
@@ -246,7 +257,7 @@ def iter_hreflang_facts(
                     }
                 )
 
-        locale = _locale_folder(page.url)
+        locale = _locale_folder(page.url, languages)
         if locale is not None:
             declarations: list[tuple[str, str]] = []
             if page.html_lang:

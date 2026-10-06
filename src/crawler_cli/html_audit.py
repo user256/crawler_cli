@@ -17,11 +17,15 @@ from .schema import _PARSER
 
 _LANG = re.compile(r"^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$")
 _BODY = re.compile(r"<body\b[^>]*>(.*?)</body\s*>", re.IGNORECASE | re.DOTALL)
+# A <title> or rel=alternate link is head-only only outside SVG/MathML (icons
+# carry their own <title>) and, for alternates, only when it is an hreflang link
+# (RSS and Atom feed alternates may appear in the body).
 _HEAD_ONLY_IN_BODY = re.compile(
-    r"<(?:title\b|meta\b[^>]*(?:name\s*=\s*['\"]?robots|property\s*=\s*['\"]?robots)|"
-    r"link\b[^>]*(?:rel\s*=\s*['\"]?[^'\">]*\b(?:canonical|alternate)[^'\">]*|hreflang\s*=))",
+    r"<(?:title\b|meta\b[^>]*(?:name\s*=\s*['\"]?(?:robots|googlebot)|property\s*=\s*['\"]?robots)|"
+    r"link\b[^>]*rel\s*=\s*['\"]?[^'\">]*\bcanonical\b|link\b[^>]*\bhreflang\s*=)",
     re.IGNORECASE,
 )
+_FOREIGN_CONTENT = re.compile(r"<(svg|math)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 
 
 def _normalise_url(value: str) -> str:
@@ -81,13 +85,11 @@ def inspect_stored_html(url: str, html: str) -> list[dict[str, object]]:
         if href and urlsplit(href).scheme not in {"http", "https"}:
             finding("relative-canonical", canonical=href)
 
-    titles = soup.find_all("title")
+    titles = [node for node in soup.find_all("title") if node.find_parent(("svg", "math")) is None]
     if len(titles) > 1:
         finding("duplicate-title", count=len(titles))
     descriptions = [
-        node
-        for node in soup.find_all("meta")
-        if str(node.get("name", "")).strip().casefold() == "description"
+        node for node in soup.find_all("meta") if str(node.get("name", "")).strip().casefold() == "description"
     ]
     if len(descriptions) > 1:
         finding("duplicate-meta-description", count=len(descriptions))
@@ -100,7 +102,7 @@ def inspect_stored_html(url: str, html: str) -> list[dict[str, object]]:
         finding("duplicate-meta-robots", count=len(robots))
 
     body_match = _BODY.search(html)
-    if body_match and _HEAD_ONLY_IN_BODY.search(body_match.group(1)):
+    if body_match and _HEAD_ONLY_IN_BODY.search(_FOREIGN_CONTENT.sub(" ", body_match.group(1))):
         finding("head-only-element-in-body")
 
     headings = [(int(node.name[1]), node.get_text(" ", strip=True)) for node in soup.find_all(re.compile(r"^h[1-6]$"))]

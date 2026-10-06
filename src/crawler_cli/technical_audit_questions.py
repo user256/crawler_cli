@@ -288,6 +288,15 @@ def _heading_link(row: Json) -> bool:
     return bool(re.search(r"/h[23](?:\[\d+\])?(?:/|$)", str(row.get("xpath", "")), re.IGNORECASE))
 
 
+def _heading_target_failure(row: Json) -> bool:
+    """Q39 asks about non-200 or non-canonical targets; a noindex 200 target is out of scope."""
+    issues = row.get("issues") or [row.get("issue")]
+    return _heading_link(row) and any(
+        issue in {"error_target", "redirect_target", "noncanonical_target"}
+        for issue in issues  # type: ignore[union-attr]
+    )
+
+
 def _trailing_slash_redirect(row: Json) -> bool:
     if row.get("issue") != "redirect_target":
         return False
@@ -333,8 +342,10 @@ def _duplicate_head_elements(audit: Json, question: Json, profile: Json | None) 
 def _indexable_heading_issues(audit: Json, question: Json, profile: Json | None) -> Evidence:
     return _from_check(
         "metadata-basics",
-        keep=lambda row: row.get("overall_indexable") is True
-        and str(row.get("kind", "")) in {"missing-h1", "multiple-h1", "heading-level-skip"},
+        keep=lambda row: (
+            row.get("overall_indexable") is True
+            and str(row.get("kind", "")) in {"missing-h1", "multiple-h1", "heading-level-skip"}
+        ),
         distinct_url=True,
     )(audit, question, profile)
 
@@ -352,13 +363,25 @@ def _missing_indexable_canonical(audit: Json, question: Json, profile: Json | No
 
 
 def _header_html_parity(audit: Json, question: Json, profile: Json | None) -> Evidence:
+    """Robots header/meta conflicts plus Link-header/HTML canonical conflicts."""
     coverage = audit.get("source_coverage")
     if not isinstance(coverage, Mapping):
         return Evidence(available=False, note="audit has no source coverage")
     required = ("indexability", "stored-html")
-    if any(not isinstance(coverage.get(name), Mapping) or coverage[name].get("available") is not True for name in required):
+    if any(
+        not isinstance(coverage.get(name), Mapping) or coverage[name].get("available") is not True for name in required
+    ):
         return Evidence(available=False, note="header/HTML parity needs both saved directives and raw HTML")
-    return _from_check("indexability-segmentation")(audit, question, profile)
+    robots = _from_check("indexability-segmentation")(audit, question, profile)
+    canonical = _check_kinds("canonical-declarations", "html-header-canonical-mismatch")(audit, question, profile)
+    if not robots.available or not canonical.available:
+        return Evidence(available=False, note=robots.note or canonical.note)
+    return Evidence(
+        rows=[*robots.rows, *canonical.rows],
+        denominator=robots.denominator,
+        coverage_complete=robots.coverage_complete and canonical.coverage_complete,
+        language_check="indexability-segmentation",
+    )
 
 
 def _semantic_rows(audit: Json) -> tuple[list[dict[str, object]], bool]:
@@ -414,6 +437,8 @@ def _profile_indexability(question_id: str) -> Callable[[Json, Json, Json | None
         result = analyse_profile_indexability(
             [row for row in pages if isinstance(row, Mapping)], profile
         ).by_question()[question_id]  # type: ignore[index]
+        if result.available and result.denominator == 0:
+            return Evidence(available=False, note=f"no saved page matches the {question_id} profile template")
         return Evidence(
             rows=[fact.as_dict() for fact in result.affected],
             denominator=result.denominator,
@@ -427,19 +452,28 @@ def _profile_indexability(question_id: str) -> Callable[[Json, Json, Json | None
 
 
 def _semantic_figure_caption(audit: Json, question: Json, profile: Json | None) -> Evidence:
+    """One row per in-content image without a figure/figcaption, named by its source."""
     rows, available = _semantic_rows(audit)
     eligible = [row for row in rows if row.get("main_image_eligible") is True]
     total_images = sum(_int_or_none(row.get("main_image_count")) or 0 for row in eligible)
     findings: list[dict[str, object]] = []
+    unlisted = 0
     for row in eligible:
         missing = _int_or_none(row.get("main_images_without_figure_and_figcaption")) or 0
-        findings.extend([dict(row)] * missing)
+        listed = row.get("uncaptioned_main_image_srcs")
+        srcs = [str(src) for src in listed] if isinstance(listed, (list, tuple)) else []
+        findings.extend({"url": row.get("url"), "image_src": src} for src in srcs[:missing])
+        unlisted += max(0, missing - len(srcs))
+        findings.extend({"url": row.get("url"), "image_src": ""} for _ in range(max(0, missing - len(srcs))))
+    note = "Counts in-content source images; confirm decorative-image intent before ticketing."
+    if unlisted:
+        note += f" {unlisted:,} images beyond the per-page listing limit are counted without a source."
     return Evidence(
         rows=findings,
         denominator=total_images if available else None,
         available=available,
         qualification="review_required",
-        note="Counts in-content source images; confirm decorative-image intent before ticketing.",
+        note=note,
         language_check="semantic-html",
     )
 
@@ -472,23 +506,50 @@ def _run_gate(audit: Json, question: Json, profile: object) -> Evidence:
     return Evidence(rows=failures, denominator=1)
 
 
+_MIN_DRIFT_SAMPLES = 20
+
+
 def _rate_limit_gate(audit: Json, question: Json, profile: object) -> Evidence:
+    """Q81: 429/503 responses, or median TTFB rising over 50% between the first and last tenth of the run."""
     context = audit.get("run_context")
     if not isinstance(context, Mapping) or not context:
         return Evidence(available=False, note="audit has no run_context")
     rate_limited = _int_or_none(context.get("rate_limited_count"))
     if rate_limited is None:
-        return Evidence(available=False, note="audit has no saved 429/503 response count")
-    rows = []
+        return Evidence(available=False, note="audit has no saved 429/503 response count; regenerate the audit")
+    rows: list[dict[str, object]] = []
     if rate_limited:
         rows.append({"condition": "429/503 responses", "observed": rate_limited, "expected": 0})
-    return Evidence(rows=rows, denominator=1, coverage_complete=context.get("completion_state") == "complete")
+    samples = _int_or_none(context.get("ttfb_sample_count")) or 0
+    early = context.get("ttfb_early_median_ms")
+    late = context.get("ttfb_late_median_ms")
+    note = ""
+    drift_tested = samples >= _MIN_DRIFT_SAMPLES and isinstance(early, (int, float)) and isinstance(late, (int, float))
+    if drift_tested:
+        assert isinstance(early, (int, float)) and isinstance(late, (int, float))
+        if early > 0 and late > early * 1.5:
+            rows.append(
+                {
+                    "condition": "median TTFB rose over 50% during the run",
+                    "observed": f"{early:,.0f} ms -> {late:,.0f} ms",
+                    "expected": f"<= {early * 1.5:,.0f} ms",
+                }
+            )
+    else:
+        note = f"Response-time drift not tested: {samples:,} timed fetches (needs {_MIN_DRIFT_SAMPLES})."
+    return Evidence(
+        rows=rows,
+        denominator=1,
+        scope_complete=drift_tested,
+        coverage_complete=context.get("completion_state") == "complete",
+        note=note,
+    )
 
 
 ANSWERERS: dict[str, Answerer] = {
     "Q8": Answerer(
-        "locale-html-lang saved markup rows",
-        _check_kinds("locale-html-lang", "missing-html-lang", "invalid-html-lang", "html-lang-self-hreflang-mismatch"),
+        "metadata-basics html lang markup rows",
+        _check_kinds("metadata-basics", "missing-html-lang", "invalid-html-lang", "html-lang-self-hreflang-mismatch"),
     ),
     "Q10": Answerer("raw HTML duplicate head elements", _duplicate_head_elements),
     "Q11": Answerer("metadata-duplicates-aliases clusters", _from_check("metadata-duplicates-aliases")),
@@ -521,23 +582,24 @@ ANSWERERS: dict[str, Answerer] = {
     "Q23": Answerer("supplied pre/post-interaction inventory capture", _from_check("rendered-robots-links")),
     "Q26": Answerer("run_context completeness gate", _run_gate),
     "Q81": Answerer("run_context 429/503 rate-limit count", _rate_limit_gate),
-    "Q82": Answerer("discovery-source-provenance sitemap/internal-link rows", _from_check("discovery-source-provenance")),
+    "Q82": Answerer(
+        "discovery-source-provenance sitemap/internal-link rows", _from_check("discovery-source-provenance")
+    ),
     "Q30": Answerer("supplied Search Console / URL Inspection records", _from_check("supplied-search-evidence")),
     "Q32": Answerer("locale-html-lang shared-signature rows", _from_check("locale-html-lang")),
     "Q39": Answerer(
-        "internal-link-targets error targets linked from an H2/H3",
-        _from_check(
-            "internal-link-targets",
-            keep=_heading_link,
-            scope_note="Only 4xx/5xx targets are tested; redirecting and non-canonical heading links are not yet.",
-        ),
+        "internal-link-targets error, redirect and non-canonical targets linked from an H2/H3",
+        _from_check("internal-link-targets", keep=_heading_target_failure),
     ),
     "Q41": Answerer(
-        "locale-html-lang locale-folder mismatches",
-        _check_kinds("locale-html-lang", "locale-path-language-mismatch"),
+        "hreflang-html-http locale-folder mismatches",
+        _check_kinds("hreflang-html-http", "locale-path-language-mismatch"),
     ),
     "Q42": Answerer("soft404-error-routes saved-source candidates", _from_check("soft404-error-routes")),
-    "Q72": Answerer("internal-link-targets trailing-slash redirect rows", _from_check("internal-link-targets", keep=_trailing_slash_redirect)),
+    "Q72": Answerer(
+        "internal-link-targets trailing-slash redirect rows",
+        _from_check("internal-link-targets", keep=_trailing_slash_redirect),
+    ),
     "Q51": Answerer("semantic-html landmark facts", _semantic_landmarks),
     "Q54": Answerer("semantic-html figure and figcaption facts", _semantic_figure_caption),
     "Q58": Answerer("semantic-html long-page H2 fragment facts", _semantic_toc),
@@ -547,7 +609,9 @@ ANSWERERS: dict[str, Answerer] = {
     "Q78": Answerer("profile-indexability policy facts", _profile_indexability("Q78")),
     "Q71": Answerer("canonical-declarations missing indexable canonical rows", _missing_indexable_canonical),
     "Q73": Answerer("canonical-target-validation homepage canonical rows", _from_check("canonical-target-validation")),
-    "Q80": Answerer("canonical-declarations relative canonical rows", _check_kinds("canonical-declarations", "relative-canonical")),
+    "Q80": Answerer(
+        "canonical-declarations relative canonical rows", _check_kinds("canonical-declarations", "relative-canonical")
+    ),
     "Q87": Answerer("nonhtml-search-assets header inventory", _from_check("nonhtml-search-assets")),
     "Q94": Answerer(
         "indexability-segmentation header/HTML canonical and robots conflicts",
@@ -565,16 +629,13 @@ def answer_questions(
 
     questions = [entry for entry in registry["questions"] if isinstance(entry, Mapping)]
     by_id = {str(entry["id"]): entry for entry in questions}
-    gates = {
-        qid: _answer_one(by_id[qid], audit, site_profile, gate_ok=True)
-        for qid in ("Q26", "Q81")
-        if qid in by_id
-    }
+    gates = {qid: _answer_one(by_id[qid], audit, site_profile, gate_ok=True) for qid in ("Q26", "Q81") if qid in by_id}
     gate_ok = bool(gates) and all(gate["status"] == "Healthy" for gate in gates.values())
     answers = []
     for entry in questions:
-        if entry["id"] in gates:
-            answers.append(gates[str(entry["id"])])
+        qid = str(entry["id"])
+        if qid in gates:
+            answers.append(gates[qid])  # type: ignore[index]
         else:
             answers.append(_answer_one(entry, audit, site_profile, gate_ok=gate_ok))
     return answers
@@ -626,6 +687,11 @@ def _answer_one(
         language_check=evidence.language_check,
         qualification=evidence.qualification,
     )
+    if not rows and evidence.denominator == 0:
+        # An empty tested population is not evidence that the rule passed.
+        notes.append("No items in the tested population, so the rule could not be tested.")
+        answer.update(affected_count=None, denominator=None, rows=[])
+        return answer
     matched = _meets_threshold(affected, evidence.denominator, entry.get("threshold"))
     if matched is None:
         notes.append("Share threshold needs a population size the evidence does not give.")

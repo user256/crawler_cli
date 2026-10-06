@@ -24,6 +24,9 @@ LONG_PAGE_MINIMUM_H2S = 4
 """Q58's minimum number of H2 sections."""
 
 TOC_MINIMUM_LINKED_H2S = 2
+
+MAX_LISTED_IMAGES = 50
+"""Uncaptioned image sources kept per page; the count is always exact."""
 """One fragment link can be an ordinary cross-reference, not a TOC."""
 
 _WORD = re.compile(r"\b[\w'-]+\b", re.UNICODE)
@@ -53,6 +56,7 @@ class SemanticHtmlFacts:
     main_image_count: int
     main_images_with_figure_and_figcaption: int
     main_images_without_figure_and_figcaption: int
+    uncaptioned_main_image_srcs: tuple[str, ...]
 
     content_word_count: int
     content_h2_count: int
@@ -108,15 +112,16 @@ def inspect_semantic_html(url: str, html: str) -> SemanticHtmlFacts:
     landmark_eligible = body is not None
     missing_main = not mains if landmark_eligible else None
     missing_header_and_footer = (not headers and not footers) if landmark_eligible else None
-    missing_required_landmarks = (
-        bool(missing_main or missing_header_and_footer) if landmark_eligible else None
-    )
+    missing_required_landmarks = bool(missing_main or missing_header_and_footer) if landmark_eligible else None
 
     # Q54 concerns images in main content.  A page without main is ineligible
     # for this image denominator; Q51 records that separate landmark defect.
     main = mains[0] if mains else None
     main_images = main.find_all("img") if main else []
     captioned_count = sum(_has_figure_caption(image) for image in main_images)
+    uncaptioned_srcs = tuple(
+        str(image.get("src") or image.get("data-src") or "") for image in main_images if not _has_figure_caption(image)
+    )[:MAX_LISTED_IMAGES]
 
     root = _content_root(soup, body)
     h2s = root.find_all("h2") if root else []
@@ -126,8 +131,7 @@ def inspect_semantic_html(url: str, html: str) -> SemanticHtmlFacts:
             {
                 href[1:]
                 for link in (root.find_all("a", href=True) if root else [])
-                if (href := str(link.get("href", "")).strip()).startswith("#")
-                and href[1:] in h2_ids
+                if (href := str(link.get("href", "")).strip()).startswith("#") and href[1:] in h2_ids
             }
         )
     )
@@ -149,6 +153,7 @@ def inspect_semantic_html(url: str, html: str) -> SemanticHtmlFacts:
         main_image_count=len(main_images),
         main_images_with_figure_and_figcaption=captioned_count,
         main_images_without_figure_and_figcaption=len(main_images) - captioned_count,
+        uncaptioned_main_image_srcs=uncaptioned_srcs,
         content_word_count=word_count,
         content_h2_count=len(h2s),
         h2_with_id_count=len(h2_ids),

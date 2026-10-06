@@ -70,6 +70,9 @@ def _context(**overrides: object) -> dict[str, object]:
         "unparsed_html_count": 0,
         "challenged_count": 0,
         "rate_limited_count": 0,
+        "ttfb_sample_count": 100,
+        "ttfb_early_median_ms": 120.0,
+        "ttfb_late_median_ms": 130.0,
         "frontier_pending": 0,
         "seed_hosts": ["example.com"],
         "created_at": "2026-10-01T00:00:00",
@@ -202,10 +205,15 @@ def test_discovery_source_difference_is_a_review_candidate() -> None:
         crawl_run_id="run-1",
         reports={
             "discovery-source-provenance": [
-                {"url": f"{SITE}/legacy", "is_from_sitemap": True, "found_from_internal_link": False, "issue": "sitemap_only"}
+                {
+                    "url": f"{SITE}/legacy",
+                    "in_sitemap": True,
+                    "internally_linked": False,
+                    "issue": "sitemap_only",
+                }
             ]
         },
-        run_context=_context(),
+        run_context=_context(run_sitemap_source_count=1),
     )
     answer = _by_id(answer_questions(audit, load_question_registry()))["Q82"]
     assert (answer["answer"], answer["status"], answer["ticket"]) == ("Yes", "Needs validation", False)
@@ -295,8 +303,19 @@ def test_semantic_question_inputs_answer_toc_and_landmark_questions() -> None:
         crawl_run_id="run-1",
         reports={
             "semantic-html": [
-                {"url": f"{SITE}/shell", "landmark_eligible": True, "missing_required_landmarks": True, "toc_eligible": False},
-                {"url": f"{SITE}/guide", "landmark_eligible": True, "missing_required_landmarks": False, "toc_eligible": True, "missing_h2_fragment_toc": True},
+                {
+                    "url": f"{SITE}/shell",
+                    "landmark_eligible": True,
+                    "missing_required_landmarks": True,
+                    "toc_eligible": False,
+                },
+                {
+                    "url": f"{SITE}/guide",
+                    "landmark_eligible": True,
+                    "missing_required_landmarks": False,
+                    "toc_eligible": True,
+                    "missing_h2_fragment_toc": True,
+                },
             ]
         },
         run_context=_context(stored_html_count=2),
@@ -321,7 +340,12 @@ def test_profile_and_image_question_inputs_preserve_policy_coverage() -> None:
         reports={
             "profile-indexability-pages": [
                 {"url": f"{SITE}/listing/", "noindex": True, "in_sitemap": False},
-                {"url": f"{SITE}/user/a/reviews/", "status": 200, "indexable": True, "canonical": f"{SITE}/user/a/reviews/"},
+                {
+                    "url": f"{SITE}/user/a/reviews/",
+                    "status": 200,
+                    "indexable": True,
+                    "canonical": f"{SITE}/user/a/reviews/",
+                },
                 {"url": f"{SITE}/user/a/", "word_count": 10, "indexable": True, "in_sitemap": False},
                 {"url": f"{SITE}/category/a/", "noindex": True, "inlink_percentile": 0.95},
             ],
@@ -340,7 +364,11 @@ def test_profile_and_image_question_inputs_preserve_policy_coverage() -> None:
     assert (answers["Q20"]["answer"], answers["Q20"]["status"]) == ("Yes", "Needs validation")
     for qid in ("Q36", "Q37", "Q78"):
         assert (answers[qid]["answer"], answers[qid]["status"], answers[qid]["affected_count"]) == ("Yes", "Issue", 1)
-    assert (answers["Q54"]["answer"], answers["Q54"]["status"], answers["Q54"]["affected_count"]) == ("Yes", "Needs validation", 2)
+    assert (answers["Q54"]["answer"], answers["Q54"]["status"], answers["Q54"]["affected_count"]) == (
+        "Yes",
+        "Needs validation",
+        2,
+    )
 
 
 def test_profile_template_scopes_inventory_question() -> None:
