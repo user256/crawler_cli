@@ -1,6 +1,6 @@
 # crawler_cli
 
-`crawler_cli` is a reusable async crawler module extracted from `PostgreSQLCrawler` and narrowed into a smaller package for resumable bounded crawling, extraction, sitemap parsing, robots-aware fetch control, and asyncpg persistence.
+`crawler_cli` is a reusable async crawler module extracted from `PostgreSQLCrawler` and narrowed into a smaller package for resumable bounded crawling, extraction using trafilatura, sitemap parsing, robots-aware fetch control, and asyncpg persistence.
 
 ## What This Is / What This Is Not
 
@@ -738,6 +738,26 @@ and `--ticket-register-receipt` to set the copy details. Use
 `--resume-ticket-register` with the same receipt after an interrupted
 publication. This is separate from the compatible-v2 evidence publisher, and
 it also requires explicit authorization to write to Google Drive.
+The command also builds the template-column `ticket_register` in the JSON.
+It contains evidence-backed remediation tickets and only the explicitly mapped
+Improvement tickets for material missing inputs. Publish a fresh copy of the
+Sheets template with the same run:
+
+```bash
+crawler-cli technical-audit --postgres-dsn ... --crawl-run-id crawl-20260716-a \
+  --search-evidence ./search-console-records.json \
+  --inventory-interaction-evidence ./listing-interactions.json \
+  --google-sheets-template 'https://docs.google.com/spreadsheets/d/.../edit' \
+  --out ./audit-evidence/technical-audit.json
+```
+
+`--search-evidence` accepts dated CSV/JSON records with `url`, `source` and
+`export_date`; optional fields cover index status, Google/user canonical,
+clicks, impressions and `priority_url`. `--inventory-interaction-evidence`
+accepts source URL, action and initial/post-interaction document-link counts.
+The audit records a finding only when that completed action exposes additional
+URLs. The copied workbook receives the exact `Tickets` columns plus Overview,
+Audit Log and URL-level evidence tabs.
 
 ### Run snapshots and retention
 
@@ -823,6 +843,7 @@ crawler-cli compare-urls --pairs mapping.csv \
 Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any` and exits **3** (findings) when tripped — distinct from `2` (usage error). Replacements are literal strings applied in order (no regex in v1).
 
 JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/9`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
+JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/8`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
 
 ### 4. Storage lifecycle
 
@@ -993,7 +1014,7 @@ async def main() -> None:
         backend="aiohttp",
         max_concurrency=5,
         rate_limit_per_second=2.0,
-        user_agent="crawler_cli/0.1",
+        user_agent="canonicalbot/0.1",
     )
     engine = CrawlEngine(config)
 

@@ -137,5 +137,7 @@ connection guard is the one ticket 149 lands rather than a second private copy.
 
 ## Status
 
-proposed (2026-09-07, Priority: **P2**; relates to completed 130 and to
-proposed 149)
+done (2026-09-23, Priority: **P2**; relates to completed 130 and 149). The
+branch remains as documented prior art; the destination guard landed on master
+in PRs #72/#74/#75/#76 and the browser/archive follow-up, so no adapter code is
+to be revived or merged.

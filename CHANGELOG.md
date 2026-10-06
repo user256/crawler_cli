@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking for artifact consumers:** saved crawl artifacts advance to
   `crawler-cli/crawl-artifact/9` and add scoped robots declaration evidence.
   Version 8 and earlier artifacts remain loadable.
+  `crawler-cli/crawl-artifact/8` and add `extracted.image_references`. Version 7
+  and earlier artifacts remain loadable.
 
 - **Breaking for artifact consumers:** saved crawl artifacts are stamped
   `crawler-cli/crawl-artifact/7`, carrying the speculative-discovery evidence

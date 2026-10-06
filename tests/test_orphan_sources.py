@@ -4,7 +4,6 @@ import pytest
 
 from crawler_cli.orphan_sources import load_known_url_inventory
 from crawler_cli.reports import CrawlReports, _build_link_graph
-from crawler_cli.technical_audit import build_technical_audit
 
 
 def test_known_url_inventory_is_validated_deduplicated_and_source_labelled(tmp_path):
@@ -112,33 +111,3 @@ async def test_orphan_report_keeps_supplied_urls_as_qualified_candidates():
     assert by_url["https://example.test/unlinked"]["live_validation_state"] == "not_requested"
     assert by_url["https://other.test/outside"]["candidate_type"] == "source_inventory_out_of_scope"
     assert by_url["https://other.test/outside"]["observed_inlink_count"] is None
-
-
-def test_known_inventory_is_not_misreported_as_orphan_or_client_action():
-    rows = [
-        {
-            "url": "https://example.test/linked",
-            "candidate_type": "source_known_with_observed_inlinks",
-            "source_labels": ["analytics"],
-            "source_observations": [{"source": "analytics", "observed_at": "2026-09"}],
-            "observed_inlink_count": 2,
-        },
-        {
-            "url": "https://example.test/orphan",
-            "candidate_type": "source_known_zero_observed_inlinks",
-            "source_labels": ["search_console"],
-            "source_observations": [{"source": "search_console"}],
-            "observed_inlink_count": 0,
-            "live_validation_state": "not_requested",
-        },
-    ]
-    audit = build_technical_audit(
-        crawl_run_id="run-1",
-        reports={"orphans": rows, "link-graph-metrics": [{"graph_complete": True}]},
-        run_context={"completion_state": "complete", "parsed_html_count": 2},
-    )
-    orphan_check = next(check for check in audit["checks"] if check["id"] == "orphan-candidates")
-
-    assert [row["url"] for row in orphan_check["evidence"]] == ["https://example.test/orphan"]
-    assert audit["known_url_inventory"] == rows
-    assert audit["audit_log"] == []

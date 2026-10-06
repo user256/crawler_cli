@@ -76,11 +76,8 @@ from .exposure_inventory import (
 from .embeddings import generate_embeddings_for_store
 from .engine import CrawlEngine, CrawlRunSelectionError
 from .current_site_files import build_site_file_scope, collect_current_site_files, project_current_site_files
-from .rendered_audit import render_audit_records
-from .url_variant_audit import collect_url_variant_evidence
-from .ai_governance import collect_ai_governance, project_ai_governance
+from .ai_governance import collect_ai_governance
 from .accept_language_audit import (
-    MAX_ACCEPT_LANGUAGE_TARGETS,
     collect_accept_language_evidence,
     select_accept_language_targets,
 )
@@ -90,23 +87,8 @@ from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
 from .reports import CrawlReports
-from .orphan_sources import load_known_url_inventory
-from .technical_audit import (
-    TECHNICAL_AUDIT_REPORTS,
-    TECHNICAL_AUDIT_SCHEMA_VERSION,
-    audit_sheet_tables,
-    build_technical_audit,
-    canonical_hreflang_report,
-    metadata_locale_report,
-    render_technical_audit_markdown,
-)
-from .performance_audit import (
-    collect_conditional_get_evidence,
-    conditional_get_report,
-    conditional_probe_candidate_population,
-    select_conditional_probe_candidates,
-)
-from .live_rechecks import candidate_targets, collect_live_rechecks
+from .technical_audit import TECHNICAL_AUDIT_REPORTS, audit_sheet_tables, build_technical_audit
+from .technical_audit_tickets import TicketLanguageError, build_ticket_register, load_ticket_language
 from .validators import (
     non_negative_float,
     non_negative_int,
@@ -655,7 +637,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     if curl_impersonate and curl_impersonate != "none" and not args.custom_ua:
         _user_agent = ""
     else:
-        _user_agent = args.custom_ua or "crawler_cli/0.1"
+        _user_agent = args.custom_ua or "canonicalbot/0.1"
 
     user_data_dir = getattr(args, "playwright_user_data_dir", "") or ""
     if user_data_dir:
@@ -2126,6 +2108,7 @@ class _SavedDiscoveredLink(TypedDict, total=False):
     fragment: str | None
     url_parameters: str | None
     original_href: str | None
+    rel: list[str]
 
 
 class _SavedJavaScriptUrlCandidate(TypedDict, total=False):
@@ -2242,9 +2225,39 @@ class _SavedJob(TypedDict, total=False):
     results: list[_SavedResult]
 
 
+_OPT_IN_REPORTS = frozenset(
+    {
+        "js-url-candidates",
+        "css-url-candidates",
+        "render-url-candidates",
+        "render-attempts",
+        "stored-html",
+        "metadata-duplicates",
+        "nonhtml-search-assets",
+        "hreflang-validation",
+        "semantic-html",
+        "profile-indexability-pages",
+        "soft404-error-routes",
+        "discovery-source-provenance",
+        "crawl-depth-pages",
+        "performance-pages",
+        "empty-anchor-links",
+    }
+)
 _REPORT_NAMES = (
     "orphans",
     "indexability",
+    "stored-html",
+    "metadata-duplicates",
+    "nonhtml-search-assets",
+    "hreflang-validation",
+    "semantic-html",
+    "profile-indexability-pages",
+    "soft404-error-routes",
+    "discovery-source-provenance",
+    "crawl-depth-pages",
+    "performance-pages",
+    "empty-anchor-links",
     "redirect-chains",
     "hub-pages",
     "slowest",
@@ -2257,15 +2270,11 @@ _REPORT_NAMES = (
     "missing-analytics",
     "missing-expected-id",
     "schema-compatibility",
-    "structured-data-inventory",
-    "performance-inventory",
     "image-issues",
     "internal-link-quality",
     "tracking-parameter-links",
     "near-duplicates",
-    "similarity-coverage",
     "internal-authority",
-    "authority-coverage",
 )
 
 
@@ -2274,6 +2283,28 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.orphan_pages()
     if name == "indexability":
         return await reports.indexability_reasons()
+    if name == "stored-html":
+        return await reports.stored_html_findings()
+    if name == "metadata-duplicates":
+        return await reports.duplicate_metadata()
+    if name == "nonhtml-search-assets":
+        return await reports.nonhtml_search_assets()
+    if name == "hreflang-validation":
+        return await reports.hreflang_validation()
+    if name == "semantic-html":
+        return await reports.semantic_html_facts()
+    if name == "profile-indexability-pages":
+        return await reports.profile_indexability_pages()
+    if name == "soft404-error-routes":
+        return await reports.soft404_error_routes()
+    if name == "discovery-source-provenance":
+        return await reports.discovery_source_provenance()
+    if name == "crawl-depth-pages":
+        return await reports.crawl_depth_pages()
+    if name == "performance-pages":
+        return await reports.performance_pages()
+    if name == "empty-anchor-links":
+        return await reports.empty_anchor_links()
     if name == "redirect-chains":
         return await reports.redirect_chains()
     if name == "hub-pages":
@@ -2298,32 +2329,18 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.pages_missing_expected_id(args.expected_id)
     if name == "schema-compatibility":
         return await reports.schema_compatibility()
-    if name == "structured-data-inventory":
-        return await reports.structured_data_inventory()
-    if name == "performance-inventory":
-        return await reports.technical_audit_performance_inventory()
     if name == "image-issues":
         return await reports.image_issues()
     if name == "internal-link-quality":
         return await reports.internal_link_quality()
-    if name == "link-graph-metrics":
-        return await reports.link_graph_metrics()
     if name == "tracking-parameter-links":
         return await reports.tracking_parameter_links()
     if name == "near-duplicates":
         return await reports.near_duplicates(threshold=args.simhash_threshold, limit=args.similarity_limit)
-    if name == "similarity-coverage":
-        return await reports.similarity_coverage(threshold=args.simhash_threshold, limit=args.similarity_limit)
     if name == "internal-authority":
         return await reports.internal_authority()
-    if name == "authority-coverage":
-        return await reports.authority_coverage()
-    if name == "metadata-locale-inventory":
-        return metadata_locale_report(await reports.metadata_locale_inventory())
-    if name == "canonical-hreflang-inventory":
-        return canonical_hreflang_report(await reports.canonical_hreflang_inventory())
-    if name == "accept-language-probes":
-        return await reports.accept_language_probes()
+    if name == "locale-content-alignment":
+        return await reports.locale_content_alignment()
     raise ValueError(f"unknown report: {name}")
 
 
@@ -2387,18 +2404,12 @@ async def _run_report(args: argparse.Namespace) -> int:
     if not requested:
         # missing-expected-id needs an identifier, so it only joins the default
         # set when --expected-id makes it answerable. JS candidates are an
-        # opt-in, potentially high-volume inventory and stay explicitly named.
+        # opt-in, potentially high-volume inventory and stay explicitly named,
+        # as do the technical-audit inputs, which scan every stored page.
         requested = [
             name
             for name in _REPORT_NAMES
-            if (name != "missing-expected-id" or args.expected_id)
-            and name
-            not in {
-                "js-url-candidates",
-                "css-url-candidates",
-                "render-url-candidates",
-                "render-attempts",
-            }
+            if (name != "missing-expected-id" or args.expected_id) and name not in _OPT_IN_REPORTS
         ]
     if "missing-expected-id" in requested and not args.expected_id:
         print("Error: report 'missing-expected-id' requires --expected-id", file=sys.stderr)
@@ -2598,724 +2609,63 @@ async def _run_reconcile_sources(args: argparse.Namespace) -> int:
 
 async def _run_technical_audit(args: argparse.Namespace) -> int:
     """Build one deterministic evidence bundle from a stored crawl run."""
-    if args.check_external_links and not args.compare_current_renders:
-        print("Error: --check-external-links requires --compare-current-renders", file=sys.stderr)
-        return EXIT_VALIDATION
-    if args.check_external_links and not args.scope_manifest:
-        print("Error: --check-external-links requires --scope-manifest", file=sys.stderr)
-        return EXIT_VALIDATION
-    if args.check_external_links and args.external_link_max_targets > 25:
-        print("Error: --external-link-max-targets must be at most 25", file=sys.stderr)
-        return EXIT_VALIDATION
-    if args.allow_network_cidrs and not args.allow_private_network:
-        print("Error: --allow-network-cidr requires --allow-private-network", file=sys.stderr)
-        return EXIT_VALIDATION
-    if args.allow_private_network or args.allow_network_cidrs:
-        if not args.check_external_links:
-            print("Error: private-network options require --check-external-links", file=sys.stderr)
-            return EXIT_VALIDATION
-        if not args.scope_manifest:
-            print("Error: private-network options require --scope-manifest", file=sys.stderr)
-            return EXIT_VALIDATION
-        try:
-            from .authorisation import load_scope_manifest
-
-            if not load_scope_manifest(args.scope_manifest).allow_private_network:
-                print("Error: scope manifest does not authorize private-network access", file=sys.stderr)
-                return EXIT_VALIDATION
-            CrawlConfig(
-                backend="aiohttp",
-                destination_guard="pinned",
-                challenge_escalate_to_browser=False,
-                allow_private_network=True,
-                allow_network_cidrs=tuple(args.allow_network_cidrs),
-            )
-        except (OSError, ValueError) as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            return EXIT_VALIDATION
-    if args.resume_google_sheets and not args.publish_google_sheets:
-        print("Error: --resume-google-sheets requires --publish-google-sheets", file=sys.stderr)
-        return EXIT_VALIDATION
-    if args.publish_google_sheets and not args.google_sheets_template:
-        print("Error: --publish-google-sheets requires --google-sheets-template", file=sys.stderr)
-        return EXIT_VALIDATION
-    if args.resume_ticket_register and not args.publish_ticket_register:
-        print("Error: --resume-ticket-register requires --publish-ticket-register", file=sys.stderr)
-        return EXIT_VALIDATION
-    if not args.publish_ticket_register and any(
-        (
-            args.ticket_register_title,
-            args.ticket_register_folder,
-            args.ticket_register_receipt,
-        )
-    ):
-        print("Error: ticket-register options require --publish-ticket-register", file=sys.stderr)
-        return EXIT_VALIDATION
-    if not (args.publish_google_sheets or args.publish_ticket_register) and any(
-        (
-            args.google_sheets_template,
-            args.google_sheets_folder,
-            args.google_sheets_credentials,
-            args.google_sheets_receipt,
-            args.google_sheets_title,
-        )
-    ):
-        print("Error: Google Sheets options require --publish-google-sheets", file=sys.stderr)
-        return EXIT_VALIDATION
-
     import asyncpg
-
-    try:
-        known_url_inventory = [
-            row for path in (args.known_url_inventory or []) for row in load_known_url_inventory(path)
-        ]
-        known_url_inventory = _deduplicate_known_urls(known_url_inventory)
-    except (OSError, UnicodeError, ValueError, csv.Error) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return EXIT_VALIDATION
 
     store = _store_from_args(args)
     reports = CrawlReports(store, run_id=args.crawl_run_id)
-    live_rechecks = None
     try:
         # Resolve before fetching so the emitted artifact records the exact
         # stored run even when the operator deliberately selected "latest".
         run_id = await reports._run_id()
         run_context = await reports.technical_audit_context()
-        audit_options: dict[str, object] = {
+        run_context["audit_options"] = {
             "simhash_threshold": args.simhash_threshold,
             "similarity_limit": args.similarity_limit,
-            "similarity_selection": "canonical indexable HTML ordered by stable MD5(url); bounded sample",
-            "known_url_inventory_count": len(known_url_inventory),
-            "known_url_inventory_url_count": len({row["url"] for row in known_url_inventory}),
-            "known_url_inventory_sources": sorted({row["source"] for row in known_url_inventory}),
-            "conditional_get_probe_requested": args.probe_conditional_gets,
-            "conditional_get_sample_limit": args.conditional_max_pages,
-            "conditional_get_timeout_seconds": args.conditional_timeout,
-            "ai_governance_probe_requested": args.audit_ai_governance,
+            "similarity_selection": "indexable pages ordered by URL; first N pages",
         }
-        run_context["audit_options"] = audit_options
         capabilities = run_context.get("schema_capabilities", {})
         if not isinstance(capabilities, dict):
             capabilities = {}
-        capabilities_by_report = {
-            "redirect-chains": ("redirect_chain_json",),
-            "structured-data-inventory": ("schema_json",),
-            "image-issues": ("images_json",),
-            "internal-link-quality": ("links_json",),
-            "link-graph-metrics": (
-                "links_json",
-                "content_extracted",
-                "render_discovery_attempted",
-                "render_discovery_complete",
-            ),
-            "tracking-parameter-links": ("links_json",),
-            "orphans": (
-                "links_json",
-                "content_extracted",
-                "render_discovery_attempted",
-                "render_discovery_complete",
-            ),
-            "internal-authority": (
-                "links_json",
-                "content_extracted",
-                "render_discovery_attempted",
-                "render_discovery_complete",
-                "canonical_urls_json",
-            ),
-            "authority-coverage": (
-                "links_json",
-                "content_extracted",
-                "render_discovery_attempted",
-                "render_discovery_complete",
-                "canonical_urls_json",
-            ),
-            "metadata-locale-inventory": ("content_extracted", "canonical_urls_json", "variant_kind"),
-            "canonical-hreflang-inventory": (
-                "content_extracted",
-                "canonical_urls_json",
-                "canonical_evidence_json",
-            ),
-            "performance-inventory": (
-                "content_extracted",
-                "canonical_urls_json",
-                "ttfb_seconds",
-                "total_duration_seconds",
-                "lcp_ms",
-                "cls",
-                "inp_ms",
-            ),
+        capability_by_report = {
+            "image-issues": "images_json",
+            "internal-link-quality": "links_json",
+            "tracking-parameter-links": "links_json",
+            "near-duplicates": "content_hash_simhash",
+            "locale-content-alignment": "run_intent_signatures",
         }
         evidence = {}
+        supplied_inputs: dict[str, list[dict[str, object]]] = {}
+        if args.search_evidence:
+            from .technical_audit_inputs import AuditInputError, load_search_evidence
+
+            try:
+                supplied_inputs["supplied-search-evidence"] = load_search_evidence(args.search_evidence)
+            except AuditInputError as exc:
+                print(f"Error: --search-evidence {exc}", file=sys.stderr)
+                return EXIT_VALIDATION
+        if args.inventory_interaction_evidence:
+            from .technical_audit_inputs import AuditInputError, load_inventory_interaction_evidence
+
+            try:
+                supplied_inputs["inventory-interactions"] = load_inventory_interaction_evidence(
+                    args.inventory_interaction_evidence
+                )
+            except AuditInputError as exc:
+                print(f"Error: --inventory-interaction-evidence {exc}", file=sys.stderr)
+                return EXIT_VALIDATION
         for name in TECHNICAL_AUDIT_REPORTS:
-            if name in {
-                "current-robots-sitemaps",
-                "url-variant-soft404",
-                "rendered-mobile-resources",
-                "conditional-get-probes",
-                "ai-governance",
-            }:
+            if name in supplied_inputs:
+                evidence[name] = supplied_inputs[name]
                 continue
-            required_capabilities = capabilities_by_report.get(name, ())
-            if any(capabilities.get(capability) is not True for capability in required_capabilities):
+            if name in {"inventory-interactions", "supplied-search-evidence"}:
                 continue
-            if name == "orphans":
-                evidence[name] = await reports.orphan_pages(known_urls=known_url_inventory)
-            else:
+            if name in {"render-url-candidates", "render-attempts"}:
                 evidence[name] = await _fetch_report(reports, name, args)
-        if args.fetch_current_robots_sitemaps:
-            collected = await _collect_run_current_site_files(
-                args, reports, run_context, max_live_samples=args.current_max_live_samples
-            )
-            if collected is None:
-                return EXIT_VALIDATION
-            current_site_records, sitemap_graph_urls = project_current_site_files(collected)
-            evidence["current-robots-sitemaps"] = current_site_records
-            if sitemap_graph_urls:
-                known_url_inventory = _deduplicate_known_urls([*known_url_inventory, *sitemap_graph_urls])
-                audit_options.update(
-                    {
-                        "known_url_inventory_count": len(known_url_inventory),
-                        "known_url_inventory_url_count": len({row["url"] for row in known_url_inventory}),
-                        "known_url_inventory_sources": sorted({row["source"] for row in known_url_inventory}),
-                        "sitemap_orphan_graph_url_count": len(sitemap_graph_urls),
-                    }
-                )
-                evidence["orphans"] = await reports.orphan_pages(known_urls=known_url_inventory)
-        if args.probe_url_variants:
-            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
-                print(
-                    "Error: this crawl run used an authorization scope; URL-variant probes require --scope-manifest",
-                    file=sys.stderr,
-                )
-                return EXIT_VALIDATION
-            if run_context.get("portal_connection_policy_active") is True:
-                print(
-                    "Error: URL-variant probes do not reuse the crawl's Portal connection policy",
-                    file=sys.stderr,
-                )
-                return EXIT_VALIDATION
-            historical_rows = await reports.current_site_join_inventory()
-            allowed = run_context.get("declared_allowed_hosts", [])
-            seeds = run_context.get("seed_origins", [])
-            allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
-            seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
-            scope_predicate = None
-            if args.scope_manifest:
-                from .authorisation import compile_scope_predicate, load_scope_manifest
-
-                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
-            stored_digest = run_context.get("authorization_scope_digest")
-            if stored_digest:
-                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
-                supplied_digest = (
-                    hashlib.sha256(
-                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
-                    ).hexdigest()
-                    if supplied_snapshot is not None
-                    else None
-                )
-                if supplied_digest != stored_digest:
-                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
-                    return EXIT_VALIDATION
-            host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
-            probe_engine = CrawlEngine(
-                CrawlConfig(
-                    same_host_only=True,
-                    allowed_hosts=sorted(allowed_hosts),
-                    respect_robots_txt=True,
-                    max_concurrency=1,
-                    per_host_concurrency=1,
-                    max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
-                    destination_guard="pinned",
-                    challenge_escalate_to_browser=False,
-                    scope_predicate=cast(Any, host_scope),
-                )
-            )
-            try:
-                collected = await collect_url_variant_evidence(
-                    probe_engine,
-                    historical_rows,
-                    max_control_pages=args.variant_max_control_pages,
-                    max_variant_probes=args.variant_max_probes,
-                    max_soft404_hosts=args.soft404_max_hosts,
-                )
-            finally:
-                await probe_engine.close()
-            variant_rows = collected.get("variant_candidates", [])
-            soft404_rows = collected.get("soft404_candidates", [])
-            variant_candidates = (
-                [row for row in variant_rows if isinstance(row, Mapping)] if isinstance(variant_rows, list) else []
-            )
-            soft404_candidates = (
-                [row for row in soft404_rows if isinstance(row, Mapping)] if isinstance(soft404_rows, list) else []
-            )
-            variant_evidence: list[dict[str, object]] = [
-                {
-                    key: value
-                    for key, value in collected.items()
-                    if key not in {"variant_candidates", "soft404_candidates"}
-                }
-            ]
-            variant_evidence.extend(dict(row) for row in variant_candidates)
-            variant_evidence.extend(dict(row) for row in soft404_candidates)
-            evidence["url-variant-soft404"] = variant_evidence
-        if args.audit_ai_governance:
-            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
-                print(
-                    "Error: this crawl run used an authorization scope; AI governance probes require --scope-manifest",
-                    file=sys.stderr,
-                )
-                return EXIT_VALIDATION
-            if run_context.get("portal_connection_policy_active") is True:
-                print("Error: AI governance probes do not reuse the crawl's Portal connection policy", file=sys.stderr)
-                return EXIT_VALIDATION
-            scope_predicate = None
-            if args.scope_manifest:
-                from .authorisation import compile_scope_predicate, load_scope_manifest
-
-                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
-            stored_digest = run_context.get("authorization_scope_digest")
-            if stored_digest:
-                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
-                supplied_digest = (
-                    hashlib.sha256(
-                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
-                    ).hexdigest()
-                    if supplied_snapshot is not None
-                    else None
-                )
-                if supplied_digest != stored_digest:
-                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
-                    return EXIT_VALIDATION
-            allowed = run_context.get("declared_allowed_hosts", [])
-            seeds = run_context.get("seed_origins", [])
-            allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
-            seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
-            host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
-            ai_engine = CrawlEngine(
-                CrawlConfig(
-                    same_host_only=True,
-                    allowed_hosts=sorted(allowed_hosts),
-                    respect_robots_txt=True,
-                    max_concurrency=1,
-                    per_host_concurrency=1,
-                    max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
-                    destination_guard="pinned",
-                    challenge_escalate_to_browser=False,
-                    scope_predicate=cast(Any, host_scope),
-                )
-            )
-            try:
-                collected = await collect_ai_governance(
-                    ai_engine, seed_origins=seed_origins, max_origins=args.ai_governance_max_origins
-                )
-            finally:
-                await ai_engine.close()
-            evidence["ai-governance"] = project_ai_governance(collected)
-        if args.probe_accept_language:
-            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
-                print(
-                    "Error: this crawl run used an authorization scope; Accept-Language probes require --scope-manifest",
-                    file=sys.stderr,
-                )
-                return EXIT_VALIDATION
-            if run_context.get("portal_connection_policy_active") is True:
-                print(
-                    "Error: Accept-Language probes do not reuse the crawl's Portal connection policy", file=sys.stderr
-                )
-                return EXIT_VALIDATION
-            historical_rows = await reports.current_site_join_inventory()
-            allowed = run_context.get("declared_allowed_hosts", [])
-            seeds = run_context.get("seed_origins", [])
-            allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
-            seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
-            scope_predicate = None
-            if args.scope_manifest:
-                from .authorisation import compile_scope_predicate, load_scope_manifest
-
-                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
-            stored_digest = run_context.get("authorization_scope_digest")
-            if stored_digest:
-                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
-                supplied_digest = (
-                    hashlib.sha256(
-                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
-                    ).hexdigest()
-                    if supplied_snapshot is not None
-                    else None
-                )
-                if supplied_digest != stored_digest:
-                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
-                    return EXIT_VALIDATION
-            host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
-            language_targets, language_population = select_accept_language_targets(
-                seed_origins, historical_rows, max_targets=args.accept_language_max_targets
-            )
-            language_engine = CrawlEngine(
-                CrawlConfig(
-                    same_host_only=True,
-                    allowed_hosts=sorted(allowed_hosts),
-                    respect_robots_txt=True,
-                    max_concurrency=1,
-                    per_host_concurrency=1,
-                    max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
-                    destination_guard="pinned",
-                    challenge_escalate_to_browser=False,
-                    scope_predicate=cast(Any, host_scope),
-                )
-            )
-            try:
-                language_evidence = await collect_accept_language_evidence(
-                    language_engine,
-                    language_targets,
-                    eligible_population=language_population,
-                    max_redirect_hops=args.accept_language_max_hops,
-                )
-            finally:
-                await language_engine.close()
-            await store.persist_language_probe_evidence(
-                await reports._run_id(), language_evidence, session_id=str(uuid.uuid4())
-            )
-            evidence["accept-language-probes"] = await reports.accept_language_probes()
-        if args.probe_conditional_gets:
-            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
-                print(
-                    "Error: this crawl run used an authorization scope; conditional GET probes require --scope-manifest",
-                    file=sys.stderr,
-                )
-                return EXIT_VALIDATION
-            if run_context.get("portal_connection_policy_active") is True:
-                print(
-                    "Error: conditional GET probes do not reuse the crawl's Portal connection policy",
-                    file=sys.stderr,
-                )
-                return EXIT_VALIDATION
-            scope_predicate = None
-            if args.scope_manifest:
-                from .authorisation import compile_scope_predicate, load_scope_manifest
-
-                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
-            stored_digest = run_context.get("authorization_scope_digest")
-            if stored_digest:
-                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
-                supplied_digest = (
-                    hashlib.sha256(
-                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
-                    ).hexdigest()
-                    if supplied_snapshot is not None
-                    else None
-                )
-                if supplied_digest != stored_digest:
-                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
-                    return EXIT_VALIDATION
-            allowed = run_context.get("declared_allowed_hosts", [])
-            seeds = run_context.get("seed_origins", [])
-            allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
-            seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
-            performance_rows = evidence.get("performance-inventory", [])
-            candidates = select_conditional_probe_candidates(
-                performance_rows,
-                max_pages=args.conditional_max_pages,
-            )
-            host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
-            observations = await collect_conditional_get_evidence(
-                candidates,
-                allowed_hosts=sorted(allowed_hosts),
-                scope_predicate=cast(Any, host_scope),
-                timeout_seconds=args.conditional_timeout,
-            )
-            evidence["conditional-get-probes"] = conditional_get_report(
-                observations,
-                candidate_population=conditional_probe_candidate_population(performance_rows),
-                sample_size=len(candidates),
-            )
-        if args.compare_current_renders:
-            if run_context.get("authorization_scope_active") is True and not args.scope_manifest:
-                print(
-                    "Error: this crawl run used an authorization scope; current render comparison requires --scope-manifest",
-                    file=sys.stderr,
-                )
-                return EXIT_VALIDATION
-            if run_context.get("portal_connection_policy_active") is True:
-                print(
-                    "Error: current render comparison does not reuse the crawl's Portal connection policy",
-                    file=sys.stderr,
-                )
-                return EXIT_VALIDATION
-            historical_rows = await reports.current_site_join_inventory()
-            history_by_url = {str(row.get("url") or ""): row for row in historical_rows}
-            raw_candidates = await reports.store.fetch_render_comparison_candidates(run_id=run_id)
-            valid_candidates = []
-            for candidate in raw_candidates:
-                url = str(candidate.get("url") or "")
-                page = history_by_url.get(url)
-                if not page or page.get("kind") != "html" or page.get("overall_indexable") is not True:
-                    continue
-                canonicals = page.get("canonical_urls_json")
-                if isinstance(canonicals, str):
-                    try:
-                        canonicals = json.loads(canonicals)
-                    except ValueError:
-                        canonicals = []
-                if not isinstance(canonicals, list) or url not in [str(value) for value in canonicals]:
-                    continue
-                valid_candidates.append({**dict(candidate), "template": page.get("template")})
-            scope_predicate = None
-            if args.scope_manifest:
-                from .authorisation import compile_scope_predicate, load_scope_manifest
-
-                scope_predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
-            stored_digest = run_context.get("authorization_scope_digest")
-            if stored_digest:
-                supplied_snapshot = scope_predicate.snapshot() if scope_predicate is not None else None
-                supplied_digest = (
-                    hashlib.sha256(
-                        json.dumps(supplied_snapshot, sort_keys=True, separators=(",", ":")).encode()
-                    ).hexdigest()
-                    if supplied_snapshot is not None
-                    else None
-                )
-                if supplied_digest != stored_digest:
-                    print("Error: --scope-manifest does not match the crawl run authorization scope", file=sys.stderr)
-                    return EXIT_VALIDATION
-            if not valid_candidates:
-                evidence["rendered-mobile-resources"] = [
-                    {
-                        "record_type": "coverage",
-                        "complete": True,
-                        "sample_size": 0,
-                        "candidate_population": 0,
-                        "state": "no_self_canonical_indexable_controls",
-                        "devices": [],
-                    }
-                ]
-                if args.check_external_links:
-                    from .external_link_checks import collect_external_link_rechecks
-
-                    assert scope_predicate is not None
-                    evidence["external-link-rechecks"] = await collect_external_link_rechecks(
-                        [], scope_predicate=scope_predicate, max_targets=args.external_link_max_targets
-                    )
-            else:
-                allowed = run_context.get("declared_allowed_hosts", [])
-                seeds = run_context.get("seed_origins", [])
-                allowed_hosts = {str(host).lower() for host in (allowed if isinstance(allowed, list) else []) if host}
-                seed_origins = [str(origin) for origin in seeds] if isinstance(seeds, list) else []
-                host_scope = build_site_file_scope(seed_origins, allowed_hosts, scope_predicate)
-                initial_urls, strata, url_strata, _stratum_sources = _select_run_render_candidates(
-                    valid_candidates,
-                    max_pages=args.render_max_pages,
-                )
-                render_page_context = {
-                    str(candidate.get("url") or ""): {
-                        "locale": history_by_url.get(str(candidate.get("url") or ""), {}).get("html_lang"),
-                        "template": candidate.get("template"),
-                        "stratum": url_strata.get(str(candidate.get("url") or "")),
-                    }
-                    for candidate in valid_candidates
-                }
-                selected_urls = list(initial_urls)
-                external_link_instances: list[dict[str, object]] = []
-                external_link_truncated_count = 0
-                device_coverages: list[dict[str, object]] = []
-                device_results: list[dict[str, object]] = []
-                device_specs = [("desktop_viewport", 1280, 720)]
-                if args.render_mobile_viewport:
-                    device_specs.append(("mobile_viewport", 390, 844))
-                for device, width, height in device_specs:
-                    render_config = CrawlConfig(
-                        backend="playwright",
-                        same_host_only=True,
-                        allowed_hosts=sorted(allowed_hosts),
-                        respect_robots_txt=True,
-                        max_concurrency=1,
-                        per_host_concurrency=1,
-                        max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
-                        capture_render_baseline=True,
-                        capture_render_link_states=True,
-                        capture_render_image_layout=True,
-                        discover_render_urls=True,
-                        max_render_requests_per_page=args.render_max_requests_per_page,
-                        max_render_links_per_page=args.render_max_links_per_page,
-                        playwright_network_idle_timeout_seconds=args.render_ready_timeout,
-                        playwright_wait_for_selector=args.render_ready_selector or "",
-                        playwright_viewport_width=width,
-                        playwright_viewport_height=height,
-                        destination_guard="pinned",
-                        scope_predicate=cast(Any, host_scope),
-                    )
-                    render_engine = CrawlEngine(render_config)
-                    try:
-                        initial = await compare_rendered_sample(
-                            render_engine,
-                            initial_urls,
-                            max_concurrent=1,
-                        )
-                        expanded = []
-                        if args.render_expansion_pages:
-                            divergent_strata = {
-                                url_strata[item.url]
-                                for item in initial
-                                if item.url in url_strata and (item.state != "complete" or item.findings)
-                            }
-                            taken = set(initial_urls)
-                            for stratum in sorted(divergent_strata):
-                                for candidate_row in valid_candidates:
-                                    url = str(candidate_row.get("url") or "")
-                                    if url_strata.get(url) == stratum and url not in taken:
-                                        expanded.append(url)
-                                        taken.add(url)
-                                        break
-                                if len(expanded) >= args.render_expansion_pages:
-                                    break
-                        extra = (
-                            await compare_rendered_sample(render_engine, expanded, max_concurrent=1) if expanded else []
-                        )
-                    finally:
-                        await render_engine.close()
-                    comparisons = [*initial, *extra]
-                    if args.check_external_links:
-                        for comparison in comparisons:
-                            crawl_result = comparison.crawl_result
-                            for link in getattr(crawl_result, "render_link_observations", []) or []:
-                                if not isinstance(link, Mapping) or link.get("capture_phase") != "after_bounded_scroll":
-                                    continue
-                                if len(external_link_instances) >= 10_000:
-                                    external_link_truncated_count += 1
-                                    continue
-                                external_link_instances.append(
-                                    {
-                                        "source_url": comparison.url,
-                                        "target_url": link.get("href"),
-                                        "device": device,
-                                        "anchor_text": link.get("anchor_text"),
-                                        "dom_path": link.get("dom_path"),
-                                        "capture_phase": link.get("capture_phase"),
-                                        "reveal_state": link.get("reveal_state"),
-                                    }
-                                )
-                    selected_urls = [*initial_urls, *expanded]
-                    records = render_audit_records(
-                        comparisons,
-                        device=device,
-                        viewport=(width, height),
-                        page_context=render_page_context,
-                    )
-                    records[0]["candidate_population"] = len(valid_candidates)
-                    records[0]["initial_sample_size"] = len(initial_urls)
-                    records[0]["expanded_sample_size"] = len(expanded)
-                    records[0]["strata"] = strata
-                    records[0]["render_ready_selector_configured"] = bool(args.render_ready_selector)
-                    device_coverages.append(dict(records[0]))
-                    device_results.extend(records[1:])
-                    if args.persist_render_comparisons:
-                        persistence_rows: list[dict[str, object]] = []
-                        rendered_observations = [row for row in records[1:] if row.get("record_type") == "observation"]
-                        for comparison in comparisons:
-                            persisted = comparison.as_dict()
-                            persisted["url"] = comparison.url
-                            persisted["state"] = comparison.state
-                            persisted["state_reason"] = comparison.state_reason
-                            persisted["primary_summary"] = comparison.primary_summary
-                            persisted["observed_at"] = datetime.now(UTC).isoformat()
-                            persisted["device"] = device
-                            digest = hashlib.sha256(comparison.url.encode()).hexdigest()
-                            persisted["resource_observations"] = [
-                                row
-                                for row in rendered_observations
-                                if row.get("url_digest_sha256") == digest
-                                and row.get("record_kind") in {"image_reference", "browser_request"}
-                            ]
-                            persistence_rows.append(persisted)
-                        await store.persist_render_comparison_session(
-                            source_crawl_run_id=run_id,
-                            schema_version=TECHNICAL_AUDIT_SCHEMA_VERSION,
-                            ruleset_version=RENDER_COMPARISON_RULESET_VERSION,
-                            input_metadata={
-                                "device": device,
-                                "viewport": {"width": width, "height": height},
-                                "sampling_basis": "deterministic_host_locale_path_depth_strata",
-                                "strata": strata,
-                                "selected_urls": selected_urls,
-                                "sample_contexts": [
-                                    {"url": url, **render_page_context.get(url, {})} for url in selected_urls
-                                ],
-                            },
-                            summary={
-                                "sample_size": len(comparisons),
-                                "complete": records[0].get("complete"),
-                                "candidate_count": len(valid_candidates),
-                            },
-                            results=persistence_rows,
-                        )
-                evidence["rendered-mobile-resources"] = [
-                    {
-                        "record_type": "coverage",
-                        "complete": all(row.get("complete") is True for row in device_coverages),
-                        "sample_size": sum(cast(int, row.get("sample_size", 0)) for row in device_coverages),
-                        "devices": device_coverages,
-                        "rendered_only_link_count": sum(
-                            cast(int, row.get("rendered_only_link_count", 0)) for row in device_coverages
-                        ),
-                        "raw_only_link_count": sum(
-                            cast(int, row.get("raw_only_link_count", 0)) for row in device_coverages
-                        ),
-                    },
-                    *device_results,
-                ]
-                if args.check_external_links:
-                    from .external_link_checks import collect_external_link_rechecks
-
-                    if scope_predicate is None:
-                        print("Error: --check-external-links requires a valid --scope-manifest", file=sys.stderr)
-                        return EXIT_VALIDATION
-                    external_link_checks = await collect_external_link_rechecks(
-                        external_link_instances,
-                        scope_predicate=scope_predicate,
-                        max_targets=args.external_link_max_targets,
-                        truncated_instance_count=external_link_truncated_count,
-                        allow_private_network=args.allow_private_network,
-                        allow_network_cidrs=args.allow_network_cidrs,
-                    )
-                    evidence["external-link-rechecks"] = external_link_checks
-                    evidence["external-link-rechecks"][0]["device_count"] = len(device_specs)
-        if args.recheck_live:
-            if not args.scope_manifest:
-                print("Error: --recheck-live requires --scope-manifest", file=sys.stderr)
-                return EXIT_VALIDATION
-            from .authorisation import compile_scope_predicate, load_scope_manifest
-
-            predicate = compile_scope_predicate(load_scope_manifest(args.scope_manifest))
-            assert predicate is not None
-            hosts_value = run_context.get("declared_allowed_hosts", [])
-            seeds_value = run_context.get("seed_hosts", [])
-            hosts = hosts_value if isinstance(hosts_value, list) else []
-            seeds = seeds_value if isinstance(seeds_value, list) else []
-            recheck_allowed_hosts = sorted({str(host).lower() for host in [*hosts, *seeds] if host})
-            saved_failure_targets = candidate_targets(
-                evidence.get("internal-link-quality", []), limit=args.recheck_limit
-            )
-            known_target_urls = {row["url"] for row in known_url_inventory}
-            known_targets = sorted(known_target_urls - set(saved_failure_targets))
-            selected_known_targets = known_targets[: max(0, args.recheck_limit - len(saved_failure_targets))]
-            targets = sorted({*saved_failure_targets, *selected_known_targets})
-            selected_known_urls = known_target_urls.intersection(targets)
-            audit_options.update(
-                {
-                    "known_url_recheck_candidate_count": len(known_target_urls),
-                    "known_url_recheck_selected_count": len(selected_known_urls),
-                    "known_url_recheck_not_selected_count": len(known_target_urls - selected_known_urls),
-                    "known_url_recheck_selection": "sorted source URLs after saved failures, within shared recheck limit",
-                }
-            )
-            live_rechecks = await collect_live_rechecks(
-                targets,
-                scope_predicate=predicate,
-                allowed_hosts=recheck_allowed_hosts,
-                attempts=args.recheck_attempts,
-                timeout_seconds=args.recheck_timeout,
-            )
+                continue
+            capability = capability_by_report.get(name)
+            if capability and capabilities.get(capability) is not True:
+                continue
+            evidence[name] = await _fetch_report(reports, name, args)
         final_run = await store.get_crawl_run(run_id)
         initial_updated_at = run_context.get("updated_at")
         final_updated_at = final_run.get("updated_at") if final_run else None
@@ -3335,85 +2685,339 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_VALIDATION
-    except (OSError, ValueError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return EXIT_VALIDATION
     finally:
         await store.close()
 
-    audit = build_technical_audit(
-        crawl_run_id=run_id,
-        reports=evidence,
-        run_context=run_context,
-        live_rechecks=live_rechecks,
-    )
+    audit = build_technical_audit(crawl_run_id=run_id, reports=evidence, run_context=run_context)
+    try:
+        audit["ticket_register"] = build_ticket_register(audit, load_ticket_language(args.ticket_language))
+    except TicketLanguageError as exc:
+        print(f"Error: ticket language {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(audit, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     print(f"Wrote deterministic technical audit to {output}")
-    if args.markdown_out:
-        markdown_output = Path(args.markdown_out)
-        markdown_output.parent.mkdir(parents=True, exist_ok=True)
-        markdown_output.write_text(render_technical_audit_markdown(audit), encoding="utf-8")
-        print(f"Wrote technical-audit Markdown projection to {markdown_output}")
 
-    if args.publish_google_sheets:
+    if args.google_sheets_template:
         from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services
 
-        receipt_path = args.google_sheets_receipt or f"{args.out}.sheets-receipt.json"
         try:
-            credentials = credential_path(args.google_sheets_credentials)
-            drive, sheets = google_services(credentials)
-            sheet_url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
+            drive, sheets = google_services(credential_path(args.google_sheets_credentials))
+            title = args.google_sheets_title or f"Technical SEO Audit – {run_id}"
+            url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
                 template=args.google_sheets_template,
-                title=args.google_sheets_title or f"Technical SEO audit {run_id}",
+                title=title,
                 folder_id=args.google_sheets_folder,
                 tables=audit_sheet_tables(audit),
-                receipt_path=receipt_path,
-                resume=args.resume_google_sheets,
             )
-        except (ValueError, RuntimeError, OSError) as exc:
-            print(f"Google Sheets publication failed: {exc}", file=sys.stderr)
+        except (RuntimeError, ValueError) as exc:
+            print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
             return EXIT_VALIDATION
-        except Exception as exc:
-            status = getattr(getattr(exc, "resp", None), "status", None)
-            status_text = f" (HTTP {status})" if status else ""
-            print(
-                f"Google Sheets publication failed: {type(exc).__name__}{status_text}; receipt: {receipt_path}",
-                file=sys.stderr,
-            )
-            return EXIT_VALIDATION
-        print(f"Published technical audit to {sheet_url}")
-        print(f"Publication receipt: {receipt_path}")
+        print(f"Published technical audit workbook: {url}")
 
-    if args.publish_ticket_register:
-        from .google_sheets import GoogleSheetsTicketRegisterPublisher, credential_path, google_services
+    return EXIT_SUCCESS
 
-        receipt_path = args.ticket_register_receipt or f"{args.out}.ticket-register-receipt.json"
+
+def _run_technical_audit_questions(args: argparse.Namespace) -> int:
+    """Answer every registry question from one saved audit bundle; no database or network."""
+    from .audit_observations import ObservationError, attach_observations, load_observation_bundle
+    from .technical_audit_questions import (
+        QuestionRegistryError,
+        answer_questions,
+        load_question_registry,
+        question_ticket_rows,
+        questions_sheet_tables,
+        validate_question_registry,
+    )
+
+    try:
+        registry = load_question_registry(args.questions)
+        profile = json.loads(Path(args.site_profile).read_text(encoding="utf-8")) if args.site_profile else None
+        if profile is not None and not isinstance(profile, dict):
+            raise QuestionRegistryError("site profile must be a JSON object")
+        audit = json.loads(Path(args.audit).read_text(encoding="utf-8"))
+        language = load_ticket_language(args.ticket_language)
+        observation_paths = getattr(args, "observations", None) or []
+        if observation_paths:
+            audit = attach_observations(audit, [load_observation_bundle(path) for path in observation_paths])
+    except (OSError, json.JSONDecodeError, QuestionRegistryError, TicketLanguageError, ObservationError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    if profile is not None:
         try:
-            credentials = credential_path(args.google_sheets_credentials)
-            drive, sheets = google_services(credentials)
-            sheet_url = GoogleSheetsTicketRegisterPublisher(drive, sheets).publish(
-                audit=audit,
-                title=args.ticket_register_title or f"Technical SEO audit tickets {run_id}",
-                folder_id=args.ticket_register_folder,
-                receipt_path=receipt_path,
-                resume=args.resume_ticket_register,
-            )
-        except (ValueError, RuntimeError, OSError) as exc:
-            print(f"Ticket-register publication failed: {exc}", file=sys.stderr)
-            return EXIT_VALIDATION
-        except Exception as exc:
-            status = getattr(getattr(exc, "resp", None), "status", None)
-            status_text = f" (HTTP {status})" if status else ""
-            print(
-                f"Ticket-register publication failed: {type(exc).__name__}{status_text}; receipt: {receipt_path}",
-                file=sys.stderr,
-            )
-            return EXIT_VALIDATION
-        print(f"Published client ticket register to {sheet_url}")
-        print(f"Ticket-register publication receipt: {receipt_path}")
+            validate_question_registry(registry, profile)
+        except QuestionRegistryError as exc:
+            # Missing keys only leave those questions Pending; say which.
+            print(f"Warning: {exc}", file=sys.stderr)
 
+    answers = answer_questions(audit, registry, profile)
+    tickets = question_ticket_rows(audit, registry, answers, language)
+    output = Path(args.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "crawl_run_id": audit.get("crawl_run_id"),
+        "registry_version": registry.get("version"),
+        "answers": answers,
+        "tickets": tickets,
+    }
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    counts: dict[str, int] = {}
+    for answer in answers:
+        counts[str(answer["status"])] = counts.get(str(answer["status"]), 0) + 1
+    summary = ", ".join(f"{name} {counts.get(name, 0)}" for name in ("Issue", "Needs validation", "Healthy", "Pending"))
+    print(f"Wrote {len(answers)} question answers and {len(tickets)} draft tickets to {output} ({summary})")
+
+    if args.google_sheets_template:
+        from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services
+
+        try:
+            drive, sheets = google_services(credential_path(args.google_sheets_credentials))
+            title = args.google_sheets_title or f"Technical SEO Audit – {audit.get('crawl_run_id')}"
+            url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
+                template=args.google_sheets_template,
+                title=title,
+                folder_id=args.google_sheets_folder,
+                tables=questions_sheet_tables(audit, registry, answers, tickets),
+                locate_ticket_header=True,
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
+            return EXIT_VALIDATION
+        print(f"Published question workbook: {url}")
+    return EXIT_SUCCESS
+
+
+async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
+    """Write a run-scoped observation bundle from stored HTML and other crawler_cli artifacts."""
+    from .audit_html_signals import HTML_SIGNALS_VERSION, page_html_signals
+    from .audit_observations import (
+        ObservationError,
+        collection,
+        collection_from_exposure_inventory,
+        collection_from_html_signals,
+        collection_from_render_comparison,
+        new_bundle,
+    )
+
+    run_id = args.crawl_run_id
+    collections: list[dict[str, object]] = []
+    try:
+        for path in args.render_comparison or []:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            collections.append(collection_from_render_comparison(payload, run_id))
+        for path in args.exposure_inventory or []:
+            collections.append(collection_from_exposure_inventory(json.loads(Path(path).read_text(encoding="utf-8"))))
+        robots = []
+        for item in args.robots_txt or []:
+            host, separator, path = item.partition("=")
+            if not separator or not host or not path:
+                raise ObservationError(f"--robots-txt expects HOST=FILE, got {item!r}")
+            robots.append({"host": host, "status": 200, "body": Path(path).read_text(encoding="utf-8")})
+        if robots:
+            collections.append(
+                collection(
+                    "robots-txt",
+                    robots,
+                    source="operator-saved robots.txt files",
+                    scope=f"{len(robots)} hosts: {', '.join(record['host'] for record in robots)}",
+                    coverage_state="complete",
+                )
+            )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ObservationError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+
+    if args.html_signals:
+        import asyncpg
+
+        store = _store_from_args(args)
+        try:
+            reports = CrawlReports(store, run_id=run_id)
+            run_id = await reports._run_id()
+            run_context = await reports.technical_audit_context()
+            records = [
+                page_html_signals(url, html, site_hosts=args.site_host or ())
+                async for url, html in store.iter_run_html(run_id=run_id)
+            ]
+        except (OSError, ValueError, asyncpg.PostgresError) as exc:
+            print(f"Error: {scrub_text(str(exc))}", file=sys.stderr)
+            return EXIT_VALIDATION
+        finally:
+            await store.close()
+        collections.append(collection_from_html_signals(records, run_context=run_context, version=HTML_SIGNALS_VERSION))
+
+    if (
+        getattr(args, "ai_governance", False)
+        or getattr(args, "probe_accept_language", False)
+        or getattr(args, "tls_probe", False)
+    ):
+        import asyncpg
+
+        from .audit_observation_adapters import (
+            llms_txt_status_by_host,
+            locale_probe_records,
+            robots_txt_record,
+            tls_probe_records,
+        )
+        from .audit_observations import collection
+        from .transport_security import transport_security_report
+
+        store = _store_from_args(args)
+        probe_engine: CrawlEngine | None = None
+        try:
+            reports = CrawlReports(store, run_id=run_id)
+            run_id = await reports._run_id()
+            run_context = await reports.technical_audit_context()
+            raw_seed_hosts = run_context.get("seed_hosts")
+            seed_hosts = [str(host) for host in raw_seed_hosts if host] if isinstance(raw_seed_hosts, list) else []
+            raw_allowed = run_context.get("declared_allowed_hosts")
+            allowed_hosts = {
+                str(host).lower() for host in (raw_allowed if isinstance(raw_allowed, list) else []) if host
+            }
+            allowed_hosts |= {host.lower() for host in seed_hosts}
+            seed_origins = [f"https://{host}/" for host in seed_hosts]
+            if (
+                getattr(args, "ai_governance", False) or getattr(args, "probe_accept_language", False)
+            ) and not seed_origins:
+                print("Error: the run records no seed hosts, so live probes have no origin to target", file=sys.stderr)
+                return EXIT_VALIDATION
+            if getattr(args, "ai_governance", False) or getattr(args, "probe_accept_language", False):
+                probe_engine = CrawlEngine(
+                    CrawlConfig(
+                        same_host_only=True,
+                        allowed_hosts=sorted(allowed_hosts),
+                        respect_robots_txt=True,
+                        max_concurrency=2,
+                        per_host_concurrency=1,
+                        max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
+                        destination_guard="pinned",
+                        challenge_escalate_to_browser=False,
+                        scope_predicate=cast(Any, build_site_file_scope(seed_origins, allowed_hosts, None)),
+                    )
+                )
+            if getattr(args, "ai_governance", False):
+                assert probe_engine is not None
+                origins = seed_origins[: max(1, args.ai_governance_max_origins)]
+                collected = await collect_ai_governance(
+                    probe_engine, seed_origins=origins, max_origins=max(1, args.ai_governance_max_origins)
+                )
+                llms = llms_txt_status_by_host(collected)
+                records = []
+                for origin in origins:
+                    host = urlsplit(origin).netloc.lower()
+                    response = await probe_engine._bounded_fetch_response(f"{origin.rstrip('/')}/robots.txt")
+                    records.append(robots_txt_record(host, response, llms.get(host)))
+                unread = [str(record["host"]) for record in records if record["status"] is None]
+                collections.append(
+                    collection(
+                        "robots-txt",
+                        records,
+                        source="crawler-cli technical-audit-observations --ai-governance: guarded live robots.txt and /llms.txt fetch",
+                        scope=f"{len(records)} seed origins"
+                        + (f"; not fetched: {', '.join(unread)}" if unread else ""),
+                        coverage_state="partial" if unread else "complete",
+                    )
+                )
+            if getattr(args, "probe_accept_language", False):
+                assert probe_engine is not None
+                page_rows = await reports.current_site_join_inventory()
+                targets, population = select_accept_language_targets(
+                    seed_origins, page_rows, max_targets=args.accept_language_max_targets
+                )
+                evidence = await collect_accept_language_evidence(
+                    probe_engine,
+                    targets,
+                    eligible_population=population,
+                    max_redirect_hops=args.accept_language_max_hops,
+                )
+                await store.persist_language_probe_evidence(run_id, evidence, session_id=str(uuid.uuid4()))
+                records = locale_probe_records(evidence)
+                collections.append(
+                    collection(
+                        "locale-probe",
+                        records,
+                        source="crawler-cli technical-audit-observations --probe-accept-language: guarded Accept-Language probes",
+                        scope=f"{len(targets)} of {population} eligible roots; {len(records)} header variants",
+                        coverage_state="complete" if population and len(targets) >= population else "partial",
+                    )
+                )
+            if getattr(args, "tls_probe", False):
+                rows = await reports.https_response_headers()
+                records = tls_probe_records(transport_security_report(rows))
+                collections.append(
+                    collection(
+                        "tls-probe",
+                        records,
+                        source="crawler-cli technical-audit-observations --tls-probe: Strict-Transport-Security from stored HTTPS responses; preload list not queried, OCSP not observed",
+                        scope=f"{len(records)} HTTPS hosts in run {run_id}",
+                        coverage_state="partial",
+                    )
+                )
+        except (OSError, ValueError, asyncpg.PostgresError) as exc:
+            print(f"Error: {scrub_text(str(exc))}", file=sys.stderr)
+            return EXIT_VALIDATION
+        finally:
+            if probe_engine is not None:
+                await probe_engine.close()
+            await store.close()
+
+    if not collections:
+        print("Error: nothing to observe; pass --html-signals or an artifact option", file=sys.stderr)
+        return EXIT_VALIDATION
+    try:
+        bundle = new_bundle(run_id, collections)
+    except ObservationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    output = Path(args.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(bundle, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    summary = ", ".join(f"{item['kind']} {len(item['records'])} ({item['coverage_state']})" for item in collections)  # type: ignore[arg-type]
+    print(f"Wrote observation bundle for run {run_id} to {output}: {summary}")
+    return EXIT_SUCCESS
+
+
+async def _run_import_backlinks(args: argparse.Namespace) -> int:
+    """Import inbound-link evidence for one existing crawl run."""
+    from .backlinks import BacklinkImportError, load_backlink_import
+
+    try:
+        imported = load_backlink_import(
+            args.file,
+            target_column=args.target_column,
+            referring_column=args.referring_column,
+        )
+    except (OSError, BacklinkImportError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+
+    store = _store_from_args(args)
+    try:
+        await store.initialize()
+        run = await store.get_crawl_run(args.crawl_run_id)
+        if run is None:
+            print(f"Error: crawl run {args.crawl_run_id!r} was not found", file=sys.stderr)
+            return EXIT_VALIDATION
+        store.set_active_crawl_run(args.crawl_run_id)
+        await store.record_sources_bulk(imported.pairs, source="backlink")
+    finally:
+        await store.close()
+
+    print(
+        json.dumps(
+            {
+                "crawl_run_id": args.crawl_run_id,
+                "source": "backlink",
+                "file": str(args.file),
+                "rows_read": imported.total_rows,
+                "valid_target_rows": len(imported.pairs),
+                "unique_targets": len({url for url, _ in imported.pairs}),
+                "skipped_rows": imported.skipped_rows,
+            },
+            sort_keys=True,
+        )
+    )
     return EXIT_SUCCESS
 
 
@@ -3530,6 +3134,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
                     fragment=item.get("fragment"),
                     url_parameters=item.get("url_parameters"),
                     original_href=item.get("original_href"),
+                    rel=[str(value) for value in (item.get("rel") or [])],
                 )
             )
         return links
@@ -5053,142 +4658,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     audit_parser.add_argument("--out", required=True, help="Write the deterministic audit JSON to this path")
     audit_parser.add_argument(
-        "--markdown-out", help="Optionally write the concise recipient-facing Markdown projection"
-    )
-    audit_parser.add_argument(
-        "--publish-google-sheets",
-        action="store_true",
-        help="Explicitly copy and populate the selected compatible v2 Google Sheets template",
-    )
-    audit_parser.add_argument(
-        "--publish-ticket-register",
-        action="store_true",
-        help="Explicitly copy the standard client ticket register and populate evidenced remediation rows",
-    )
-    audit_parser.add_argument("--google-sheets-template", help="Google Sheets URL or ID for a compatible v2 template")
-    audit_parser.add_argument("--google-sheets-title", help="Title for the copied audit workbook")
-    audit_parser.add_argument("--google-sheets-folder", help="Destination Google Drive folder ID")
-    audit_parser.add_argument("--google-sheets-credentials", help="Optional service-account JSON credentials file")
-    audit_parser.add_argument("--google-sheets-receipt", help="Local publication receipt path (defaults beside --out)")
-    audit_parser.add_argument("--ticket-register-title", help="Title for the copied client ticket register")
-    audit_parser.add_argument(
-        "--ticket-register-folder", help="Destination Google Drive folder ID for the ticket register"
-    )
-    audit_parser.add_argument("--ticket-register-receipt", help="Local ticket-register publication receipt path")
-    audit_parser.add_argument(
-        "--resume-ticket-register",
-        action="store_true",
-        help="Resume the ticket-register copy recorded in --ticket-register-receipt",
-    )
-    audit_parser.add_argument(
-        "--resume-google-sheets",
-        action="store_true",
-        help="Resume or reconcile the exact copy recorded in --google-sheets-receipt",
-    )
-    audit_parser.add_argument(
-        "--recheck-live",
-        action="store_true",
-        help="Recheck saved failing link targets through the guarded crawler (requires an authorization manifest)",
-    )
-    audit_parser.add_argument("--scope-manifest", help="Authorization manifest required by --recheck-live")
-    audit_parser.add_argument(
-        "--allow-private-network",
-        action="store_true",
-        help="Permit private destinations for external-link checks only when also authorized by the scope manifest",
-    )
-    audit_parser.add_argument(
-        "--allow-network-cidr",
-        dest="allow_network_cidrs",
-        action="append",
-        default=[],
-        metavar="CIDR",
-        help="Permit this private CIDR for external-link checks (requires --allow-private-network)",
-    )
-    audit_parser.add_argument(
-        "--known-url-inventory",
-        action="append",
-        default=[],
-        metavar="CSV",
-        help=(
-            "Optional Search Console or analytics URL inventory CSV with url,source columns; "
-            "repeat to include multiple files"
-        ),
-    )
-    audit_parser.add_argument(
-        "--fetch-current-robots-sitemaps",
-        action="store_true",
-        help="Explicitly fetch current robots.txt and bounded sitemap samples for the selected run hosts",
-    )
-    audit_parser.add_argument("--current-max-sitemaps", type=positive_int, default=100)
-    audit_parser.add_argument("--current-max-sitemap-urls", type=positive_int, default=100_000)
-    audit_parser.add_argument("--current-max-live-samples", type=non_negative_int, default=25)
-    audit_parser.add_argument(
-        "--probe-url-variants",
-        action="store_true",
-        help="Explicitly probe a bounded set of current URL variants and one synthetic 404 path per host",
-    )
-    audit_parser.add_argument("--variant-max-control-pages", type=positive_int, default=10)
-    audit_parser.add_argument("--variant-max-probes", type=positive_int, default=50)
-    audit_parser.add_argument("--soft404-max-hosts", type=positive_int, default=10)
-    audit_parser.add_argument(
-        "--probe-accept-language",
-        action="store_true",
-        help=(
-            "Explicitly probe seed roots and saved locale roots with a fixed set of Accept-Language headers "
-            "to detect language redirects, missing Vary and no-header crawler traps"
-        ),
-    )
-    audit_parser.add_argument(
-        "--accept-language-max-targets",
-        type=positive_int,
-        default=5,
-        help=f"Maximum Accept-Language probe targets (1–{MAX_ACCEPT_LANGUAGE_TARGETS}; default 5)",
-    )
-    audit_parser.add_argument(
-        "--accept-language-max-hops",
-        type=positive_int,
-        default=5,
-        help="Maximum redirects followed per Accept-Language probe (1–10; default 5)",
-    )
-    audit_parser.add_argument(
-        "--probe-conditional-gets",
-        action="store_true",
-        help="Explicitly sample ordinary and validator-based conditional GETs for public self-canonical HTML",
-    )
-    audit_parser.add_argument(
-        "--audit-ai-governance",
-        action="store_true",
-        help=(
-            "Explicitly evaluate robots.txt posture for recognised AI crawlers and probe "
-            "/.well-known/llms.txt, /llms.txt and /llms-full.txt on the selected run origins"
-        ),
-    )
-    audit_parser.add_argument("--ai-governance-max-origins", type=positive_int, default=10)
-    audit_parser.add_argument("--conditional-max-pages", type=positive_int, default=10)
-    audit_parser.add_argument("--conditional-timeout", type=positive_float, default=10.0)
-    audit_parser.add_argument(
-        "--compare-current-renders",
-        action="store_true",
-        help="Explicitly compare a stratified current raw/desktop render sample from the selected crawl run",
-    )
-    audit_parser.add_argument("--render-max-pages", type=positive_int, default=10)
-    audit_parser.add_argument("--render-expansion-pages", type=non_negative_int, default=5)
-    audit_parser.add_argument("--render-mobile-viewport", action="store_true")
-    audit_parser.add_argument(
-        "--check-external-links",
-        action="store_true",
-        help="Recheck a bounded sample of rendered external links (requires render comparison and scope manifest)",
-    )
-    audit_parser.add_argument("--external-link-max-targets", type=positive_int, default=25)
-    audit_parser.add_argument("--render-ready-selector", default="")
-    audit_parser.add_argument("--render-ready-timeout", type=positive_float, default=5.0)
-    audit_parser.add_argument("--render-max-requests-per-page", type=positive_int, default=200)
-    audit_parser.add_argument("--render-max-links-per-page", type=positive_int, default=200)
-    audit_parser.add_argument("--persist-render-comparisons", action="store_true")
-    audit_parser.add_argument("--recheck-limit", type=positive_int, default=25)
-    audit_parser.add_argument("--recheck-attempts", type=positive_int, default=2)
-    audit_parser.add_argument("--recheck-timeout", type=positive_float, default=10.0)
-    audit_parser.add_argument(
         "--simhash-threshold",
         type=non_negative_int,
         default=4,
@@ -5200,8 +4669,152 @@ def _build_parser() -> argparse.ArgumentParser:
         default=5000,
         help="Maximum indexable pages compared by near-duplicates (default 5000)",
     )
+    audit_parser.add_argument(
+        "--search-evidence",
+        help="CSV or JSON Search Console/URL Inspection records. Required fields: url, source, export_date.",
+    )
+    audit_parser.add_argument(
+        "--inventory-interaction-evidence",
+        help=(
+            "CSV or JSON initial-render versus interaction capture. Required fields: "
+            "source_url, action, initial_document_url_count, post_interaction_document_url_count."
+        ),
+    )
+    audit_parser.add_argument(
+        "--ticket-language",
+        help="Ticket-language JSON. Defaults to templates/technical-audit-ticket-language.json.",
+    )
+    audit_parser.add_argument(
+        "--google-sheets-template",
+        help="Copy this Google Sheets template and publish the Tickets and evidence tabs.",
+    )
+    audit_parser.add_argument("--google-sheets-title", help="Title for the copied Google Sheet.")
+    audit_parser.add_argument("--google-sheets-folder", help="Optional Google Drive folder ID for the copied sheet.")
+    audit_parser.add_argument(
+        "--google-sheets-credentials",
+        help="Service-account credential file; otherwise GOOGLE_DOCS_OAUTH_TOKEN_FILE is used.",
+    )
     _add_postgres_args(audit_parser)
     _add_reporting_run_selector(audit_parser)
+
+    questions_parser = subparsers.add_parser(
+        "technical-audit-questions",
+        help="Answer the audit template's Questions tab from a saved technical-audit JSON",
+    )
+    questions_parser.add_argument(
+        "--audit", required=True, help="technical-audit JSON written by technical-audit --out"
+    )
+    questions_parser.add_argument("--out", required=True, help="Write the question answers JSON to this path")
+    questions_parser.add_argument(
+        "--site-profile",
+        help="Site profile JSON (see templates/site-profile.example.json); questions needing it stay Pending without it.",
+    )
+    questions_parser.add_argument(
+        "--questions",
+        help="Question registry JSON. Defaults to templates/technical-audit-questions.json.",
+    )
+    questions_parser.add_argument(
+        "--ticket-language",
+        help="Ticket-language JSON. Defaults to templates/technical-audit-ticket-language.json.",
+    )
+    questions_parser.add_argument(
+        "--observations",
+        action="append",
+        help="Observation bundle for the same crawl run (technical-audit-observations or supplied; repeatable).",
+    )
+    questions_parser.add_argument(
+        "--google-sheets-template",
+        help="Copy this Google Sheets template and publish the Questions, Tickets and data tabs.",
+    )
+    questions_parser.add_argument("--google-sheets-title", help="Title for the copied Google Sheet.")
+    questions_parser.add_argument(
+        "--google-sheets-folder", help="Optional Google Drive folder ID for the copied sheet."
+    )
+    questions_parser.add_argument(
+        "--google-sheets-credentials",
+        help="Service-account credential file; otherwise GOOGLE_DOCS_OAUTH_TOKEN_FILE is used.",
+    )
+
+    observations_parser = subparsers.add_parser(
+        "technical-audit-observations",
+        help="Write a run-scoped observation bundle for technical-audit-questions --observations",
+    )
+    observations_parser.add_argument("--crawl-run-id", required=True, help="Crawl run the observations belong to")
+    observations_parser.add_argument("--out", required=True, help="Write the observation bundle JSON to this path")
+    observations_parser.add_argument(
+        "--html-signals",
+        action="store_true",
+        help="Scan the run's stored raw HTML for mixed content, forms, head resources, fonts, spam and link signals.",
+    )
+    observations_parser.add_argument(
+        "--site-host",
+        action="append",
+        help="Extra host treated as the site's own when classifying links (repeatable); each page's host always is.",
+    )
+    observations_parser.add_argument(
+        "--render-comparison",
+        action="append",
+        help="compare-renders --crawl-run-id JSON output to include as render-parity evidence (repeatable).",
+    )
+    observations_parser.add_argument(
+        "--exposure-inventory",
+        action="append",
+        help="exposure-inventory JSON artifact to include as host-probe evidence (repeatable).",
+    )
+    observations_parser.add_argument(
+        "--robots-txt",
+        action="append",
+        metavar="HOST=FILE",
+        help="Saved robots.txt body for a host, for the AI-crawler policy question (repeatable).",
+    )
+    observations_parser.add_argument(
+        "--ai-governance",
+        action="store_true",
+        help="Fetch each seed origin's robots.txt and /llms.txt through the guarded engine (robots-txt observations).",
+    )
+    observations_parser.add_argument(
+        "--ai-governance-max-origins", type=int, default=10, help="Most seed origins to probe for AI governance."
+    )
+    observations_parser.add_argument(
+        "--probe-accept-language",
+        action="store_true",
+        help="Probe seed and locale roots with a fixed Accept-Language set, persist the session, "
+        "and write locale-probe observations.",
+    )
+    observations_parser.add_argument(
+        "--accept-language-max-targets", type=int, default=5, help="Most roots to probe with Accept-Language."
+    )
+    observations_parser.add_argument(
+        "--accept-language-max-hops", type=int, default=5, help="Redirect hops followed per Accept-Language probe."
+    )
+    observations_parser.add_argument(
+        "--tls-probe",
+        action="store_true",
+        help="Read Strict-Transport-Security headers from the run's stored HTTPS responses (tls-probe observations).",
+    )
+    _add_postgres_args(observations_parser)
+
+    backlink_parser = subparsers.add_parser(
+        "import-backlinks",
+        help="Attach an inbound-link export to an existing crawl run",
+    )
+    backlink_parser.add_argument("file", help="Backlink CSV/TSV export (UTF-8 or UTF-16)")
+    backlink_parser.add_argument(
+        "--crawl-run-id",
+        required=True,
+        help="Existing crawl run whose target URLs receive the backlink evidence",
+    )
+    backlink_parser.add_argument(
+        "--target-column",
+        default="Target URL",
+        help="Column containing the crawled-site URL (default: %(default)s)",
+    )
+    backlink_parser.add_argument(
+        "--referring-column",
+        default="Referring page URL",
+        help="Column containing the external referring URL (default: %(default)s)",
+    )
+    _add_postgres_args(backlink_parser)
 
     rec_parser = subparsers.add_parser(
         "reconcile-sources",
@@ -5586,6 +5199,10 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "intent-overlap",
         "render-report",
         "report",
+        "technical-audit",
+        "technical-audit-questions",
+        "technical-audit-observations",
+        "import-backlinks",
         "reconcile-sources",
         "compare",
         "compare-urls",
@@ -5642,6 +5259,12 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_report(args)
     if command == "technical-audit":
         return await _run_technical_audit(args)
+    if command == "technical-audit-questions":
+        return _run_technical_audit_questions(args)
+    if command == "technical-audit-observations":
+        return await _run_technical_audit_observations(args)
+    if command == "import-backlinks":
+        return await _run_import_backlinks(args)
     if command == "reconcile-sources":
         return await _run_reconcile_sources(args)
     if command == "compare":

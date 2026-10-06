@@ -1,4 +1,4 @@
-from crawler_cli.extract import extract_page_data
+from crawler_cli.extract import extract_links, extract_page_data
 
 
 def test_extract_page_data_captures_indexability_and_hreflang():
@@ -54,4 +54,16 @@ def test_extract_page_data_preserves_canonical_channels_and_multiplicity():
         ("html_head", "https://example.com/one"),
         ("html_head", "https://example.com/two"),
         ("http_header_link", "https://example.com/header,path"),
+    ]
+
+
+def test_extract_links_records_follow_state():
+    links = extract_links(
+        '<a href="/follow">Follow</a><a href="https://offsite.example/no" rel="nofollow">No follow</a>',
+        "https://example.com/",
+        same_host_only=False,
+    )
+    assert [(link.href, "nofollow" not in link.rel) for link in links] == [
+        ("https://example.com/follow", True),
+        ("https://offsite.example/no", False),
     ]

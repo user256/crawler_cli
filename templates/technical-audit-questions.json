@@ -1,0 +1,2919 @@
+{
+  "version": 1,
+  "source_sheet": "https://docs.google.com/spreadsheets/d/1JyYbeoXhBq3Y_heUsUXRaZHOmNPSTeNeUhRodWcZ53o/edit?gid=1652728870",
+  "polarity": "Every question is phrased so that Yes means a problem. issue_if is the deterministic rule that makes the answer Yes.",
+  "statuses": {
+    "Issue": "The issue_if rule matched on a complete population.",
+    "Healthy": "The rule was tested on a complete population and did not match (or the control does not apply, with the reason given).",
+    "Needs validation": "The rule matched or was tested on partial coverage, a heuristic group, or a run that failed Q26.",
+    "Pending": "Not tested: a required input, profile key or external tool was missing."
+  },
+  "check_status_to_question_status": {
+    "finding": "Issue",
+    "pass": "Healthy",
+    "not_applicable": "Healthy",
+    "partial": "Needs validation",
+    "unavailable": "Pending"
+  },
+  "groups": {
+    "crawl": {
+      "answerable": "Yes",
+      "ticket": "on Issue, at the entry's classification"
+    },
+    "crawl+profile": {
+      "answerable": "Yes, with site profile",
+      "ticket": "on Issue; Pending when a profile key is missing"
+    },
+    "best-practice": {
+      "answerable": "Yes",
+      "ticket": "on Issue, classification capped at Improvement or Warning, priority at most Medium"
+    },
+    "heuristic": {
+      "answerable": "Partly",
+      "ticket": "never automatic; status is at most Needs validation until a person confirms"
+    },
+    "supplied-input": {
+      "answerable": "With supplied data",
+      "ticket": "on Issue when the input is supplied; otherwise Pending"
+    },
+    "external": {
+      "answerable": "No",
+      "ticket": "never; always Pending with the tool needed"
+    },
+    "run-gate": {
+      "answerable": "Yes",
+      "ticket": "never; a failure downgrades every other crawl answer to Needs validation"
+    }
+  },
+  "requires_vocabulary": {
+    "crawl": "a completed crawler_cli run",
+    "stored-html": "raw HTML stored for the run (pages.html_compressed)",
+    "render": "a rendered crawl (--js)",
+    "mobile-render": "a mobile-viewport render",
+    "interaction": "a pre/post-interaction inventory capture",
+    "robots": "robots.txt fetched in the run",
+    "sitemaps": "sitemaps discovered in the run",
+    "probes": "active probes (variants, synthetic 404s, conditional requests, locale)",
+    "site-profile": "a site profile JSON (see templates/site-profile.example.json)",
+    "gsc": "a supplied Search Console export",
+    "logs": "supplied server logs with verified bot identity",
+    "backlinks": "a supplied backlink export",
+    "external-api": "a third-party service outside crawler_cli"
+  },
+  "questions": [
+    {
+      "id": "Q1",
+      "theme": "Crawlability",
+      "area": "Robots.txt",
+      "original_question": "Are any important paths blocked by robots.txt, including paths needed to build or populate page copy?",
+      "question": "Does robots.txt block any URL the site needs crawled: an indexable page, a sitemap URL, an internally linked page, or a script, stylesheet or API resource that a page needs to render its copy?",
+      "issue_if": "At least one sitemap URL, internally linked HTML URL or render-critical resource has allowed_by_robots = false.",
+      "unit": "URLs",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "robots",
+        "sitemaps",
+        "render"
+      ],
+      "checks": [
+        "robots-controls",
+        "critical-resource-impact"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Google cannot crawl a blocked URL, so it cannot read or rank its content; a blocked page can still be indexed from links as a bare URL with no snippet. When a script or API that builds the page copy is blocked, Google renders the page without that copy.",
+      "note": "Resource-level blocking needs a rendered crawl (--js); without it only HTML URLs are tested.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q97",
+      "theme": "Crawlability",
+      "area": "Robots.txt",
+      "original_question": "Are there any paths we should be blocking via robots.txt such as /search /admin or other paths found in the crawl we wouldn't want indexed?",
+      "question": "Does any discovered URL fail its approved crawl, noindex or authentication policy?",
+      "issue_if": "A URL designated for crawl blocking is allowed by robots.txt; a public URL designated for noindex lacks the directive or is Disallowed; or a protected path exposes its content without authentication.",
+      "unit": "URLs",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "robots",
+        "probes",
+        "site-profile"
+      ],
+      "checks": [
+        "robots-controls",
+        "indexability-segmentation"
+      ],
+      "new_detector": "unwanted-path-policy",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Uncontrolled search, account, preview and other low-value URL paths can waste crawl capacity and expose pages not intended for discovery. robots.txt alone does not prevent a linked URL appearing in search.",
+      "note": "Planned: no dedicated answerer yet. Requires an approved per-path policy, with distinct crawl-block, public-noindex and authentication routes. A saved crawl cannot establish undiscovered paths or live authentication; missing inputs remain Pending.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q3",
+      "theme": "Crawlability",
+      "area": "Sitemaps",
+      "original_question": "Are all sitemap URLs 200, indexable and self-canonical?",
+      "question": "Does any XML sitemap list a URL that does not return 200, is noindex, or canonicalises to a different URL?",
+      "issue_if": "At least one sitemap URL has status != 200, a noindex directive, or a canonical that is not itself.",
+      "unit": "URLs",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "sitemaps"
+      ],
+      "checks": [
+        "sitemap-integrity",
+        "canonical-target-validation"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "High",
+      "why": "A sitemap should list only the canonical, indexable version of each page. Redirects, errors, noindex and non-canonical entries waste crawl requests, send conflicting canonical signals and make Search Console's sitemap coverage report meaningless.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q4",
+      "theme": "Crawlability",
+      "area": "Sitemaps",
+      "original_question": "Are there indexable pages missing from the sitemaps?",
+      "question": "Is any indexable, self-canonical page that returns 200 in the crawl missing from every XML sitemap?",
+      "issue_if": "At least one crawled 200, indexable, self-canonical HTML URL is absent from all discovered sitemaps.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "sitemaps"
+      ],
+      "checks": [
+        "sitemap-integrity",
+        "discovery-source-provenance"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "The sitemap is Google's list of pages the site wants indexed. Pages left out are found only through links, so they are discovered and recrawled more slowly, which matters most for new and deep pages.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q13",
+      "theme": "Crawlability",
+      "area": "Internal linking",
+      "original_question": "Are there orphaned pages, in the sitemaps but without internal links?",
+      "question": "Does any indexable sitemap URL receive no internal link from any crawled page?",
+      "issue_if": "At least one indexable sitemap URL has zero run-scoped internal inlinks.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "sitemaps"
+      ],
+      "checks": [
+        "orphan-candidates"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "High",
+      "why": "Pages with no internal links receive no internal authority and are crawled less often. Google treats them as unimportant, so they rarely rank even when the content is good.",
+      "note": "Pages linked only from areas the crawl could not reach (login, robots-blocked) can appear here.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q14",
+      "theme": "Crawlability",
+      "area": "Internal linking",
+      "original_question": "Do any pages have an excessive number of outlinks or inlinks?",
+      "question": "Does any page carry more unique internal outlinks than the threshold?",
+      "issue_if": "At least one HTML page has more than 300 unique internal outlinks.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "internal-authority"
+      ],
+      "new_detector": "link-count-outliers",
+      "profile_keys": [],
+      "threshold": {
+        "max_unique_internal_outlinks": 300
+      },
+      "classification": "Warning",
+      "priority": "Low",
+      "why": "Every extra link on a page divides the value passed to each target. Very high counts usually mean an oversized mega-menu or an unbounded link module, which flattens internal priority so key pages get no more weight than trivial ones.",
+      "note": "High inlink counts are not a defect in themselves (the homepage and navigation targets always have them), so only outlinks are tested.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q18",
+      "theme": "Crawlability",
+      "area": "Crawl access",
+      "original_question": "Does Googlebot (US, smartphone) actually render the page?",
+      "question": "Does Google's own smartphone renderer, from a Google IP, fail to render the primary content of key templates?",
+      "issue_if": "URL Inspection or the Rich Results Test shows missing primary content, blocked resources or a render error for a key template.",
+      "unit": "templates",
+      "group": "supplied-input",
+      "requires": [
+        "gsc"
+      ],
+      "checks": [
+        "mobile-rendering-parity"
+      ],
+      "new_detector": "google-render-inspection",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "If Google's renderer is blocked, geo-gated or times out, the indexed version of the page lacks its content, and nothing else in the audit will show it.",
+      "note": "Supplied URL Inspection or Rich Results Test records (observation kind google-render-inspection), one or more per key template. A US mobile Playwright render (mobile-rendering-parity) is supporting evidence only. The runner never queries Google; without a supplied bundle the answer stays Pending.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q23",
+      "theme": "Crawlability",
+      "area": "Internal linking",
+      "original_question": "Can Google discover the game inventory without interacting with the page?",
+      "question": "Are any inventory items (for example games) reachable only after clicking, scrolling or filtering, and absent from both the raw HTML and the initial render?",
+      "issue_if": "At least one inventory URL from the profile pattern appears only in the post-interaction link set.",
+      "unit": "URLs",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "render",
+        "interaction",
+        "site-profile"
+      ],
+      "checks": [
+        "rendered-robots-links"
+      ],
+      "new_detector": null,
+      "profile_keys": [
+        "templates.inventory"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Google does not click, scroll or submit forms. Items that appear only after 'load more', a filter or infinite scroll are never discovered through links, and have to rely on the sitemap alone.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q31",
+      "theme": "Crawlability",
+      "area": "Crawl access",
+      "original_question": "Is the site showing search engines something different from visitors (cloaking)?",
+      "question": "Does the site serve Google's crawler materially different content from what it serves visitors?",
+      "issue_if": "Content, links or directives fetched as verified Google differ materially from a visitor fetch of the same URL.",
+      "unit": "URLs",
+      "group": "supplied-input",
+      "requires": [
+        "external-api"
+      ],
+      "checks": [],
+      "new_detector": "verified-google-fetch",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Showing search engines different content from users breaks Google's spam policies and can lead to a manual action that removes pages from search.",
+      "note": "Supplied comparison (observation kind verified-google-fetch) of a fetch from Google's own IPs (URL Inspection live test) with a visitor fetch of the same URL. A Googlebot user agent from crawler_cli's IP catches user-agent cloaking only. The runner never fetches as Google; without a supplied bundle the answer stays Pending.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q38",
+      "theme": "Crawlability",
+      "area": "Crawl access & JS",
+      "original_question": "Are interactive faceted filters and category selectors implemented as static <a href> links with distinct URLs rather than client-side SPA state changes?",
+      "question": "Do filter or category controls on listing templates change the listing without an <a href> to a distinct URL?",
+      "issue_if": "A filter or category control on a listing template is a button or scripted element with no crawlable href.",
+      "unit": "templates",
+      "group": "heuristic",
+      "requires": [
+        "crawl",
+        "render",
+        "site-profile"
+      ],
+      "checks": [
+        "parameter-and-faceted-controls",
+        "rendered-robots-links"
+      ],
+      "new_detector": "js-only-navigation-controls",
+      "profile_keys": [
+        "templates.listing"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Category and useful filter states that exist only as JavaScript state have no URL, so they cannot be crawled, indexed or linked to. Search demand for those subsets goes to competitors.",
+      "note": "Only filters with search demand need crawlable URLs; turning every facet into a link creates crawl waste (see Q24).",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q40",
+      "theme": "Crawlability",
+      "area": "Information architecture",
+      "original_question": "Does the primary navigation (e.g. meganav, header hierarchy) provide direct, crawlable <a href> links to top commercial hubs and priority categories?",
+      "question": "Does the primary navigation in the raw HTML lack a direct <a href> to any commercial hub listed in the site profile?",
+      "issue_if": "At least one profile commercial hub has no <a href> inside the header or <nav> of the raw HTML of the homepage and main templates.",
+      "unit": "hubs",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "stored-html",
+        "site-profile"
+      ],
+      "checks": [],
+      "new_detector": "nav-hub-links",
+      "profile_keys": [
+        "commercial_hubs"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "High",
+      "why": "Navigation links appear on every page, so they pass the most internal authority and tell Google which pages matter most. A hub missing from the raw-HTML navigation depends on JavaScript or deep links to be found and ranked.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q44",
+      "theme": "Crawlability",
+      "area": "Crawl depth & discoverability",
+      "original_question": "Is there an HTML sitemap or curated directory linked sitewide to reduce click depth for critical commercial and review landing pages?",
+      "question": "Is any priority landing page more than three clicks from the homepage?",
+      "issue_if": "At least one URL matching the profile's priority templates or hub list has crawl depth > 3.",
+      "unit": "pages",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "crawl-depth-distribution"
+      ],
+      "new_detector": null,
+      "profile_keys": [
+        "commercial_hubs",
+        "templates.priority"
+      ],
+      "threshold": {
+        "max_depth": 3
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "The further a page sits from the homepage, the less often it is crawled and the less internal authority it gets. A sitewide HTML sitemap or directory is one fix; the defect is the depth, not the missing sitemap.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q45",
+      "theme": "Crawlability",
+      "area": "International & internal linking",
+      "original_question": "Are localized articles and language siblings cross-linked contextually to strengthen semantic clustering across regional editions?",
+      "question": "Do localized pages with hreflang alternates fail to link to their language siblings with a crawlable link?",
+      "issue_if": "At least 20% of pages with hreflang alternates have no <a href> to any of their alternates.",
+      "unit": "pages",
+      "group": "best-practice",
+      "requires": [
+        "crawl",
+        "stored-html"
+      ],
+      "checks": [
+        "hreflang-html-http"
+      ],
+      "new_detector": "locale-sibling-links",
+      "profile_keys": [],
+      "threshold": {
+        "min_share": 0.2
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Hreflang tags are not links. A crawlable language switcher lets users and crawlers move between editions and helps new locale pages get discovered.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q46",
+      "theme": "Crawlability",
+      "area": "DOM completeness & rendering",
+      "original_question": "Are primary footer navigation and commercial links rendered in the static HTML of article templates rather than suppressed or deferred by infinite scroll?",
+      "question": "On article templates, are footer navigation links missing from the raw HTML and present only after rendering or scrolling?",
+      "issue_if": "At least one article-template page has footer links in the rendered DOM that are absent from its raw HTML.",
+      "unit": "templates",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "render",
+        "stored-html",
+        "site-profile"
+      ],
+      "checks": [
+        "rendered-indexing-parity"
+      ],
+      "new_detector": "footer-link-parity",
+      "profile_keys": [
+        "templates.article"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "Medium",
+      "why": "Links added only after rendering or scrolling are invisible to raw-HTML crawlers and may never be seen by Google's renderer, so the sitewide footer stops passing authority from article pages.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q48",
+      "theme": "Crawlability",
+      "area": "Information architecture",
+      "original_question": "Do sub-category and guide templates feature secondary contextual navigation that links directly to peer guide hubs and parent topic clusters?",
+      "question": "Does any guide or sub-category page lack a link to its parent hub or to at least one peer hub?",
+      "issue_if": "At least 20% of pages on the guide template link neither to their profile parent hub nor to a peer hub.",
+      "unit": "pages",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "internal-authority"
+      ],
+      "new_detector": "hub-cluster-links",
+      "profile_keys": [
+        "templates.guide",
+        "hub_clusters"
+      ],
+      "threshold": {
+        "min_share": 0.2
+      },
+      "classification": "Improvement",
+      "priority": "Medium",
+      "why": "Links between a guide, its parent and its peers show Google the topic cluster and move authority to the hub pages that target the head terms.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q49",
+      "theme": "Crawlability",
+      "area": "Internal linking & clusters",
+      "original_question": "Are automated or taxonomy-driven internal links deployed across informational news/articles to pass link equity to commercial betting and guide hubs?",
+      "question": "Do news and article pages lack an in-body link to any commercial or guide hub?",
+      "issue_if": "At least 20% of article-template pages have no in-body <a href> to a profile commercial hub.",
+      "unit": "pages",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "stored-html",
+        "site-profile"
+      ],
+      "checks": [
+        "internal-authority"
+      ],
+      "new_detector": "article-to-hub-links",
+      "profile_keys": [
+        "templates.article",
+        "commercial_hubs"
+      ],
+      "threshold": {
+        "min_share": 0.2
+      },
+      "classification": "Improvement",
+      "priority": "Medium",
+      "why": "News and articles attract most external links and fresh crawls. Without links to the commercial hubs, that authority stays on short-lived articles instead of reaching the pages that earn revenue.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q75",
+      "theme": "Crawlability",
+      "area": "Commercial links & compliance",
+      "original_question": "Are outbound affiliate and partner links routed through a disallowed redirect path (e.g. /go/), obfuscated, or tagged with rel=\"sponsored\"?",
+      "question": "Does any outbound affiliate link lack both rel=\"sponsored\" (or nofollow) and routing through a robots-disallowed redirect path?",
+      "issue_if": "At least one link to a profile affiliate domain or path has neither a sponsored/nofollow rel nor a robots-disallowed /go/-style route.",
+      "unit": "links",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "robots",
+        "site-profile"
+      ],
+      "checks": [
+        "external-link-integrity",
+        "robots-controls"
+      ],
+      "new_detector": "affiliate-link-qualification",
+      "profile_keys": [
+        "affiliate"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "High",
+      "why": "Google requires paid and affiliate links to be qualified. Unqualified affiliate links can be treated as a link scheme, which risks a manual action and passes authority to partners.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q82",
+      "theme": "Crawlability",
+      "area": "Crawl discovery provenance",
+      "original_question": "Does the crawl audit cross-reference multiple discovery sources (XML sitemaps, internal HTML graph, GSC, and external backlink exports) to identify untracked URL populations?",
+      "question": "Is any URL population found in one discovery source (sitemaps, internal links, supplied Search Console or backlink exports) but missing from the others?",
+      "issue_if": "At least one URL family is present in one source and absent from the internal link graph and the sitemaps.",
+      "unit": "URLs",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "sitemaps"
+      ],
+      "checks": [
+        "discovery-source-provenance"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "URLs that Google or other sites know about but the site no longer links or lists are unmanaged: old, parameter or orphan URLs that still use crawl budget and can stay indexed.",
+      "note": "Crawl and sitemap sources are always available; Search Console and backlink exports widen the comparison when supplied.",
+      "sheet_answerable_was": "No"
+    },
+    {
+      "id": "Q90",
+      "theme": "Crawlability",
+      "area": "Access-log bot verification",
+      "original_question": "Does server access-log analysis of reverse-DNS verified search bot hits reveal crawl frequency drops, repeated 4xx/5xx errors, or non-canonical crawl waste?",
+      "question": "Do verified search-bot hits in the server logs show a crawl drop, repeated 4xx/5xx responses, or crawling concentrated on non-canonical URLs?",
+      "issue_if": "Supplied logs show any of: a week-on-week verified Googlebot hit drop over 30%, a URL with repeated 4xx/5xx to Googlebot, or over 20% of bot hits on non-canonical URLs.",
+      "unit": "requests",
+      "group": "supplied-input",
+      "requires": [
+        "logs"
+      ],
+      "checks": [
+        "validated-bot-log-analysis"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "Medium",
+      "why": "Server logs are the only direct record of what Googlebot actually requests. They show crawl budget spent on errors and duplicates, and falling crawl rates that come before ranking drops.",
+      "note": null,
+      "sheet_answerable_was": "No"
+    },
+    {
+      "id": "Q93",
+      "theme": "Crawlability",
+      "area": "XML sitemap architecture",
+      "original_question": "Do XML sitemaps strictly adhere to protocol limits (maximum 50,000 URLs and 50MB uncompressed per file) and use gzip compression within a valid sitemap index?",
+      "question": "Does any XML sitemap fail to parse, exceed 50,000 URLs or 50MB uncompressed, or sit outside a sitemap index when the site has more than one sitemap?",
+      "issue_if": "At least one sitemap file is unparseable or over a protocol limit, or multiple sitemaps exist with no index referencing them.",
+      "unit": "sitemaps",
+      "group": "crawl",
+      "requires": [
+        "sitemaps"
+      ],
+      "checks": [
+        "sitemap-integrity"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Search engines reject a sitemap file that breaks the protocol, so none of its URLs are read.",
+      "note": "Gzip is optional in the sitemap protocol, so an uncompressed sitemap is not a defect.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q95",
+      "theme": "Crawlability",
+      "area": "Mobile & interstitial compliance",
+      "original_question": "Do mobile cookie consent dialogs, age gates, or promotional overlays comply with Google's intrusive interstitial guidelines by keeping underlying primary content crawlable?",
+      "question": "On a mobile render, does an overlay cover most of the viewport on load, or remove the primary content from the rendered DOM?",
+      "issue_if": "A mobile render of a key template shows an overlay covering over 50% of the viewport, or rendered primary-content word count drops below 50% of the raw HTML.",
+      "unit": "templates",
+      "group": "heuristic",
+      "requires": [
+        "mobile-render"
+      ],
+      "checks": [
+        "mobile-rendering-parity"
+      ],
+      "new_detector": "interstitial-coverage",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Intrusive interstitials count against page experience on mobile, and a gate that removes the content from the DOM stops it being indexed at all.",
+      "note": "Legally required cookie and age gates are allowed if they are reasonably sized and the content remains in the DOM.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q98",
+      "theme": "Crawlability",
+      "area": "Robots.txt",
+      "original_question": "Does robots.txt return 200, parse correctly, declare the intended XML sitemap index and avoid broad accidental Disallow rules?",
+      "question": "Does a host's robots.txt fail its approved availability, syntax, sitemap-declaration or broad-rule policy?",
+      "issue_if": "For a host required to publish robots.txt, the response is not a usable 200 file, a recognised directive is malformed, an approved sitemap declaration is missing or a broad Disallow rule violates the approved policy.",
+      "unit": "hosts",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "robots",
+        "sitemaps",
+        "site-profile"
+      ],
+      "checks": [
+        "robots-controls",
+        "sitemap-integrity"
+      ],
+      "new_detector": "robots-file-policy",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "An unavailable, malformed or over-broad robots.txt file can stop intended crawling and hide the sitemap routes that guide controlled discovery.",
+      "note": "Planned: no dedicated answerer yet. Needs raw robots response/body and approved host rules and sitemap declarations. Absence of robots.txt or of a Sitemap directive is not inherently a crawl failure; report policy non-compliance separately from observed blocking.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q99",
+      "theme": "Crawlability",
+      "area": "Directory and file exposure",
+      "original_question": "Are public document, upload and asset directories protected against unintended directory listings (auto-index) and file enumeration?",
+      "question": "Does any tested document, upload or asset directory expose an unintended generated file listing?",
+      "issue_if": "A scoped directory probe returns a generated file listing that exposes file or child-directory links and is not an approved public directory.",
+      "unit": "directories",
+      "group": "heuristic",
+      "requires": [
+        "crawl",
+        "stored-html",
+        "probes",
+        "site-profile"
+      ],
+      "checks": [],
+      "new_detector": "directory-listing-exposure",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Browsable directory listings can expose unpublished files, create low-value crawl paths and allow documents to be enumerated outside an intentional content journey.",
+      "note": "Planned: no dedicated answerer yet. Listing fingerprints are candidates for manual confirmation against approved directories. Only scoped directory responses are tested; disabling listings does not prove that sensitive files cannot be fetched directly. Public document discovery belongs to Q100.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q100",
+      "theme": "Crawlability",
+      "area": "Document discovery",
+      "original_question": "Are documents intended to appear in search linked from crawlable HTML hubs and included in the relevant XML sitemap?",
+      "question": "Does any document in the approved search inventory lack its designated crawlable HTML hub link or required sitemap entry?",
+      "issue_if": "An approved inventory document has no crawlable link from its designated HTML hub, or is marked for sitemap inclusion but is absent from its designated XML sitemap.",
+      "unit": "documents",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "sitemaps",
+        "site-profile"
+      ],
+      "checks": [
+        "nonhtml-search-assets",
+        "discovery-source-provenance"
+      ],
+      "new_detector": "document-discovery-inventory",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Unlinked documents can be discovered inconsistently, while documents without a curated hub give users and crawlers little context about their purpose or relationship.",
+      "note": "Planned: no dedicated answerer yet. Requires an approved document inventory naming each HTML hub, whether sitemap inclusion is required, and the designated sitemap. Incomplete HTML, document or sitemap coverage cannot establish a Healthy result.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q8",
+      "theme": "Indexability",
+      "area": "International",
+      "original_question": "Do the page hreflang and html lang declarations make sense and agree?",
+      "question": "Is any page's <html lang> missing, invalid, or different from the language of its own self-referencing hreflang?",
+      "issue_if": "At least one page has no or an invalid html lang, or an html lang whose language differs from its self-hreflang code.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "metadata-basics",
+        "hreflang-html-http"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Conflicting language signals make it unclear which locale a page targets. Google does not use html lang for targeting, but Bing and assistive tools do, and a mismatch almost always shows a template bug that also affects hreflang.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q9",
+      "theme": "Indexability",
+      "area": "International",
+      "original_question": "Do hreflang links reciprocate, and do the pages they point to return 200 and allow indexing?",
+      "question": "Does any hreflang annotation lack a return link, or point at a URL that is not 200, is noindex, or canonicalises elsewhere?",
+      "issue_if": "At least one hreflang pair is not reciprocal, or its target is non-200, noindex or non-canonical.",
+      "unit": "annotations",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "sitemaps"
+      ],
+      "checks": [
+        "hreflang-html-http",
+        "hreflang-sitemap",
+        "hreflang-noindex",
+        "canonical-target-validation"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Google ignores hreflang pairs that do not point at each other or that target non-canonical or non-indexable URLs, so the wrong language version ranks in each market.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q10",
+      "theme": "Indexability",
+      "area": "On-page",
+      "original_question": "Do any pages declare the title, description, canonical or robots tag more than once?",
+      "question": "Does any page declare more than one title, meta description, canonical or meta robots tag?",
+      "issue_if": "At least one page has more than one of any of these elements in the raw HTML.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "stored-html"
+      ],
+      "checks": [
+        "metadata-basics",
+        "canonical-declarations"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "High",
+      "why": "With several canonicals Google may ignore them all; with several robots tags it applies the most restrictive one; with several titles it chooses one unpredictably. Each usually means two systems (theme and plugin) are writing the same tag.",
+      "note": "Header-vs-HTML conflicts are Q94.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q11",
+      "theme": "Indexability",
+      "area": "On-page",
+      "original_question": "Do multiple pages share the same title or H1?",
+      "question": "Do two or more indexable, self-canonical pages share the same title or the same H1?",
+      "issue_if": "At least one title or H1 value is shared by two or more indexable, self-canonical pages.",
+      "unit": "clusters",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "metadata-duplicates-aliases"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Duplicate titles make pages compete for the same queries and lower click-through. They usually come from a template default that was never overridden.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q12",
+      "theme": "Indexability",
+      "area": "On-page",
+      "original_question": "Are any head elements (canonical etc.) placed in the body instead of the head?",
+      "question": "Does any page place a head-only element (title, meta robots, canonical, hreflang link) inside <body>?",
+      "issue_if": "At least one page has a head-only element parsed inside <body> of the raw HTML.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "stored-html"
+      ],
+      "checks": [],
+      "new_detector": "head-elements-in-body",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Google stops reading the head at the first element that does not belong there. A canonical, robots or hreflang tag that ends up in the body is ignored.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q15",
+      "theme": "Indexability",
+      "area": "On-page",
+      "original_question": "Are headings out of sequence on any pages?",
+      "question": "Does any indexable page have no H1, more than one H1, or skip a heading level (for example H2 to H4)?",
+      "issue_if": "At least one indexable page has zero or multiple H1s or a skipped heading level.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "stored-html"
+      ],
+      "checks": [
+        "metadata-basics"
+      ],
+      "new_detector": "heading-sequence",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Low",
+      "why": "Headings give the page its outline. A missing H1 or broken hierarchy makes the main topic less clear to search engines and screen readers. The ranking effect is small; the fix is usually one template change.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q16",
+      "theme": "Indexability",
+      "area": "Structured data",
+      "original_question": "Is any schema markup invalid?",
+      "question": "Does any page contain structured data that fails to parse, or duplicate entities with conflicting values?",
+      "issue_if": "At least one page has a JSON-LD/microdata parse error or conflicting duplicate entities.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "schema-parser-diagnostics"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "Medium",
+      "why": "Search engines ignore markup that does not parse, so the page loses the rich result or entity information the markup was added for.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q17",
+      "theme": "Indexability",
+      "area": "Social",
+      "original_question": "Are Open Graph and Twitter card tags in place?",
+      "question": "Does any indexable page lack og:title, og:description, og:image or twitter:card, or reference an og:image that does not return 200?",
+      "issue_if": "At least 20% of indexable pages miss one of these tags, or any og:image returns non-200.",
+      "unit": "pages",
+      "group": "best-practice",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [],
+      "new_detector": "social-tags",
+      "profile_keys": [],
+      "threshold": {
+        "min_share": 0.2
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Social tags do not affect rankings. They control the preview when a page is shared in social apps, chat tools and some AI answers, which affects click-through from those channels.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q20",
+      "theme": "Indexability",
+      "area": "Indexability",
+      "original_question": "Which pages are noindex, by template, and is that intentional?",
+      "question": "Is any noindex page on a template the site profile marks as indexable, listed in a sitemap, or linked from the main navigation?",
+      "issue_if": "At least one noindex URL matches an indexable profile template, appears in a sitemap, or is a navigation target.",
+      "unit": "pages",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "sitemaps",
+        "site-profile"
+      ],
+      "checks": [
+        "indexability-segmentation"
+      ],
+      "new_detector": null,
+      "profile_keys": [
+        "templates"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "An unintended noindex removes the page from search completely. Noindex pages in sitemaps or navigation send contradictory signals and waste crawl.",
+      "note": "Without a profile the noindex inventory by template is still produced, and the status is Needs validation.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q21",
+      "theme": "Indexability",
+      "area": "Content quality",
+      "original_question": "Are the 7,500 game pages thin or near-duplicate?",
+      "question": "Are inventory pages (for example games) thin or near-duplicates of each other?",
+      "issue_if": "At least 10% of inventory-template pages have fewer than 250 main-content words or belong to a near-duplicate cluster.",
+      "unit": "pages",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "content-quality",
+        "near-duplicate-content"
+      ],
+      "new_detector": null,
+      "profile_keys": [
+        "templates.inventory"
+      ],
+      "threshold": {
+        "min_share": 0.1,
+        "min_words": 250
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Large sets of thin or templated pages lower Google's view of site quality overall and are commonly 'Crawled, currently not indexed'. They also compete with each other for the same queries.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q26",
+      "theme": "Indexability",
+      "area": "Scope",
+      "original_question": "Was the crawl complete enough to trust the counts?",
+      "question": "Did the crawl end before its scope was covered, with more than 2% fetch failures, or with rate limiting?",
+      "issue_if": "The run stopped at a page/time limit, over 2% of fetches failed, or any 429/503 responses were recorded.",
+      "unit": "run",
+      "group": "run-gate",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "audit-run-integrity",
+        "audit-collection-safeguards"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "max_failure_share": 0.02
+      },
+      "classification": null,
+      "priority": null,
+      "why": "An incomplete crawl understates every count in the audit. This question never becomes a ticket; when it fails, every other crawl answer is reported as Needs validation.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q30",
+      "theme": "Indexability",
+      "area": "Search evidence",
+      "original_question": "Indexation test: for each important template × locale, how many URLs did Google discover, crawl and index; why did it exclude the rest; which canonical did it select; and do indexed pages get impressions?",
+      "question": "For any important template and locale, do Search Console records show important URLs not indexed, a Google-selected canonical different from the declared one, or indexed pages with no impressions?",
+      "issue_if": "Supplied Search Console data shows any of: important URLs excluded, Google canonical != declared canonical, or indexed URLs with zero impressions over 90 days.",
+      "unit": "URLs",
+      "group": "supplied-input",
+      "requires": [
+        "gsc"
+      ],
+      "checks": [
+        "supplied-search-evidence"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "High",
+      "why": "Only Search Console shows what Google actually did with the pages the crawl found: whether it indexed them, which canonical it chose and whether they earn impressions. Crawl findings are the likely causes; this is the result.",
+      "note": null,
+      "sheet_answerable_was": "No"
+    },
+    {
+      "id": "Q32",
+      "theme": "Indexability",
+      "area": "International",
+      "original_question": "Are the language pages genuinely translated and worth indexing?",
+      "question": "Is the main content of a locale page in a different language from its URL locale and html lang, or nearly identical to the default-language version?",
+      "issue_if": "At least one locale page's detected content language differs from its declared locale, or it is a near-duplicate of its default-language alternate.",
+      "unit": "pages",
+      "group": "heuristic",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "locale-html-lang",
+        "near-duplicate-content"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "Medium",
+      "why": "Untranslated locale pages are duplicates. Google may fold them into the original or treat them as low-quality, so the locale never ranks and the whole site looks thinner.",
+      "note": "Language detection is statistical; confirm a sample before ticketing.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q36",
+      "theme": "Indexability",
+      "area": "URL consolidation",
+      "original_question": "Do user profile tabs (e.g. updates, reviews, winners) generate unnecessary indexable sub-URLs instead of consolidating authority onto the primary profile?",
+      "question": "Are profile sub-tab URLs indexable and self-canonical instead of consolidated onto the main profile?",
+      "issue_if": "At least one URL matching the profile sub-tab pattern is 200, indexable and self-canonical.",
+      "unit": "URLs",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "parameter-and-faceted-controls",
+        "indexability-segmentation"
+      ],
+      "new_detector": "profile-subtab-indexability",
+      "profile_keys": [
+        "templates.profile_subtab"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Each tab multiplies the number of thin, near-identical URLs per profile, which splits signals and uses crawl budget on pages that should not rank on their own.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q37",
+      "theme": "Indexability",
+      "area": "Indexability & thin content",
+      "original_question": "Are newly created, inactive, or empty user profiles noindexed until they publish substantive, active public content?",
+      "question": "Is any empty user profile indexable or listed in a sitemap?",
+      "issue_if": "At least one profile-template page meeting the profile's empty rule is indexable or in a sitemap.",
+      "unit": "pages",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "sitemaps",
+        "site-profile"
+      ],
+      "checks": [
+        "indexability-segmentation",
+        "content-quality"
+      ],
+      "new_detector": "empty-profile-indexability",
+      "profile_keys": [
+        "templates.profile",
+        "empty_profile_rule"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Empty user profiles are thin pages in bulk, and they are a common target for spam sign-ups. Indexing them lowers perceived site quality.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q41",
+      "theme": "Indexability",
+      "area": "International & URL structure",
+      "original_question": "Do all localized pages reside in dedicated locale folders (e.g. /en/, /es/) rather than mixing languages under root directories?",
+      "question": "Does any localized page sit outside its locale folder, or does a locale folder serve content in another language?",
+      "issue_if": "At least one page's declared language (html lang or self-hreflang) does not match its first path segment's locale.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "hreflang-html-http"
+      ],
+      "new_detector": "locale-path-consistency",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Mixed-language folders stop per-locale reporting in Search Console and make hreflang mapping and geotargeting error-prone.",
+      "note": "A root-level default language is valid if it is consistent; the site profile can declare it.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q47",
+      "theme": "Indexability",
+      "area": "Information architecture & taxonomy",
+      "original_question": "Can editorial teams configure custom hierarchical breadcrumbs to enforce intentional topic parent-child clusters independently of CMS URL paths?",
+      "question": "Does any content page lack a visible breadcrumb or BreadcrumbList markup, or does the markup disagree with the visible trail?",
+      "issue_if": "At least 20% of content pages lack both, or any page's BreadcrumbList items differ from its visible breadcrumb links.",
+      "unit": "pages",
+      "group": "best-practice",
+      "requires": [
+        "crawl",
+        "stored-html"
+      ],
+      "checks": [
+        "structured-data-feature-rules"
+      ],
+      "new_detector": "breadcrumb-consistency",
+      "profile_keys": [],
+      "threshold": {
+        "min_share": 0.2
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Breadcrumbs link each page to its parent topic and appear in search results. Markup that differs from the visible trail is ignored.",
+      "note": "Whether editors can set breadcrumbs independently of URLs is a CMS question for the client; only the published output is tested.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q50",
+      "theme": "Indexability",
+      "area": "Content quality & topical authority",
+      "original_question": "Does content coverage address full search journey entity relationships and subtopics (fan-out query expansion) compared to leading competitors?",
+      "question": "Do leading competitors cover subtopics and entities of the core queries that the site does not?",
+      "issue_if": "An entity or SERP fan-out comparison finds subtopics covered by the top competitors and missing from the site.",
+      "unit": "topics",
+      "group": "supplied-input",
+      "requires": [
+        "external-api"
+      ],
+      "checks": [],
+      "new_detector": "competitor-topic-gap",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Medium",
+      "why": "Search and AI answers expand a query into related sub-questions. Sites that cover only the head topic lose the long tail and are cited less.",
+      "note": "Supplied entity or SERP fan-out comparison (observation kind competitor-topic-gap) naming its method and competitor set. The runner classifies the supplied topics only; it does not query search engines. Without a supplied bundle the answer stays Pending.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q51",
+      "theme": "Indexability",
+      "area": "Semantic HTML5",
+      "original_question": "Does the page template leverage semantic landmark elements (<header>, <main>, <article>, <aside>, <footer>) to clearly define core vs boilerplate content?",
+      "question": "Does any template's raw HTML lack a <main> element, or lack header and footer landmarks?",
+      "issue_if": "At least one template (by URL pattern) has no <main>, or neither <header> nor <footer>, in its raw HTML.",
+      "unit": "templates",
+      "group": "best-practice",
+      "requires": [
+        "stored-html"
+      ],
+      "checks": [],
+      "new_detector": "semantic-landmarks",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Landmarks help parsers separate the main content from navigation and boilerplate. The search effect is small; the main benefit is accessibility and cleaner extraction by AI crawlers.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q52",
+      "theme": "Indexability",
+      "area": "Semantic HTML5",
+      "original_question": "Are comparison toplists, odds boards, and structured reviews built using semantic HTML <table> elements (<thead>, <tbody>, <th>, <td>) rather than nested <div>s?",
+      "question": "Are comparison toplists or odds tables on the profile's comparison templates built from <div>s with no <table>?",
+      "issue_if": "A page on a profile comparison template contains the toplist selector with no <table> element inside it.",
+      "unit": "templates",
+      "group": "heuristic",
+      "requires": [
+        "stored-html",
+        "site-profile"
+      ],
+      "checks": [],
+      "new_detector": "table-markup",
+      "profile_keys": [
+        "templates.comparison"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Table markup is read as rows and columns of data, which makes comparison content easier to extract for featured snippets and AI answers.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q53",
+      "theme": "Indexability",
+      "area": "Semantic HTML5",
+      "original_question": "Are collapsible FAQs and accordion sections marked up using <details> and <summary> elements to ensure clear machine-readability of hidden content?",
+      "question": "Are FAQ answers missing from the raw HTML (loaded only when clicked)?",
+      "issue_if": "At least one page has an FAQ answer (from FAQPage markup or accordion selectors) whose text is absent from its raw HTML.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "stored-html"
+      ],
+      "checks": [
+        "rendered-indexing-parity"
+      ],
+      "new_detector": "faq-answer-presence",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Content that loads only on click is not indexed. Hidden-but-present content (CSS-collapsed or <details>) is indexed normally.",
+      "note": "Using <details>/<summary> is good practice but not required; the defect is answers absent from the HTML.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q54",
+      "theme": "Indexability",
+      "area": "Semantic HTML5 & images",
+      "original_question": "Are contextual images, infographics, and charts wrapped in <figure> and <figcaption> elements for enhanced accessibility and image search indexing?",
+      "question": "Are most content images inside the main content without a <figure> and <figcaption>?",
+      "issue_if": "Over 50% of in-content images on content templates have no enclosing <figure> with a <figcaption>.",
+      "unit": "images",
+      "group": "best-practice",
+      "requires": [
+        "stored-html"
+      ],
+      "checks": [
+        "image-markup"
+      ],
+      "new_detector": "figure-markup",
+      "profile_keys": [],
+      "threshold": {
+        "min_share": 0.5
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Captions give image search extra context next to alt text. The effect is small and mostly on image search.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q55",
+      "theme": "Indexability",
+      "area": "Semantic HTML5",
+      "original_question": "Are non-core contextual notices (e.g. responsible gambling disclaimers, affiliate disclosures) isolated in <aside> elements?",
+      "question": "Are repeated disclaimers and disclosures placed inside the main content rather than an <aside> or the footer?",
+      "issue_if": "On at least 20% of content pages, a profile disclaimer phrase appears inside <main>/<article> and outside any <aside>.",
+      "unit": "pages",
+      "group": "best-practice",
+      "requires": [
+        "stored-html",
+        "site-profile"
+      ],
+      "checks": [],
+      "new_detector": "disclaimer-placement",
+      "profile_keys": [
+        "disclaimer_phrases"
+      ],
+      "threshold": {
+        "min_share": 0.2
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Repeated boilerplate inside the main content dilutes it and inflates near-duplicate similarity between pages. Marking it as an aside separates it from the page's real topic.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q56",
+      "theme": "Indexability",
+      "area": "Semantic HTML5 & schema",
+      "original_question": "Are article timestamps, reading times, and publication dates marked up with semantic <time> tags and matching schema properties?",
+      "question": "Do article pages show a date with no <time datetime>, or a date that disagrees with datePublished/dateModified in structured data?",
+      "issue_if": "At least one article page's visible date differs from its schema date, or 20% of article pages have no <time datetime>.",
+      "unit": "pages",
+      "group": "best-practice",
+      "requires": [
+        "stored-html"
+      ],
+      "checks": [
+        "structured-data-feature-rules"
+      ],
+      "new_detector": "date-consistency",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Low",
+      "why": "Google chooses the date shown in results from several signals. When the visible date and the markup disagree it may show the wrong date or none.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q57",
+      "theme": "Indexability",
+      "area": "SERP presentation & freshness",
+      "original_question": "Do commercial review and toplist titles, H1s, and metadata dynamically display the current month and year to signal freshness in SERPs?",
+      "question": "Does any commercial review or toplist title or H1 show a past year, or a month more than one month before the crawl?",
+      "issue_if": "At least one page on a profile commercial template has a year earlier than the crawl year (or a stale month) in its title or H1.",
+      "unit": "pages",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "metadata-basics"
+      ],
+      "new_detector": "stale-title-dates",
+      "profile_keys": [
+        "templates.commercial"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Medium",
+      "why": "A past date in the title looks out of date in results and lowers click-through on queries where users expect current offers.",
+      "note": "Adding the current month without actually updating the content is a known pattern Google may ignore; the date should reflect a real review.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q58",
+      "theme": "Indexability",
+      "area": "On-page & SERP features",
+      "original_question": "Do long-form guide and toplist pages include an anchor-linked Table of Contents (TOC) to generate rich SERP sitelinks and improve navigation?",
+      "question": "Does any long-form page lack a table of contents of in-page links to its H2 sections?",
+      "issue_if": "At least 20% of pages with over 1,500 words and 4+ H2s have no set of #fragment links to their H2 ids.",
+      "unit": "pages",
+      "group": "best-practice",
+      "requires": [
+        "crawl",
+        "stored-html"
+      ],
+      "checks": [],
+      "new_detector": "toc-presence",
+      "profile_keys": [],
+      "threshold": {
+        "min_share": 0.2,
+        "min_words": 1500
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "In-page jump links help users and can appear as 'Jump to' links in search results.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q59",
+      "theme": "Indexability",
+      "area": "E-E-A-T & author entities",
+      "original_question": "Do review and affiliate articles display transparent author, fact-checker, and expert reviewer bylines with links to author entity profiles (E-E-A-T)?",
+      "question": "Does any review or affiliate article lack a visible author byline linked to an author page, or author markup?",
+      "issue_if": "At least one page on a profile review template has no linked byline and no author property in its Article/Review markup.",
+      "unit": "pages",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "stored-html",
+        "site-profile"
+      ],
+      "checks": [
+        "structured-data-feature-rules"
+      ],
+      "new_detector": "author-bylines",
+      "profile_keys": [
+        "templates.review"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Medium",
+      "why": "Gambling is a Your Money or Your Life topic. Google's quality guidelines look for who wrote and checked the content, and anonymous reviews rank poorly in these results.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q60",
+      "theme": "Indexability",
+      "area": "E-E-A-T & content freshness",
+      "original_question": "Does the template differentiate between original publication date and 'Last Updated' date in both visible copy and structured data?",
+      "question": "Does any article page lack both a visible updated date and dateModified, or have dateModified earlier than datePublished?",
+      "issue_if": "At least one article page has no updated date in copy or markup, or dateModified < datePublished.",
+      "unit": "pages",
+      "group": "best-practice",
+      "requires": [
+        "stored-html"
+      ],
+      "checks": [
+        "structured-data-feature-rules"
+      ],
+      "new_detector": "date-consistency",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Low",
+      "why": "A clear last-updated date tells users and search engines the content is maintained, which matters for pages about offers and rules that change.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q61",
+      "theme": "Indexability",
+      "area": "Content formatting & E-E-A-T",
+      "original_question": "Are expert commentary and authoritative quotations marked up with semantic <blockquote> elements and proper citation attribution?",
+      "question": "Are quotations shown as styled paragraphs instead of <blockquote> with an attribution?",
+      "issue_if": "A sampled quotation on a content template is not inside <blockquote> or <q>, or has no cite or visible attribution.",
+      "unit": "pages",
+      "group": "heuristic",
+      "requires": [
+        "stored-html"
+      ],
+      "checks": [],
+      "new_detector": "quotation-markup",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Marking quotations and their source makes attribution clear to users and to AI systems that cite content. The search effect is minor.",
+      "note": "Quotations cannot be found reliably without markup, so this stays a manual sample.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q62",
+      "theme": "Indexability",
+      "area": "Anchor text optimization",
+      "original_question": "Do internal commercial links use entity-specific, descriptive anchor text (e.g. 'Read [Brand] Review') rather than generic 'Read Review' labels?",
+      "question": "Do internal links to review or commercial pages use generic anchor text without the entity name?",
+      "issue_if": "At least 20% of internal links to profile commercial templates use an anchor from the profile's generic phrase list.",
+      "unit": "links",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "internal-authority"
+      ],
+      "new_detector": "generic-anchor-text",
+      "profile_keys": [
+        "generic_anchor_phrases",
+        "templates.review"
+      ],
+      "threshold": {
+        "min_share": 0.2
+      },
+      "classification": "Improvement",
+      "priority": "Medium",
+      "why": "Anchor text tells Google what the target page is about. Generic labels such as 'Read review' waste that signal across thousands of links.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q71",
+      "theme": "Indexability",
+      "area": "Canonicalization",
+      "original_question": "Does every public HTML page—including the homepage, category roots, and schedule pages—explicitly output a canonical link tag?",
+      "question": "Is any indexable 200 HTML page missing a canonical (HTML link or HTTP header)?",
+      "issue_if": "At least one 200, indexable HTML page has neither a <link rel=canonical> nor a Link canonical header.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "canonical-declarations"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Without a declared canonical, Google picks one itself among parameter, case and trailing-slash variants, and may choose the wrong URL.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q73",
+      "theme": "Indexability",
+      "area": "Canonicalization & error handling",
+      "original_question": "Are deleted, deprecated, or orphan URLs mistakenly canonicalised to the homepage (soft 404s) instead of returning a 404/410 status or a relevant 301 redirect?",
+      "question": "Does any non-homepage URL canonicalise to the homepage?",
+      "issue_if": "At least one URL other than the homepage and its variants declares the homepage as its canonical.",
+      "unit": "URLs",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "canonical-target-validation",
+        "soft404-error-routes"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Google treats a canonical to the homepage from unrelated pages as a soft 404 and ignores it. Retired pages should return 404/410 or 301 to a relevant replacement.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q78",
+      "theme": "Indexability",
+      "area": "Taxonomy & indexability",
+      "original_question": "Does the indexing strategy for taxonomy archives (tags, categories, author pages) avoid applying noindex to pages that serve as key navigational hubs?",
+      "question": "Is any taxonomy archive that acts as a hub set to noindex?",
+      "issue_if": "At least one noindex tag, category or author URL is a profile hub or is in the top 10% of pages by internal inlinks.",
+      "unit": "pages",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "indexability-segmentation",
+        "internal-authority"
+      ],
+      "new_detector": null,
+      "profile_keys": [
+        "templates.taxonomy"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "Medium",
+      "why": "Noindexing a hub removes its own chance to rank, and over time Google also crawls its links less, so the pages beneath it lose discovery.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q80",
+      "theme": "Indexability",
+      "area": "Canonicalization standards",
+      "original_question": "Are canonical URL link tags declared as fully-qualified absolute URLs (including protocol and domain) rather than relative paths?",
+      "question": "Does any canonical tag use a relative URL?",
+      "issue_if": "At least one canonical declaration lacks a scheme and host.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "stored-html"
+      ],
+      "checks": [
+        "canonical-declarations"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Low",
+      "why": "Relative canonicals resolve against whatever host served the page, so staging mirrors, http variants and proxies all declare themselves canonical.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q83",
+      "theme": "Indexability",
+      "area": "Hreflang & sitemaps",
+      "original_question": "Are hreflang multi-regional annotations deployed via XML sitemaps to prevent HTML page-weight bloat on large multilingual sites?",
+      "question": "Do pages carry more than 20 hreflang alternates in the HTML head while no sitemap provides hreflang?",
+      "issue_if": "At least one page has over 20 head hreflang links and the sitemaps contain no xhtml:link annotations.",
+      "unit": "pages",
+      "group": "best-practice",
+      "requires": [
+        "crawl",
+        "sitemaps"
+      ],
+      "checks": [
+        "hreflang-html-http",
+        "hreflang-sitemap"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "max_head_alternates": 20
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Large hreflang sets in the head add weight to every page and are hard to keep reciprocal. Sitemaps keep them in one place. Both methods are valid; this is only worth changing at scale.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q84",
+      "theme": "Indexability",
+      "area": "Structured data & rich results",
+      "original_question": "Do schema entities satisfy all mandatory Google Search feature guidelines and required fields for target rich results (e.g. Product, FAQ, Article)?",
+      "question": "Does any structured-data entity of a rich-result type miss a property Google requires?",
+      "issue_if": "At least one entity of a supported rich-result type lacks a required property under the documented rule set.",
+      "unit": "entities",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "structured-data-feature-rules"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "Medium",
+      "why": "An entity missing a required property is not eligible for its rich result, so the markup has no effect in search.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q85",
+      "theme": "Indexability",
+      "area": "JavaScript & rendering parity",
+      "original_question": "Does client-side JavaScript execution alter, inject, or contradict critical metadata (canonical, title, robots directives) compared to the raw server HTML?",
+      "question": "Does rendering change the canonical, title, meta robots or hreflang compared with the raw HTML?",
+      "issue_if": "At least one page's rendered value differs from its raw-HTML value for any of these elements.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "render"
+      ],
+      "checks": [
+        "rendered-indexing-parity"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Google may use either version. A canonical or robots tag changed by JavaScript is unreliable, and a noindex in the raw HTML stops Google from rendering the page at all.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q87",
+      "theme": "Indexability",
+      "area": "Non-HTML search assets",
+      "original_question": "Do indexable non-HTML documents (e.g. PDFs, Word docs, spreadsheets) deliver HTTP Link canonical headers and appropriate X-Robots-Tag indexation directives?",
+      "question": "Is any non-HTML document indexable with neither a Link canonical header nor an X-Robots-Tag?",
+      "issue_if": "At least one linked PDF/DOC/XLS returns 200 with no X-Robots-Tag and no Link rel=canonical header.",
+      "unit": "documents",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "nonhtml-search-assets"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Low",
+      "why": "Without these headers, documents that duplicate an HTML page can outrank it, and documents that should stay private can be indexed.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q94",
+      "theme": "Indexability",
+      "area": "Header vs HTML parity",
+      "original_question": "Do HTTP response headers (Link: rel=\"canonical\", X-Robots-Tag) agree with in-page HTML <link rel=\"canonical\"> and <meta name=\"robots\"> declarations without conflicting directives?",
+      "question": "Does any page's HTTP Link canonical or X-Robots-Tag disagree with its HTML canonical or meta robots?",
+      "issue_if": "At least one page has a header canonical different from its HTML canonical, or header and meta robots with conflicting index/follow values.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "canonical-declarations",
+        "indexability-segmentation"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "When the header and the HTML disagree, Google may ignore both canonicals and applies the most restrictive robots directive, which can deindex a page by accident.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q24",
+      "theme": "Crawl Budget",
+      "area": "Crawl waste",
+      "original_question": "Are the parameter URL families sized correctly, and does the betId family keep growing?",
+      "question": "Does any parameter URL family exceed its expected size, or grow between runs, while being crawlable and indexable?",
+      "issue_if": "A family is over 10% of crawled URLs or over its profile maximum, or grows over 20% from the previous run, and its URLs are crawlable and indexable.",
+      "unit": "URL families",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "crawl-waste-url-families",
+        "parameter-and-faceted-controls"
+      ],
+      "new_detector": null,
+      "profile_keys": [
+        "parameter_families"
+      ],
+      "threshold": {
+        "min_share": 0.1,
+        "max_growth": 0.2
+      },
+      "classification": "Issue",
+      "priority": "High",
+      "why": "Unbounded parameter families use crawl budget on duplicates and slow the crawling of real pages. A family that keeps growing means the problem gets worse with every crawl.",
+      "note": "Without a profile, families are still sized and flagged at 10%; run-over-run growth needs a previous run ID.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q34",
+      "theme": "Crawl Budget",
+      "area": "Index bloat & lifecycle",
+      "original_question": "How are expired, ended, or out-of-stock lifecycle pages handled to prevent index bloat and preserve crawl equity?",
+      "question": "Is any expired or ended lifecycle page 200 and indexable with no link to a live replacement, or still listed in a sitemap?",
+      "issue_if": "At least one URL matching the profile's expired markers is 200 + indexable without a link to a live equivalent, or is in a sitemap.",
+      "unit": "pages",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "sitemaps",
+        "site-profile"
+      ],
+      "checks": [
+        "indexability-segmentation"
+      ],
+      "new_detector": "lifecycle-pages",
+      "profile_keys": [
+        "lifecycle"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Expired pages pile up into a large set of dead-end, low-value URLs. The fix depends on whether the page has links and demand: keep and link onward, 301, or 410.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q35",
+      "theme": "Crawl Budget",
+      "area": "Crawl efficiency",
+      "original_question": "Do client-side scripts, SPA hydrations, or internal links trigger excessive, uncacheable API requests that waste server resources and crawler budget?",
+      "question": "Does rendering a page issue more than 50 API (XHR/fetch) requests, or any uncacheable one?",
+      "issue_if": "A rendered page issues over 50 XHR/fetch requests, or an API response carries Cache-Control no-store/private.",
+      "unit": "templates",
+      "group": "heuristic",
+      "requires": [
+        "render"
+      ],
+      "checks": [
+        "critical-resource-impact"
+      ],
+      "new_detector": "render-api-requests",
+      "profile_keys": [],
+      "threshold": {
+        "max_api_requests": 50
+      },
+      "classification": "Warning",
+      "priority": "Low",
+      "why": "Google's renderer fetches these requests too, from the same crawl budget. High request counts slow rendering and can cause timeouts that leave content out of the index.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q70",
+      "theme": "Crawl Budget",
+      "area": "Robots.txt & crawl budget",
+      "original_question": "Does robots.txt explicitly disallow internal search parameters (?s=, /search/) and RSS/API feeds (/feed/, /api/feed/) to conserve crawl budget?",
+      "question": "Are internal search result or feed URLs found in the crawl, and allowed by robots.txt?",
+      "issue_if": "At least one discovered URL matching internal-search or feed patterns has allowed_by_robots = true.",
+      "unit": "URLs",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "robots"
+      ],
+      "checks": [
+        "robots-controls",
+        "crawl-waste-url-families"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Internal search creates unlimited low-value URLs, and Google recommends blocking it. Feeds are duplicates of pages that are already crawled.",
+      "note": "Search and feed URL patterns can be overridden in the site profile.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q81",
+      "theme": "Crawl Budget",
+      "area": "Crawl safety & rate limiting",
+      "original_question": "Are crawler request rates and concurrency configured safely to avoid triggering origin 429 rate limits or server degradation during deep audits?",
+      "question": "Did the audit crawl trigger 429/503 rate limiting or measurable slowing of the origin?",
+      "issue_if": "The run recorded any 429/503, or response times rising over 50% during the run.",
+      "unit": "run",
+      "group": "run-gate",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "audit-collection-safeguards"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": null,
+      "priority": null,
+      "why": "This is about the audit crawler's own settings, not a site defect. Rate-limited responses do not show the site's normal behaviour, so affected rows are rechecked rather than ticketed.",
+      "note": null,
+      "sheet_answerable_was": "No"
+    },
+    {
+      "id": "Q88",
+      "theme": "Crawl Budget",
+      "area": "Server response & crawl budget",
+      "original_question": "What is the server response time (TTFB) distribution across page templates (mean, p90, p99), and do slow origin outliers constrain crawl capacity?",
+      "question": "Does any template have p90 server response time above 600 ms or p99 above 1.5 s?",
+      "issue_if": "At least one template with 20+ samples has p90 TTFB > 600 ms or p99 > 1,500 ms.",
+      "unit": "templates",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "performance-distribution"
+      ],
+      "new_detector": null,
+      "profile_keys": [
+        "templates"
+      ],
+      "threshold": {
+        "p90_ms": 600,
+        "p99_ms": 1500,
+        "min_samples": 20
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Google lowers its crawl rate when the server is slow, so fewer pages get crawled. Slow TTFB also pushes LCP out of the 'good' range.",
+      "note": "Measured from the crawler's location, not Google's. Pages matching no profile template are timed as one 'other' group; a template with fewer than min_samples timed pages keeps the answer at Needs validation.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q89",
+      "theme": "Crawl Budget",
+      "area": "Conditional HTTP caching",
+      "original_question": "Does the web server support conditional HTTP requests (ETag / If-None-Match and Last-Modified / If-Modified-Since) returning 304 Not Modified to optimize search crawler efficiency?",
+      "question": "Does the server ignore conditional requests, returning 200 instead of 304 for unchanged pages?",
+      "issue_if": "On a probe sample, pages that send ETag or Last-Modified return 200 to a matching conditional request, or send neither validator.",
+      "unit": "templates",
+      "group": "crawl",
+      "requires": [
+        "probes"
+      ],
+      "checks": [
+        "conditional-cache-behaviour"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "A 304 lets Googlebot skip downloading unchanged pages, which saves crawl capacity for pages that have changed.",
+      "note": null,
+      "sheet_answerable_was": "No"
+    },
+    {
+      "id": "Q101",
+      "theme": "Crawl Budget",
+      "area": "Crawl traps",
+      "original_question": "Do calendars, pagination, sort orders, filters and other state combinations create uncontrolled crawl paths or infinite URL spaces?",
+      "question": "Does any discovered navigation-state family exceed its approved finite URL, date-range or traversal-depth limit?",
+      "issue_if": "A calendar, pagination, sort or filter family exceeds its documented URL-count, date-range or traversal-depth bound, or exposes a next-state link beyond that bound.",
+      "unit": "URL families",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "crawl-waste-url-families",
+        "parameter-and-faceted-controls"
+      ],
+      "new_detector": "bounded-navigation-states",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Unbounded navigation states can create near-duplicate URL populations that consume crawl capacity without adding useful indexable content.",
+      "note": "Planned: no dedicated answerer yet. Requires approved finite limits for each family; a finite saved crawl cannot prove an infinite URL space. Report observed bound violations, qualify partial coverage and never traverse indefinitely.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q2",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "URL variants",
+      "original_question": "Do the www/non-www and http/https versions redirect to the canonical URL?",
+      "question": "Does any http/https or www/non-www variant fail to 301 or 308 to the canonical host in one hop?",
+      "issue_if": "At least one host or protocol variant returns 200, a non-permanent redirect, or a chain of more than one hop.",
+      "unit": "variants",
+      "group": "crawl",
+      "requires": [
+        "probes"
+      ],
+      "checks": [
+        "url-host-and-variants"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Variants that do not redirect permanently split links and signals across duplicate copies of the site, and redirect chains slow crawling.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q5",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Security",
+      "original_question": "Does the site link to or embed non-SSL (http://) assets?",
+      "question": "Does any HTTPS page load an http:// resource, or link internally to an http:// URL?",
+      "issue_if": "At least one HTTPS page references an http:// image, script, stylesheet or iframe, or has an internal http:// link.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "stored-html"
+      ],
+      "checks": [
+        "nonproduction-https"
+      ],
+      "new_detector": "mixed-content",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "Medium",
+      "why": "Browsers block insecure scripts and flag insecure images, which breaks pages and removes the secure padlock. Internal http:// links add a redirect hop to every click and crawl.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q6",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Error handling",
+      "original_question": "Do made-up URLs under the main sections return 404?",
+      "question": "Does a made-up URL under any main section return a status other than 404 or 410?",
+      "issue_if": "At least one synthetic non-existent URL returns 200 or redirects to a live page.",
+      "unit": "sections",
+      "group": "crawl",
+      "requires": [
+        "probes"
+      ],
+      "checks": [
+        "soft404-error-routes"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "If any URL returns 200, junk and mistyped URLs can be crawled and indexed indefinitely as soft 404s, and genuinely removed pages never drop out.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q7",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "URL variants",
+      "original_question": "What happens when pages are requested in camelCase or uppercase?",
+      "question": "Does an uppercase or camelCase variant of a URL return 200 without redirecting or canonicalising to the lowercase URL?",
+      "issue_if": "At least one case variant returns 200 with a self-referencing or missing canonical.",
+      "unit": "URLs",
+      "group": "crawl",
+      "requires": [
+        "probes"
+      ],
+      "checks": [
+        "url-host-and-variants"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "URL paths are case-sensitive. Case variants that return 200 create duplicate URLs whenever someone links with the wrong case.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q19",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Redirects",
+      "original_question": "Do the backlinked dead URLs and legacy URLs behave as the 25 Sep audit reported?",
+      "question": "Does any backlinked or legacy URL return an error, or redirect in a chain, instead of a single 301 to a relevant live page?",
+      "issue_if": "At least one supplied backlinked or archived URL returns 4xx/5xx or needs more than one redirect hop.",
+      "unit": "URLs",
+      "group": "supplied-input",
+      "requires": [
+        "backlinks",
+        "probes"
+      ],
+      "checks": [
+        "response-status-and-redirect-history"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "High",
+      "why": "External links to dead URLs pass no value. Each one fixed with a single 301 recovers authority the site has already earned.",
+      "note": "Needs a backlink export (Ahrefs/Semrush); archived URLs can come from the crawler's Wayback seeding.",
+      "sheet_answerable_was": "No"
+    },
+    {
+      "id": "Q22",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Internal linking",
+      "original_question": "Do internal links point at 404s, redirects, noindex or non-canonical URLs?",
+      "question": "Does any internal link point at a URL that returns 4xx/5xx, redirects, is noindex, or canonicalises elsewhere?",
+      "issue_if": "At least one internal link target has one of these states.",
+      "unit": "links",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "internal-link-targets"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "Medium",
+      "why": "Broken links waste crawl and frustrate users. Links to redirects, noindex or non-canonical URLs pass weaker signals and make Google crawl two URLs to reach one page.",
+      "note": "Priority rises to High for 4xx/5xx targets linked from navigation.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q25",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Redirects",
+      "original_question": "Does the site redirect by Accept-Language or IP?",
+      "question": "Does the site redirect or change content based on Accept-Language or the visitor's IP location?",
+      "issue_if": "The same URL gives a different status, Location or primary content when Accept-Language or egress country changes.",
+      "unit": "URLs",
+      "group": "crawl",
+      "requires": [
+        "probes"
+      ],
+      "checks": [
+        "locale-redirects"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Googlebot crawls mostly from the US without an Accept-Language header. Automatic locale redirects can hide every other locale version from Google.",
+      "note": "Accept-Language needs no proxy; the IP part needs proxies for each tested country.",
+      "sheet_answerable_was": "No"
+    },
+    {
+      "id": "Q27",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Host hygiene",
+      "original_question": "Are non-production hosts and other rainbet hostnames exposed or indexable?",
+      "question": "Is any non-production or alternate host (staging, dev, preview, other brand hostnames) publicly reachable and indexable?",
+      "issue_if": "A host from the profile list, found in links, or found in certificate transparency logs returns 200 HTML without noindex or auth.",
+      "unit": "hosts",
+      "group": "crawl+profile",
+      "requires": [
+        "probes",
+        "site-profile"
+      ],
+      "checks": [
+        "nonproduction-https"
+      ],
+      "new_detector": null,
+      "profile_keys": [
+        "nonproduction_hosts"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Open staging and duplicate hosts can be indexed as copies of the live site, competing with it and exposing unreleased content.",
+      "note": "Host discovery beyond the profile list and linked hosts (DNS or certificate-log enumeration) is an external step.",
+      "sheet_answerable_was": "No"
+    },
+    {
+      "id": "Q28",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "External links",
+      "original_question": "Are outbound links broken, or missing sponsored/nofollow where needed?",
+      "question": "Does any outbound link return 4xx/5xx, or does a paid/affiliate outbound link lack rel=sponsored or nofollow?",
+      "issue_if": "On an external recheck, at least one outbound link returns 4xx/5xx, or a profile affiliate link lacks the rel qualification.",
+      "unit": "links",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "probes"
+      ],
+      "checks": [
+        "external-link-integrity"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Broken outbound links reflect poor maintenance on review pages. Unqualified paid links break Google's link-scheme policy (see Q75).",
+      "note": "The external recheck runs at a slow, conservative rate.",
+      "sheet_answerable_was": "No"
+    },
+    {
+      "id": "Q33",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Site security & spam",
+      "original_question": "Does the site host user-generated spam, exploit pages, or spam profiles that dilute domain quality and risk search penalties?",
+      "question": "Does the site host user-generated spam, injected content or spam profiles?",
+      "issue_if": "At least one crawled page matches the spam pattern list (pharma, casino-spam, essay, crypto-scam terms or injected hidden links) outside the site's own topic.",
+      "unit": "pages",
+      "group": "heuristic",
+      "requires": [
+        "crawl",
+        "stored-html"
+      ],
+      "checks": [],
+      "new_detector": "ugc-spam-patterns",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Hosted spam can trigger a manual action for user-generated spam or a site-reputation abuse action, and lowers trust in the whole domain.",
+      "note": "A gambling site's own vocabulary overlaps spam lists; every match needs review.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q39",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Internal linking",
+      "original_question": "Do content headings (H2/H3) or section titles link to outdated, redirecting, or mismatched slugs rather than direct canonical destinations?",
+      "question": "Does any link inside an H2 or H3 point at a redirecting, error or non-canonical URL?",
+      "issue_if": "At least one link whose xpath is within an h2/h3 has a non-200 or non-canonical target.",
+      "unit": "links",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "internal-link-targets"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Low",
+      "why": "Section-heading links usually point to the most important related pages. When they redirect or break, the link that matters most on the page passes the least.",
+      "note": "A subset of Q22 reported separately because it is usually a separate content fix.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q42",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Status codes & errors",
+      "original_question": "Do error pages return proper HTTP status codes (404/410/500) at the server level rather than returning 200 OK with client-rendered error notices?",
+      "question": "Does any page return 200 while showing an error or 'not found' message?",
+      "issue_if": "At least one 200 page has an error-page title/body signature or matches the site's 404 template.",
+      "unit": "pages",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "probes"
+      ],
+      "checks": [
+        "soft404-error-routes"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Soft 404s are reported as errors in Search Console, waste crawl, and keep dead pages indexed.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q43",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Link equity & architecture",
+      "original_question": "Do sitewide footer or navigation templates leak internal PageRank by linking out to non-essential network websites or third-party properties?",
+      "question": "Do sitewide header or footer templates link to third-party or network sites outside the profile's allowed list, without nofollow?",
+      "issue_if": "At least one followed external link appears on over 50% of pages and its domain is not in the profile's allowed list.",
+      "unit": "links",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "site-profile"
+      ],
+      "checks": [
+        "external-link-integrity"
+      ],
+      "new_detector": "sitewide-external-links",
+      "profile_keys": [
+        "allowed_external_domains"
+      ],
+      "threshold": {
+        "min_page_share": 0.5
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Sitewide followed links between sister sites can look like a link network. They also add a link to every page that points visitors away from the site.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q72",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Redirects & internal links",
+      "original_question": "Do all internal links strictly match the site's trailing-slash URL convention to eliminate unnecessary 301/308 redirect hops?",
+      "question": "Does any internal link use the non-canonical trailing-slash form and cause a redirect?",
+      "issue_if": "At least one internal link differs from its final URL only by a trailing slash.",
+      "unit": "links",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "internal-link-targets",
+        "url-host-and-variants"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Low",
+      "why": "Each such link costs an extra redirect for users and crawlers, and usually comes from one template or a menu setting.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q74",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Asset accessibility",
+      "original_question": "Do any internal media files, static uploads, or script assets in content directories return 403 Forbidden status codes to crawlers and visitors?",
+      "question": "Does any internally referenced image, video, script or stylesheet return 403 or another 4xx?",
+      "issue_if": "At least one first-party asset referenced by a crawled page returns 4xx.",
+      "unit": "assets",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "render"
+      ],
+      "checks": [
+        "image-resource-delivery",
+        "critical-resource-impact"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "Medium",
+      "why": "Missing images and scripts break pages for visitors, and a render resource that returns an error leaves Google with an incomplete page.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q76",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Subdomain & link hygiene",
+      "original_question": "Do internal page links inadvertently point to non-resolving staging, admin, or obsolete subdomains (e.g. admin., cache., preview.)?",
+      "question": "Do internal links point to staging, admin, preview or other non-canonical subdomains, or to hosts that don't resolve?",
+      "issue_if": "At least one link to a same-site subdomain other than the canonical host fails DNS or points at a non-production host.",
+      "unit": "links",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "internal-link-targets",
+        "nonproduction-https"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Issue",
+      "priority": "Medium",
+      "why": "Links to staging or admin hosts leak those hosts to crawlers and users. Links to dead subdomains are broken links.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q77",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Subdomain & index hygiene",
+      "original_question": "Are cache, CDN image-resizer, or preview subdomains (e.g. cache.domain.com, /_next/image/) blocked from search crawling and indexing?",
+      "question": "Are cache, CDN, image-resizer or preview hosts serving indexable HTML copies of pages?",
+      "issue_if": "At least one profile cache/preview host or path returns 200 HTML without noindex, a canonical to the main host, or a robots block.",
+      "unit": "hosts",
+      "group": "crawl+profile",
+      "requires": [
+        "probes",
+        "site-profile"
+      ],
+      "checks": [
+        "nonproduction-https",
+        "robots-controls"
+      ],
+      "new_detector": null,
+      "profile_keys": [
+        "nonproduction_hosts"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "HTML copies on cache or preview hosts are duplicates of the site and can be indexed instead of it.",
+      "note": "Image-resizer paths that serve images (not HTML) should stay crawlable, or image search breaks; do not block /_next/image in robots.txt.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q79",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Server errors & 5xx stability",
+      "original_question": "Do any crawlable or search-indexed URLs persistently return 500-level Internal Server Errors indicating unhandled application failures?",
+      "question": "Does any URL return 5xx both in the crawl and on a live recheck?",
+      "issue_if": "At least one URL returns 5xx in the run and again on recheck.",
+      "unit": "URLs",
+      "group": "crawl",
+      "requires": [
+        "crawl",
+        "probes"
+      ],
+      "checks": [
+        "response-status-and-redirect-history"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Error",
+      "priority": "High",
+      "why": "Persistent 5xx errors make Google slow its crawl of the whole site and drop the affected pages from the index.",
+      "note": "Qualification: recheck_required.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q91",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Internal link quality",
+      "original_question": "Do internal hyperlinks contain empty anchor text, whitespace-only content, or missing alt attributes on linked images?",
+      "question": "Does any internal link have empty anchor text, with no alt text on a linked image either?",
+      "issue_if": "At least one internal <a> has empty or whitespace-only text and no image with non-empty alt.",
+      "unit": "links",
+      "group": "crawl",
+      "requires": [
+        "crawl"
+      ],
+      "checks": [
+        "image-markup"
+      ],
+      "new_detector": "empty-anchors",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Low",
+      "why": "An empty link gives Google no anchor text and screen readers nothing to announce. It is usually an icon or logo link without a label.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q92",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Security & forms",
+      "original_question": "Do interactive HTML <form action=\"...\"> attributes submit exclusively to secure https:// URLs to avoid browser mixed-content warnings?",
+      "question": "Does any form submit to an http:// URL?",
+      "issue_if": "At least one <form action> resolves to an http:// URL.",
+      "unit": "forms",
+      "group": "crawl",
+      "requires": [
+        "stored-html"
+      ],
+      "checks": [
+        "nonproduction-https"
+      ],
+      "new_detector": "insecure-form-actions",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Browsers warn users on insecure form submissions, and the data goes over an unencrypted connection. This is a security issue before it is an SEO one.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q102",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Preview and draft exposure",
+      "original_question": "Are preview, draft, admin and CMS utility paths protected from public access and governed correctly for crawling and indexing?",
+      "question": "Does any preview, draft, admin or CMS utility URL violate its approved access or indexing policy?",
+      "issue_if": "An unauthenticated request exposes protected content, or an intentionally public utility URL lacks its required noindex or crawl control; a public noindex directive is not readable because robots.txt blocks the URL.",
+      "unit": "URLs",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "probes",
+        "robots",
+        "site-profile"
+      ],
+      "checks": [
+        "robots-controls",
+        "indexability-segmentation"
+      ],
+      "new_detector": "utility-path-access-policy",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "High",
+      "why": "Public preview and utility URLs can expose unfinished content, create duplicate pages and introduce low-value or sensitive crawl paths.",
+      "note": "Needs scoped unauthenticated probes (observation kind utility-path-probe) whose records carry the approved path class: protected or public-utility. A login page returning 200 is not by itself evidence of exposed protected content; crawl-only absence is not proof of protection.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q103",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Redirect integrity",
+      "original_question": "Do internal, sitemap and priority legacy URLs avoid redirect chains, loops and temporary redirects where a permanent destination is intended?",
+      "question": "Does any internal, sitemap or approved legacy URL violate its direct-destination or permanent-redirect policy?",
+      "issue_if": "An internal or sitemap URL redirects; or an approved legacy redirect loops, takes more than one hop, uses a temporary response where a permanent move is required, or fails to reach its approved canonical destination.",
+      "unit": "URLs",
+      "group": "crawl+profile",
+      "requires": [
+        "crawl",
+        "sitemaps",
+        "probes",
+        "site-profile"
+      ],
+      "checks": [
+        "response-status-and-redirect-history",
+        "internal-link-targets"
+      ],
+      "new_detector": "redirect-policy-integrity",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Redirect chains and loops waste crawl capacity, delay users and weaken consolidation signals to the intended canonical URL.",
+      "note": "Planned: no dedicated answerer yet. Needs full redirect histories, internal and sitemap membership, and approved legacy targets. Temporary redirects are not inherently defects; evaluate the approved intent. Missing history or incomplete populations remain Pending or qualified.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q104",
+      "theme": "Maintenance (broken links etc.)",
+      "area": "Search-result host hygiene",
+      "original_question": "Do Google search results rank staging, development, cache, preview or other alternate-host versions instead of the intended production URLs?",
+      "question": "Does Google Search show any unapproved alternate-host URL in the reviewed performance data or search results?",
+      "issue_if": "A dated GSC domain-property export records impressions for an unapproved hostname during the agreed review period, or a documented SERP check finds an unapproved alternate-host URL.",
+      "unit": "URLs",
+      "group": "external",
+      "requires": [
+        "gsc",
+        "external-api"
+      ],
+      "checks": [],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Alternate-host results can divide visibility, expose non-production content and send users to the wrong version of the site even when the production host is healthy.",
+      "note": "Manual review required; always Pending in the automatic runner and never an automatic ticket. Procedure: (1) export GSC Performance > Pages from the domain property for the agreed date range; (2) segment page URLs by hostname and list every hostname with impressions that is not a permitted host; (3) for SERP checks, record each query, location, device and review date with the alternate-host URLs found. Record the result as observation kind search-host-review (review_type gsc-hosts or serp-check, reviewed_at, date_range, permitted_hosts, unapproved_hosts, queries). No impressions or site: matches does not prove universal absence from Google's index.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q29",
+      "theme": "Performance",
+      "area": "Performance",
+      "original_question": "Do images and Core Web Vitals hold up?",
+      "question": "Do lab LCP, CLS or INP exceed Google's 'good' thresholds on a key template, or do in-content images lack width and height?",
+      "issue_if": "A template's p75 lab LCP > 2.5 s, CLS > 0.1 or INP > 200 ms, or over 20% of its images lack dimensions.",
+      "unit": "templates",
+      "group": "heuristic",
+      "requires": [
+        "render"
+      ],
+      "checks": [
+        "performance-distribution",
+        "image-markup",
+        "image-resource-delivery"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "lcp_ms": 2500,
+        "cls": 0.1,
+        "inp_ms": 200
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "Core Web Vitals are part of page experience. Lab results show likely causes; field data (CrUX) decides whether it actually affects the site in search.",
+      "note": "Lab only; confirm with CrUX or Search Console Core Web Vitals before ticketing.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q63",
+      "theme": "Performance",
+      "area": "Server performance & security",
+      "original_question": "Is the domain submitted to the HSTS preload list and configured with OCSP stapling to minimize initial SSL handshake latency and TTFB?",
+      "question": "Is the Strict-Transport-Security header missing or weak, the domain absent from the HSTS preload list, or OCSP stapling off?",
+      "issue_if": "HSTS max-age < 31536000 or missing includeSubDomains/preload, the preload list status is not 'preloaded', or the TLS handshake has no stapled OCSP response.",
+      "unit": "hosts",
+      "group": "crawl",
+      "requires": [
+        "probes",
+        "external-api"
+      ],
+      "checks": [],
+      "new_detector": "hsts-ocsp",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "HSTS preload removes the first http-to-https redirect and prevents downgrade attacks; stapling shortens the TLS handshake. The search effect is small.",
+      "note": null,
+      "sheet_answerable_was": "No"
+    },
+    {
+      "id": "Q64",
+      "theme": "Performance",
+      "area": "Resource hints & performance",
+      "original_question": "Are critical third-party resource domains preconnected (<link rel=\"preconnect\">) with crossorigin attributes to accelerate connection setup?",
+      "question": "Does a page load render-critical fonts, CSS or its LCP image from a third-party origin without a preconnect hint?",
+      "issue_if": "A key template requests a render-blocking or LCP resource from another origin with no matching <link rel=preconnect>.",
+      "unit": "templates",
+      "group": "best-practice",
+      "requires": [
+        "render",
+        "stored-html"
+      ],
+      "checks": [
+        "critical-resource-impact"
+      ],
+      "new_detector": "resource-hints",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Each new origin costs DNS, TCP and TLS round trips before the first byte. Preconnecting to the origins that block rendering shortens LCP.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q65",
+      "theme": "Performance",
+      "area": "Resource loading & priority",
+      "original_question": "Are non-critical tracking scripts (e.g. Google Tag Manager, analytics) avoided in <link rel=\"preload\"> to prevent bandwidth contention with Above-The-Fold assets?",
+      "question": "Does any page preload an analytics or tag-manager script?",
+      "issue_if": "At least one <link rel=preload> points to a known analytics/tag-manager URL.",
+      "unit": "templates",
+      "group": "best-practice",
+      "requires": [
+        "stored-html"
+      ],
+      "checks": [],
+      "new_detector": "tracking-preloads",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Preloading a tracking script gives it the same priority as the hero image and CSS, which delays what the user sees first.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q66",
+      "theme": "Performance",
+      "area": "Image performance",
+      "original_question": "Are all raster images converted and served in modern next-gen formats (WebP and AVIF) with appropriate compression quality?",
+      "question": "Are content images served as JPEG or PNG instead of WebP or AVIF?",
+      "issue_if": "Over 20% of fetched in-content raster images have a JPEG/PNG content type.",
+      "unit": "images",
+      "group": "best-practice",
+      "requires": [
+        "crawl",
+        "render"
+      ],
+      "checks": [
+        "image-resource-delivery"
+      ],
+      "new_detector": null,
+      "profile_keys": [],
+      "threshold": {
+        "min_share": 0.2
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "WebP and AVIF are usually 25–50% smaller, which speeds up LCP on image-heavy templates.",
+      "note": "Compression quality is not measured.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q67",
+      "theme": "Performance",
+      "area": "Font performance & CWV",
+      "original_question": "Are web fonts configured with font-display: swap and restricted to strictly needed Above-The-Fold weights to prevent FOIT text render delays?",
+      "question": "Does any @font-face rule lack font-display swap/optional, or does a page preload more than four font files?",
+      "issue_if": "At least one first-party @font-face has no font-display (or 'block'), or a page has > 4 font preloads.",
+      "unit": "templates",
+      "group": "best-practice",
+      "requires": [
+        "crawl",
+        "stored-html"
+      ],
+      "checks": [],
+      "new_detector": "font-loading",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Without font-display, text stays invisible until the font loads, which delays the first render and can make LCP late.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q68",
+      "theme": "Performance",
+      "area": "Core Web Vitals (LCP & CLS)",
+      "original_question": "Are mobile-responsive hero images delivered with fetchpriority=\"high\", explicit width/height or aspect-ratio to optimize LCP and prevent CLS?",
+      "question": "Is the LCP image lazy-loaded, missing fetchpriority=high, or missing width and height?",
+      "issue_if": "On a key template the rendered LCP element is an image with loading=lazy, no fetchpriority=high, or no dimensions.",
+      "unit": "templates",
+      "group": "heuristic",
+      "requires": [
+        "render"
+      ],
+      "checks": [
+        "critical-resource-impact",
+        "image-markup"
+      ],
+      "new_detector": "lcp-image-attributes",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "A lazy-loaded or low-priority hero image is the most common cause of slow LCP, and missing dimensions cause layout shift.",
+      "note": "Identifying the LCP element needs a render with performance tracing.",
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q69",
+      "theme": "Performance",
+      "area": "Resource loading & LCP",
+      "original_question": "Are critical Above-The-Fold visual assets delivered via responsive <img> or <picture> elements rather than CSS background-image:url() rules?",
+      "question": "Is the LCP element on any key template a CSS background image?",
+      "issue_if": "On a key template the rendered LCP element's image comes from a CSS background-image.",
+      "unit": "templates",
+      "group": "heuristic",
+      "requires": [
+        "render"
+      ],
+      "checks": [
+        "critical-resource-impact"
+      ],
+      "new_detector": "lcp-background-image",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Low",
+      "why": "Browsers find CSS background images late and cannot prioritise them, and they are not indexed as images.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q86",
+      "theme": "Performance",
+      "area": "Critical rendering path",
+      "original_question": "Do render-blocking CSS stylesheets or synchronous JavaScript bundles delay first paint and impede crawler rendering queues?",
+      "question": "Does the <head> contain more than three render-blocking stylesheets or any synchronous external script?",
+      "issue_if": "A key template has > 3 blocking stylesheets or ≥ 1 external <script> in the head without async, defer or type=module.",
+      "unit": "templates",
+      "group": "best-practice",
+      "requires": [
+        "stored-html"
+      ],
+      "checks": [
+        "critical-resource-impact"
+      ],
+      "new_detector": "render-blocking-head",
+      "profile_keys": [],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Improvement",
+      "priority": "Medium",
+      "why": "Everything that blocks rendering delays first paint for users and adds work for Google's renderer.",
+      "note": null,
+      "sheet_answerable_was": null
+    },
+    {
+      "id": "Q96",
+      "theme": "AI",
+      "area": "AI crawler governance",
+      "original_question": "Does the site define explicit crawl and training permissions for AI search crawlers (e.g. GPTBot, ClaudeBot, PerplexityBot) in robots.txt and provide an /llms.txt file?",
+      "question": "Do the robots.txt rules for AI crawlers differ from the site's declared AI policy?",
+      "issue_if": "For any of GPTBot, OAI-SearchBot, ClaudeBot, Claude-SearchBot, PerplexityBot, Google-Extended or CCBot, the effective robots.txt verdict differs from the profile's ai_crawler_policy.",
+      "unit": "user agents",
+      "group": "crawl+profile",
+      "requires": [
+        "robots",
+        "site-profile"
+      ],
+      "checks": [
+        "robots-controls"
+      ],
+      "new_detector": "ai-crawler-policy",
+      "profile_keys": [
+        "ai_crawler_policy"
+      ],
+      "threshold": {
+        "min_affected": 1
+      },
+      "classification": "Warning",
+      "priority": "Medium",
+      "why": "AI search assistants send traffic only to sites they can crawl. Blocking a search agent by accident removes the site from those answers; allowing a training agent the site meant to block cannot be undone later.",
+      "note": "Without a declared policy the per-agent inventory is reported as Needs validation. /llms.txt presence is reported but is not a defect: no major search engine has confirmed using it.",
+      "sheet_answerable_was": "No"
+    }
+  ]
+}

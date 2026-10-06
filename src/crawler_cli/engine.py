@@ -1836,6 +1836,7 @@ class CrawlEngine:
         else:
             logger.info("Open crawl limit: unlimited (0)")
         seeds = list(seed_urls)
+        archive_seed_urls: list[str] = []
         if self.config.csv_urls and self.config.csv_seed_mode:
             seeds = list(dict.fromkeys([*self.config.csv_urls, *seeds]))
         if self.config.seed_from_archive:
@@ -1845,7 +1846,9 @@ class CrawlEngine:
             )
             for archive_target in archive_targets:
                 archive_candidates.extend(await discover_historical_urls(archive_target, self.config))
-            seeds = list(dict.fromkeys([*seeds, *archive_candidates]))
+            known_seeds = set(seeds)
+            archive_seed_urls = [url for url in dict.fromkeys(archive_candidates) if url not in known_seeds]
+            seeds = [*seeds, *archive_seed_urls]
 
         def _open_crawl_metadata(job: CrawlJobResult | None = None) -> dict[str, object]:
             payload: dict[str, object] = {
@@ -1923,13 +1926,22 @@ class CrawlEngine:
         if not resume:
             # Fresh crawl: enqueue seeds (record out-of-scope seeds without fetching)
             seed_enqueue = [
-                (url, 0, None, self._priority_score(url, 0)) for url in seeds if self.config.should_crawl_url(url)
+                (url, 0, None, self._priority_score(url, 0))
+                for url in seeds
+                if url not in archive_seed_urls and self.config.should_crawl_url(url)
+            ]
+            archive_enqueue = [
+                (url, 0, None, self._priority_score(url, 0))
+                for url in archive_seed_urls
+                if self.config.should_crawl_url(url)
             ]
             seed_skip = [url for url in seeds if not self.config.should_crawl_url(url)]
             if seed_skip:
                 await self._record_out_of_scope_urls(seed_skip, source="seed", detail="path_out_of_scope")
             if seed_enqueue:
                 await self._enqueue_frontier(seed_enqueue, source="seed")
+            if archive_enqueue:
+                await self._enqueue_frontier(archive_enqueue, source="archive_org")
             if self.config.discover_sitemaps and not self.config.skip_sitemaps:
                 await self._discover_and_enqueue_sitemaps(seeds, limit)
         else:

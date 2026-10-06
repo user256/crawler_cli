@@ -243,7 +243,7 @@ Ticket files remain the source of truth for scope and DoD.
   the affected fields.
 - External/manual evidence is recorded as a blocker; it is never inferred from
   unit tests.
-- New remediation work uses the next unreserved number (**162**); do not reuse **110**.
+- New remediation work uses the next unreserved number (**183**); do not reuse **110**.
 
 - `001` `done` [ticket-001-crawler-modularisation.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-001-crawler-modularisation.md)
 - `002` `done` [ticket-002-bounded-crawler-behaviour.md](/home/user256/GitRepos/crawler_cli/tickets/ticket-002-bounded-crawler-behaviour.md)
@@ -549,7 +549,7 @@ its evidence contract.
 
 - `144` `done` (2026-08-21, PR #64) [ticket-144-adversarial-crawler-scope.md](./ticket-144-adversarial-crawler-scope.md) — **P1:** README/SKILL/CLI help now name the product boundary — evidence crawler, not evasion, not pentest — with an explicit out-of-scope list, corrected dual-use flag help, and a `tests/contract/test_product_scope_contract.py` guard. Foundation for 145–154.
 - `145` `proposed` [ticket-145-client-split-measurement.md](./ticket-145-client-split-measurement.md) — **P2, depends on 144+148+149+153:** bounded plain vs impersonate vs spoofed-bot UA matrix; no retry-on-403; spoofed Googlebot is not Googlebot
-- `146` `proposed` [ticket-146-authorised-exposure-inventory.md](./ticket-146-authorised-exposure-inventory.md) — **P2, depends on 144+148+149+153:** declared non-prod hosts, CLI soft-404 fingerprint, sitemap leftovers, and published error/test URLs; no payloads
+- `146` `done` (2026-09-23, PRs #80–#87) [ticket-146-authorised-exposure-inventory.md](./ticket-146-authorised-exposure-inventory.md) — **P2:** shipped the scope-gated `exposure-inventory` command, bounded declared-host probes, soft-404/sitemap evidence, redacted versioned artifact, and dedicated regression tests; no payloads
 - `147` `proposed` [ticket-147-crawler-self-safety.md](./ticket-147-crawler-self-safety.md) — **P1/safety, depends on 144:** regression-lock existing GET-only HTTP(S); add session-mutating URL policy, robots confirmation, typed skip evidence; strict-mode integration uses 148
 - `148` `done` (2026-08-21, PR #65) [ticket-148-authorisation-scope-manifest.md](./ticket-148-authorisation-scope-manifest.md) — **P1, depends on 144:** versioned operator attestation with exact origin/path/time/method scope and one fail-closed predicate applied to every URL source; gates security-adjacent fetch modes. Unblocks 149 and 152.
 - `149` `done` (2026-09-07, PRs #72/#74/#75/#76 + browser/archive follow-up) [ticket-149-default-network-ssrf-safety.md](./ticket-149-default-network-ssrf-safety.md) — **P1/security, depends on 148:** block special/private destinations and rebinding across redirects/auxiliary fetches; honest per-backend capabilities; double-confirmed private-network exception. **Prior art:** `portal_adapter.py` on unmerged branch `feature/3350-portal-url-policy-v1` (`8fcdb54`) already implements the address-class policy and the per-hop resolve-validate-pin loop, with tests; read it first (see ticket 162).
@@ -583,9 +583,218 @@ an optional outcome-feedback layer and does not block either discovery path.
 
 - `160` `done` (2026-08-24 PR #68, completed 2026-09-07 by ticket 161) [ticket-160-first-class-render-parity-audit.md](./ticket-160-first-class-render-parity-audit.md) — **P1, builds on completed 019+031+097+153+157+159:** `crawler-cli compare-renders` over exact URLs, `--csv-file`, and `--crawl-run-id`, same-navigation raw-versus-hydrated comparison, typed completeness, multiple typed findings, `crawler-cli/render-comparison/1` JSON plus CSV and self-contained HTML report with strata coverage and filter, and the `--fail-on`/`--fail-on-incomplete` exit contract. No Googlebot-emulation claim.
 - `161` `done` (2026-09-07) [ticket-161-render-parity-run-selection-and-persistence.md](./ticket-161-render-parity-run-selection-and-persistence.md) — **P1, depends on 153+157+159 and the first delivery of 160:** run-backed `--crawl-run-id` selection with deterministic sampling and honest run/partial provenance, operator template labels plus computed path strata and stratum coverage/filtering in JSON/CSV/HTML, and the optional run-scoped render-comparison persistence session. Closes ticket 160.
-- `162` `proposed` (2026-09-07) [ticket-162-orphaned-migration-manager-adapter.md](./ticket-162-orphaned-migration-manager-adapter.md) — **P2, relates to completed 130 and proposed 149:** triage and disposition of the orphaned Portal Migration Manager adapter on `feature/3350-portal-url-policy-v1`. Not mergeable as authored (pins the excluded `v0.2.1`; contract baseline predates 144–161). Recommended disposition is harvest-then-retire: carry its address-class policy and per-hop re-resolution into ticket 149 and leave the branch as history.
+- `162` `done` (2026-09-23) [ticket-162-orphaned-migration-manager-adapter.md](./ticket-162-orphaned-migration-manager-adapter.md) — **P2:** ticket 149 landed the relevant guard; retain `feature/3350-portal-url-policy-v1` as documented prior art, not merge material.
+
+### Correctness backlog reconciliation (2026-09-23)
+
+The 2026-07-22 wiring-audit tickets were renumbered from their colliding local
+130–143 identifiers. Magento hygiene keeps 131–134 and the release remains
+130; audit identifiers are now 163–176.
+
+- `163` `proposed` [ticket-163-list-crawl-run-id-isolation.md](./ticket-163-list-crawl-run-id-isolation.md) — **P0:** List/CSV crawls honour `--crawl-run-id`
+- `164` `proposed` [ticket-164-sitemap-hreflang-snapshot-retention.md](./ticket-164-sitemap-hreflang-snapshot-retention.md) — **P0:** retain sitemap-only hreflang in run snapshots
+- `165` `proposed` [ticket-165-skip-outcomes-session-budget.md](./ticket-165-skip-outcomes-session-budget.md) — **P1:** make `--max-pages` semantics consistent for skips and content
+- `166` `proposed` [ticket-166-playwright-max-response-bytes-text.md](./ticket-166-playwright-max-response-bytes-text.md) — **P1:** cap parsed Playwright text as well as body
+- `167` `proposed` [ticket-167-obscura-fetch-auth-status-parity.md](./ticket-167-obscura-fetch-auth-status-parity.md) — **P1:** prevent silent Obscura auth/status falsehoods
+- `168` `proposed` [ticket-168-playwright-per-host-proxy-select.md](./ticket-168-playwright-per-host-proxy-select.md) — **P1:** make browser `per-host` proxy selection honest
+- `169` `proposed` [ticket-169-custom-ua-vs-per-domain-ua.md](./ticket-169-custom-ua-vs-per-domain-ua.md) — **P2:** restore per-domain UA precedence
+- `170` `proposed` [ticket-170-challenge-escalate-fresh-proxy.md](./ticket-170-challenge-escalate-fresh-proxy.md) — **P2:** select a distinct proxy for bounded challenge escalation
+- `171` `proposed` [ticket-171-rate-limit-cli-gui-delay.md](./ticket-171-rate-limit-cli-gui-delay.md) — **P2:** wire crawl rate limit through CLI/GUI
+- `172` `proposed` [ticket-172-gui-crawl-dsn-env.md](./ticket-172-gui-crawl-dsn-env.md) — **P2:** keep GUI DSNs off argv
+- `173` `proposed` [ticket-173-gui-run-scoped-link-graph.md](./ticket-173-gui-run-scoped-link-graph.md) — **P2:** scope GUI link graph to the selected run
+- `174` `proposed` [ticket-174-refresh-days-run-scope.md](./ticket-174-refresh-days-run-scope.md) — **P3:** document and lock refresh-days scope
+- `175` `proposed` [ticket-175-concurrency-skip-sitemaps-hygiene.md](./ticket-175-concurrency-skip-sitemaps-hygiene.md) — **P3:** resolve config/CLI drift
+- `176` `proposed` [ticket-176-list-max-pages-semantics.md](./ticket-176-list-max-pages-semantics.md) — **P2:** make GUI List max-pages honest
+
+### Shopify crawl correctness follow-ups (2026-09-23)
+
+- `177` `proposed` [ticket-177-raw-http-sitemap-fetch-under-js.md](./ticket-177-raw-http-sitemap-fetch-under-js.md) — **P1:** fetch sitemap documents as raw HTTP under browser page backends
+- `178` `proposed` [ticket-178-orphans-use-run-scoped-inlinks.md](./ticket-178-orphans-use-run-scoped-inlinks.md) — **P1:** define orphans from same-run internal inlinks
+- `179` `proposed` [ticket-179-playwright-redirect-status-evidence.md](./ticket-179-playwright-redirect-status-evidence.md) — **P1:** retain requested/final redirect status evidence in Playwright
+- `180` `proposed` [ticket-180-resume-seed-mismatch-intent.md](./ticket-180-resume-seed-mismatch-intent.md) — **P1:** do not silently discard changed resume seeds
+- `181` `proposed` [ticket-181-rate-limit-vs-challenge-accounting.md](./ticket-181-rate-limit-vs-challenge-accounting.md) — **P2:** distinguish 429 rate limits from challenges and count distinct URLs
+- `182` `proposed` [ticket-182-playwright-system-chromium-discovery.md](./ticket-182-playwright-system-chromium-discovery.md) — **P3:** bounded system-Chromium fallback after bundled launch failure
+
+### Deterministic technical audit (2026-09-24)
+
+- `183` `in review` [Audit check registry, provenance and coverage](./ticket-183-technical-audit-coverage-contract.md) — **P1**; [PR #88](https://github.com/user256/crawler_cli/pull/88).
+- `184` `in review` [Fix false indexing-directive conflicts](./ticket-184-technical-audit-explicit-robots-conflicts.md) — **P1**; [PR #89](https://github.com/user256/crawler_cli/pull/89).
+- `185` `in review` [Automate live rechecks and gate client publication](./ticket-185-technical-audit-live-rechecks-publication-gate.md) — **P1**; [PR #90](https://github.com/user256/crawler_cli/pull/90).
+- `186` `in review` [Correct audit link graph and multi-issue classification](./ticket-186-technical-audit-link-graph-correctness.md) — **P1**; [PR #91](https://github.com/user256/crawler_cli/pull/91). Optional Search Console/analytics CSV URLs now join the run graph; current sitemap URL ingestion remains open in ticket 204.
+- `187` `in review` [Make similarity and internal authority evidence representative](./ticket-187-technical-audit-content-similarity-authority.md) — **P1**; [PR #92](https://github.com/user256/crawler_cli/pull/92). Template-group classification is explicitly unavailable pending a stored template signal.
+- `188` `in review` [Define and validate the audit Sheets template contract](./ticket-188-technical-audit-sheets-template-contract.md) — **P1**; [PR #93](https://github.com/user256/crawler_cli/pull/93), stacked on PR #92; its full suite also passes on the PR #94 stack (1,445 passed, 57 skipped), superseding the earlier temp-quota caveat.
+- `189` `in review` [Validate, verify and recover Google Sheets publication](./ticket-189-technical-audit-sheets-publication-recovery.md) — **P1**; [PR #94](https://github.com/user256/crawler_cli/pull/94), stacked on PR #93; full suite passes, 1,445 passed and 57 skipped.
+- `190` `in review` [Automate metadata, language and indexability inventories](./ticket-190-technical-audit-metadata-locale-inventory.md) — **P1**; [PR #95](https://github.com/user256/crawler_cli/pull/95), stacked on PR #94; full suite passes, 1,448 passed and 57 skipped. Thin-content scoring and rendered confirmation remain explicit limitations.
+- `191` `in review` [Automate canonical and hreflang consistency checks](./ticket-191-technical-audit-canonical-hreflang-checks.md) — **P1**; [PR #96](https://github.com/user256/crawler_cli/pull/96), stacked on PR #95; full suite passes, 1,452 passed and 57 skipped. Sitemap hreflang comparison and live target checks remain unavailable.
+- `192` `in review` [Automate current robots and sitemap evidence](./ticket-192-technical-audit-robots-sitemap-collector.md) — **P1**; [PR #97](https://github.com/user256/crawler_cli/pull/97), stacked on PR #96; full suite passes, 1,457 passed and 57 skipped; all 26 CI checks pass. Rendered/internal-link purpose classification remains open.
+- `193` `in review` [Automate URL variants, canonicalized parameters and soft-404 probes](./ticket-193-technical-audit-url-variants-soft404.md) — **P1**; [PR #98](https://github.com/user256/crawler_cli/pull/98), stacked on PR #97; full suite passes, 1,462 passed and 57 skipped; all 26 CI checks pass. Rendered SPA/error-state, geo, and route/entity intent remain analyst follow-ups.
+- `194` `in review` [Integrate rendered, mobile, geo and resource evidence](./ticket-194-technical-audit-render-geo-resource-evidence.md) — **P2**; [PR #99](https://github.com/user256/crawler_cli/pull/99), stacked on PR #98; full suite passes, 1,466 passed and 57 skipped; all 26 CI checks pass. Geo comparisons, interactions/screenshots, robots-aware resource impact, layout measurement, external-link and non-HTML asset checks remain open.
+- `195` `in review` [Add versioned structured-data audit rules](./ticket-195-technical-audit-structured-data-rules.md) — **P2**; [PR #100](https://github.com/user256/crawler_cli/pull/100), stacked on PR #99; full suite passes, 1,474 passed and 57 skipped; all 26 CI checks pass after pinned-Ruff formatting fixes. Content/image/URL equivalence, contextual/restricted eligibility, and live Google validation remain analyst follow-ups.
+- `196` `in review` [Automate timing distributions, conditional requests and optional log evidence](./ticket-196-technical-audit-performance-conditional-logs.md) — **P2**; [PR #101](https://github.com/user256/crawler_cli/pull/101), stacked on PR #100; 1,483 passed, 57 skipped; all 26 CI checks pass; field-CWV/browser-trace and validated access-log ingestion remain open pending source contracts.
+- `197` `in review` [Build recipient-focused audit actions and healthy overview](./ticket-197-technical-audit-client-report-projection.md) — **P1**; [PR #102](https://github.com/user256/crawler_cli/pull/102), stacked on PR #101; 1,487 passed, 57 skipped; all 26 CI checks pass; depth/thin-content and business-specific severity remain explicitly unknown/analyst supplied.
+- `198` `in review` [Prove the complete audit workflow and correct completion claims](./ticket-198-technical-audit-end-to-end-acceptance.md) — **P1**; [PR #103](https://github.com/user256/crawler_cli/pull/103), stacked on PR #102; 1,488 passed, 58 skipped, Ruff/mypy and all 26 CI checks pass, including PostgreSQL integration; live Sheets publication and representative-audit trace remain unverified.
+- `199` `in review` [Move the audit skill to its owning repo and link all agents](./ticket-199-technical-audit-shared-skill-location.md) — **P2**; [PR #104](https://github.com/user256/crawler_cli/pull/104), stacked on PR #103; repo-owned skill validated, all five configured links resolve to the shared directory, and all 26 CI checks pass.
+- `200` `in review` [Complete technical-audit skill requirement traceability](./ticket-200-technical-audit-skill-requirement-traceability.md) — **P1**; section-level inventory and guard submitted in [PR #109](https://github.com/user256/crawler_cli/pull/109), all 26 CI checks pass; per-control requirement mapping remains open under ticket 203.
+- `201` `in review` [Handle legacy crawl snapshot schemas in technical audits](./ticket-201-technical-audit-legacy-snapshot-compatibility.md) — **P1**; [PR #105](https://github.com/user256/crawler_cli/pull/105), stacked on PR #104; real-run replay succeeds, and all 26 CI checks pass including PostgreSQL regression.
+- `202` `proposed` [Audit non-production hosts and HTTPS hygiene](./ticket-202-technical-audit-nonproduction-hosts-https.md) — **P2**; uncovered requirement from the skill-coverage map; reuse URL/sitemap/redirect/exposure evidence.
+- `203` `proposed` [Make technical-audit traceability requirement-level](./ticket-203-technical-audit-control-level-traceability.md) — **P1**; section-level control mapping does not prove each substantive skill requirement is mapped to evidence, tests, and an owner.
+- `204` `in review` [Include supplied URL inventories in orphan analysis](./ticket-204-technical-audit-supplied-url-inventories.md) — **P2**; sitemap join and recipient projection submitted in [PR #106](https://github.com/user256/crawler_cli/pull/106), reusing CSV sources from PR #91.
+- `205` `proposed` [Classify rendered links blocked by robots rules](./ticket-205-technical-audit-rendered-robots-link-purpose.md) — **P1**; rendered link instances need matched-rule and conservative purpose evidence.
+- `206` `proposed` [Reconcile sitemap, HTML, and HTTP hreflang evidence](./ticket-206-technical-audit-hreflang-channel-reconciliation.md) — **P2**; audit-side channel comparison depends on ticket 164's retained sitemap annotations.
+- `207` `in review` [Preserve incomplete live-recheck outcomes](./ticket-207-live-recheck-incomplete-state.md) — **P1**; keeps inconclusive observations from being interpreted as intermittent or persistent failures; [PR #107](https://github.com/user256/crawler_cli/pull/107).
+- `208` `in review` [Capture pre-scroll and scroll-revealed rendered links](./ticket-208-rendered-link-scroll-evidence.md) — **P2**; adds bounded same-page/device rendered-link states without clicking controls; [PR #110](https://github.com/user256/crawler_cli/pull/110).
+- `214` `proposed` [Stop reporting the Next.js RSC payload script as broken schema](./ticket-214-schema-parser-nextjs-rsc-payload-noise.md) — **P2**; untyped hydration scripts surface as `BrokenScriptSchema` site defects.
+- `215` `proposed` [Do not classify a 200 page embedding Turnstile as a challenge](./ticket-215-challenge-detector-turnstile-false-positive.md) — **P1**; rainbet crawl 2026-09-25 recorded 399 real pages as blocked and stored no content.
+- `216` `proposed` [Use Wayback Machine URL history as an audit inventory](./ticket-216-technical-audit-wayback-url-history.md) — **P1**; rainbet: 3,378 formerly live URLs now fail, invisible to the crawl; feeds 204.
+- `217` `proposed` [Weight failing URLs by supplied backlink data](./ticket-217-technical-audit-backlink-weighting.md) — **P1**; Ahrefs/Semrush/GSC exports; rainbet dead URLs held ~34.8k referring domains (non-unique sum).
+- `218` `proposed` [Generate a deterministic redirect map for failing URLs](./ticket-218-technical-audit-redirect-map.md) — **P1**; rule-based targets, similarity only as review-required, detect redirects into 404s; depends on 216/217.
+- `219` `proposed` [Flag unresolved route placeholders in raw HTML links](./ticket-219-link-quality-route-placeholders.md) — **P2**; rainbet raw HTML carried 18,080 `[slug]` links that 404.
+- `220` `proposed` [Detect growing internal URL families from repeated observations](./ticket-220-technical-audit-growing-url-families.md) — **P2**; route/parameter families beyond tracking params; growth only with timestamped re-observation.
+- `221` `proposed` [Flag locale pages that reuse default-locale metadata](./ticket-221-technical-audit-untranslated-locale-metadata.md) — **P3**; extends 190.
+- `222` `proposed` [Qualify orphan claims by crawl coverage](./ticket-222-orphans-coverage-qualification.md) — **P1**; capped crawls must not state absolute orphan status; complements 178.
+- `223` `proposed` [Publish into a mapped client ticket template](./ticket-223-sheets-mapped-client-template.md) — **P2**; Canonicals Tickets/Config template; `sheets.copyTo` fallback under `drive.file`; builds on 188/189.
+- `224` `proposed` [Coherent browser fetch profile and a shared live-check rate limit](./ticket-224-fetch-profile-and-shared-rate-limit.md) — **P1**; impersonation implies matching UA; one per-host budget across live modules; relates to 169/181.
+- `225` `proposed` [Show the run and audit dates in the Markdown projection](./ticket-225-technical-audit-markdown-run-date.md) — **P3**; rainbet master rerun printed `Date: unknown`.
+
+### Rainbet audit delivery and QA follow-up (2026-09-28)
+
+The two-track plan separates the immediate, evidence-backed corrections needed
+to finish the current Rainbet audit from reusable process work. All tickets in
+this section are proposed; filing them does not claim that the audit or any
+process change is complete. Tickets 240–246 do not depend on tickets 247–253.
+
+- `240` `proposed` [Correct Rainbet validation statuses and client row selection](./ticket-240-rainbet-validation-status-and-client-selection.md) — **P0:** correct validation logic, omit no-action client rows, and retain the complete internal ledger.
+- `241` `proposed` [Finish game-discovery checks and qualify Rainbet bot claims](./ticket-241-rainbet-game-discovery-and-bot-claims.md) — **P0:** finish Q23 and bound game-link, bot, and popup assertions to observed evidence.
+- `242` `proposed` [Reverify Rainbet backlink and legacy redirect findings](./ticket-242-rainbet-backlinks-and-legacy-reverification.md) — **P0:** resolve Q19 and correct dates, totals, destinations, and retired-page advice.
+- `243` `proposed` [Finish outstanding Rainbet checks and close the scope](./ticket-243-rainbet-finish-outstanding-audit-checks.md) — **P0:** prioritise Q32, finish feasible checks, and record precise external evidence gaps.
+- `244` `proposed` [Correct Rainbet counts and incomplete remediation advice](./ticket-244-rainbet-factual-and-remediation-corrections.md) — **P0:** reconcile counts, link units, remediation branches, and security wording.
+- `245` `proposed` [Repair Rainbet sheet readability and navigation](./ticket-245-rainbet-sheet-layout-and-navigation.md) — **P0:** fit populated content, repair navigation, reconcile final counts, and visually inspect the sheet.
+- `246` `proposed` [Sign off the finished Rainbet audit for client review](./ticket-246-rainbet-final-qa-and-client-handoff.md) — **P0, depends on 240–245:** prepare one corrected audit for John’s review without external sending.
+- `247` `proposed` [Do not populate client sheets when nothing is wrong](./ticket-247-audit-omit-no-action-client-rows.md) — **P1:** retain all checks internally while omitting Healthy/pass/N/A/no-action client rows.
+- `248` `proposed` [Require claim-specific evidence for status changes](./ticket-248-audit-claim-specific-validation.md) — **P1:** prevent unrelated validation from promoting a finding to Issue.
+- `249` `proposed` [Compare bot and user navigation without unsupported conclusions](./ticket-249-audit-bot-render-and-navigation-parity.md) — **P1:** separate raw/rendered, bot/user, and access-state evidence.
+- `250` `proposed` [Reconcile audit counts, freshness and claim scope](./ticket-250-audit-count-freshness-and-scope-reconciliation.md) — **P1:** attach each assertion to its population, date, source, unit, and sample scope.
+- `251` `proposed` [Review remediation branches and policy claims before publication](./ticket-251-audit-remediation-and-policy-review.md) — **P1:** ensure advice and conditional acceptance criteria follow the observed issue.
+- `252` `proposed` [Verify published sheet content, links and visual layout](./ticket-252-audit-sheet-semantic-and-visual-qa.md) — **P1:** require semantic read-back, working links, current totals, and visual sign-off.
+- `253` `proposed` [Keep client audit delivery independent of process improvements](./ticket-253-audit-delivery-independent-of-process-work.md) — **P1:** make the two-queue delivery rule part of the shared workflow.
+
+See [delivery brief](./technical-audit-review-2026-09-24.md) for ordered phases,
+existing-ticket reuse and review finding coverage.
+
+### UA parity and third-party URL sources (2026-09-28)
+
+- `254` `proposed` [Compare responses across crawler and browser User-Agents](./ticket-254-compare-agents-ua-differential.md) — **P1, depends on 224:** `compare-agents` fetches the same URLs as Googlebot, Screaming Frog and a browser from one egress, subtracts A/A noise, adds an optional `--render` pass, and reports differences for review, never as a cloaking verdict.
+- `255` `proposed` [Add a UA-parity check to the technical audit's server-configuration group](./ticket-255-technical-audit-agent-parity-check.md) — **P2, depends on 254:** an opt-in `agent-parity` check alongside the host/variant and soft-404 probes (193/236); differences get Review status only.
+- `256` `proposed` [Accept a Semrush Organic Pages export as a URL source](./ticket-256-semrush-organic-pages-url-source.md) — **P1:** fixes the `csv_urls` fallback that turned the rainbet export into 542 junk URLs; recognises Semrush exports; keeps traffic for `--top`/`--order-by`; flags ranking dev/staging hosts; shares the loader with 217.
+- `257` `proposed` [Persist run-scoped custom probe results for generic GUI reporting](./ticket-257-run-scoped-custom-probe-results.md) — **P1, extends 193/236:** save actual bounded host/protocol, URL-variant and fictional-URL outcomes against a crawl run; generic consumers query only those rows, never source imports or inferred URLs.
+- `263` `implemented (local)` [Answer the audit template's Questions tab from a saved technical audit](./ticket-263-technical-audit-question-runner.md) — **P1:** question registry, site profile, `technical-audit-questions` runner with Q26 run gate, data tabs, draft tickets and header-aware Tickets publish; answers 11 questions, the rest Pending with reasons. Real-run publish review outstanding.
+- `264` `proposed` [Stored-HTML detectors for the question runner](./ticket-264-question-detectors-stored-html.md) — **P1, depends on 263:** 17 HTML-only detectors plus answerers over contract checks as their collectors land.
+- `265` `proposed` [Site-profile detectors for the question runner](./ticket-265-question-detectors-site-profile.md) — **P1, depends on 263:** template/hub/parameter/affiliate/host/AI-policy rules; Rainbet profile first.
+- `266` `proposed` [Render, probe and external detectors for the question runner](./ticket-266-question-detectors-render-probe-external.md) — **P2, depends on 263:** rendered, mobile, probe and third-party evidence; heuristics capped at Needs validation.
+- Tickets **267–370** create one local implementation record for every Questions-tab row, Q1–Q104. See [the question-level implementation queue](./technical-audit-question-implementation-queue-2026-10-06.md). It refines detector batches 264–266; the 11 existing answerers are marked implemented locally (four partial, three without tests) and the rest are proposed; priorities follow the registry. Q104 is a supplied-evidence/manual workflow, not a crawler-only detector. Next unreserved ticket number is **400**.
+- `371` `done` [Decode JSONB in Stream B report collectors](./ticket-371-stream-b-jsonb-decoding.md) — **P1, Stream B QA fix.**
+- `372` `done` [Stop SVG titles and feed links tripping Q10 and Q12](./ticket-372-stream-b-svg-title-false-positives.md) — **P1, Stream B QA fix.**
+- `373` `done` [Only treat real locale folders as locales in Q41](./ticket-373-stream-b-locale-folder-detection.md) — **P1, Stream B QA fix.**
+- `374` `done` [Exclude homepage variants from Q73](./ticket-374-stream-b-q73-homepage-variants.md) — **P2, Stream B QA fix.**
+- `375` `done` [Detect X-Robots-Tag by header name in Q87](./ticket-375-stream-b-q87-x-robots-tag.md) — **P1, Stream B QA fix.**
+- `376` `done` [Never answer Healthy from a zero tested population](./ticket-376-stream-b-zero-population-healthy.md) — **P1, Stream B QA fix.**
+- `377` `done` [Separate locale markup rows from Q32 and restore review qualifications](./ticket-377-stream-b-locale-check-populations.md) — **P1, Stream B QA fix.**
+- `378` `done` [Keep heavy stored-HTML reports out of the default report run](./ticket-378-stream-b-report-cli-defaults.md) — **P2, Stream B QA fix.**
+- `379` `done` [Scan stored HTML once, without loading the whole run into memory](./ticket-379-stream-b-stored-html-single-pass.md) — **P2, Stream B QA fix.**
+- `380` `done` [Make profile page facts run-scoped and meaningful](./ticket-380-stream-b-profile-page-facts.md) — **P2, Stream B QA fix.**
+- `381` `done` [Report header/HTML canonical mismatches as their own finding](./ticket-381-stream-b-q94-canonical-rows.md) — **P3, Stream B QA fix.**
+- `382` `done` [Make Q54 rows traceable to individual images](./ticket-382-stream-b-q54-image-identity.md) — **P3, Stream B QA fix.**
+- `383` `done` [Detect redirecting link targets by final URL, and compare canonicals normalised](./ticket-383-stream-b-link-target-redirects.md) — **P1, Stream B QA fix.**
+- `384` `done` [Finish the Q81 run gate that Stream B started](./ticket-384-stream-b-q81-gate-scope.md) — **P2, Stream B QA fix.**
+- `385` `done` [Tighten the soft-404 and discovery-provenance collectors Stream B added](./ticket-385-stream-b-soft404-and-provenance.md) — **P2, Stream B QA fix.**
+- `386` `implemented (local)` [Keep Q28, Q31 and locale probes below Healthy when a field was never recorded](./ticket-386-stream-c-untested-fields-healthy.md) — **P1, Stream C QA fix.**
+- `387` `implemented (local)` [Do not raise Q102 when robots blocking was never checked](./ticket-387-stream-c-q102-robots-unknown.md) — **P1, Stream C QA fix.**
+- `388` `implemented (local)` [Treat a redirected robots.txt without a body as unknown in Q96](./ticket-388-stream-c-q96-redirected-robots.md) — **P1, Stream C QA fix.**
+- `389` `implemented (local)` [Break the import cycle between the question runner and observed answerers](./ticket-389-stream-c-answerer-import-cycle.md) — **P2, Stream C QA fix.**
+- `390` `implemented (local)` [Say truthfully how Q46 footer evidence is collected](./ticket-390-stream-c-q46-footer-parity-docs.md) — **P3, Stream C QA fix.**
+- `391` `implemented (local)` [Tighten observed-answer edge cases](./ticket-391-stream-c-observed-answer-edge-cases.md) — **P3, Stream C QA fix.**
+- `392` `implemented (local)` [Downgrade other answers only when a run gate answers Yes](./ticket-392-integration-run-gate-scope.md) — **P1, integration QA fix.**
+- `393` `implemented (local)` [Count the indexable-page population for Q15 and Q71](./ticket-393-integration-indexable-population.md) — **P1, integration QA fix; Q39 part open.**
+- `394` `proposed` [Give Q94 and Q41 rows their own ticket language](./ticket-394-integration-q94-q41-ticket-language.md) — **P3, integration QA.**
+- `395` `implemented (local)` [Trust frontier depth for Q44 only when it is click depth from a homepage](./ticket-395-integration-q44-click-depth-provenance.md) — **P1, integration QA fix; homepage BFS follow-up open.**
+- `396` `implemented (local)` [Never answer Q91 Healthy from an empty or partial link population](./ticket-396-integration-q91-zero-population.md) — **P1, integration QA fix.**
+- `397` `implemented (local)` [Collect empty-anchor facts in the shared stored-HTML pass, bounded per page](./ticket-397-integration-empty-anchor-single-pass.md) — **P1, integration QA fix.**
+- `398` `implemented (local)` [Make Q88 match its registry entry and keep untemplated pages in scope](./ticket-398-integration-q88-registry-alignment.md) — **P2, integration QA fix.**
+- `399` `proposed` [Stream A follow-ups found in integration QA](./ticket-399-integration-stream-a-followups.md) — **P3, integration QA.**
 
 Deferred lanes remain below.
+
+
+### Technical-audit question lineage (merged from feature/technical-audit-183, 2026-10-06)
+
+These sections come from the question-runner lineage. Its ticket numbers 240-246 and 263-266
+name different work from this queue's 240-243 and 264-266; both sets of files are kept.
+
+### Rainbet audit delivery and QA follow-up (2026-09-28)
+
+The two-track plan separates the immediate, evidence-backed corrections needed
+to finish the current Rainbet audit from reusable process work. All tickets in
+this section are proposed; filing them does not claim that the audit or any
+process change is complete. Tickets 240–246 do not depend on tickets 247–253.
+
+- `240` `proposed` [Correct Rainbet validation statuses and client row selection](./ticket-240-rainbet-validation-status-and-client-selection.md) — **P0:** correct validation logic, omit no-action client rows, and retain the complete internal ledger.
+- `241` `proposed` [Finish game-discovery checks and qualify Rainbet bot claims](./ticket-241-rainbet-game-discovery-and-bot-claims.md) — **P0:** finish Q23 and bound game-link, bot, and popup assertions to observed evidence.
+- `242` `proposed` [Reverify Rainbet backlink and legacy redirect findings](./ticket-242-rainbet-backlinks-and-legacy-reverification.md) — **P0:** resolve Q19 and correct dates, totals, destinations, and retired-page advice.
+- `243` `proposed` [Finish outstanding Rainbet checks and close the scope](./ticket-243-rainbet-finish-outstanding-audit-checks.md) — **P0:** prioritise Q32, finish feasible checks, and record precise external evidence gaps.
+- `244` `proposed` [Correct Rainbet counts and incomplete remediation advice](./ticket-244-rainbet-factual-and-remediation-corrections.md) — **P0:** reconcile counts, link units, remediation branches, and security wording.
+- `245` `proposed` [Repair Rainbet sheet readability and navigation](./ticket-245-rainbet-sheet-layout-and-navigation.md) — **P0:** fit populated content, repair navigation, reconcile final counts, and visually inspect the sheet.
+- `246` `proposed` [Sign off the finished Rainbet audit for client review](./ticket-246-rainbet-final-qa-and-client-handoff.md) — **P0, depends on 240–245:** prepare one corrected audit for John’s review without external sending.
+- `247` `proposed` [Do not populate client sheets when nothing is wrong](./ticket-247-audit-omit-no-action-client-rows.md) — **P1:** retain all checks internally while omitting Healthy/pass/N/A/no-action client rows.
+- `248` `proposed` [Require claim-specific evidence for status changes](./ticket-248-audit-claim-specific-validation.md) — **P1:** prevent unrelated validation from promoting a finding to Issue.
+- `249` `proposed` [Compare bot and user navigation without unsupported conclusions](./ticket-249-audit-bot-render-and-navigation-parity.md) — **P1:** separate raw/rendered, bot/user, and access-state evidence.
+- `250` `proposed` [Reconcile audit counts, freshness and claim scope](./ticket-250-audit-count-freshness-and-scope-reconciliation.md) — **P1:** attach each assertion to its population, date, source, unit, and sample scope.
+- `251` `proposed` [Review remediation branches and policy claims before publication](./ticket-251-audit-remediation-and-policy-review.md) — **P1:** ensure advice and conditional acceptance criteria follow the observed issue.
+- `252` `proposed` [Verify published sheet content, links and visual layout](./ticket-252-audit-sheet-semantic-and-visual-qa.md) — **P1:** require semantic read-back, working links, current totals, and visual sign-off.
+- `253` `proposed` [Keep client audit delivery independent of process improvements](./ticket-253-audit-delivery-independent-of-process-work.md) — **P1:** make the two-queue delivery rule part of the shared workflow.
+
+See [delivery brief](./technical-audit-review-2026-09-24.md) for ordered phases,
+existing-ticket reuse and review finding coverage.
+
+### UA parity and third-party URL sources (2026-09-28)
+
+- `254` `proposed` [Compare responses across crawler and browser User-Agents](./ticket-254-compare-agents-ua-differential.md) — **P1, depends on 224:** `compare-agents` fetches the same URLs as Googlebot, Screaming Frog and a browser from one egress, subtracts A/A noise, adds an optional `--render` pass, and reports differences for review, never as a cloaking verdict.
+- `255` `proposed` [Add a UA-parity check to the technical audit's server-configuration group](./ticket-255-technical-audit-agent-parity-check.md) — **P2, depends on 254:** an opt-in `agent-parity` check alongside the host/variant and soft-404 probes (193/236); differences get Review status only.
+- `256` `proposed` [Accept a Semrush Organic Pages export as a URL source](./ticket-256-semrush-organic-pages-url-source.md) — **P1:** fixes the `csv_urls` fallback that turned the rainbet export into 542 junk URLs; recognises Semrush exports; keeps traffic for `--top`/`--order-by`; flags ranking dev/staging hosts; shares the loader with 217.
+- `257` `proposed` [Persist run-scoped custom probe results for generic GUI reporting](./ticket-257-run-scoped-custom-probe-results.md) — **P1, extends 193/236:** save actual bounded host/protocol, URL-variant and fictional-URL outcomes against a crawl run; generic consumers query only those rows, never source imports or inferred URLs.
+- `263` `implemented (local)` [Answer the audit template's Questions tab from a saved technical audit](./ticket-263-technical-audit-question-runner.md) — **P1:** question registry, site profile, `technical-audit-questions` runner with Q26 run gate, data tabs, draft tickets and header-aware Tickets publish; answers 11 questions, the rest Pending with reasons. Real-run publish review outstanding.
+- `264` `proposed` [Stored-HTML detectors for the question runner](./ticket-264-question-detectors-stored-html.md) — **P1, depends on 263:** 17 HTML-only detectors plus answerers over contract checks as their collectors land.
+- `265` `proposed` [Site-profile detectors for the question runner](./ticket-265-question-detectors-site-profile.md) — **P1, depends on 263:** template/hub/parameter/affiliate/host/AI-policy rules; Rainbet profile first.
+- `266` `proposed` [Render, probe and external detectors for the question runner](./ticket-266-question-detectors-render-probe-external.md) — **P2, depends on 263:** rendered, mobile, probe and third-party evidence; heuristics capped at Needs validation.
+- Tickets **267–370** create one local implementation record for every Questions-tab row, Q1–Q104. See [the question-level implementation queue](./technical-audit-question-implementation-queue-2026-10-06.md). It refines detector batches 264–266; the 11 existing answerers are marked implemented locally (four partial, three without tests) and the rest are proposed; priorities follow the registry. Q104 is a supplied-evidence/manual workflow, not a crawler-only detector. Next unreserved ticket number is **400**.
+- `371` `done` [Decode JSONB in Stream B report collectors](./ticket-371-stream-b-jsonb-decoding.md) — **P1, Stream B QA fix.**
+- `372` `done` [Stop SVG titles and feed links tripping Q10 and Q12](./ticket-372-stream-b-svg-title-false-positives.md) — **P1, Stream B QA fix.**
+- `373` `done` [Only treat real locale folders as locales in Q41](./ticket-373-stream-b-locale-folder-detection.md) — **P1, Stream B QA fix.**
+- `374` `done` [Exclude homepage variants from Q73](./ticket-374-stream-b-q73-homepage-variants.md) — **P2, Stream B QA fix.**
+- `375` `done` [Detect X-Robots-Tag by header name in Q87](./ticket-375-stream-b-q87-x-robots-tag.md) — **P1, Stream B QA fix.**
+- `376` `done` [Never answer Healthy from a zero tested population](./ticket-376-stream-b-zero-population-healthy.md) — **P1, Stream B QA fix.**
+- `377` `done` [Separate locale markup rows from Q32 and restore review qualifications](./ticket-377-stream-b-locale-check-populations.md) — **P1, Stream B QA fix.**
+- `378` `done` [Keep heavy stored-HTML reports out of the default report run](./ticket-378-stream-b-report-cli-defaults.md) — **P2, Stream B QA fix.**
+- `379` `done` [Scan stored HTML once, without loading the whole run into memory](./ticket-379-stream-b-stored-html-single-pass.md) — **P2, Stream B QA fix.**
+- `380` `done` [Make profile page facts run-scoped and meaningful](./ticket-380-stream-b-profile-page-facts.md) — **P2, Stream B QA fix.**
+- `381` `done` [Report header/HTML canonical mismatches as their own finding](./ticket-381-stream-b-q94-canonical-rows.md) — **P3, Stream B QA fix.**
+- `382` `done` [Make Q54 rows traceable to individual images](./ticket-382-stream-b-q54-image-identity.md) — **P3, Stream B QA fix.**
+- `383` `done` [Detect redirecting link targets by final URL, and compare canonicals normalised](./ticket-383-stream-b-link-target-redirects.md) — **P1, Stream B QA fix.**
+- `384` `done` [Finish the Q81 run gate that Stream B started](./ticket-384-stream-b-q81-gate-scope.md) — **P2, Stream B QA fix.**
+- `385` `done` [Tighten the soft-404 and discovery-provenance collectors Stream B added](./ticket-385-stream-b-soft404-and-provenance.md) — **P2, Stream B QA fix.**
+- `386` `implemented (local)` [Keep Q28, Q31 and locale probes below Healthy when a field was never recorded](./ticket-386-stream-c-untested-fields-healthy.md) — **P1, Stream C QA fix.**
+- `387` `implemented (local)` [Do not raise Q102 when robots blocking was never checked](./ticket-387-stream-c-q102-robots-unknown.md) — **P1, Stream C QA fix.**
+- `388` `implemented (local)` [Treat a redirected robots.txt without a body as unknown in Q96](./ticket-388-stream-c-q96-redirected-robots.md) — **P1, Stream C QA fix.**
+- `389` `implemented (local)` [Break the import cycle between the question runner and observed answerers](./ticket-389-stream-c-answerer-import-cycle.md) — **P2, Stream C QA fix.**
+- `390` `implemented (local)` [Say truthfully how Q46 footer evidence is collected](./ticket-390-stream-c-q46-footer-parity-docs.md) — **P3, Stream C QA fix.**
+- `391` `implemented (local)` [Tighten observed-answer edge cases](./ticket-391-stream-c-observed-answer-edge-cases.md) — **P3, Stream C QA fix.**
+- `392` `implemented (local)` [Downgrade other answers only when a run gate answers Yes](./ticket-392-integration-run-gate-scope.md) — **P1, integration QA fix.**
+- `393` `implemented (local)` [Count the indexable-page population for Q15 and Q71](./ticket-393-integration-indexable-population.md) — **P1, integration QA fix; Q39 part open.**
+- `394` `proposed` [Give Q94 and Q41 rows their own ticket language](./ticket-394-integration-q94-q41-ticket-language.md) — **P3, integration QA.**
+- `395` `implemented (local)` [Trust frontier depth for Q44 only when it is click depth from a homepage](./ticket-395-integration-q44-click-depth-provenance.md) — **P1, integration QA fix; homepage BFS follow-up open.**
+- `396` `implemented (local)` [Never answer Q91 Healthy from an empty or partial link population](./ticket-396-integration-q91-zero-population.md) — **P1, integration QA fix.**
+- `397` `implemented (local)` [Collect empty-anchor facts in the shared stored-HTML pass, bounded per page](./ticket-397-integration-empty-anchor-single-pass.md) — **P1, integration QA fix.**
+- `398` `implemented (local)` [Make Q88 match its registry entry and keep untemplated pages in scope](./ticket-398-integration-q88-registry-alignment.md) — **P2, integration QA fix.**
+- `399` `proposed` [Stream A follow-ups found in integration QA](./ticket-399-integration-stream-a-followups.md) — **P3, integration QA.**
 
 **Deferred lanes**
 

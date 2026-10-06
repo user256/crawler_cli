@@ -71,13 +71,16 @@ def test_page_from_row_snapshot_maps_core_fields():
     # Charset param is stripped so exact content-type matching works downstream.
     assert page["contentType"] == "text/html"
     assert "page-titles" in page["categoryHints"]
+    assert page["sources"] == []  # attached later from url_sources
 
 
 def test_page_from_row_snapshot_extracts_external_outlinks_only():
     # Only the external href becomes an outlink here; internal links are added
     # later from internal_links by attach_link_graph.
     page = server.page_from_row(_snapshot_row(), has_snapshots=True)
-    assert page["outlinks"] == [{"targetUrl": "https://external.example/x", "anchorText": "Out", "external": True}]
+    assert page["outlinks"] == [
+        {"targetUrl": "https://external.example/x", "anchorText": "Out", "external": True, "follow": True}
+    ]
 
 
 def test_page_from_row_missing_response_time_is_none():
@@ -124,6 +127,46 @@ def test_attach_link_graph_folds_counts_and_lists():
     assert page["outlinks"][-1]["external"] is True
 
 
+def test_attach_url_sources_folds_recorded_provenance():
+    pages = [server.page_from_row(_snapshot_row(url_id=1), has_snapshots=True)]
+    server.attach_url_sources(
+        pages,
+        {
+            1: [
+                {"source": "link", "detail": "https://site.example/home"},
+                {"source": "backlink", "detail": "https://referrer.example/a"},
+                {"source": "backlink", "detail": "https://referrer.example/b"},
+            ]
+        },
+    )
+    assert pages[0]["sources"] == ["link", "backlink"]
+    assert pages[0]["externalInlinks"] == 2
+    assert pages[0]["sourceEvidence"][0]["detail"] == "https://site.example/home"
+
+
+def test_live_category_tabs_puts_archive_before_external_links():
+    tabs = server.live_category_tabs(
+        [
+            {"id": "internal", "label": "Internal"},
+            {"id": "external", "label": "External"},
+            {"id": "security", "label": "Security"},
+            {"id": "url", "label": "URL"},
+        ]
+    )
+    assert [(tab["id"], tab["label"]) for tab in tabs[:9]] == [
+        ("internal", "Internal URLs"),
+        ("archive-org", "Archive.org URLs"),
+        ("backlinks", "External backlinks"),
+        ("custom-checks", "Custom checks"),
+        ("host-protocol-checks", "Host & protocol"),
+        ("url-variant-checks", "URL variants"),
+        ("fictional-url-checks", "Fictional URLs"),
+        ("external", "External outlinks"),
+        ("security", "Insecure HTTP URLs"),
+    ]
+    assert tabs[-2]["id"] == "url"
+    assert tabs[-1]["id"] == "social"
+
 def test_overview_from_counts_reports_whole_run_aggregates():
     # Counts come from the run-wide SQL aggregate, not the page window, so a
     # 2-page window over a 100-page run still describes all 100.
@@ -164,6 +207,81 @@ def test_structured_data_of_handles_strings_and_dicts():
     assert server.structured_data_of(["Organization"]) == [{"type": "Organization", "name": ""}]
     assert server.structured_data_of([{"type": "Product", "name": "Widget"}]) == [{"type": "Product", "name": "Widget"}]
     assert server.structured_data_of(None) == []
+
+
+def test_saved_snapshot_populates_report_categories_and_nested_schema_name():
+    page = server.page_from_row(_snapshot_row(
+        h2_tags="First\nSecond", images_json=[{"url": "https://site.example/a.png"}],
+        hreflang_json=[{"href": "https://site.example/fr", "hreflang": "fr"}],
+        schema_json=[{"type": "Organization", "parsed_data": json.dumps({"name": "Stored name"}), "is_valid": True}],
+        robots_json=["noarchive"],
+    ), has_snapshots=True)
+    assert {"structured-data", "images", "hreflang", "h2", "url", "response-codes"} <= set(page["categoryHints"])
+    assert page["structuredData"][0]["name"] == "Stored name"
+    assert page["h2Count"] == 2
+    assert page["robots"] == "noarchive"
+
+
+def test_saved_html_evidence_recovers_social_and_links_without_fetching():
+    from crawler_cli.compression import compress_html
+    result = server.saved_html_evidence({"url_id": 1, "url": "https://site.example/page", "html_compressed": compress_html('''
+      <html><head><base href="https://cdn.example/assets/">
+      <meta property="og:title" content="A &amp; B"><meta name="twitter:card" content="summary">
+      <meta property="og:locale:alternate" content="fr"><meta property="og:locale:alternate" content="de">
+      <script src="app.js"></script><script type="application/ld+json">{}</script></head>
+      <body><a href="https://other.example/path" rel="nofollow">External</a></body></html>''')})
+    assert result["social"][0] == {"property": "og:title", "content": "A & B"}
+    assert len(result["social"]) == 4
+    assert result["scripts"] == [{"url": "https://cdn.example/assets/app.js", "type": "text/javascript"}]
+    assert result["savedOutlinks"][0]["external"] is True
+    assert result["savedOutlinks"][0]["follow"] is False
+    assert result["evidenceLoaded"] is True
+
+
+def test_resume_restores_scope_and_refuses_incompatible_backend():
+    from crawler_cli.config import CrawlConfig
+    from crawler_cli.engine import _crawl_run_config_hash, _crawl_run_config_snapshot
+    from crawler_gui.resume import resume_configuration
+    config = CrawlConfig(backend="curl_cffi", same_host_only=True, path_exclude=["/private"])
+    seeds = ["https://site.example/"]
+    saved = _crawl_run_config_snapshot(config, seeds)
+    row = {"config_json": json.dumps(saved), "seed_urls_json": json.dumps(seeds), "config_hash": _crawl_run_config_hash(saved)}
+    restored, restored_seeds = resume_configuration(row)
+    assert restored.backend == "curl_cffi"
+    assert restored.path_exclude == ["/private"]
+    assert restored_seeds == seeds
+    with pytest.raises(ValueError, match="cannot be reconstructed"):
+        resume_configuration(row, "aiohttp")
+
+
+@pytest.mark.asyncio
+async def test_source_fallback_keeps_run_evidence_and_labels_global_facts():
+    from unittest.mock import AsyncMock
+    store = server.LiveStore("unused")
+    store.has_run_url_sources = store.has_url_sources = True
+    conn = AsyncMock()
+    conn.fetch.side_effect = [
+        [{"url_id": 1, "source": "link", "detail": "parent"}],
+        [{"url_id": 1, "source": "link", "detail": "parent"},
+         {"url_id": 1, "source": "archive_org", "detail": "old import"}],
+    ]
+    result = await store._url_sources(conn, "selected", [1])
+    assert result[1] == [
+        {"source": "link", "detail": "parent", "scope": "run"},
+        {"source": "archive_org", "detail": "old import", "scope": "database"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_endpoint_does_not_launch_an_exhausted_run():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    launcher = SimpleNamespace(resume=AsyncMock())
+    store = SimpleNamespace(resume_plan=AsyncMock(return_value={"canResume": False, "reason": "No queued URLs"}))
+    request = SimpleNamespace(app={"store": store, "launcher": launcher}, match_info={"run_id": "complete-run"}, json=AsyncMock(return_value={}))
+    with pytest.raises(server.web.HTTPConflict, match="Conflict"):
+        await server.resume_handler(request)
+    launcher.resume.assert_not_awaited()
 
 
 def test_as_list_coerces_jsonb_forms():

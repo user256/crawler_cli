@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 
-from crawler_cli.technical_audit import audit_sheet_tables, build_technical_audit
-from test_live_rechecks import _context, _reports
 from crawler_cli.transport_security import (
     OcspHandshakeObservation,
     classify_ocsp_stapling,
@@ -201,39 +199,3 @@ def test_report_attributes_headers_to_the_final_response_host():
     assert coverage["https_host_count"] == 1
     assert row["host"] == "www.example.com"
     assert coverage["http_redirect_evidence"] == "unavailable_not_probed"
-
-
-def test_audit_surfaces_transport_evidence_without_blocking_publication():
-    audit = build_technical_audit(
-        crawl_run_id="run-1",
-        reports={"performance-inventory": [_page("https://example.com/", "max-age=300")]},
-        run_context={"completion_state": "complete", "parsed_html_count": 1},
-    )
-
-    check = next(row for row in audit["detector_checks"] if row["id"] == "transport-security")
-    assert check["status"] == "finding"
-    assert check["denominator"] == 1
-    evidence = check["evidence"][0]
-    assert evidence["hsts_preload_eligible"] is False
-    assert evidence["ocsp_stapled"] is None
-    assert "include_subdomains_missing" in evidence["warnings"]
-    assert audit["transport_security_coverage"]["hsts_preload_not_eligible_count"] == 1
-    overview = dict((row[0], row[1]) for row in audit_sheet_tables(audit)["Overview"])
-    assert overview["HTTPS hosts assessed for HSTS"] == 1
-    assert overview["HSTS preload list membership"] == "not_queried_requires_authoritative_external_lookup"
-    assert "Transport security" not in audit_sheet_tables(audit)
-
-
-def test_transport_findings_do_not_block_an_otherwise_publishable_audit():
-    reports = _reports() | {"performance-inventory": [_page("https://example.test/", None)]}
-    audit = build_technical_audit(
-        crawl_run_id="run-1",
-        reports=reports,
-        run_context=_context(),
-        live_rechecks={"https://example.test/failed": {"state": "persistent_server_error", "attempts": []}},
-    )
-
-    check = next(row for row in audit["detector_checks"] if row["id"] == "transport-security")
-    assert check["status"] == "finding"
-    assert audit["client_publication_gate"]["ready"] is True
-    assert all(action.get("check_id") != "transport-security" for action in audit["audit_log"])

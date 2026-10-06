@@ -12,6 +12,7 @@ from .amp import VARIANT_KIND_AMP, classify_amp_variants, urls_match
 from .compression import compress_html, decompress_html, is_compressed
 from .detection.analytics import AnalyticsDetectionResult
 from .hashing import sha256_hash, simhash64, simhash_to_signed, simhash_to_unsigned
+from .extract import extract_links
 from .models import (
     CrawlResult,
     CssUrlCandidate,
@@ -31,6 +32,28 @@ from .security_persistence import (
     purge_run_security_evidence,
     security_run_stats,
 )
+
+
+def _snapshot_link_inventory(result: CrawlResult) -> list[DiscoveredLink]:
+    """Return persisted links without widening the crawl frontier.
+
+    ``result.discovered_links`` is intentionally scoped by the engine. The
+    immutable run snapshot also needs external outbound links, but those must
+    remain inventory evidence rather than candidates for fetching.
+    """
+    links = list(result.discovered_links or [])
+    if not result.raw_html:
+        return links
+    source_host = urlparse(result.final_url).netloc.lower()
+    present = {(link.href, link.xpath) for link in links}
+    for link in extract_links(result.raw_html, result.final_url, same_host_only=False):
+        if urlparse(link.href).netloc.lower() == source_host:
+            continue
+        key = (link.href, link.xpath)
+        if key not in present:
+            links.append(link)
+            present.add(key)
+    return links
 
 
 # --- Query-row schemas (ticket 083) -----------------------------------------
@@ -2656,7 +2679,7 @@ class AsyncpgStore:
                     "rel": link.rel,
                     "discovery_source": "html_anchor",
                 }
-                for link in (result.discovered_links or [])
+                for link in _snapshot_link_inventory(result)
                 if link.href
             ]
             images = [

@@ -129,6 +129,11 @@ async def probe_variant(engine, canonical_url: str, variant: UrlVariant) -> Vari
     finally:
         engine.config.follow_redirects = original_follow
 
+    store = getattr(engine, "store", None)
+    recorder = getattr(store, "record_source_by_url", None)
+    if recorder is not None:
+        await recorder(variant.url, "custom_check", f"url_variant:{variant.kind}")
+
     status = result.status
     redirect_location = None
     html_canonical = None

@@ -30,6 +30,7 @@
             <option>List</option>
           </select>
           <button type="button" class="primary" id="btn-new-crawl">New crawl</button>
+          <button type="button" id="btn-resume" hidden>Resume crawl…</button>
           <button type="button" id="btn-new-schedule">Schedule crawl</button>
           <button type="button" id="btn-options">Configuration</button>
           <button type="button" class="danger" id="btn-delete">Delete</button>
@@ -53,7 +54,9 @@
             <span class="filter-total" id="filter-total">Filter Total: 0</span>
             <span class="live-note" id="live-note" hidden></span>
             <button type="button" id="btn-load-more" hidden>Load more</button>
+            <button type="button" id="btn-load-all" hidden>Load all</button>
           </div>
+          <p class="grid-note muted" id="grid-note" hidden role="status"></p>
           <div class="table-wrap">
             <table class="data">
               <thead id="grid-head"></thead>
@@ -82,6 +85,20 @@
           <em id="status-fill-label"></em>
         </div>
       </footer>
+    </div>
+
+    <div class="modal-backdrop" id="modal-resume" role="dialog" aria-modal="true" aria-labelledby="resume-title">
+      <div class="modal">
+        <header><h2 id="resume-title">Resume selected crawl</h2><button type="button" class="ghost" data-close aria-label="Close">✕</button></header>
+        <div style="padding:1rem">
+          <p id="resume-summary" role="status">Checking saved queue…</p>
+          <p class="muted">Starting a resume makes live requests for queued URLs. Browsing saved results does not.</p>
+          <label>Backend <select id="resume-backend"><option value="aiohttp">aiohttp</option><option value="curl_cffi">curl_cffi</option><option value="playwright">Playwright Chromium</option></select></label>
+          <label>Maximum URLs <input id="resume-max" type="number" min="1" max="100000" value="200" /></label>
+          <label>Concurrency <input id="resume-concurrency" type="number" min="1" max="20" value="2" /></label>
+        </div>
+        <footer><button type="button" data-close>Close</button><button type="button" class="primary" id="btn-confirm-resume" disabled>Start resume</button></footer>
+      </div>
     </div>
 
     <!-- History -->

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tech Audit Tickets"
+  short_description: "Write and clean up technical SEO audit tickets in house style"
+  default_prompt: "Use $tech-audit-tickets to write or tidy the tickets in this technical SEO audit sheet."

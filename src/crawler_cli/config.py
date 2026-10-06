@@ -116,7 +116,7 @@ def _env_float(name: str) -> float | None:
 @dataclass(slots=True)
 class CrawlConfig:
     backend: BackendName = "aiohttp"
-    user_agent: str = "crawler_cli/0.1"
+    user_agent: str = "canonicalbot/0.1"
     ua_map: dict[str, str] = field(default_factory=dict)
     """Per-domain user agents (ticket 080). Keys are bare registrable domains;
     a host matches its own domain and any subdomain (``www.casino.org`` matches
@@ -172,7 +172,11 @@ class CrawlConfig:
     circuit_breaker_failure_threshold: int = CB_THRESHOLD_DEFAULT
     circuit_breaker_recovery_seconds: float = CB_RECOVERY_SECONDS_DEFAULT
     seed_from_archive: bool = False
-    archive_timeout_seconds: float = 10.0
+    # The CDX endpoint can stream a substantial result set before it returns
+    # valid JSON.  Ten seconds is routinely too short even for a healthy
+    # direct connection, so leave enough time for the normal collapsed query
+    # before switching to the paginated fallback.
+    archive_timeout_seconds: float = 60.0
     archive_max_urls: int = 250
     frontier_max_retries: int = 3
     frontier_retry_base_delay_seconds: float = 2.0

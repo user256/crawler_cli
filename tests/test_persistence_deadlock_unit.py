@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncpg
 import pytest
 
-from crawler_cli.persistence import AsyncpgStore
+from crawler_cli.models import CrawlResult, DiscoveredLink
+from crawler_cli.persistence import AsyncpgStore, _snapshot_link_inventory
 
 
 @pytest.mark.asyncio
@@ -45,3 +46,24 @@ async def test_retry_on_deadlock_exhausts_and_reraises(monkeypatch: pytest.Monke
 
     with pytest.raises(asyncpg.SerializationError):
         await store._retry_on_deadlock(always_deadlock, _attempts=3)
+
+
+def test_snapshot_link_inventory_keeps_external_links_without_expanding_frontier():
+    result = CrawlResult(
+        requested_url="https://site.example/",
+        final_url="https://site.example/",
+        status=200,
+        headers={"content-type": "text/html"},
+        content_type="text/html",
+        fetch_backend="aiohttp",
+        extracted=None,
+        raw_html=('<a href="/internal">Internal</a><a href="https://external.example/no" rel="nofollow">External</a>'),
+        discovered_links=[DiscoveredLink("https://site.example/internal", "Internal", "/a[1]", False)],
+    )
+
+    links = _snapshot_link_inventory(result)
+
+    assert [(link.href, "nofollow" not in link.rel) for link in links] == [
+        ("https://site.example/internal", True),
+        ("https://external.example/no", False),
+    ]

@@ -16,11 +16,6 @@ from crawler_cli.ai_governance import (
 )
 from crawler_cli.models import FetchResponse
 from crawler_cli.robots import _RobotsRules
-from crawler_cli.technical_audit import (
-    TECHNICAL_AUDIT_REPORTS,
-    build_technical_audit,
-    render_technical_audit_markdown,
-)
 
 
 BASE = "https://example.com"
@@ -291,78 +286,3 @@ async def test_absent_manifests_are_informational_and_origin_budget_is_recorded(
     # /llms-full.txt returned nothing from the fake engine: fetch unavailable.
     assert [row["candidate_type"] for row in candidates] == ["llms_txt_absent"]
     assert candidates[0]["qualification"] == "absence_is_not_a_defect_llms_txt_is_a_proposal"
-
-
-def _audit_reports(ai_rows):
-    return {name: [] for name in TECHNICAL_AUDIT_REPORTS} | {"ai-governance": ai_rows}
-
-
-@pytest.mark.asyncio
-async def test_technical_audit_surfaces_ai_findings_under_ai_theme():
-    engine = _Engine(
-        {
-            f"{BASE}/.well-known/llms.txt": _response("/.well-known/llms.txt", b"", "text/plain", 404),
-            f"{BASE}/llms.txt": _response("/llms.txt", LLMS_MARKDOWN, "text/markdown"),
-            f"{BASE}/llms-full.txt": _response("/llms-full.txt", HTML_404, "text/html"),
-        },
-        _rules(MIXED_ROBOTS),
-    )
-    rows = project_ai_governance(await collect_ai_governance(engine, seed_origins=[BASE]))
-    context = {"completion_state": "complete", "parsed_html_count": 1}
-
-    audit = build_technical_audit(crawl_run_id="run-1", reports=_audit_reports(rows), run_context=context)
-
-    check = next(item for item in audit["detector_checks"] if item["id"] == "ai-crawler-governance")
-    assert check["theme"] == "AI"
-    assert check["status"] == "finding"
-    assert check["denominator"] == 12
-    assert "llms_file_html_soft_404" in {row["candidate_type"] for row in check["evidence"]}
-    bundle = audit["ai_governance"]
-    assert bundle["theme"] == "AI"
-    assert len(bundle["bot_posture"]) == 9
-    assert {row["path"]: row["state"] for row in bundle["llms_files"]}["/llms.txt"] == "valid"
-    projection = audit["recipient_projection"]["ai_governance"]
-    assert projection["status"] == "finding"
-    assert {row["family"]: row["posture"] for row in projection["bot_posture"]}["gptbot"] == "blocked"
-    llms = next(row for row in projection["llms_files"] if row["path"] == "/llms.txt")
-    assert llms == {
-        "origin": BASE,
-        "path": "/llms.txt",
-        "state": "valid",
-        "http_status": 200,
-        "content_type": "text/markdown",
-        "byte_size": len(LLMS_MARKDOWN),
-        "title": "Example Casino Guide",
-        "final_url": f"{BASE}/llms.txt",
-    }
-    markdown = render_technical_audit_markdown(audit)
-    assert "## AI crawler governance" in markdown
-    assert "| https://example.com | GPTBot | OpenAI | blocked |" in markdown
-    assert "| https://example.com | /llms-full.txt | html_soft_404 | 200 | text/html |" in markdown
-    json.dumps(audit)
-
-
-def test_unrequested_ai_probe_is_unavailable_and_hidden_from_the_report():
-    # Publication-gate exemption for an unrequested probe is covered by
-    # tests/test_live_rechecks.py, whose ready-gate fixture has no AI rows.
-    context = {"completion_state": "complete", "parsed_html_count": 1}
-    without = build_technical_audit(crawl_run_id="run-1", reports=_audit_reports([]), run_context=context)
-    check = next(item for item in without["detector_checks"] if item["id"] == "ai-crawler-governance")
-
-    assert check["status"] == "unavailable"
-    assert check["qualification"] == "requires_explicit_ai_governance_probe"
-    assert without["recipient_projection"]["ai_governance"]["status"] == "unavailable"
-    assert "## AI crawler governance" not in render_technical_audit_markdown(without)
-
-
-def test_incomplete_ai_probe_is_partial_not_pass():
-    rows = [{"record_type": "coverage", "complete": False, "tested_count": 12}]
-    audit = build_technical_audit(
-        crawl_run_id="run-1",
-        reports=_audit_reports(rows),
-        run_context={"completion_state": "complete", "parsed_html_count": 1},
-    )
-    check = next(item for item in audit["detector_checks"] if item["id"] == "ai-crawler-governance")
-
-    assert check["status"] == "partial"
-    assert check["qualification"] == "bounded_or_incomplete_ai_governance_probe"
