@@ -4,7 +4,7 @@ import asyncio
 import asyncpg
 import json
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Any, TypedDict, cast
 from urllib.parse import urlparse
 
@@ -3568,6 +3568,26 @@ class AsyncpgStore:
                     self._resolve_run_id(run_id),
                 )
         return [(int(row["url_id"]), str(row["url"]), decompress_html(bytes(row["html_compressed"]))) for row in rows]
+
+    async def iter_run_html(
+        self, *, run_id: str | None = None, batch_size: int = 200
+    ) -> AsyncIterator[tuple[str, str]]:
+        """Yield (url, raw HTML) for every stored page of one run, in URL order, without loading all pages."""
+        await self.connect()
+        assert self.pool is not None
+        async with self.pool.acquire() as conn, conn.transaction():
+            cursor = conn.cursor(
+                """
+                SELECT u.url, s.html_compressed
+                FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+                WHERE s.run_id = $1 AND s.html_compressed IS NOT NULL
+                ORDER BY u.url
+                """,
+                self._resolve_run_id(run_id),
+                prefetch=batch_size,
+            )
+            async for row in cursor:
+                yield str(row["url"]), decompress_html(bytes(row["html_compressed"]))
 
     async def embedding_url_ids(self, *, model: str, run_id: str | None = None) -> set[int]:
         await self.connect()

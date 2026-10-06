@@ -17,8 +17,8 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 | crawl+profile | Yes, with site profile | on Issue; Pending when a profile key is missing | Q97, Q23, Q40, Q44, Q46, Q48, Q49, Q75, Q98, Q100, Q20, Q21, Q36, Q37, Q57, Q59, Q62, Q78, Q24, Q34, Q101, Q27, Q43, Q77, Q102, Q103, Q96 |
 | best-practice | Yes | on Issue, classification capped at Improvement or Warning, priority at most Medium | Q45, Q17, Q47, Q51, Q54, Q55, Q56, Q58, Q60, Q83, Q64, Q65, Q66, Q67, Q86 |
 | heuristic | Partly | never automatic; status is at most Needs validation until a person confirms | Q38, Q95, Q99, Q32, Q52, Q61, Q35, Q33, Q29, Q68, Q69 |
-| supplied-input | With supplied data | on Issue when the input is supplied; otherwise Pending | Q90, Q30, Q19 |
-| external | No | never; always Pending with the tool needed | Q18, Q31, Q50, Q104 |
+| supplied-input | With supplied data | on Issue when the input is supplied; otherwise Pending | Q18, Q31, Q90, Q30, Q50, Q19 |
+| external | No | never; always Pending with the tool needed | Q104 |
 | run-gate | Yes | never; a failure downgrades every other crawl answer to Needs validation | Q26, Q81 |
 
 ## Crawlability
@@ -101,10 +101,11 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 
 - Issue if: URL Inspection or the Rich Results Test shows missing primary content, blocked resources or a render error for a key template.
 - Why it matters: If Google's renderer is blocked, geo-gated or times out, the indexed version of the page lacks its content, and nothing else in the audit will show it.
-- Group: external · Ticket: Error / High · Unit: templates
-- Needs: external-api
-- Evidence owners: `mobile-rendering-parity`
-- Note: A US mobile Playwright render (mobile-rendering-parity) is supporting evidence only; confirmation needs URL Inspection.
+- Group: supplied-input · Ticket: Error / High · Unit: templates
+- Needs: gsc
+- Runner: answered today (supplied URL Inspection / Rich Results Test renders per key template)
+- Evidence owners: `mobile-rendering-parity`, new detector `google-render-inspection`
+- Note: Supplied URL Inspection or Rich Results Test records (observation kind google-render-inspection), one or more per key template. A US mobile Playwright render (mobile-rendering-parity) is supporting evidence only. The runner never queries Google; without a supplied bundle the answer stays Pending.
 - Original: Does Googlebot (US, smartphone) actually render the page?
 
 ### Q23 · Internal linking
@@ -126,10 +127,11 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 
 - Issue if: Content, links or directives fetched as verified Google differ materially from a visitor fetch of the same URL.
 - Why it matters: Showing search engines different content from users breaks Google's spam policies and can lead to a manual action that removes pages from search.
-- Group: external · Ticket: Error / High · Unit: URLs
+- Group: supplied-input · Ticket: Error / High · Unit: URLs
 - Needs: external-api
-- Evidence owners: outside crawler_cli
-- Note: crawler_cli can compare a Googlebot user agent with a browser user agent from the same IP, which catches user-agent cloaking only; IP-based cloaking needs a fetch from Google's own IPs (URL Inspection).
+- Runner: answered today (supplied verified-Google versus visitor fetch comparison)
+- Evidence owners: new detector `verified-google-fetch`
+- Note: Supplied comparison (observation kind verified-google-fetch) of a fetch from Google's own IPs (URL Inspection live test) with a visitor fetch of the same URL. A Googlebot user agent from crawler_cli's IP catches user-agent cloaking only. The runner never fetches as Google; without a supplied bundle the answer stays Pending.
 - Original: Is the site showing search engines something different from visitors (cloaking)?
 
 ### Q38 · Crawl access & JS
@@ -140,6 +142,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Category and useful filter states that exist only as JavaScript state have no URL, so they cannot be crawled, indexed or linked to. Search demand for those subsets goes to competitors.
 - Group: heuristic · Ticket: Warning / Medium · Unit: templates
 - Needs: crawl, render, site-profile
+- Runner: answered today (listing-controls without a crawlable href on the listing template)
 - Evidence owners: `parameter-and-faceted-controls`, `rendered-robots-links`, new detector `js-only-navigation-controls`
 - Site profile keys: `templates.listing`
 - Note: Only filters with search demand need crawlable URLs; turning every facet into a link creates crawl waste (see Q24).
@@ -177,6 +180,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Hreflang tags are not links. A crawlable language switcher lets users and crawlers move between editions and helps new locale pages get discovered.
 - Group: best-practice · Ticket: Improvement / Low · Unit: pages
 - Needs: crawl, stored-html
+- Runner: answered today (html-signals pages with hreflang alternates and no sibling link)
 - Evidence owners: `hreflang-html-http`, new detector `locale-sibling-links`
 - Original: Are localized articles and language siblings cross-linked contextually to strengthen semantic clustering across regional editions?
 
@@ -188,6 +192,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Links added only after rendering or scrolling are invisible to raw-HTML crawlers and may never be seen by Google's renderer, so the sitewide footer stops passing authority from article pages.
 - Group: crawl+profile · Ticket: Issue / Medium · Unit: templates
 - Needs: crawl, render, stored-html, site-profile
+- Runner: answered today (render-parity footer links on the article template)
 - Evidence owners: `rendered-indexing-parity`, new detector `footer-link-parity`
 - Site profile keys: `templates.article`
 - Original: Are primary footer navigation and commercial links rendered in the static HTML of article templates rather than suppressed or deferred by infinite scroll?
@@ -273,6 +278,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Intrusive interstitials count against page experience on mobile, and a gate that removes the content from the DOM stops it being indexed at all.
 - Group: heuristic · Ticket: Warning / Medium · Unit: templates
 - Needs: mobile-render
+- Runner: answered today (mobile-render overlay share and primary-content ratio)
 - Evidence owners: `mobile-rendering-parity`, new detector `interstitial-coverage`
 - Note: Legally required cookie and age gates are allowed if they are reasonably sized and the content remains in the DOM.
 - Original: Do mobile cookie consent dialogs, age gates, or promotional overlays comply with Google's intrusive interstitial guidelines by keeping underlying primary content crawlable?
@@ -523,9 +529,11 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 
 - Issue if: An entity or SERP fan-out comparison finds subtopics covered by the top competitors and missing from the site.
 - Why it matters: Search and AI answers expand a query into related sub-questions. Sites that cover only the head topic lose the long tail and are cited less.
-- Group: external · Ticket: Improvement / Medium · Unit: topics
+- Group: supplied-input · Ticket: Improvement / Medium · Unit: topics
 - Needs: external-api
-- Evidence owners: outside crawler_cli
+- Runner: answered today (supplied competitor topic-gap comparison)
+- Evidence owners: new detector `competitor-topic-gap`
+- Note: Supplied entity or SERP fan-out comparison (observation kind competitor-topic-gap) naming its method and competitor set. The runner classifies the supplied topics only; it does not query search engines. Without a supplied bundle the answer stays Pending.
 - Original: Does content coverage address full search journey entity relationships and subtopics (fan-out query expansion) compared to leading competitors?
 
 ### Q51 · Semantic HTML5
@@ -743,6 +751,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Google may use either version. A canonical or robots tag changed by JavaScript is unreliable, and a noindex in the raw HTML stops Google from rendering the page at all.
 - Group: crawl · Ticket: Error / High · Unit: pages
 - Needs: crawl, render
+- Runner: answered today (render-parity canonical, title, robots and hreflang changes)
 - Evidence owners: `rendered-indexing-parity`
 - Original: Does client-side JavaScript execution alter, inject, or contradict critical metadata (canonical, title, robots directives) compared to the raw server HTML?
 
@@ -804,6 +813,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Google's renderer fetches these requests too, from the same crawl budget. High request counts slow rendering and can cause timeouts that leave content out of the index.
 - Group: heuristic · Ticket: Warning / Low · Unit: templates
 - Needs: render
+- Runner: answered today (render-trace API requests per template)
 - Evidence owners: `critical-resource-impact`, new detector `render-api-requests`
 - Original: Do client-side scripts, SPA hydrations, or internal links trigger excessive, uncacheable API requests that waste server resources and crawler budget?
 
@@ -888,6 +898,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Browsers block insecure scripts and flag insecure images, which breaks pages and removes the secure padlock. Internal http:// links add a redirect hop to every click and crawl.
 - Group: crawl · Ticket: Issue / Medium · Unit: pages
 - Needs: crawl, stored-html
+- Runner: answered today (html-signals mixed content on HTTPS pages)
 - Evidence owners: `nonproduction-https`, new detector `mixed-content`
 - Original: Does the site link to or embed non-SSL (http://) assets?
 
@@ -947,6 +958,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Googlebot crawls mostly from the US without an Accept-Language header. Automatic locale redirects can hide every other locale version from Google.
 - Group: crawl · Ticket: Error / High · Unit: URLs
 - Needs: probes
+- Runner: answered today (locale-probe status, Location and content per variant)
 - Evidence owners: `locale-redirects`
 - Sheet said answerable: No (changed)
 - Note: Accept-Language needs no proxy; the IP part needs proxies for each tested country.
@@ -960,6 +972,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Open staging and duplicate hosts can be indexed as copies of the live site, competing with it and exposing unreleased content.
 - Group: crawl+profile · Ticket: Error / High · Unit: hosts
 - Needs: probes, site-profile
+- Runner: answered today (host-probe of profile non-production hosts)
 - Evidence owners: `nonproduction-https`
 - Site profile keys: `nonproduction_hosts`
 - Sheet said answerable: No (changed)
@@ -974,6 +987,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Broken outbound links reflect poor maintenance on review pages. Unqualified paid links break Google's link-scheme policy (see Q75).
 - Group: crawl · Ticket: Warning / Medium · Unit: links
 - Needs: crawl, probes
+- Runner: answered today (external-link-recheck status and affiliate rel)
 - Evidence owners: `external-link-integrity`
 - Sheet said answerable: No (changed)
 - Note: The external recheck runs at a slow, conservative rate.
@@ -987,6 +1001,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Hosted spam can trigger a manual action for user-generated spam or a site-reputation abuse action, and lowers trust in the whole domain.
 - Group: heuristic · Ticket: Error / High · Unit: pages
 - Needs: crawl, stored-html
+- Runner: answered today (html-signals spam terms and hidden external links)
 - Evidence owners: new detector `ugc-spam-patterns`
 - Note: A gambling site's own vocabulary overlaps spam lists; every match needs review.
 - Original: Does the site host user-generated spam, exploit pages, or spam profiles that dilute domain quality and risk search penalties?
@@ -1023,6 +1038,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Sitewide followed links between sister sites can look like a link network. They also add a link to every page that points visitors away from the site.
 - Group: crawl+profile · Ticket: Improvement / Low · Unit: links
 - Needs: crawl, site-profile
+- Runner: answered today (html-signals followed external links by page share)
 - Evidence owners: `external-link-integrity`, new detector `sitewide-external-links`
 - Site profile keys: `allowed_external_domains`
 - Original: Do sitewide footer or navigation templates leak internal PageRank by linking out to non-essential network websites or third-party properties?
@@ -1068,6 +1084,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: HTML copies on cache or preview hosts are duplicates of the site and can be indexed instead of it.
 - Group: crawl+profile · Ticket: Warning / Medium · Unit: hosts
 - Needs: probes, site-profile
+- Runner: answered today (host-probe of profile cache and preview hosts)
 - Evidence owners: `nonproduction-https`, `robots-controls`
 - Site profile keys: `nonproduction_hosts`
 - Note: Image-resizer paths that serve images (not HTML) should stay crawlable, or image search breaks; do not block /_next/image in robots.txt.
@@ -1104,6 +1121,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Browsers warn users on insecure form submissions, and the data goes over an unencrypted connection. This is a security issue before it is an SEO one.
 - Group: crawl · Ticket: Warning / Medium · Unit: forms
 - Needs: stored-html
+- Runner: answered today (html-signals form actions)
 - Evidence owners: `nonproduction-https`, new detector `insecure-form-actions`
 - Original: Do interactive HTML <form action="..."> attributes submit exclusively to secure https:// URLs to avoid browser mixed-content warnings?
 
@@ -1115,8 +1133,9 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Public preview and utility URLs can expose unfinished content, create duplicate pages and introduce low-value or sensitive crawl paths.
 - Group: crawl+profile · Ticket: Warning / High · Unit: URLs
 - Needs: crawl, probes, robots, site-profile
+- Runner: answered today (utility-path-probe against the approved path classes)
 - Evidence owners: `robots-controls`, `indexability-segmentation`, new detector `utility-path-access-policy`
-- Note: Planned: no dedicated answerer yet. Needs approved protected/public path classes and scoped unauthenticated probes. A login page returning 200 is not by itself evidence of exposed protected content; crawl-only absence is not proof of protection.
+- Note: Needs scoped unauthenticated probes (observation kind utility-path-probe) whose records carry the approved path class: protected or public-utility. A login page returning 200 is not by itself evidence of exposed protected content; crawl-only absence is not proof of protection.
 - Original: Are preview, draft, admin and CMS utility paths protected from public access and governed correctly for crawling and indexing?
 
 ### Q103 · Redirect integrity
@@ -1140,7 +1159,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Group: external · Ticket: Warning / Medium · Unit: URLs
 - Needs: gsc, external-api
 - Evidence owners: outside crawler_cli
-- Note: Manual review required: segment GSC page URLs by hostname and record the date range, permitted hosts, queries, location and review date for SERP checks. No impressions or site: matches does not prove universal absence from Google's index. Always Pending in the automatic runner; no automatic ticket.
+- Note: Manual review required; always Pending in the automatic runner and never an automatic ticket. Procedure: (1) export GSC Performance > Pages from the domain property for the agreed date range; (2) segment page URLs by hostname and list every hostname with impressions that is not a permitted host; (3) for SERP checks, record each query, location, device and review date with the alternate-host URLs found. Record the result as observation kind search-host-review (review_type gsc-hosts or serp-check, reviewed_at, date_range, permitted_hosts, unapproved_hosts, queries). No impressions or site: matches does not prove universal absence from Google's index.
 - Original: Do Google search results rank staging, development, cache, preview or other alternate-host versions instead of the intended production URLs?
 
 ## Performance
@@ -1153,6 +1172,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Core Web Vitals are part of page experience. Lab results show likely causes; field data (CrUX) decides whether it actually affects the site in search.
 - Group: heuristic · Ticket: Warning / Medium · Unit: templates
 - Needs: render
+- Runner: answered today (render-trace lab vitals and image dimensions per template)
 - Evidence owners: `performance-distribution`, `image-markup`, `image-resource-delivery`
 - Note: Lab only; confirm with CrUX or Search Console Core Web Vitals before ticketing.
 - Original: Do images and Core Web Vitals hold up?
@@ -1165,6 +1185,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: HSTS preload removes the first http-to-https redirect and prevents downgrade attacks; stapling shortens the TLS handshake. The search effect is small.
 - Group: crawl · Ticket: Improvement / Low · Unit: hosts
 - Needs: probes, external-api
+- Runner: answered today (tls-probe HSTS, preload status and OCSP stapling)
 - Evidence owners: new detector `hsts-ocsp`
 - Sheet said answerable: No (changed)
 - Original: Is the domain submitted to the HSTS preload list and configured with OCSP stapling to minimize initial SSL handshake latency and TTFB?
@@ -1177,6 +1198,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Each new origin costs DNS, TCP and TLS round trips before the first byte. Preconnecting to the origins that block rendering shortens LCP.
 - Group: best-practice · Ticket: Improvement / Low · Unit: templates
 - Needs: render, stored-html
+- Runner: answered today (render-trace critical third-party origins without preconnect)
 - Evidence owners: `critical-resource-impact`, new detector `resource-hints`
 - Original: Are critical third-party resource domains preconnected (<link rel="preconnect">) with crossorigin attributes to accelerate connection setup?
 
@@ -1188,6 +1210,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Preloading a tracking script gives it the same priority as the hero image and CSS, which delays what the user sees first.
 - Group: best-practice · Ticket: Improvement / Low · Unit: templates
 - Needs: stored-html
+- Runner: answered today (html-signals analytics preloads)
 - Evidence owners: new detector `tracking-preloads`
 - Original: Are non-critical tracking scripts (e.g. Google Tag Manager, analytics) avoided in <link rel="preload"> to prevent bandwidth contention with Above-The-Fold assets?
 
@@ -1199,6 +1222,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: WebP and AVIF are usually 25–50% smaller, which speeds up LCP on image-heavy templates.
 - Group: best-practice · Ticket: Improvement / Low · Unit: images
 - Needs: crawl, render
+- Runner: answered today (image-resources content types of in-content raster images)
 - Evidence owners: `image-resource-delivery`
 - Note: Compression quality is not measured.
 - Original: Are all raster images converted and served in modern next-gen formats (WebP and AVIF) with appropriate compression quality?
@@ -1211,6 +1235,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Without font-display, text stays invisible until the font loads, which delays the first render and can make LCP late.
 - Group: best-practice · Ticket: Improvement / Low · Unit: templates
 - Needs: crawl, stored-html
+- Runner: answered today (html-signals inline @font-face rules and font preloads)
 - Evidence owners: new detector `font-loading`
 - Original: Are web fonts configured with font-display: swap and restricted to strictly needed Above-The-Fold weights to prevent FOIT text render delays?
 
@@ -1222,6 +1247,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: A lazy-loaded or low-priority hero image is the most common cause of slow LCP, and missing dimensions cause layout shift.
 - Group: heuristic · Ticket: Warning / Medium · Unit: templates
 - Needs: render
+- Runner: answered today (render-trace LCP image attributes)
 - Evidence owners: `critical-resource-impact`, `image-markup`, new detector `lcp-image-attributes`
 - Note: Identifying the LCP element needs a render with performance tracing.
 - Original: Are mobile-responsive hero images delivered with fetchpriority="high", explicit width/height or aspect-ratio to optimize LCP and prevent CLS?
@@ -1234,6 +1260,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Browsers find CSS background images late and cannot prioritise them, and they are not indexed as images.
 - Group: heuristic · Ticket: Improvement / Low · Unit: templates
 - Needs: render
+- Runner: answered today (render-trace LCP background images)
 - Evidence owners: `critical-resource-impact`, new detector `lcp-background-image`
 - Original: Are critical Above-The-Fold visual assets delivered via responsive <img> or <picture> elements rather than CSS background-image:url() rules?
 
@@ -1245,6 +1272,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Everything that blocks rendering delays first paint for users and adds work for Google's renderer.
 - Group: best-practice · Ticket: Improvement / Medium · Unit: templates
 - Needs: stored-html
+- Runner: answered today (html-signals render-blocking head resources)
 - Evidence owners: `critical-resource-impact`, new detector `render-blocking-head`
 - Original: Do render-blocking CSS stylesheets or synchronous JavaScript bundles delay first paint and impede crawler rendering queues?
 
@@ -1258,6 +1286,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: AI search assistants send traffic only to sites they can crawl. Blocking a search agent by accident removes the site from those answers; allowing a training agent the site meant to block cannot be undone later.
 - Group: crawl+profile · Ticket: Warning / Medium · Unit: user agents
 - Needs: robots, site-profile
+- Runner: answered today (robots-txt verdicts for AI crawlers against the profile policy)
 - Evidence owners: `robots-controls`, new detector `ai-crawler-policy`
 - Site profile keys: `ai_crawler_policy`
 - Sheet said answerable: No (changed)

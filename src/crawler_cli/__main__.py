@@ -2458,6 +2458,7 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
 
 def _run_technical_audit_questions(args: argparse.Namespace) -> int:
     """Answer every registry question from one saved audit bundle; no database or network."""
+    from .audit_observations import ObservationError, attach_observations, load_observation_bundle
     from .technical_audit_questions import (
         QuestionRegistryError,
         answer_questions,
@@ -2474,7 +2475,10 @@ def _run_technical_audit_questions(args: argparse.Namespace) -> int:
             raise QuestionRegistryError("site profile must be a JSON object")
         audit = json.loads(Path(args.audit).read_text(encoding="utf-8"))
         language = load_ticket_language(args.ticket_language)
-    except (OSError, json.JSONDecodeError, QuestionRegistryError, TicketLanguageError) as exc:
+        observation_paths = getattr(args, "observations", None) or []
+        if observation_paths:
+            audit = attach_observations(audit, [load_observation_bundle(path) for path in observation_paths])
+    except (OSError, json.JSONDecodeError, QuestionRegistryError, TicketLanguageError, ObservationError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
     if profile is not None:
@@ -2518,6 +2522,81 @@ def _run_technical_audit_questions(args: argparse.Namespace) -> int:
             print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
             return EXIT_VALIDATION
         print(f"Published question workbook: {url}")
+    return EXIT_SUCCESS
+
+
+async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
+    """Write a run-scoped observation bundle from stored HTML and other crawler_cli artifacts."""
+    from .audit_html_signals import HTML_SIGNALS_VERSION, page_html_signals
+    from .audit_observations import (
+        ObservationError,
+        collection,
+        collection_from_exposure_inventory,
+        collection_from_html_signals,
+        collection_from_render_comparison,
+        new_bundle,
+    )
+
+    run_id = args.crawl_run_id
+    collections: list[dict[str, object]] = []
+    try:
+        for path in args.render_comparison or []:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            collections.append(collection_from_render_comparison(payload, run_id))
+        for path in args.exposure_inventory or []:
+            collections.append(collection_from_exposure_inventory(json.loads(Path(path).read_text(encoding="utf-8"))))
+        robots = []
+        for item in args.robots_txt or []:
+            host, separator, path = item.partition("=")
+            if not separator or not host or not path:
+                raise ObservationError(f"--robots-txt expects HOST=FILE, got {item!r}")
+            robots.append({"host": host, "status": 200, "body": Path(path).read_text(encoding="utf-8")})
+        if robots:
+            collections.append(
+                collection(
+                    "robots-txt",
+                    robots,
+                    source="operator-saved robots.txt files",
+                    scope=f"{len(robots)} hosts: {', '.join(record['host'] for record in robots)}",
+                    coverage_state="complete",
+                )
+            )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ObservationError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+
+    if args.html_signals:
+        import asyncpg
+
+        store = _store_from_args(args)
+        try:
+            reports = CrawlReports(store, run_id=run_id)
+            run_id = await reports._run_id()
+            run_context = await reports.technical_audit_context()
+            records = [
+                page_html_signals(url, html, site_hosts=args.site_host or ())
+                async for url, html in store.iter_run_html(run_id=run_id)
+            ]
+        except (OSError, ValueError, asyncpg.PostgresError) as exc:
+            print(f"Error: {scrub_text(str(exc))}", file=sys.stderr)
+            return EXIT_VALIDATION
+        finally:
+            await store.close()
+        collections.append(collection_from_html_signals(records, run_context=run_context, version=HTML_SIGNALS_VERSION))
+
+    if not collections:
+        print("Error: nothing to observe; pass --html-signals or an artifact option", file=sys.stderr)
+        return EXIT_VALIDATION
+    try:
+        bundle = new_bundle(run_id, collections)
+    except ObservationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    output = Path(args.out)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(bundle, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    summary = ", ".join(f"{item['kind']} {len(item['records'])} ({item['coverage_state']})" for item in collections)  # type: ignore[arg-type]
+    print(f"Wrote observation bundle for run {run_id} to {output}: {summary}")
     return EXIT_SUCCESS
 
 
@@ -4246,6 +4325,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Ticket-language JSON. Defaults to templates/technical-audit-ticket-language.json.",
     )
     questions_parser.add_argument(
+        "--observations",
+        action="append",
+        help="Observation bundle for the same crawl run (technical-audit-observations or supplied; repeatable).",
+    )
+    questions_parser.add_argument(
         "--google-sheets-template",
         help="Copy this Google Sheets template and publish the Questions, Tickets and data tabs.",
     )
@@ -4257,6 +4341,40 @@ def _build_parser() -> argparse.ArgumentParser:
         "--google-sheets-credentials",
         help="Service-account credential file; otherwise GOOGLE_DOCS_OAUTH_TOKEN_FILE is used.",
     )
+
+    observations_parser = subparsers.add_parser(
+        "technical-audit-observations",
+        help="Write a run-scoped observation bundle for technical-audit-questions --observations",
+    )
+    observations_parser.add_argument("--crawl-run-id", required=True, help="Crawl run the observations belong to")
+    observations_parser.add_argument("--out", required=True, help="Write the observation bundle JSON to this path")
+    observations_parser.add_argument(
+        "--html-signals",
+        action="store_true",
+        help="Scan the run's stored raw HTML for mixed content, forms, head resources, fonts, spam and link signals.",
+    )
+    observations_parser.add_argument(
+        "--site-host",
+        action="append",
+        help="Extra host treated as the site's own when classifying links (repeatable); each page's host always is.",
+    )
+    observations_parser.add_argument(
+        "--render-comparison",
+        action="append",
+        help="compare-renders --crawl-run-id JSON output to include as render-parity evidence (repeatable).",
+    )
+    observations_parser.add_argument(
+        "--exposure-inventory",
+        action="append",
+        help="exposure-inventory JSON artifact to include as host-probe evidence (repeatable).",
+    )
+    observations_parser.add_argument(
+        "--robots-txt",
+        action="append",
+        metavar="HOST=FILE",
+        help="Saved robots.txt body for a host, for the AI-crawler policy question (repeatable).",
+    )
+    _add_postgres_args(observations_parser)
 
     backlink_parser = subparsers.add_parser(
         "import-backlinks",
@@ -4617,6 +4735,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
         "report",
         "technical-audit",
         "technical-audit-questions",
+        "technical-audit-observations",
         "import-backlinks",
         "compare",
         "compare-urls",
@@ -4675,6 +4794,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_technical_audit(args)
     if command == "technical-audit-questions":
         return _run_technical_audit_questions(args)
+    if command == "technical-audit-observations":
+        return await _run_technical_audit_observations(args)
     if command == "import-backlinks":
         return await _run_import_backlinks(args)
     if command == "compare":

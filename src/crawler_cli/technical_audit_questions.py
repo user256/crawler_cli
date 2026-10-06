@@ -666,3 +666,10 @@ def _int_or_none(value: Any) -> int | None:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+# Stream C answerers read run-scoped observation bundles; they live in their own
+# module and import the helpers above, so they are registered last.
+from .technical_audit_observed_answers import OBSERVED_ANSWERERS  # noqa: E402
+
+ANSWERERS.update({qid: answerer for qid, answerer in OBSERVED_ANSWERERS.items() if qid not in ANSWERERS})

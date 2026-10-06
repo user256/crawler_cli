@@ -124,7 +124,12 @@ def test_complete_run_answers_implemented_questions_and_leaves_the_rest_pending(
     # Orphans carry coverage_required, so they are candidates, never an automatic ticket.
     assert (answers["Q13"]["status"], answers["Q13"]["ticket"]) == ("Needs validation", False)
     assert answers["Q2"]["status"] == "Pending" and "url-host-and-variants" in answers["Q2"]["notes"][0]
-    assert answers["Q18"]["status"] == "Pending" and answers["Q18"]["notes"][0].startswith("Outside crawler_cli")
+    # Supplied-input questions stay Pending until a bundle is attached.
+    assert (
+        answers["Q18"]["status"] == "Pending"
+        and "No google-render-inspection observations" in answers["Q18"]["notes"][1]
+    )
+    assert answers["Q104"]["status"] == "Pending" and answers["Q104"]["notes"][0].startswith("Outside crawler_cli")
     # A scope-limited answer with no rows cannot be called healthy.
     assert answers["Q94"]["status"] == "Needs validation" and answers["Q94"]["answer"] == "No (partial)"
 
@@ -198,7 +203,7 @@ def test_new_questions_remain_pending_without_dedicated_answerers() -> None:
     audit = _audit()
     answers = answer_questions(audit, registry)
     by_id = _by_id(answers)
-    for number in range(97, 105):
+    for number in (97, 98, 99, 100, 101, 103, 104):
         answer = by_id[f"Q{number}"]
         assert answer["status"] == "Pending"
         assert answer["answer"] == "" and answer["affected_count"] is None

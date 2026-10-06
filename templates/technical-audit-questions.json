@@ -238,14 +238,14 @@
       "question": "Does Google's own smartphone renderer, from a Google IP, fail to render the primary content of key templates?",
       "issue_if": "URL Inspection or the Rich Results Test shows missing primary content, blocked resources or a render error for a key template.",
       "unit": "templates",
-      "group": "external",
+      "group": "supplied-input",
       "requires": [
-        "external-api"
+        "gsc"
       ],
       "checks": [
         "mobile-rendering-parity"
       ],
-      "new_detector": null,
+      "new_detector": "google-render-inspection",
       "profile_keys": [],
       "threshold": {
         "min_affected": 1
@@ -253,7 +253,7 @@
       "classification": "Error",
       "priority": "High",
       "why": "If Google's renderer is blocked, geo-gated or times out, the indexed version of the page lacks its content, and nothing else in the audit will show it.",
-      "note": "A US mobile Playwright render (mobile-rendering-parity) is supporting evidence only; confirmation needs URL Inspection.",
+      "note": "Supplied URL Inspection or Rich Results Test records (observation kind google-render-inspection), one or more per key template. A US mobile Playwright render (mobile-rendering-parity) is supporting evidence only. The runner never queries Google; without a supplied bundle the answer stays Pending.",
       "sheet_answerable_was": null
     },
     {
@@ -295,12 +295,12 @@
       "question": "Does the site serve Google's crawler materially different content from what it serves visitors?",
       "issue_if": "Content, links or directives fetched as verified Google differ materially from a visitor fetch of the same URL.",
       "unit": "URLs",
-      "group": "external",
+      "group": "supplied-input",
       "requires": [
         "external-api"
       ],
       "checks": [],
-      "new_detector": null,
+      "new_detector": "verified-google-fetch",
       "profile_keys": [],
       "threshold": {
         "min_affected": 1
@@ -308,7 +308,7 @@
       "classification": "Error",
       "priority": "High",
       "why": "Showing search engines different content from users breaks Google's spam policies and can lead to a manual action that removes pages from search.",
-      "note": "crawler_cli can compare a Googlebot user agent with a browser user agent from the same IP, which catches user-agent cloaking only; IP-based cloaking needs a fetch from Google's own IPs (URL Inspection).",
+      "note": "Supplied comparison (observation kind verified-google-fetch) of a fetch from Google's own IPs (URL Inspection live test) with a visitor fetch of the same URL. A Googlebot user agent from crawler_cli's IP catches user-agent cloaking only. The runner never fetches as Google; without a supplied bundle the answer stays Pending.",
       "sheet_answerable_was": null
     },
     {
@@ -1218,12 +1218,12 @@
       "question": "Do leading competitors cover subtopics and entities of the core queries that the site does not?",
       "issue_if": "An entity or SERP fan-out comparison finds subtopics covered by the top competitors and missing from the site.",
       "unit": "topics",
-      "group": "external",
+      "group": "supplied-input",
       "requires": [
         "external-api"
       ],
       "checks": [],
-      "new_detector": null,
+      "new_detector": "competitor-topic-gap",
       "profile_keys": [],
       "threshold": {
         "min_affected": 1
@@ -1231,7 +1231,7 @@
       "classification": "Improvement",
       "priority": "Medium",
       "why": "Search and AI answers expand a query into related sub-questions. Sites that cover only the head topic lose the long tail and are cited less.",
-      "note": null,
+      "note": "Supplied entity or SERP fan-out comparison (observation kind competitor-topic-gap) naming its method and competitor set. The runner classifies the supplied topics only; it does not query search engines. Without a supplied bundle the answer stays Pending.",
       "sheet_answerable_was": null
     },
     {
@@ -2588,7 +2588,7 @@
       "classification": "Warning",
       "priority": "High",
       "why": "Public preview and utility URLs can expose unfinished content, create duplicate pages and introduce low-value or sensitive crawl paths.",
-      "note": "Planned: no dedicated answerer yet. Needs approved protected/public path classes and scoped unauthenticated probes. A login page returning 200 is not by itself evidence of exposed protected content; crawl-only absence is not proof of protection.",
+      "note": "Needs scoped unauthenticated probes (observation kind utility-path-probe) whose records carry the approved path class: protected or public-utility. A login page returning 200 is not by itself evidence of exposed protected content; crawl-only absence is not proof of protection.",
       "sheet_answerable_was": null
     },
     {
@@ -2643,7 +2643,7 @@
       "classification": "Warning",
       "priority": "Medium",
       "why": "Alternate-host results can divide visibility, expose non-production content and send users to the wrong version of the site even when the production host is healthy.",
-      "note": "Manual review required: segment GSC page URLs by hostname and record the date range, permitted hosts, queries, location and review date for SERP checks. No impressions or site: matches does not prove universal absence from Google's index. Always Pending in the automatic runner; no automatic ticket.",
+      "note": "Manual review required; always Pending in the automatic runner and never an automatic ticket. Procedure: (1) export GSC Performance > Pages from the domain property for the agreed date range; (2) segment page URLs by hostname and list every hostname with impressions that is not a permitted host; (3) for SERP checks, record each query, location, device and review date with the alternate-host URLs found. Record the result as observation kind search-host-review (review_type gsc-hosts or serp-check, reviewed_at, date_range, permitted_hosts, unapproved_hosts, queries). No impressions or site: matches does not prove universal absence from Google's index.",
       "sheet_answerable_was": null
     },
     {
