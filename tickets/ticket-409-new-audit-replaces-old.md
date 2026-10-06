@@ -39,7 +39,7 @@ producer for the new runner's `host-probe`, `utility-path-probe`,
 
 - [x] Merge, resolve, re-attach, suite green (old-audit test files excluded).
 - [ ] Delete the old-audit modules, tests, docs and templates listed above (left to the operator).
-- [ ] Rebuild the Rainbet bundle with the merged code and compare answers with the lineage's run.
+- [x] Rebuilt the Rainbet bundle with the merged code (11 min, 1.3 GB peak; the lineage's run peaked at 3.9 GB). 104 answers: Issue 1, Needs validation 22, Healthy 1, Pending 80 against the lineage's 1/20/1/82. Only Q13 (orphans now graph-based: 8,761 of 10,852 vs 7,716), Q91 (500 confirmed empty anchors over 627,923 internal anchors, previously Pending) and Q63 (answered from `--tls-probe`: rainbet.com sends no Strict-Transport-Security header) changed.
 - [ ] Write producers for the observation kinds that lost their probe (follow-up tickets).
 
 ## Status
