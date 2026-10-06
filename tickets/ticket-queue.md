@@ -813,21 +813,21 @@ existing-ticket reuse and review finding coverage.
 - `265` `proposed` [Site-profile detectors for the question runner](./ticket-265-question-detectors-site-profile.md) — **P1, depends on 263:** template/hub/parameter/affiliate/host/AI-policy rules; Rainbet profile first.
 - `266` `proposed` [Render, probe and external detectors for the question runner](./ticket-266-question-detectors-render-probe-external.md) — **P2, depends on 263:** rendered, mobile, probe and third-party evidence; heuristics capped at Needs validation.
 - Tickets **267–370** create one local implementation record for every Questions-tab row, Q1–Q104. See [the question-level implementation queue](./technical-audit-question-implementation-queue-2026-10-06.md). It refines detector batches 264–266; the 11 existing answerers are marked implemented locally (four partial, three without tests) and the rest are proposed; priorities follow the registry. Q104 is a supplied-evidence/manual workflow, not a crawler-only detector. Next unreserved ticket number is **400**.
-- `371` `implemented (local)` [Decode JSONB in Stream B report collectors](./ticket-371-stream-b-jsonb-decoding.md) — **P1, Stream B QA fix.**
-- `372` `implemented (local)` [Stop SVG titles and feed links tripping Q10 and Q12](./ticket-372-stream-b-svg-title-false-positives.md) — **P1, Stream B QA fix.**
-- `373` `implemented (local)` [Only treat real locale folders as locales in Q41](./ticket-373-stream-b-locale-folder-detection.md) — **P1, Stream B QA fix.**
-- `374` `implemented (local)` [Exclude homepage variants from Q73](./ticket-374-stream-b-q73-homepage-variants.md) — **P2, Stream B QA fix.**
-- `375` `implemented (local)` [Detect X-Robots-Tag by header name in Q87](./ticket-375-stream-b-q87-x-robots-tag.md) — **P1, Stream B QA fix.**
-- `376` `implemented (local)` [Never answer Healthy from a zero tested population](./ticket-376-stream-b-zero-population-healthy.md) — **P1, Stream B QA fix.**
-- `377` `implemented (local)` [Separate locale markup rows from Q32 and restore review qualifications](./ticket-377-stream-b-locale-check-populations.md) — **P1, Stream B QA fix.**
-- `378` `implemented (local)` [Keep heavy stored-HTML reports out of the default report run](./ticket-378-stream-b-report-cli-defaults.md) — **P2, Stream B QA fix.**
-- `379` `implemented (local)` [Scan stored HTML once, without loading the whole run into memory](./ticket-379-stream-b-stored-html-single-pass.md) — **P2, Stream B QA fix.**
-- `380` `implemented (local)` [Make profile page facts run-scoped and meaningful](./ticket-380-stream-b-profile-page-facts.md) — **P2, Stream B QA fix.**
-- `381` `implemented (local)` [Report header/HTML canonical mismatches as their own finding](./ticket-381-stream-b-q94-canonical-rows.md) — **P3, Stream B QA fix.**
-- `382` `implemented (local)` [Make Q54 rows traceable to individual images](./ticket-382-stream-b-q54-image-identity.md) — **P3, Stream B QA fix.**
-- `383` `implemented (local)` [Detect redirecting link targets by final URL, and compare canonicals normalised](./ticket-383-stream-b-link-target-redirects.md) — **P1, Stream B QA fix.**
-- `384` `implemented (local)` [Finish the Q81 run gate that Stream B started](./ticket-384-stream-b-q81-gate-scope.md) — **P2, Stream B QA fix.**
-- `385` `implemented (local)` [Tighten the soft-404 and discovery-provenance collectors Stream B added](./ticket-385-stream-b-soft404-and-provenance.md) — **P2, Stream B QA fix.**
+- `371` `done` [Decode JSONB in Stream B report collectors](./ticket-371-stream-b-jsonb-decoding.md) — **P1, Stream B QA fix.**
+- `372` `done` [Stop SVG titles and feed links tripping Q10 and Q12](./ticket-372-stream-b-svg-title-false-positives.md) — **P1, Stream B QA fix.**
+- `373` `done` [Only treat real locale folders as locales in Q41](./ticket-373-stream-b-locale-folder-detection.md) — **P1, Stream B QA fix.**
+- `374` `done` [Exclude homepage variants from Q73](./ticket-374-stream-b-q73-homepage-variants.md) — **P2, Stream B QA fix.**
+- `375` `done` [Detect X-Robots-Tag by header name in Q87](./ticket-375-stream-b-q87-x-robots-tag.md) — **P1, Stream B QA fix.**
+- `376` `done` [Never answer Healthy from a zero tested population](./ticket-376-stream-b-zero-population-healthy.md) — **P1, Stream B QA fix.**
+- `377` `done` [Separate locale markup rows from Q32 and restore review qualifications](./ticket-377-stream-b-locale-check-populations.md) — **P1, Stream B QA fix.**
+- `378` `done` [Keep heavy stored-HTML reports out of the default report run](./ticket-378-stream-b-report-cli-defaults.md) — **P2, Stream B QA fix.**
+- `379` `done` [Scan stored HTML once, without loading the whole run into memory](./ticket-379-stream-b-stored-html-single-pass.md) — **P2, Stream B QA fix.**
+- `380` `done` [Make profile page facts run-scoped and meaningful](./ticket-380-stream-b-profile-page-facts.md) — **P2, Stream B QA fix.**
+- `381` `done` [Report header/HTML canonical mismatches as their own finding](./ticket-381-stream-b-q94-canonical-rows.md) — **P3, Stream B QA fix.**
+- `382` `done` [Make Q54 rows traceable to individual images](./ticket-382-stream-b-q54-image-identity.md) — **P3, Stream B QA fix.**
+- `383` `done` [Detect redirecting link targets by final URL, and compare canonicals normalised](./ticket-383-stream-b-link-target-redirects.md) — **P1, Stream B QA fix.**
+- `384` `done` [Finish the Q81 run gate that Stream B started](./ticket-384-stream-b-q81-gate-scope.md) — **P2, Stream B QA fix.**
+- `385` `done` [Tighten the soft-404 and discovery-provenance collectors Stream B added](./ticket-385-stream-b-soft404-and-provenance.md) — **P2, Stream B QA fix.**
 - `386` `implemented (local)` [Keep Q28, Q31 and locale probes below Healthy when a field was never recorded](./ticket-386-stream-c-untested-fields-healthy.md) — **P1, Stream C QA fix.**
 - `387` `implemented (local)` [Do not raise Q102 when robots blocking was never checked](./ticket-387-stream-c-q102-robots-unknown.md) — **P1, Stream C QA fix.**
 - `388` `implemented (local)` [Treat a redirected robots.txt without a body as unknown in Q96](./ticket-388-stream-c-q96-redirected-robots.md) — **P1, Stream C QA fix.**
