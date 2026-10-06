@@ -812,7 +812,7 @@ existing-ticket reuse and review finding coverage.
 
 Numbering note: the `feature/technical-audit-183` lineage reserved 240-246 and
 263-399 for different tickets than this queue's 240-243 and 264-266. Nothing below
-reuses either range; the next unreserved number after both lineages is **409**.
+reuses either range; the next unreserved number after both lineages is **410**.
 
 - `400` `proposed` [Map the AI governance, Accept-Language and transport detectors to v3 controls](./ticket-400-map-post-contract-detectors-to-controls.md) — **P2:** the three post-contract detectors stay analyst-only until a control consumes them.
 - `401` `implemented (local)` [Decode persisted language-probe evidence and stop the placeholder posing as coverage](./ticket-401-language-probe-read-path.md) — **P1, QA fix for 264.**
@@ -823,3 +823,4 @@ reuses either range; the next unreserved number after both lineages is **409**.
 - `406` `proposed` [Finish ticket 223: template mapping, copy fallback and destination header check](./ticket-406-mapped-template-publish-gaps.md) — **P2.**
 - `407` `proposed` [Register publisher review nits](./ticket-407-register-review-nits.md) — **P3.**
 - `408` `proposed` [Port the question runner and stream collectors onto master's audit contract](./ticket-408-port-question-runner-onto-master-contract.md) — **P1:** the `feature/technical-audit-183` lineage cannot merge textually; per-check port with the Rainbet evidence matrix.
+- `409` `in progress` [Replace the old technical audit with the three-stream audit](./ticket-409-new-audit-replaces-old.md) — **P0:** merge of the question-runner lineage onto master; deletion of the old audit files and the Rainbet re-run outstanding.

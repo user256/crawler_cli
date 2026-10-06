@@ -5,6 +5,10 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- The technical audit is now the three-stream question-runner audit (ticket 409): `technical-audit` writes the deterministic bundle, `technical-audit-observations` adds run-scoped observations (including the re-attached AI-governance, Accept-Language and TLS probes) and `technical-audit-questions` answers the Q1-Q104 registry. The previous contract projection, manual-review register and ticket-register publisher are removed.
+
 ## [Unreleased]
 
 ### Added
