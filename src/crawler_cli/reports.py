@@ -6,6 +6,7 @@ from typing import Any, cast
 from urllib.parse import parse_qsl, urljoin, urlparse
 
 from .amp import urls_match
+from .extract import parse_html
 from .hashing import hamming64
 from .html_audit import canonical_targets, inspect_stored_html
 from .hreflang_audit import hreflang_facts
@@ -534,6 +535,55 @@ class CrawlReports:
             """,
             run_id,
         )
+
+    async def crawl_depth_pages(self) -> list[dict[str, object]]:
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT u.url, f.depth AS crawl_depth
+            FROM frontier f JOIN urls u ON u.id = f.url_id
+            WHERE f.run_id = $1
+            ORDER BY u.url
+            """,
+            run_id,
+        )
+
+    async def performance_pages(self) -> list[dict[str, object]]:
+        run_id = await self._run_id()
+        return await self._fetch(
+            """
+            SELECT u.url, s.final_status_code, s.ttfb_seconds
+            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
+            WHERE s.run_id = $1 AND u.kind = 'html'
+            ORDER BY u.url
+            """,
+            run_id,
+        )
+
+    async def empty_anchor_links(self) -> list[dict[str, object]]:
+        """Saved raw-HTML internal-link facts, including linked-image alts."""
+        run_id = await self._run_id()
+        records: list[dict[str, object]] = []
+        for _url_id, source_url, html in await self.store.fetch_pages_for_embeddings(run_id=run_id):
+            source_host = urlparse(source_url).netloc.casefold()
+            soup = parse_html(html)
+            for anchor in soup.find_all("a", href=True):
+                target_url = urljoin(source_url, str(anchor.get("href", "")).strip())
+                if urlparse(target_url).scheme not in {"http", "https"} or urlparse(target_url).netloc.casefold() != source_host:
+                    continue
+                anchor_text = anchor.get_text(" ", strip=True) or anchor.get("aria-label") or anchor.get("title")
+                images = anchor.find_all("img")
+                records.append(
+                    {
+                        "source_url": source_url,
+                        "target_url": target_url.split("#", 1)[0],
+                        "anchor_text": str(anchor_text) if anchor_text is not None else None,
+                        "linked_image_alt_texts": [
+                            str(image.get("alt", "")).strip() if image.has_attr("alt") else None for image in images
+                        ],
+                    }
+                )
+        return records
 
     async def redirect_chains(self) -> list[dict[str, object]]:
         run_id = await self._run_id()

@@ -14,8 +14,8 @@ Ticket files remain the source of truth for scope and DoD.
   a saved audit JSON; the rest are Pending with the reason. Detector batches
   **264** (stored HTML), **265** (site profile) and **266** (render, probes,
   external) move the remainder. Numbers 258–262 are skipped because they are
-  in git history. Tickets 267–370 are the question-level queue; next unreserved
-  ticket number is **371**.
+  in git history. Tickets 267–370 are the question-level queue; 371–385 are Stream B QA
+  fixes; next unreserved ticket number is **386**.
 - The question-level queue is assigned to three agents by implementation seam:
   [Stream A: crawl and HTTP](./technical-audit-stream-a-crawl-http-2026-10-06.md),
   [Stream B: page indexability](./technical-audit-stream-b-page-indexability-2026-10-06.md)
@@ -812,7 +812,22 @@ existing-ticket reuse and review finding coverage.
 - `264` `proposed` [Stored-HTML detectors for the question runner](./ticket-264-question-detectors-stored-html.md) — **P1, depends on 263:** 17 HTML-only detectors plus answerers over contract checks as their collectors land.
 - `265` `proposed` [Site-profile detectors for the question runner](./ticket-265-question-detectors-site-profile.md) — **P1, depends on 263:** template/hub/parameter/affiliate/host/AI-policy rules; Rainbet profile first.
 - `266` `proposed` [Render, probe and external detectors for the question runner](./ticket-266-question-detectors-render-probe-external.md) — **P2, depends on 263:** rendered, mobile, probe and third-party evidence; heuristics capped at Needs validation.
-- Tickets **267–370** create one local implementation record for every Questions-tab row, Q1–Q104. See [the question-level implementation queue](./technical-audit-question-implementation-queue-2026-10-06.md). It refines detector batches 264–266; the 11 existing answerers are marked implemented locally (four partial, three without tests) and the rest are proposed; priorities follow the registry. Q104 is a supplied-evidence/manual workflow, not a crawler-only detector. Next unreserved ticket number is **371**.
+- Tickets **267–370** create one local implementation record for every Questions-tab row, Q1–Q104. See [the question-level implementation queue](./technical-audit-question-implementation-queue-2026-10-06.md). It refines detector batches 264–266; the 11 existing answerers are marked implemented locally (four partial, three without tests) and the rest are proposed; priorities follow the registry. Q104 is a supplied-evidence/manual workflow, not a crawler-only detector. Next unreserved ticket number is **386**.
+- `371` `proposed` [Decode JSONB in Stream B report collectors](./ticket-371-stream-b-jsonb-decoding.md) — **P1, Stream B QA fix.**
+- `372` `proposed` [Stop SVG titles and feed links tripping Q10 and Q12](./ticket-372-stream-b-svg-title-false-positives.md) — **P1, Stream B QA fix.**
+- `373` `proposed` [Only treat real locale folders as locales in Q41](./ticket-373-stream-b-locale-folder-detection.md) — **P1, Stream B QA fix.**
+- `374` `proposed` [Exclude homepage variants from Q73](./ticket-374-stream-b-q73-homepage-variants.md) — **P2, Stream B QA fix.**
+- `375` `proposed` [Detect X-Robots-Tag by header name in Q87](./ticket-375-stream-b-q87-x-robots-tag.md) — **P1, Stream B QA fix.**
+- `376` `proposed` [Never answer Healthy from a zero tested population](./ticket-376-stream-b-zero-population-healthy.md) — **P1, Stream B QA fix.**
+- `377` `proposed` [Separate locale markup rows from Q32 and restore review qualifications](./ticket-377-stream-b-locale-check-populations.md) — **P1, Stream B QA fix.**
+- `378` `proposed` [Keep heavy stored-HTML reports out of the default report run](./ticket-378-stream-b-report-cli-defaults.md) — **P2, Stream B QA fix.**
+- `379` `proposed` [Scan stored HTML once, without loading the whole run into memory](./ticket-379-stream-b-stored-html-single-pass.md) — **P2, Stream B QA fix.**
+- `380` `proposed` [Make profile page facts run-scoped and meaningful](./ticket-380-stream-b-profile-page-facts.md) — **P2, Stream B QA fix.**
+- `381` `proposed` [Report header/HTML canonical mismatches as their own finding](./ticket-381-stream-b-q94-canonical-rows.md) — **P3, Stream B QA fix.**
+- `382` `proposed` [Make Q54 rows traceable to individual images](./ticket-382-stream-b-q54-image-identity.md) — **P3, Stream B QA fix.**
+- `383` `proposed` [Detect redirecting link targets by final URL, and compare canonicals normalised](./ticket-383-stream-b-link-target-redirects.md) — **P1, Stream B QA fix.**
+- `384` `proposed` [Finish the Q81 run gate that Stream B started](./ticket-384-stream-b-q81-gate-scope.md) — **P2, Stream B QA fix.**
+- `385` `proposed` [Tighten the soft-404 and discovery-provenance collectors Stream B added](./ticket-385-stream-b-soft404-and-provenance.md) — **P2, Stream B QA fix.**
 
 Deferred lanes remain below.
 

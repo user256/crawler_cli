@@ -43,6 +43,9 @@ TECHNICAL_AUDIT_REPORTS = (
     "profile-indexability-pages",
     "soft404-error-routes",
     "discovery-source-provenance",
+    "crawl-depth-pages",
+    "performance-pages",
+    "empty-anchor-links",
     "inventory-interactions",
     "supplied-search-evidence",
 )
@@ -775,6 +778,9 @@ def build_technical_audit(
         "question_inputs": {
             "semantic-html": rows["semantic-html"],
             "profile-indexability-pages": rows["profile-indexability-pages"],
+            "crawl-depth-pages": rows["crawl-depth-pages"],
+            "performance-pages": rows["performance-pages"],
+            "empty-anchor-links": rows["empty-anchor-links"],
         },
         "status_vocabulary": [
             "pass",

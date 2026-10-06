@@ -168,6 +168,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: The further a page sits from the homepage, the less often it is crawled and the less internal authority it gets. A sitewide HTML sitemap or directory is one fix; the defect is the depth, not the missing sitemap.
 - Group: crawl+profile · Ticket: Warning / Medium · Unit: pages
 - Needs: crawl, site-profile
+- Runner: answered today (crawl-depth-pages priority depth facts)
 - Evidence owners: `crawl-depth-distribution`
 - Site profile keys: `commercial_hubs`, `templates.priority`
 - Original: Is there an HTML sitemap or curated directory linked sitewide to reduce click depth for critical commercial and review landing pages?
@@ -868,6 +869,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: Google lowers its crawl rate when the server is slow, so fewer pages get crawled. Slow TTFB also pushes LCP out of the 'good' range.
 - Group: crawl · Ticket: Warning / Medium · Unit: templates
 - Needs: crawl
+- Runner: answered today (performance-pages template p90/p99 facts)
 - Evidence owners: `performance-distribution`
 - Note: Measured from the crawler's location, not Google's.
 - Original: What is the server response time (TTFB) distribution across page templates (mean, p90, p99), and do slow origin outliers constrain crawl capacity?
@@ -1131,6 +1133,7 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 - Why it matters: An empty link gives Google no anchor text and screen readers nothing to announce. It is usually an icon or logo link without a label.
 - Group: crawl · Ticket: Warning / Low · Unit: links
 - Needs: crawl
+- Runner: answered today (empty-anchor-links saved HTML facts)
 - Evidence owners: `image-markup`, new detector `empty-anchors`
 - Original: Do internal hyperlinks contain empty anchor text, whitespace-only content, or missing alt attributes on linked images?
 

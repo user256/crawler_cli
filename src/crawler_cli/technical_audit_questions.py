@@ -17,6 +17,9 @@ from typing import Any
 from .technical_audit import TECHNICAL_AUDIT_CHECK_CONTRACT, TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES
 from .technical_audit_tickets import _placeholders, _render, _sample_urls, ticket_sheet_table
 from .profile_indexability_audit import analyse_profile_indexability
+from .crawl_depth_audit import analyse_priority_crawl_depth
+from .performance_distribution import analyse_performance_distribution
+from .empty_anchor_audit import evaluate_empty_anchors
 
 
 QUESTION_STATUSES = ("Issue", "Healthy", "Needs validation", "Pending")
@@ -478,6 +481,84 @@ def _semantic_figure_caption(audit: Json, question: Json, profile: Json | None) 
     )
 
 
+def _question_input(audit: Json, name: str) -> tuple[list[dict[str, object]], bool]:
+    coverage = audit.get("source_coverage")
+    inputs = audit.get("question_inputs")
+    available = (
+        isinstance(coverage, Mapping)
+        and isinstance(coverage.get(name), Mapping)
+        and coverage[name].get("available") is True
+    )
+    rows = inputs.get(name) if isinstance(inputs, Mapping) else None
+    return ([dict(row) for row in rows if isinstance(row, Mapping)] if isinstance(rows, list) else [], available)
+
+
+def _crawl_depth(audit: Json, question: Json, profile: Json | None) -> Evidence:
+    pages, available = _question_input(audit, "crawl-depth-pages")
+    if not available or profile is None:
+        return Evidence(available=False, note="crawl depth needs saved graph evidence and a site profile")
+    context = audit.get("run_context")
+    roots = [str(row["url"]) for row in pages if _int_or_none(row.get("crawl_depth")) == 0 and row.get("url")]
+    graph = {
+        "root_urls": roots,
+        "depths_from_roots": bool(roots),
+        "coverage_complete": isinstance(context, Mapping) and context.get("completion_state") == "complete",
+    }
+    result = analyse_priority_crawl_depth(pages, graph, profile)
+    return Evidence(
+        rows=[fact.as_dict() for fact in result.affected],
+        denominator=result.denominator,
+        available=result.available and result.eligible,
+        coverage_complete=result.complete,
+        note="; ".join(result.unavailable_reasons),
+        language_check="crawl-depth-pages",
+    )
+
+
+def _performance_distribution(audit: Json, question: Json, profile: Json | None) -> Evidence:
+    pages, available = _question_input(audit, "performance-pages")
+    templates = _profile_value(profile or {}, "templates")
+    if not available or not isinstance(templates, Mapping):
+        return Evidence(available=False, note="performance distribution needs saved timings and site-profile template patterns")
+    classified = []
+    for page in pages:
+        value = dict(page)
+        path = _path_and_query(str(value.get("url", "")))
+        for name, spec in templates.items():
+            pattern = spec.get("pattern") if isinstance(spec, Mapping) else None
+            if isinstance(pattern, str) and re.search(pattern, path):
+                value["template"] = str(name)
+                break
+        classified.append(value)
+    result = analyse_performance_distribution(classified)
+    return Evidence(
+        rows=[fact.as_dict() for fact in result.affected],
+        denominator=result.eligible_record_count,
+        available=result.available,
+        coverage_complete=result.complete,
+        note="; ".join(result.unavailable_reasons),
+        language_check="performance-pages",
+    )
+
+
+def _empty_anchors(audit: Json, question: Json, profile: Json | None) -> Evidence:
+    links, available = _question_input(audit, "empty-anchor-links")
+    if not available:
+        return Evidence(available=False, note="saved empty-anchor link facts were not collected")
+    result = evaluate_empty_anchors(links)
+    return Evidence(
+        rows=[finding.as_dict() for finding in result.findings],
+        denominator=result.coverage.valid_record_count,
+        available=True,
+        coverage_complete=result.coverage.complete,
+        note=(
+            f"unknown image-alt facts: {result.coverage.unknown_image_alt_count}; "
+            f"invalid link facts: {result.coverage.invalid_record_count}"
+        ),
+        language_check="empty-anchor-links",
+    )
+
+
 def _run_gate(audit: Json, question: Json, profile: object) -> Evidence:
     context = audit.get("run_context")
     if not isinstance(context, Mapping) or not context:
@@ -596,6 +677,7 @@ ANSWERERS: dict[str, Answerer] = {
         _check_kinds("hreflang-html-http", "locale-path-language-mismatch"),
     ),
     "Q42": Answerer("soft404-error-routes saved-source candidates", _from_check("soft404-error-routes")),
+    "Q44": Answerer("crawl-depth-pages priority depth facts", _crawl_depth),
     "Q72": Answerer(
         "internal-link-targets trailing-slash redirect rows",
         _from_check("internal-link-targets", keep=_trailing_slash_redirect),
@@ -603,6 +685,8 @@ ANSWERERS: dict[str, Answerer] = {
     "Q51": Answerer("semantic-html landmark facts", _semantic_landmarks),
     "Q54": Answerer("semantic-html figure and figcaption facts", _semantic_figure_caption),
     "Q58": Answerer("semantic-html long-page H2 fragment facts", _semantic_toc),
+    "Q88": Answerer("performance-pages template p90/p99 facts", _performance_distribution),
+    "Q91": Answerer("empty-anchor-links saved HTML facts", _empty_anchors),
     "Q20": Answerer("profile-indexability policy facts", _profile_indexability("Q20")),
     "Q36": Answerer("profile-indexability policy facts", _profile_indexability("Q36")),
     "Q37": Answerer("profile-indexability policy facts", _profile_indexability("Q37")),

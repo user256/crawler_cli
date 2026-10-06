@@ -2203,6 +2203,9 @@ _REPORT_NAMES = (
     "profile-indexability-pages",
     "soft404-error-routes",
     "discovery-source-provenance",
+    "crawl-depth-pages",
+    "performance-pages",
+    "empty-anchor-links",
     "redirect-chains",
     "hub-pages",
     "slowest",
@@ -2244,6 +2247,12 @@ async def _fetch_report(reports: CrawlReports, name: str, args: argparse.Namespa
         return await reports.soft404_error_routes()
     if name == "discovery-source-provenance":
         return await reports.discovery_source_provenance()
+    if name == "crawl-depth-pages":
+        return await reports.crawl_depth_pages()
+    if name == "performance-pages":
+        return await reports.performance_pages()
+    if name == "empty-anchor-links":
+        return await reports.empty_anchor_links()
     if name == "redirect-chains":
         return await reports.redirect_chains()
     if name == "hub-pages":
