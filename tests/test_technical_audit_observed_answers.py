@@ -230,13 +230,23 @@ CASES: dict[str, tuple[str, list[dict[str, object]], list[dict[str, object]]]] =
     "Q25": (
         "locale-probe",
         [{"url": f"{SITE}/", "variant": "accept-language:de", "baseline_status": 200, "variant_status": 302}],
-        [{"url": f"{SITE}/", "variant": "accept-language:de", "baseline_status": 200, "variant_status": 200}],
+        [
+            {
+                "url": f"{SITE}/",
+                "variant": "accept-language:de",
+                "baseline_status": 200,
+                "variant_status": 200,
+                "baseline_location": None,
+                "variant_location": None,
+                "primary_content_differs": False,
+            }
+        ],
     ),
-    "Q27": ("host-probe", _hosts(status=200, noindex=False), _hosts()),
+    "Q27": ("host-probe", _hosts(status=200, content_type="text/html", noindex=False), _hosts()),
     "Q77": (
         "host-probe",
-        _hosts(status=200, noindex=False, canonical_to_main_host=False, robots_blocked=False),
-        _hosts(status=200, noindex=False, canonical_to_main_host=True),
+        _hosts(status=200, content_type="text/html", noindex=False, canonical_to_main_host=False, robots_blocked=False),
+        _hosts(status=200, content_type="text/html", noindex=False, canonical_to_main_host=True),
     ),
     "Q28": (
         "external-link-recheck",
@@ -476,7 +486,7 @@ def test_exposure_inventory_reachable_host_is_a_candidate_for_review() -> None:
 
     answer = _answers([host_probe])["Q27"]
     assert answer["status"] == "Needs validation" and answer["ticket"] is False
-    assert answer["rows"][0]["finding"] == "200 response without authentication; not read: noindex"
+    assert answer["rows"][0]["finding"] == "200 response without authentication; not read: content_type, noindex"
 
 
 def test_q104_stays_pending_even_with_a_review_record() -> None:

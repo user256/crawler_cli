@@ -132,11 +132,14 @@ def attach_observations(audit: Mapping[str, object], bundles: Sequence[Mapping[s
 
     run_id = _text(audit.get("crawl_run_id"))
     existing = audit.get("observations")
-    merged: list[dict[str, object]] = (
-        [dict(item) for item in existing.get("collections", [])]  # type: ignore[union-attr]
-        if isinstance(existing, Mapping)
-        else []
-    )
+    merged: list[dict[str, object]] = []
+    if existing is not None:
+        if not isinstance(existing, Mapping):
+            raise ObservationError("the audit's observations must be an object")
+        prior = existing.get("collections", [])
+        if not isinstance(prior, list) or not all(isinstance(item, Mapping) for item in prior):
+            raise ObservationError("the audit's observations.collections must be a list of objects")
+        merged = [dict(item) for item in prior]
     for bundle in bundles:
         validate_observation_bundle(bundle)
         if _text(bundle.get("crawl_run_id")) != run_id:

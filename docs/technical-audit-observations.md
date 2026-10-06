@@ -20,7 +20,10 @@ crawler-cli technical-audit-questions --audit audit.json --site-profile profile.
   (`crawler_cli.audit_html_signals`). It needs the run's database.
 - `--render-comparison` takes the JSON written by
   `compare-renders --crawl-run-id RUN --output`. A comparison sampled from
-  another run, or from explicit URLs, is refused.
+  another run, or from explicit URLs, is refused. It answers Q85 only:
+  compare-renders does not extract footer links, so Q46 stays Pending until a
+  `render-parity` collection with `footer` fields is written by hand or by a
+  future collector.
 - `--exposure-inventory` takes an `exposure-inventory` artifact. Hosts the
   inventory did not request remain untested.
 - `--robots-txt HOST=FILE` takes a robots.txt body saved by the operator.
@@ -58,26 +61,28 @@ that collected them.
   collection can produce Yes, but it never produces Healthy.
 - Each record must carry its kind's identity fields. A record without a field
   that a rule needs is counted as untested, which keeps the answer below
-  Healthy. If no record of a kind is tested, the question stays Pending.
+  Healthy, unless a field it does carry already proves the defect (a 404 link
+  is a finding even when its `rel` was not recorded). If no record of a kind
+  is tested, the question stays Pending.
 
 ## Kinds
 
 | Kind | Identity fields | Fields the answerers read | Questions |
 |---|---|---|---|
 | `html-signals` | url | is_https, mixed_content, insecure_internal_links, forms, tracking_preloads, font_faces_without_swap, font_preloads, head_blocking_stylesheets, head_sync_scripts, spam_matches, hidden_links, hreflang_alternates, linked_alternates, followed_external_links | Q5, Q33, Q43, Q45, Q65, Q67, Q86, Q92 |
-| `render-parity` | url, state | findings[] (compare-renders codes); footer.raw_links, footer.rendered_links | Q85, Q46 |
+| `render-parity` | url, state | findings[] (compare-renders codes, for Q85); footer.raw_links, footer.rendered_links (for Q46; not written by compare-renders, so they need a hand-written or future collection) | Q85, Q46 |
 | `render-trace` | url | template, api_request_count, uncacheable_api_urls, lcp_ms, cls, inp_ms, images_total, images_missing_dimensions, critical_origins, preconnect_origins, lcp_element {type, src, loading, fetchpriority, width, height, is_background} | Q29, Q35, Q64, Q68, Q69 |
 | `mobile-render` | url | template, overlay_viewport_share (0–1), overlay_kind, raw_primary_words, rendered_primary_words | Q95 |
 | `listing-controls` | url, control | template, element, changes_listing, crawlable_href | Q38 |
 | `image-resources` | image_url, content_type | page_url, in_content | Q66 |
-| `locale-probe` | url, variant | baseline_status, variant_status, baseline_location, variant_location, primary_content_differs | Q25 |
-| `host-probe` | host | status, content_type, auth_required, noindex, canonical_to_main_host, robots_blocked, discovered_via | Q27, Q77 |
-| `utility-path-probe` | url | path_class (`protected` or `public-utility`, from the approved policy), status, auth_required, exposes_content, noindex, robots_blocked | Q102 |
-| `external-link-recheck` | source_url, target_url | status, rel, affiliate | Q28 |
+| `locale-probe` | url, variant | baseline_status, variant_status, baseline_location, variant_location (null when there is no Location header), primary_content_differs; a probe is clean only when all five are recorded | Q25 |
+| `host-probe` | host | status, content_type (unknown when null, so a 200 is a candidate for review, not an Issue), auth_required, noindex, canonical_to_main_host, robots_blocked, discovered_via | Q27, Q77 |
+| `utility-path-probe` | url | path_class (`protected` or `public-utility`, from the approved policy), status, auth_required, exposes_content, noindex, robots_blocked (a public-utility path needs both noindex and robots_blocked recorded) | Q102 |
+| `external-link-recheck` | source_url, target_url | status, rel (required for an affiliate link; null when the anchor has none), affiliate | Q28 |
 | `tls-probe` | host | hsts_header (null when absent), preload_status, ocsp_stapled | Q63 |
-| `robots-txt` | host, status | body, llms_txt_status | Q96 |
+| `robots-txt` | host, status | body (required with a 2xx status; a 404 or 410 means no file and allows everything; a redirect, any other 4xx or a 5xx is unread), llms_txt_status | Q96 |
 | `google-render-inspection` | url, template, tool | primary_content_present, blocked_resources, render_error | Q18 |
-| `verified-google-fetch` | url | content_differs, links_differ, directives_differ, google_fetch_method | Q31 |
+| `verified-google-fetch` | url | content_differs, links_differ, directives_differ (all three must be recorded for a matching fetch), google_fetch_method | Q31 |
 | `competitor-topic-gap` | topic, site_covers, competitors_covering | query, method | Q50 |
 | `search-host-review` | review_type, reviewed_at, permitted_hosts | date_range, unapproved_hosts, queries | Q104 (recorded only) |
 

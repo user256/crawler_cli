@@ -10,12 +10,12 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from .technical_audit import TECHNICAL_AUDIT_CHECK_CONTRACT, TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES
+from .technical_audit_evidence import Answerer, Evidence, Json, _int_or_none, _path_and_query, _profile_value
 from .technical_audit_tickets import _placeholders, _render, _sample_urls, ticket_sheet_table
 from .profile_indexability_audit import analyse_profile_indexability
 from .crawl_depth_audit import analyse_priority_crawl_depth
@@ -114,15 +114,6 @@ def validate_question_registry(
         raise QuestionRegistryError("; ".join(errors))
 
 
-def _profile_value(profile: Mapping[str, object], dotted_key: str) -> object | None:
-    value: object = profile
-    for part in dotted_key.split("."):
-        if not isinstance(value, Mapping) or part not in value:
-            return None
-        value = value[part]
-    return value
-
-
 def questions_markdown(registry: Mapping[str, object]) -> str:
     """Render the reviewer-facing document; regenerate it whenever the JSON changes."""
 
@@ -199,30 +190,7 @@ QUESTION_SHEET_COLUMNS = (
     "Evidence tab",
     "Ticket",
 )
-# Registry entries, audits and answers are JSON documents.
-Json = Mapping[str, Any]
 _TAB_UNSAFE = re.compile(r"[\[\]\*\?/\\:']")
-
-
-@dataclass(frozen=True)
-class Evidence:
-    """What an answerer observed for one question."""
-
-    rows: list[dict[str, object]] = field(default_factory=list)
-    denominator: int | None = None
-    available: bool = True
-    # False when the answerer tests only part of what the question asks.
-    scope_complete: bool = True
-    coverage_complete: bool = True
-    qualification: str | None = None
-    note: str = ""
-    language_check: str | None = None
-
-
-@dataclass(frozen=True)
-class Answerer:
-    basis: str
-    answer: Callable[[Json, Json, Json | None], Evidence]
 
 
 def _check(audit: Json, identifier: str) -> Json | None:
@@ -1096,21 +1064,8 @@ def _row_url(row: Json) -> str:
     return samples[0] if samples else ""
 
 
-def _path_and_query(url: str) -> str:
-    match = re.match(r"^[a-z]+://[^/?#]*", url, re.IGNORECASE)
-    rest = url[match.end() :] if match else url
-    return rest or "/"
-
-
-def _int_or_none(value: Any) -> int | None:
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
 # Stream C answerers read run-scoped observation bundles; they live in their own
-# module and import the helpers above, so they are registered last.
+# module, built on technical_audit_evidence, so they are registered last.
 from .technical_audit_observed_answers import OBSERVED_ANSWERERS  # noqa: E402
 
 ANSWERERS.update({qid: answerer for qid, answerer in OBSERVED_ANSWERERS.items() if qid not in ANSWERERS})

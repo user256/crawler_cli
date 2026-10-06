@@ -5,10 +5,11 @@ third-party record (stream C of the question queue). Their evidence is an
 observation bundle attached to the audit (see ``audit_observations``), never a
 live request made by the runner.
 
-Each answerer reports which records it tested.  A record that lacks the field
-a rule needs is untested, which keeps the answer below Healthy; a kind with no
-tested record at all leaves the question Pending.  Every row carries the
-source, time and coverage of the collection it came from.
+Each answerer reports which records it tested.  A record that lacks a field
+a rule needs is untested, which keeps the answer below Healthy, unless a field
+it does carry already proves the defect; a kind with no tested record at all
+leaves the question Pending.  Every row carries the source, time and coverage
+of the collection it came from.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from urllib.parse import urlsplit
 
 from .audit_observations import observation_collections
 from .robots import _RobotsRules
-from .technical_audit_questions import (
+from .technical_audit_evidence import (
     Answerer,
     Evidence,
     Json,
@@ -48,6 +49,8 @@ AI_CRAWLERS = (
     "CCBot",
 )
 _QUESTION_RULE_CODES = {"canonical_changed", "indexing_directive_changed", "hreflang_changed"}
+# robots.txt statuses that prove there is no file; every other non-2xx response is unread.
+_NO_ROBOTS_STATUSES = frozenset({404, 410})
 
 
 class _Observed:
@@ -380,9 +383,11 @@ def _sitewide_external_links(audit: Json, question: Json, profile: Json | None) 
     share = float(dict(question.get("threshold") or {}).get("min_page_share", 0.5))
     allowed = _profile_list(profile, "allowed_external_domains")
     counts: dict[str, int] = {}
+    first_linking: dict[str, dict[str, Any]] = {}
     for record in pages:
         for url in dict.fromkeys(str(link) for link in record["followed_external_links"] or []):
             counts[url] = counts.get(url, 0) + 1
+            first_linking.setdefault(url, record)
     rows = []
     for url, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
         host = _host(url)
@@ -393,7 +398,7 @@ def _sitewide_external_links(audit: Json, question: Json, profile: Json | None) 
                     "domain": host,
                     "pages_linking": count,
                     "page_share": round(count / len(pages), 3),
-                    **pages[0]["_provenance"],
+                    **first_linking[url]["_provenance"],
                 }
             )
     untested = len(observed.records) - len(pages)
@@ -640,30 +645,24 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
     if not observed.collections:
         return observed.missing
     by_url: dict[str, list[dict[str, Any]]] = {}
+    changes_by_url: dict[str, list[str]] = {}
     untested = 0
     for record in observed.records:
-        if record.get("baseline_status") is None or record.get("variant_status") is None:
+        changes = _locale_probe_changes(record)
+        if changes is UNTESTED:
             untested += 1
             continue
-        by_url.setdefault(str(record["url"]), []).append(record)
-    rows = []
-    for url, probes in by_url.items():
-        changes = []
-        for probe in probes:
-            what = []
-            if probe["baseline_status"] != probe["variant_status"]:
-                what.append(f"status {probe['baseline_status']}->{probe['variant_status']}")
-            if (probe.get("baseline_location") or "") != (probe.get("variant_location") or ""):
-                what.append(f"Location {probe.get('variant_location') or 'none'}")
-            if probe.get("primary_content_differs") is True:
-                what.append("primary content differs")
-            if what:
-                changes.append(f"{probe['variant']}: {', '.join(what)}")
+        url = str(record["url"])
+        by_url.setdefault(url, []).append(record)
         if changes:
-            rows.append({"url": url, "finding": "; ".join(changes), **probes[0]["_provenance"]})
+            changes_by_url.setdefault(url, []).append(f"{record['variant']}: {', '.join(changes)}")
+    rows = [
+        {"url": url, "finding": "; ".join(changes), **by_url[url][0]["_provenance"]}
+        for url, changes in changes_by_url.items()
+    ]
     note = f"Observations: {observed.scopes()}."
     if untested:
-        note += f" {untested:,} probes lack a baseline or variant status."
+        note += f" {untested:,} probes lack a baseline or variant status, Location or content comparison."
     if not by_url:
         return Evidence(available=False, note=note)
     return Evidence(
@@ -673,6 +672,27 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
         coverage_complete=observed.complete,
         note=note,
     )
+
+
+def _locale_probe_changes(probe: Json) -> object:
+    """Differences one probe shows; UNTESTED when nothing differs and a comparison was never recorded."""
+
+    if probe.get("baseline_status") is None or probe.get("variant_status") is None:
+        return UNTESTED
+    what = []
+    if probe["baseline_status"] != probe["variant_status"]:
+        what.append(f"status {probe['baseline_status']}->{probe['variant_status']}")
+    # A Location value of None means no header; an absent key means it was not recorded.
+    if _has(probe, "baseline_location", "variant_location"):
+        if (probe["baseline_location"] or "") != (probe["variant_location"] or ""):
+            what.append(f"Location {probe['variant_location'] or 'none'}")
+    elif not what:
+        return UNTESTED
+    if probe.get("primary_content_differs") is True:
+        what.append("primary content differs")
+    elif probe.get("primary_content_differs") is None and not what:
+        return UNTESTED
+    return what
 
 
 def _host_exposure(*, mitigations: tuple[str, ...]) -> Callable[..., Evidence]:
@@ -692,12 +712,13 @@ def _host_exposure(*, mitigations: tuple[str, ...]) -> Callable[..., Evidence]:
             if status is None:
                 continue
             tested.add(host)
-            content_type = str(record.get("content_type") or "")
-            if status != 200 or record.get("auth_required") or (content_type and "html" not in content_type):
+            content_type = record.get("content_type")
+            if status != 200 or record.get("auth_required") or (content_type and "html" not in str(content_type)):
                 continue
             if any(record.get(key) is True for key in mitigations):
                 continue
-            unknown = [key for key in mitigations if record.get(key) is None]
+            unknown = ["content_type"] if content_type is None else []
+            unknown += [key for key in mitigations if record.get(key) is None]
             if unknown:
                 review = True
             rows.append(
@@ -738,7 +759,10 @@ def _external_links(record: Json, _q: Json, profile: Json | None) -> object:
         problems.append(f"returns {status}")
     affiliate_domains = _profile_list(profile, "affiliate.domains")
     affiliate = record.get("affiliate") is True or _domain_listed(_host(str(record["target_url"])), affiliate_domains)
-    if affiliate and "rel" in record:
+    if affiliate:
+        if "rel" not in record:
+            # The rel attribute was never recorded, so the link is clean only if its status already failed.
+            return "; ".join(problems) or UNTESTED
         rel = str(record.get("rel") or "").casefold().split()
         if "sponsored" not in rel and "nofollow" not in rel:
             problems.append("affiliate link without rel=sponsored or nofollow")
@@ -792,11 +816,13 @@ def _utility_paths(record: Json, _q: Json, _p: Json | None) -> object:
             return UNTESTED
         exposed = record["exposes_content"] is True and not record.get("auth_required")
         return f"unauthenticated {status} response exposes protected content" if exposed else None
-    if record.get("noindex") is None and record.get("robots_blocked") is None:
+    noindex, robots_blocked = record.get("noindex"), record.get("robots_blocked")
+    if noindex is None or robots_blocked is None:
+        # One control was never checked: neither "controlled" nor "uncontrolled" is proven.
         return UNTESTED
-    if record.get("noindex") is True and record.get("robots_blocked") is True:
+    if noindex is True and robots_blocked is True:
         return "noindex is unreadable because robots.txt blocks the URL"
-    if record.get("noindex") is not True and record.get("robots_blocked") is not True:
+    if noindex is False and robots_blocked is False:
         return "public utility URL has no noindex or robots.txt control"
     return None
 
@@ -817,11 +843,16 @@ def _ai_crawler_policy(audit: Json, question: Json, profile: Json | None) -> Evi
         status = _int_or_none(record.get("status"))
         if record.get("llms_txt_status") is not None:
             llms.append(f"{host} /llms.txt {record['llms_txt_status']}")
-        if status is None or status >= 500 or (200 <= status < 300 and record.get("body") is None):
+        if 200 <= (status or 0) < 300 and record.get("body") is not None:
+            body = str(record["body"])
+        elif status in _NO_ROBOTS_STATUSES:
+            # RFC 9309: a robots.txt that definitely does not exist allows everything.
+            body = ""
+        else:
+            # A redirect, a 2xx without its body, any other 4xx or a 5xx was never read.
             unknown_hosts.append(host)
             continue
-        # RFC 9309: an unavailable (4xx) robots.txt allows everything.
-        rules = _RobotsRules(host, str(record.get("body") or "") if status < 400 else "")
+        rules = _RobotsRules(host, body)
         for agent in AI_CRAWLERS:
             decision = rules.check("/", agent)
             verdict = "allow" if decision.allowed else "disallow"
@@ -886,10 +917,11 @@ def _google_render(record: Json, _q: Json, _p: Json | None) -> object:
 
 def _verified_google_fetch(record: Json, _q: Json, _p: Json | None) -> object:
     flags = {key: record.get(key) for key in ("content_differs", "links_differ", "directives_differ")}
-    if all(value is None for value in flags.values()):
-        return UNTESTED
     differs = [key.split("_", 1)[0] for key, value in flags.items() if value is True]
-    return f"{', '.join(differs)} differ from the visitor fetch" if differs else None
+    if differs:
+        return f"{', '.join(differs)} differ from the visitor fetch"
+    # Every comparison must be recorded before the fetch counts as matching.
+    return None if all(value is False for value in flags.values()) else UNTESTED
 
 
 def _topic_gap(record: Json, _q: Json, _p: Json | None) -> object:
