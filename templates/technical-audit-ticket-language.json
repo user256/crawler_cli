@@ -45,7 +45,9 @@
     "{qualification}": "check.qualification mapped through qualification_text below; empty when absent."
   },
   "ticket_eligibility": {
-    "states": ["finding"],
+    "states": [
+      "finding"
+    ],
     "blocked_qualifications": [
       "analyst_only",
       "review_required",
@@ -92,7 +94,9 @@
     "unscoped_detector_evidence": "The source detector recorded evidence that could not be attributed to one control, so this row stays in the evidence workbook until it is separated.",
     "required_detector_missing": "One of the detectors this control requires was not available in this run, so the result is incomplete.",
     "detector_finding_outside_control_scope": "The source detector reported evidence for a related control only; this control's own result was not recorded separately.",
-    "contract_evidence_not_collected": "Not tested: this run did not collect the evidence this control requires."
+    "contract_evidence_not_collected": "Not tested: this run did not collect the evidence this control requires.",
+    "bounded_external_link_sample": "Outbound destinations were rechecked for a bounded sample of linked pages; untested targets are not confirmed healthy.",
+    "bounded_or_incomplete_external_link_recheck": "The external-link recheck session did not cover its full sample, so a clean result is not a pass."
   },
   "priority_rules": [
     "Start from the check's default priority.",

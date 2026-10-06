@@ -134,7 +134,9 @@ def ticket_register_payload(audit: Mapping[str, object]) -> dict[str, object]:
     rows = build_technical_audit_ticket_rows(audit, language)
     overview = technical_audit_ticket_overview(audit, language)
     manual_review = audit.get("manual_review_answers", [])
-    manual_rows = [dict(row) for row in manual_review if isinstance(row, Mapping)] if isinstance(manual_review, list) else []
+    manual_rows = (
+        [dict(row) for row in manual_review if isinstance(row, Mapping)] if isinstance(manual_review, list) else []
+    )
     start_row = int(template["first_data_row"])
     start_column = str(template["start_column"])
     end_column = _column_label(_column_index(start_column) + len(TICKET_TEMPLATE_COLUMNS) - 1)
@@ -349,9 +351,15 @@ class GoogleSheetsTicketRegisterPublisher:
                 ],
                 [
                     [
-                        row.get("id", ""), row.get("status", ""), row.get("affected_count", ""),
-                        row.get("tested_count", ""), row.get("denominator", ""), row.get("detail_sheet", ""),
-                        row.get("ticket_eligible", ""), row.get("ticket_decision", ""), row.get("qualification", ""),
+                        row.get("id", ""),
+                        row.get("status", ""),
+                        row.get("affected_count", ""),
+                        row.get("tested_count", ""),
+                        row.get("denominator", ""),
+                        row.get("detail_sheet", ""),
+                        row.get("ticket_eligible", ""),
+                        row.get("ticket_decision", ""),
+                        row.get("qualification", ""),
                     ]
                     for row in payload.get("overview_rows", [])
                     if isinstance(row, Mapping)
@@ -359,10 +367,19 @@ class GoogleSheetsTicketRegisterPublisher:
             ),
             (
                 "Manual Review",
-                ["Question", "Question text", "State", "Controls", "Additional evidence required", "Evidence available"],
+                [
+                    "Question",
+                    "Question text",
+                    "State",
+                    "Controls",
+                    "Additional evidence required",
+                    "Evidence available",
+                ],
                 [
                     [
-                        row.get("id", ""), row.get("question", ""), row.get("status", ""),
+                        row.get("id", ""),
+                        row.get("question", ""),
+                        row.get("status", ""),
                         ", ".join(str(value) for value in row.get("control_ids", []) if value),
                         row.get("additional_evidence_required", "") or "",
                         row.get("additional_evidence_available", ""),
@@ -373,9 +390,7 @@ class GoogleSheetsTicketRegisterPublisher:
             ),
         )
         metadata = (
-            self.sheets.spreadsheets()
-            .get(spreadsheetId=spreadsheet_id, fields="sheets.properties.title")
-            .execute()
+            self.sheets.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="sheets.properties.title").execute()
         )
         existing = {
             str(sheet.get("properties", {}).get("title"))
@@ -394,6 +409,22 @@ class GoogleSheetsTicketRegisterPublisher:
             # so write blanks into an explicit block and compare it padded.
             values = _sheet_values([headers, *rows])
             tab_range = f"'{title}'!A1:{_column_label(len(headers))}{len(values)}"
+            if title in existing:
+                # A tab with this name was already in the workbook. Only clear it
+                # when its header row is ours (a rerun); never wipe client content.
+                header_range = f"'{title}'!A1:{_column_label(len(headers))}1"
+                found = (
+                    self.sheets.spreadsheets()
+                    .values()
+                    .get(spreadsheetId=spreadsheet_id, range=header_range, valueRenderOption="UNFORMATTED_VALUE")
+                    .execute()
+                    .get("values", [])
+                )
+                first_row = [str(cell) for cell in (found[0] if found else [])]
+                if first_row and first_row != [str(cell) for cell in headers]:
+                    raise ValueError(
+                        f"Refusing to overwrite the existing {title} tab: its header row is not the audit's"
+                    )
             # These tabs are audit-owned: clear the whole tab so a shorter
             # rerun cannot leave stale rows below the new block.
             self.sheets.spreadsheets().values().clear(

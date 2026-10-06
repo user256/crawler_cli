@@ -43,10 +43,11 @@ def test_audit_emits_the_manual_review_register_in_contract_order():
     assert [row["id"] for row in audit["manual_review_answers"]] == [row["id"] for row in MANUAL_REVIEW_QUESTIONS]
     assert all(row["status"] != "pass" for row in audit["manual_review_answers"])
     assert [row["id"] for row in audit["checks"]] == [row["id"] for row in TECHNICAL_AUDIT_CHECK_CONTRACT]
-    # 18 detectors from the v3 projection plus the three analyst-level detectors
-    # (AI governance, Accept-Language, transport security) that are not yet mapped
-    # to a v3 control (ticket 400).
-    assert len(audit["detector_checks"]) == 21
+    # 18 detectors from the v3 projection, the external-link recheck detector that
+    # feeds external-link-integrity (ticket 402), and the three analyst-level
+    # detectors (AI governance, Accept-Language, transport security) not yet
+    # mapped to a v3 control (ticket 400).
+    assert len(audit["detector_checks"]) == 22
 
 
 NO_EXTRA_EVIDENCE_QUESTIONS = ("Q2", "Q3", "Q6", "Q7", "Q8", "Q9", "Q11")

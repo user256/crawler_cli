@@ -103,3 +103,51 @@ def test_post_contract_detectors_are_emitted_as_detector_checks() -> None:
     control_ids = {row["id"] for row in audit["checks"]}
     for identifier in ("ai-crawler-governance", "accept-language-variation", "transport-security"):
         assert identifier in detector_ids and identifier not in control_ids
+
+
+# --- 402: the external-link control sees real recheck evidence --------------------
+
+
+def _recheck_rows(state: str, coverage_state: str = "complete") -> list[dict[str, object]]:
+    return [
+        {
+            "record_type": "coverage",
+            "record_kind": "external_link_recheck_coverage",
+            "state": coverage_state,
+            "attempted_target_count": 1,
+            "out_of_scope_target_count": 0,
+        },
+        {
+            "record_type": "observation",
+            "record_kind": "external_link_recheck",
+            "source_url": "https://example.com/a",
+            "target_url": "https://partner.example/page",
+            "state": state,
+            "attempts": [],
+        },
+    ]
+
+
+def _external_link_control(reports: dict[str, list[dict[str, object]]]) -> dict[str, object]:
+    audit = build_technical_audit(
+        crawl_run_id="run-1", reports=reports, run_context={"completion_state": "complete", "parsed_html_count": 1}
+    )
+    return next(row for row in audit["checks"] if row["id"] == "external-link-integrity")
+
+
+def test_external_link_control_is_unavailable_without_rechecks() -> None:
+    control = _external_link_control({})
+    assert control["status"] == "unavailable"
+
+
+def test_external_link_control_finds_a_hard_recheck_failure() -> None:
+    control = _external_link_control({"external-link-rechecks": _recheck_rows("http_failure")})
+    assert control["status"] == "finding"
+    assert control["affected_count"] == 1
+    assert control["evidence"][0]["target_url"] == "https://partner.example/page"
+
+
+def test_external_link_control_passes_only_on_a_complete_clean_recheck() -> None:
+    assert _external_link_control({"external-link-rechecks": _recheck_rows("responsive")})["status"] == "pass"
+    bounded = _external_link_control({"external-link-rechecks": _recheck_rows("responsive", "bounded")})
+    assert bounded["status"] != "pass"

@@ -2110,8 +2110,32 @@ def build_technical_audit(
             qualification="analyst_only",
             theme="AI",
         ),
+        _check(
+            "external-link-rechecks",
+            "External link rechecks",
+            "External Link Rechecks",
+            [
+                {**row, "qualification": "bounded_external_link_sample"}
+                for row in external_link_rechecks
+                if row.get("record_type") == "observation" and row.get("state") in _EXTERNAL_LINK_FAILURE_STATES
+            ],
+            "finding",
+            "Bounded live rechecks of outbound destinations linked from the sample; only hard failures are findings. "
+            "Redirects, challenges, timeouts and untested targets stay in the recheck tab for review.",
+            available=bool(external_link_rechecks) and external_link_rechecks[0].get("record_type") == "coverage",
+            denominator=_optional_int(external_link_rechecks[0].get("attempted_target_count"))
+            if external_link_rechecks
+            else None,
+            completion_state=completion_state,
+            qualification="bounded_external_link_sample",
+        ),
     )
     for check in checks:
+        if check["id"] == "external-link-rechecks" and check["status"] == "pass":
+            coverage_state = external_link_rechecks[0].get("state") if external_link_rechecks else None
+            if coverage_state != "complete":
+                check["status"] = "partial"
+                check["qualification"] = "bounded_or_incomplete_external_link_recheck"
         if check["id"] == "near-duplicate-content" and not similarity_complete:
             check["status"] = "partial" if source_coverage["similarity-coverage"]["available"] else "unavailable"
             check["tested_count"] = _optional_int(similarity.get("sampled_population"))
@@ -2244,6 +2268,11 @@ def build_technical_audit(
             check["id"] == "performance-and-conditional-requests"
             and check["status"] in {"partial", "unavailable"}
             and conditional_coverage.get("state") in {"not_requested", "not_testable"}
+        )
+        # External-link rechecks are an explicit, bounded session; a run that
+        # never requested one is not an incomplete check.
+        and not (
+            check["id"] == "external-link-rechecks" and check["status"] == "unavailable" and not external_link_rechecks
         )
         # Transport-security evidence is an informational optimization check;
         # unobservable preload/OCSP criteria must not block client publication.
@@ -2648,6 +2677,9 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
     if isinstance(external_link_rows, list) and external_link_rows:
         tables["External Link Rechecks"] = _table(external_link_rows)
     return tables
+
+
+_EXTERNAL_LINK_FAILURE_STATES = frozenset({"http_failure", "dns_error", "tls_error", "transport_error"})
 
 
 def _check(

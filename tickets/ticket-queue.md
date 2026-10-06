@@ -603,7 +603,14 @@ Deferred lanes remain below.
 
 Numbering note: the `feature/technical-audit-183` lineage reserved 240-246 and
 263-399 for different tickets than this queue's 240-243 and 264-266. Nothing below
-reuses either range; the next unreserved number after both lineages is **402**.
+reuses either range; the next unreserved number after both lineages is **409**.
 
 - `400` `proposed` [Map the AI governance, Accept-Language and transport detectors to v3 controls](./ticket-400-map-post-contract-detectors-to-controls.md) — **P2:** the three post-contract detectors stay analyst-only until a control consumes them.
 - `401` `implemented (local)` [Decode persisted language-probe evidence and stop the placeholder posing as coverage](./ticket-401-language-probe-read-path.md) — **P1, QA fix for 264.**
+- `402` `implemented (local)` [Feed the external-link-integrity control from the recheck rows the audit stores](./ticket-402-external-link-control-detector.md) — **P1, QA fix for full-manual-review-audit.**
+- `403` `implemented (local)` [Never clear a client tab that merely shares a name with an audit tab](./ticket-403-register-publisher-foreign-tab-guard.md) — **P1, QA fix for full-manual-review-audit.**
+- `404` `proposed` [Decide whether input-request tickets belong in the client register](./ticket-404-register-input-request-tickets-policy.md) — **P2.**
+- `405` `proposed` [Keep the control ledger and manual-review tab out of the client copy, and Config last](./ticket-405-register-ledger-tabs-in-client-workbook.md) — **P2.**
+- `406` `proposed` [Finish ticket 223: template mapping, copy fallback and destination header check](./ticket-406-mapped-template-publish-gaps.md) — **P2.**
+- `407` `proposed` [Register publisher review nits](./ticket-407-register-review-nits.md) — **P3.**
+- `408` `proposed` [Port the question runner and stream collectors onto master's audit contract](./ticket-408-port-question-runner-onto-master-contract.md) — **P1:** the `feature/technical-audit-183` lineage cannot merge textually; per-check port with the Rainbet evidence matrix.

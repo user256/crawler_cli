@@ -279,10 +279,7 @@ class _TicketSheets:
         tab, first_row, first_column, last_row, last_column = self._bounds(kwargs["range"])
         grid = self.cells.setdefault(tab, {})
         for row, column in list(grid):
-            if (
-                first_row <= row <= (last_row or row)
-                and first_column <= column <= (last_column or column)
-            ):
+            if first_row <= row <= (last_row or row) and first_column <= column <= (last_column or column):
                 del grid[(row, column)]
         return _Request({})
 
@@ -428,7 +425,12 @@ def test_resume_after_an_audit_tab_failure_verifies_both_tabs_before_the_receipt
     assert len(drive.copy_calls) == 1
     # Ticket rows already matched, so only the audit tabs are rewritten.
     assert [call["range"] for call in sheets.update_calls] == ["'Audit Controls'!A1:I45", "'Manual Review'!A1:F2"]
-    assert sheets.receipt_state_at_tab_readback == {"Audit Controls": ["writing"], "Manual Review": ["writing"]}
+    # Two reads per tab while the receipt says "writing": the header probe that
+    # proves the tab is ours (ticket 403), then the readback.
+    assert sheets.receipt_state_at_tab_readback == {
+        "Audit Controls": ["writing", "writing"],
+        "Manual Review": ["writing", "writing"],
+    }
     assert json.loads(receipt.read_text())["state"] == "verified"
     assert sheets.read("'Manual Review'!A1:F2")[1] == ["MR-1", "Question 1?", "needs_evidence", "metadata-basics"]
 
@@ -442,9 +444,36 @@ def test_rerun_with_fewer_manual_review_rows_leaves_no_stale_rows():
         "copied-sheet", {**payload, "manual_review_rows": [_manual_review_row(index) for index in range(1, 4)]}
     )
     assert len(sheets.read("'Manual Review'")) == 4
-    publisher._write_audit_register_tabs(
-        "copied-sheet", {**payload, "manual_review_rows": [_manual_review_row(1)]}
-    )
+    publisher._write_audit_register_tabs("copied-sheet", {**payload, "manual_review_rows": [_manual_review_row(1)]})
 
     assert [row[0] for row in sheets.read("'Manual Review'")] == ["Question", "MR-1"]
     assert {"range": "'Manual Review'", "spreadsheetId": "copied-sheet", "body": {}} in sheets.clear_calls
+
+
+# --- 403: never wipe a client tab that merely shares a name ----------------------
+
+
+def test_register_publisher_refuses_to_clear_a_foreign_tab_with_the_same_name(tmp_path: Path):
+    drive = _TicketDrive()
+    sheets = _TicketSheets()
+    sheets.tabs.add("Audit Controls")
+    sheets.cells["Audit Controls"] = {(1, 1): "Client notes", (2, 1): "Keep me"}
+    with pytest.raises(ValueError, match="Refusing to overwrite the existing Audit Controls tab"):
+        GoogleSheetsTicketRegisterPublisher(drive, sheets).publish(
+            audit=_audit(), title="Example tickets", receipt_path=tmp_path / "receipt.json"
+        )
+    assert sheets.cells["Audit Controls"][(2, 1)] == "Keep me"
+    assert not any(call["range"].startswith("'Audit Controls'") for call in sheets.clear_calls)
+
+
+def test_register_publisher_still_rewrites_its_own_tab_on_a_rerun(tmp_path: Path):
+    drive = _TicketDrive()
+    sheets = _TicketSheets()
+    GoogleSheetsTicketRegisterPublisher(drive, sheets).publish(
+        audit=_audit(), title="Example tickets", receipt_path=tmp_path / "first.json"
+    )
+    sheets.cells["Audit Controls"][(60, 1)] = "stale row from an earlier, longer run"
+    GoogleSheetsTicketRegisterPublisher(drive, sheets).publish(
+        audit=_audit(), title="Example tickets", receipt_path=tmp_path / "second.json"
+    )
+    assert (60, 1) not in sheets.cells["Audit Controls"]
