@@ -14,6 +14,7 @@ import json
 import pytest
 
 from crawler_cli.__main__ import _build_parser, _dispatch, _normalize_argv
+from crawler_cli.technical_audit_contract import TECHNICAL_AUDIT_CHECK_CONTRACT
 
 
 class FakeStore:
@@ -403,13 +404,14 @@ def test_technical_audit_writes_deterministic_bundle(fake_reports, tmp_path, cap
     )
     payload = json.loads(out.read_text())
     assert payload["crawl_run_id"] == "run-42"
-    assert payload["schema_version"] == "crawler-cli/technical-audit/2"
+    assert payload["schema_version"] == "crawler-cli/technical-audit/3"
     assert payload["run_context"]["snapshot_consistency"] == "stable"
-    assert {check["id"] for check in payload["checks"]} >= {
+    assert {check["id"] for check in payload["detector_checks"]} >= {
         "tracking-parameter-links",
         "schema-parser-defects",
         "orphan-candidates",
     }
+    assert [check["id"] for check in payload["checks"]] == [row["id"] for row in TECHNICAL_AUDIT_CHECK_CONTRACT]
     assert "Wrote deterministic technical audit" in capsys.readouterr().out
     calls = FakeReports.instances[-1].calls
     called = [name for name, _ in calls]
@@ -454,17 +456,19 @@ def test_technical_audit_skips_reports_requiring_absent_legacy_columns(fake_repo
     assert _run(["technical-audit", "--crawl-run-id", "run-42", "--out", str(out)]) == 0
 
     payload = json.loads(out.read_text())
-    checks = {check["id"]: check for check in payload["checks"]}
-    for check_id in (
-        "orphan-candidates",
-        "redirect-chains",
-        "metadata-and-locale",
-        "canonical-consistency",
-        "hreflang-consistency",
-        "performance-and-conditional-requests",
-        "internal-authority-inventory",
+    detectors = {check["id"]: check for check in payload["detector_checks"]}
+    controls = {check["id"]: check for check in payload["checks"]}
+    for detector_id, control_id in (
+        ("orphan-candidates", "orphan-candidates"),
+        ("redirect-chains", "response-status-and-redirect-history"),
+        ("metadata-and-locale", "metadata-basics"),
+        ("canonical-consistency", "canonical-declarations"),
+        ("hreflang-consistency", "hreflang-html-http"),
+        ("performance-and-conditional-requests", "conditional-cache-behaviour"),
+        ("internal-authority-inventory", "internal-authority"),
     ):
-        assert checks[check_id]["status"] in {"partial", "unavailable"}
+        assert detectors[detector_id]["status"] in {"partial", "unavailable"}
+        assert controls[control_id]["status"] != "pass"
 
     called = {name for name, _ in FakeReports.instances[-1].calls}
     assert "orphans" not in called

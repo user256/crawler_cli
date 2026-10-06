@@ -187,7 +187,7 @@ def test_complete_metadata_inventory_reports_zero_findings_and_keeps_sheet_denom
         },
         run_context={"completion_state": "complete"},
     )
-    check = next(row for row in audit["checks"] if row["id"] == "metadata-and-locale")
+    check = next(row for row in audit["detector_checks"] if row["id"] == "metadata-and-locale")
     assert check["status"] == "pass"
     assert check["eligible_count"] == 12
     assert check["affected_count"] == 0
@@ -376,12 +376,12 @@ def test_audit_is_stable_and_never_calls_candidate_checks_healthy():
     second = build_technical_audit(crawl_run_id="run-1", reports=reports, run_context=context)
 
     assert first == second
-    statuses = {check["id"]: check["status"] for check in first["checks"]}
+    statuses = {check["id"]: check["status"] for check in first["detector_checks"]}
     assert statuses["indexability-directive-conflicts"] == "finding"
     assert statuses["tracking-parameter-links"] == "finding"
     assert statuses["near-duplicate-content"] == "no_observations"
     assert first["check_registry"]
-    assert "canonical-targets" in {item["id"] for item in first["check_registry"]}
+    assert "canonical-target-validation" in {item["id"] for item in first["check_registry"]}
     assert len(first["skill_requirements"]) == len(TECHNICAL_AUDIT_SKILL_REQUIREMENTS)
     assert len(first["audit_log"]) == 3
     evidence_reference = first["audit_log"][0]["Evidence Reference"]
@@ -431,7 +431,7 @@ def test_timing_and_not_testable_conditional_probes_are_separate_from_client_act
     )
 
     tables = audit_sheet_tables(audit)
-    check = next(row for row in audit["checks"] if row["id"] == "performance-and-conditional-requests")
+    check = next(row for row in audit["detector_checks"] if row["id"] == "performance-and-conditional-requests")
     assert check["status"] == "unavailable"
     assert "Performance" not in tables
     assert "304 Recheck" not in tables
@@ -465,7 +465,7 @@ def test_unchanged_200_validator_warning_is_analyst_only_not_client_action():
         run_context={"completion_state": "complete", "parsed_html_count": 1},
     )
 
-    check = next(row for row in audit["checks"] if row["id"] == "performance-and-conditional-requests")
+    check = next(row for row in audit["detector_checks"] if row["id"] == "performance-and-conditional-requests")
     assert check["status"] == "finding"
     assert check["evidence"] == [candidate]
     assert audit["client_publication_gate"]["client_actions"] == []
@@ -492,7 +492,7 @@ def test_parameter_url_family_sheet_includes_reconcilable_counts_and_link_instan
     )
 
     assert "Parameter URL Families" not in audit_sheet_tables(audit)
-    check = next(row for row in audit["checks"] if row["id"] == "parameterized-canonical-links")
+    check = next(row for row in audit["detector_checks"] if row["id"] == "parameterized-canonical-links")
     assert check["evidence"][0]["candidate_type"] == "internally_linked_noncanonical_parameter_url"
 
 
@@ -611,7 +611,7 @@ def test_recipient_projection_preserves_known_url_sources_without_query_values()
 
 def test_missing_run_context_and_missing_source_are_not_reported_as_passes():
     audit = build_technical_audit(crawl_run_id="run-1", reports={"indexability": []})
-    checks = {check["id"]: check for check in audit["checks"]}
+    checks = {check["id"]: check for check in audit["detector_checks"]}
     assert checks["indexability-directive-conflicts"]["status"] == "unavailable"
     assert checks["near-duplicate-content"]["status"] == "unavailable"
     assert checks["indexability-directive-conflicts"]["denominator"] is None
@@ -665,7 +665,7 @@ def test_similarity_sample_and_authority_graph_gaps_are_partial_not_pass():
         reports=reports,
         run_context={"completion_state": "complete", "parsed_html_count": 6000},
     )
-    checks = {check["id"]: check for check in audit["checks"]}
+    checks = {check["id"]: check for check in audit["detector_checks"]}
     assert checks["near-duplicate-content"]["status"] == "partial"
     assert checks["internal-authority-inventory"]["status"] == "partial"
 
@@ -706,6 +706,6 @@ def test_legacy_rows_without_explicit_directive_evidence_are_unavailable():
             "schema_capabilities": {"indexability_evidence_json": True},
         },
     )
-    check = next(check for check in audit["checks"] if check["id"] == "indexability-directive-conflicts")
+    check = next(check for check in audit["detector_checks"] if check["id"] == "indexability-directive-conflicts")
     assert check["status"] == "unavailable"
     assert check["evidence"] == []

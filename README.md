@@ -727,6 +727,18 @@ hosts the run did not crawl are listed under `out_of_scope` and not joined. The
 it did not, unlinked rows mean "no inlinks from crawled pages", not confirmed
 orphans.
 
+To create the client-facing ticket register instead, add
+`--publish-ticket-register`. It copies the standard ticket workbook, preserves
+its layout and `Config` tab, and populates `Tickets!B7:I` only with evidenced,
+client-actionable rows. The output includes inline URL and observation evidence
+in the Description; candidate, partial and unavailable checks stay in the
+deterministic evidence bundle unless the language mapping defines a specific
+input-request ticket. Use `--ticket-register-title`, `--ticket-register-folder`
+and `--ticket-register-receipt` to set the copy details. Use
+`--resume-ticket-register` with the same receipt after an interrupted
+publication. This is separate from the compatible-v2 evidence publisher, and
+it also requires explicit authorization to write to Google Drive.
+
 ### Run snapshots and retention
 
 Each fetch is retained as an immutable page snapshot for its crawl run. The

@@ -127,6 +127,40 @@ This human-facing ticket register is distinct from the optional `crawler-cli`
 evidence publisher above. The supplied ticket sheet does not implement the
 publisher's v2 evidence contract and must not be passed to that publisher.
 
+### Deterministic ticket language
+
+The client register must be a copy of the standard template, retaining its
+`Tickets` layout and the eight columns beginning at `B6`. Its default wording
+and write range live in
+`crawler_cli/templates/technical-audit-ticket-language.json`. Keep that
+mapping in the same ordered 44-row contract as the runtime audit; validate it
+with `crawler_cli.technical_audit_tickets.load_ticket_language()` before using
+it in a publisher.
+
+To make the copied client register after the evidence bundle is written, use
+the explicit publication path. It copies the standard source workbook, writes
+ticket rows from `Tickets!B7`, and records a local receipt after read-back:
+
+```bash
+crawler-cli technical-audit --postgres-dsn "$DSN" --crawl-run-id "$RUN_ID" \
+  --out audit-evidence/technical-audit.json \
+  --publish-ticket-register --ticket-register-title "Example technical SEO audit"
+```
+
+Only create a remediation row when the control is a `finding`, has affected
+evidence rows, and has no blocking qualification such as `analyst_only`,
+`review_required`, incomplete graph coverage, partial rechecks, or a bounded
+comparison. Put up to three redaction-safe URL and observation lines directly
+in the Description, then point to the full evidence tab in Notes. A partial
+or candidate row belongs in Overview and its evidence tab, with the reason it
+was withheld from the client register.
+
+Use the ticket fields for the client action and deployment verification. Do
+not put audit commands, crawler options, run identifiers, or an unqualified
+detector interpretation in the Description or How to Replicate field. Missing
+input can become a Low `Improvement` ticket only where the mapping explicitly
+defines the input request and its acceptance criteria.
+
 ## Fetching Rules
 
 - Respect robots.txt during discovery unless the user explicitly authorises otherwise.

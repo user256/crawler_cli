@@ -8,6 +8,8 @@ import pytest
 from crawler_cli.google_sheets import (
     GoogleSheetsTemplatePublisher,
     TEMPLATE_VERSION,
+    _padded_readback,
+    _sheet_values,
     _validated_tables,
     _validate_template,
     template_manifest,
@@ -678,3 +680,19 @@ def test_large_table_writes_in_checkpointed_bounded_chunks(tmp_path):
         ("update", "'Overview'!A502:B502"),
     ]
     assert json.loads(receipt.read_text(encoding="utf-8"))["completed_chunks"]["Overview"] == [0, 1]
+
+
+def test_sheet_values_write_nulls_as_blanks():
+    assert _sheet_values([["Control", None, 0, False], [None]]) == [["Control", "", 0, False], [""]]
+
+
+def test_padded_readback_restores_trimmed_cells_and_rows():
+    # values.get omits trailing blank cells and rows, and may return nulls.
+    assert _padded_readback([["a", "b"], ["c"], [None, "d"]], 3, 5) == [
+        ["a", "b", ""],
+        ["c", "", ""],
+        ["", "d", ""],
+        ["", "", ""],
+        ["", "", ""],
+    ]
+    assert _padded_readback(None, 2, 1) == [["", ""]]

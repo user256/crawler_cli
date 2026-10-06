@@ -166,10 +166,12 @@ def _context():
 def test_historical_failures_are_candidates_until_rechecked():
     audit = build_technical_audit(crawl_run_id="run-1", reports=_reports(), run_context=_context())
     gate = audit["client_publication_gate"]
-    check = next(row for row in audit["checks"] if row["id"] == "internal-link-failures")
+    check = next(row for row in audit["detector_checks"] if row["id"] == "internal-link-failures")
+    control = next(row for row in audit["checks"] if row["id"] == "internal-link-targets")
     assert gate["ready"] is False
     assert gate["client_actions"] == []
     assert check["status"] == "unavailable"
+    assert control["status"] not in {"pass", "finding"}
     assert audit["analyst_evidence"][0]["recheck_state"] == "not_checked"
     assert "Audit Log" not in audit_sheet_tables(audit)
 
@@ -181,8 +183,10 @@ def test_recovered_targets_are_removed_from_client_failures_with_provenance_reta
         run_context=_context(),
         live_rechecks={"https://example.test/failed": {"state": "recovered", "attempts": [{"status": 200}]}},
     )
-    check = next(row for row in audit["checks"] if row["id"] == "internal-link-failures")
+    check = next(row for row in audit["detector_checks"] if row["id"] == "internal-link-failures")
+    control = next(row for row in audit["checks"] if row["id"] == "internal-link-targets")
     assert check["status"] == "pass"
+    assert control["status"] != "finding"
     assert audit["client_publication_gate"]["client_actions"] == []
     assert audit["analyst_evidence"][0]["recheck_state"] == "recovered"
     assert "Audit Log" not in audit_sheet_tables(audit)
