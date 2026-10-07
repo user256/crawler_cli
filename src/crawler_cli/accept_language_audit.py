@@ -21,6 +21,8 @@ import re
 from typing import Any, Mapping, Sequence
 from urllib.parse import urljoin, urlsplit
 
+from bs4 import BeautifulSoup
+
 from .hashing import simhash64
 from .redaction import redact_url_without_digest
 
@@ -49,6 +51,8 @@ _SIMHASH_TOLERANCE = 3
 _LOCALE_ROOT = re.compile(r"^/[a-z]{2,3}(?:[-_][a-z0-9]{2,4})?/?$", re.I)
 _LANGUAGE_COOKIE = re.compile(r"lang|locale|country|region|geo|market", re.I)
 _QUALIFICATION = "accept_language_probe_observation_requires_intent_and_crawler_access_review"
+# Elements whose text is never primary content: code, config and hidden templates.
+_NON_PRIMARY_TAGS = ("script", "style", "noscript", "template")
 
 
 def select_accept_language_targets(
@@ -225,6 +229,33 @@ async def _probe(
         ),
         "body_sha256": hashlib.sha256(raw_html.encode("utf-8")).hexdigest() if raw_html else None,
         "body_simhash": simhash64(raw_html) if raw_html else None,
+        **_primary_content(raw_html),
+    }
+
+
+def _primary_content(raw_html: str | None) -> dict[str, object]:
+    """Hash of the visible primary text, with the region it was taken from (ticket 413).
+
+    The region is the page's ``<main>`` (or ``role="main"``) element, else the
+    ``<body>``.  Script, style, noscript and template text and every attribute
+    are ignored, so a changed analytics locale, inline config or nonce is not
+    primary content.  ``None`` when there was no resolved HTML response.
+    """
+    if not raw_html:
+        return {"primary_content_sha256": None, "primary_content_basis": None}
+    soup = BeautifulSoup(raw_html, "html.parser")
+    for tag in soup(list(_NON_PRIMARY_TAGS)):
+        tag.decompose()
+    region = soup.find("main") or soup.find(attrs={"role": "main"})
+    basis = "main_visible_text"
+    if region is None:
+        region, basis = soup.find("body"), "body_visible_text"
+    if region is None:
+        region, basis = soup, "document_visible_text"
+    text = " ".join(region.get_text(" ", strip=True).split())
+    return {
+        "primary_content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "primary_content_basis": basis,
     }
 
 
@@ -327,14 +358,20 @@ def _classify_target(
 
 
 def _differences(baseline: Mapping[str, object], probe: Mapping[str, object], *, content_stable: bool) -> list[str]:
+    # A hop that was never answered (status 0: fetch error, timeout, robots or
+    # scope rejection) has no HTTP status, Location or URL to compare (ticket 412).
     differences = []
-    if _first_hop(baseline).get("status") != _first_hop(probe).get("status"):
+    first_hops_answered = _http_status(_first_hop(baseline).get("status")) and _http_status(
+        _first_hop(probe).get("status")
+    )
+    last_hops_answered = _http_status(baseline["final_status"]) and _http_status(probe["final_status"])
+    if first_hops_answered and _first_hop(baseline).get("status") != _first_hop(probe).get("status"):
         differences.append("first_status_changed")
-    if _first_hop(baseline).get("location") != _first_hop(probe).get("location"):
+    if first_hops_answered and _first_hop(baseline).get("location") != _first_hop(probe).get("location"):
         differences.append("redirect_target_changed")
-    if _url_key(str(baseline["final_url"])) != _url_key(str(probe["final_url"])):
+    if last_hops_answered and _url_key(str(baseline["final_url"])) != _url_key(str(probe["final_url"])):
         differences.append("final_url_changed")
-    if baseline["final_status"] != probe["final_status"]:
+    if last_hops_answered and baseline["final_status"] != probe["final_status"]:
         differences.append("final_status_changed")
     if baseline["outcome"] == probe["outcome"] == "resolved" and "final_url_changed" not in differences:
         if baseline.get("html_lang") != probe.get("html_lang"):
@@ -342,6 +379,10 @@ def _differences(baseline: Mapping[str, object], probe: Mapping[str, object], *,
         if content_stable and not _same_content(baseline, probe, strict=False):
             differences.append("content_changed")
     return differences
+
+
+def _http_status(status: object) -> bool:
+    return isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599
 
 
 def _same_content(left: Mapping[str, object], right: Mapping[str, object], *, strict: bool) -> bool:
@@ -403,6 +444,8 @@ def _public_probe(probe: Mapping[str, object]) -> dict[str, object]:
         "final_status": probe["final_status"],
         "html_lang": probe["html_lang"],
         "body_sha256": probe["body_sha256"],
+        "primary_content_sha256": probe.get("primary_content_sha256"),
+        "primary_content_basis": probe.get("primary_content_basis"),
         "redirect_chain": [
             {**hop, "url": _safe_url(str(hop["url"])), "location": _safe_url(str(hop["location"] or "") or None)}
             for hop in hops

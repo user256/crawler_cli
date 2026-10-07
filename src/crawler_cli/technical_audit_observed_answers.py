@@ -647,11 +647,20 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
     by_url: dict[str, list[dict[str, Any]]] = {}
     changes_by_url: dict[str, list[str]] = {}
     untested = 0
+    unanswered: dict[str, int] = {}
+    markup_only = 0
     for record in observed.records:
         changes = _locale_probe_changes(record)
         if changes is UNTESTED:
             untested += 1
+            for side in ("baseline_failure", "variant_failure"):
+                failure = record.get(side)
+                if isinstance(failure, Mapping):
+                    reason = str(failure.get("skip_reason") or failure.get("outcome") or "unknown")
+                    unanswered[reason] = unanswered.get(reason, 0) + 1
             continue
+        if record.get("raw_body_differs") is True and record.get("primary_content_differs") is False:
+            markup_only += 1
         url = str(record["url"])
         by_url.setdefault(url, []).append(record)
         if changes:
@@ -663,6 +672,14 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
     note = f"Observations: {observed.scopes()}."
     if untested:
         note += f" {untested:,} probes lack a baseline or variant status, Location or content comparison."
+    if unanswered:
+        reasons = ", ".join(f"{reason} {count:,}" for reason, count in sorted(unanswered.items()))
+        note += f" Requests never answered, so not compared: {reasons}."
+    if markup_only:
+        note += (
+            f" {markup_only:,} probes differ only outside the primary content (scripts, attributes or markup);"
+            " review-only evidence, not counted."
+        )
     if not by_url:
         return Evidence(available=False, note=note)
     return Evidence(
@@ -675,9 +692,16 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
 
 
 def _locale_probe_changes(probe: Json) -> object:
-    """Differences one probe shows; UNTESTED when nothing differs and a comparison was never recorded."""
+    """Differences one probe shows; UNTESTED when nothing differs and a comparison was never recorded.
 
-    if probe.get("baseline_status") is None or probe.get("variant_status") is None:
+    Only real HTTP statuses compare: a status of 0 or None means the request was
+    never answered (fetch error, timeout, robots or scope rejection), so that
+    variant is untested rather than a status change (ticket 412).  Raw-body
+    differences are review evidence only; just ``primary_content_differs``
+    counts as changed content (ticket 413).
+    """
+
+    if _http_status(probe.get("baseline_status")) is None or _http_status(probe.get("variant_status")) is None:
         return UNTESTED
     what = []
     if probe["baseline_status"] != probe["variant_status"]:
@@ -693,6 +717,11 @@ def _locale_probe_changes(probe: Json) -> object:
     elif probe.get("primary_content_differs") is None and not what:
         return UNTESTED
     return what
+
+
+def _http_status(value: object) -> int | None:
+    status = _int_or_none(value) if not isinstance(value, bool) else None
+    return status if status is not None and 100 <= status <= 599 else None
 
 
 def _host_exposure(*, mitigations: tuple[str, ...]) -> Callable[..., Evidence]:
