@@ -215,8 +215,12 @@ async def main():
         GoogleSheetsTemplatePublisher(drive, sheets).publish(
             template="template-sheet",
             title="QA",
-            tables={"Tickets": [list(TICKET_COLUMNS), ["x"] * 8]},
-            locate_ticket_header=True,
+            tables={
+                "Tickets": [
+                    list(TICKET_COLUMNS),
+                    [{"Priority": "High", "Ticket Classification": "Issue"}.get(column, "x") for column in TICKET_COLUMNS],
+                ]
+            },
         )
     except TemplateHeaderError as exc:
         error = type(exc).__name__
