@@ -32,15 +32,15 @@ complete. Probe-producer follow-ups in that ticket remain open.
 - `416` `done` [Preserve denominator units in question-derived tickets](./ticket-416-question-ticket-denominator-units.md) — **P2**.
 - `417` `done` [Restore the pinned formatting gate](./ticket-417-postmerge-format-gate.md) — **P2**.
 - `418` `done` [Restore per-report snapshot capability checks after PR #118](./ticket-418-legacy-snapshot-capability-checks.md) — **P1**.
-- `419` `proposed` [Live public-site QA of the reattached probes](./ticket-419-live-probe-qa.md) — **P1.**
+- `419` `done` [Live public-site QA of the reattached probes](./ticket-419-live-probe-qa.md) — **P1.**
 - `420` `proposed` [Live Google Sheets publish QA for the template-contract publisher](./ticket-420-live-sheets-publish-qa.md) — **P1.**
 - `421` `proposed` [Decide whether links that wrap a heading count for Q39](./ticket-421-q39-heading-link-definition.md) — **P2.**
 - `422` `proposed` [Make database-backed tests safe to run and run them in CI](./ticket-422-db-test-safety-and-ci-dsn.md) — **P2.**
 - `423` `proposed` [Record why an /llms.txt fetch failed in AI-governance observations](./ticket-423-llms-txt-failure-reasons.md) — **P3.**
 - `424` `proposed` [Sheets publisher follow-ups carried over from ticket 223](./ticket-424-sheets-publisher-polish.md) — **P3.**
-- `425` `proposed` [Treat a bot challenge as unanswered in the Accept-Language probe](./ticket-425-locale-probe-challenge-not-a-status.md) — **P1, 419 live QA D1.**
-- `426` `proposed` [Mark the locale-probe collection partial when comparisons were not answered](./ticket-426-locale-probe-partial-coverage.md) — **P2, 419 live QA D2.**
-- `427` `proposed` [Let the live probes use the crawl's transport, identity and pace options](./ticket-427-probe-engine-transport-options.md) — **P2, 419 live QA D3.**
+- `425` `done` [Treat a bot challenge as unanswered in the Accept-Language probe](./ticket-425-locale-probe-challenge-not-a-status.md) — **P1, 419 live QA D1.**
+- `426` `done` [Mark the locale-probe collection partial when comparisons were not answered](./ticket-426-locale-probe-partial-coverage.md) — **P2, 419 live QA D2.**
+- `427` `done` [Let the live probes use the crawl's transport, identity and pace options](./ticket-427-probe-engine-transport-options.md) — **P2, 419 live QA D3.**
 
 Next unreserved ticket number is **428**.
 

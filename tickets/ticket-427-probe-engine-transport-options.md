@@ -24,20 +24,36 @@ detector). A 429 means slow down, not escalate.
 
 ## Tasks and acceptance criteria
 
-- [ ] `technical-audit-observations` accepts `--http-backend`, `--impersonate`,
+- [x] `technical-audit-observations` accepts `--http-backend`, `--impersonate`,
       `--custom-ua` and `--no-challenge-detection` with the same meaning as
       `crawl`, and a `--probe-delay` (minimum gap between probe requests, polite
       by default).
-- [ ] With detection off, a real challenge (`cf-mitigated: challenge`, or a
+- [x] With detection off, a real challenge (`cf-mitigated: challenge`, or a
       challenge page on 403/429/503) is still recorded as challenged (ticket
       425), while a real 200 page that embeds Turnstile is compared normally.
-- [ ] The guarded engine keeps robots, scope, circuit breaker and a destination
+- [x] The guarded engine keeps robots, scope, circuit breaker and a destination
       guard on every backend.
-- [ ] Unit tests for the engine configuration the flags produce.
-- [ ] Re-run a small live check against rainbet.com with the Cloudflare
+- [x] Unit tests for the engine configuration the flags produce.
+- [x] Re-run a small live check against rainbet.com with the Cloudflare
       recipe and record it in live-probe-run.md.
 
 ## Status
 
-proposed (Priority: **P2**). Filed 2026-10-07 from the ticket 419 live QA (D3).
-Related: 410, 413, 419, 425.
+done (Priority: **P2**). Filed 2026-10-07 from the ticket 419 live QA (D3);
+fixed on branch `fix/ticket-425-427`, 2026-10-07. Related: 410, 413, 419, 425.
+
+Fix: `technical-audit-observations` has a "Live probe transport" group with
+`--http-backend`, `--impersonate` (implies curl_cffi; rejected with an explicit
+aiohttp backend), `--custom-ua`/`--user-agent`, `--no-challenge-detection` and
+`--probe-delay SECONDS` (default **1.0**, the minimum gap between probe requests;
+0 turns the limiter off; before this the engine allowed 5 requests per second).
+`__main__._probe_engine_config` builds the engine for both `--ai-governance` and
+`--probe-accept-language`, using the same UA rule as `crawl`: an impersonated
+profile keeps its own UA unless `--custom-ua` is given. Robots, scope, the circuit
+breaker, one request per host and no browser escalation are unchanged. The
+address-pinned destination guard can only reach aiohttp sockets, so a curl_cffi
+probe uses the resolver guard, which is the crawl's default. With detection off,
+real challenges are still caught by ticket 425's hop check. Tests in
+`tests/test_audit_observation_adapters.py`. The live rainbet re-check with the
+Cloudflare recipe read 200 pages on the apex, see
+[live-probe-run.md](./qa-new-audit-2026-10-06/live-probe-run.md).
