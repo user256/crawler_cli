@@ -113,9 +113,9 @@ def test_q39_heading_failures_stay_an_issue_with_a_ticket_over_the_tested_count(
     assert (answer["affected_count"], answer["denominator"]) == (2, 7)
 
 
-def test_q39_untested_heading_links_are_noted_but_do_not_block_healthy() -> None:
+def test_q39_untested_heading_links_keep_a_clean_result_below_healthy() -> None:
     answer = _answers({"internal-link-quality": []}, heading_link_count=10, heading_link_tested_count=8)["Q39"]
-    assert (answer["status"], answer["denominator"]) == ("Healthy", 8)
+    assert answer["status"] == "Needs validation" and answer["denominator"] == 8
     assert any("2 of 10 heading links" in note and "not tested" in note for note in answer["notes"])
 
 

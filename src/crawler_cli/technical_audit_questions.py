@@ -336,6 +336,8 @@ def _heading_link_targets(audit: Json, question: Json, profile: Json | None) -> 
             **evidence.__dict__,
             "denominator": tested,
             "denominator_unit": "heading links",
+            # Untested heading links are unknown, so a clean result over part of the population is not Healthy.
+            "scope_complete": evidence.scope_complete and found <= tested,
             "note": "; ".join(notes),
         }
     )

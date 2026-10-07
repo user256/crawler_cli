@@ -56,3 +56,5 @@ Regressions in `tests/test_stream_integration_qa_fixes.py` (`test_q39_*`,
 saved Rainbet audit replay is unchanged apart from Q39's note text. The SQL was not run against a live
 database in this pass (no database credentials were available to the agent); the context query is covered
 by a fake-store unit test only.
+
+Integration follow-up: a clean Q39 whose counted population has untested heading links (found > tested) is Needs validation, not Healthy.
