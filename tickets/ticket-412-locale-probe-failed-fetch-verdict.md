@@ -39,6 +39,15 @@ keeps its real 200->302 + Location finding. Regression tests: `tests/test_locale
 error, timeout, robots and scope rejection, unanswered baseline, all variants failing, failed redirect hop, real 404
 change, legacy status-0 record).
 
-Note: the collector still labels an engine timeout (status 0 with `skip_reason="fetch_error:..."`) as outcome
-`not_admitted`; the skip reason is carried through, and changing the outcome label would alter the bot-trap
-classification, so it was left as is.
+Follow-up (2026-10-07, branch `fix/postmerge-qa2-probe`): a timeout or connection error (status 0 with skip reason
+`fetch_error:...`, `timeout:...` or `javascript_fetch_error:...`) now has its own outcome, `fetch_failed`
+(`redirect_target_fetch_failed` on a later hop), separate from real admission refusals (robots, scope, destination
+guard, budget, circuit breaker), which stay `not_admitted` / `redirect_target_not_admitted`. Bot-trap classification is
+unchanged: neither label is a trap on the first hop, both still count as `left_primary_host` when an off-host redirect
+target is unanswered, and status 0 with no skip reason keeps `fetch_error` (trap). The neutral-access state for a
+timed-out baseline reads `fetch_failed` instead of `not_admitted` (still not a trap). Saved bundles with the old label
+are read correctly: the adapter (`normalized_probe_outcome`) relabels a `not_admitted` probe whose failing hop has a
+transport skip reason, so `baseline_outcome`/`variant_outcome`/`*_failure.outcome` match a fresh run; Q25's note still
+names the skip reason. Tests: `tests/test_accept_language_audit.py` (timeout labelled distinctly, robots/scope/
+destination refusals still `not_admitted`, identical bot-trap results for both on the first hop and on an off-host
+redirect target, no-reason status 0 still a trap) and `tests/test_locale_probe_verdicts.py` (legacy bundle).

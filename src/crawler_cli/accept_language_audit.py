@@ -53,6 +53,36 @@ _LANGUAGE_COOKIE = re.compile(r"lang|locale|country|region|geo|market", re.I)
 _QUALIFICATION = "accept_language_probe_observation_requires_intent_and_crawler_access_review"
 # Elements whose text is never primary content: code, config and hidden templates.
 _NON_PRIMARY_TAGS = ("script", "style", "noscript", "template")
+# Skip reasons the engine records when it sent the request but got no response
+# (connection error, timeout).  Every other skip reason is the crawler refusing
+# to send it: robots, scope, destination guard, budget or circuit breaker.
+_TRANSPORT_FAILURE_PREFIXES = ("fetch_error:", "timeout:", "javascript_fetch_error:")
+# Unanswered-request outcomes (ticket 412 follow-up).  ``fetch_error`` (status 0
+# and no skip reason at all) predates this split and stays a bot-trap signal.
+NOT_ADMITTED_OUTCOMES = frozenset({"not_admitted", "redirect_target_not_admitted"})
+FETCH_FAILED_OUTCOMES = frozenset({"fetch_failed", "redirect_target_fetch_failed"})
+
+
+def is_transport_failure(skip_reason: object) -> bool:
+    """True when the request was sent but never answered (not an admission refusal)."""
+    return isinstance(skip_reason, str) and skip_reason.startswith(_TRANSPORT_FAILURE_PREFIXES)
+
+
+def unanswered_outcome(skip_reason: str, hop_index: int) -> str:
+    """Outcome label for a hop the engine returned with status 0 and a skip reason."""
+    prefix = "" if hop_index == 0 else "redirect_target_"
+    return f"{prefix}{'fetch_failed' if is_transport_failure(skip_reason) else 'not_admitted'}"
+
+
+def normalized_probe_outcome(outcome: object, skip_reason: object) -> object:
+    """Read a saved probe outcome, relabelling the pre-split ``not_admitted`` for a timeout.
+
+    Bundles written before the split labelled a transport failure (skip reason
+    ``fetch_error:...``) ``not_admitted``; the skip reason tells them apart.
+    """
+    if outcome in NOT_ADMITTED_OUTCOMES and is_transport_failure(skip_reason):
+        return "fetch_failed" if outcome == "not_admitted" else "redirect_target_fetch_failed"
+    return outcome
 
 
 def select_accept_language_targets(
@@ -200,7 +230,7 @@ async def _probe(
                 if not result.skip_reason:
                     outcome = "fetch_error"
                 else:
-                    outcome = "not_admitted" if hop_index == 0 else "redirect_target_not_admitted"
+                    outcome = unanswered_outcome(result.skip_reason, hop_index)
                 break
             if result.status not in _REDIRECT_STATUSES:
                 outcome = "resolved"
@@ -404,7 +434,10 @@ def _trap_reason(target: str, probe: Mapping[str, object]) -> str | None:
     status = probe.get("final_status")
     if outcome == "resolved" and isinstance(status, int) and status >= 400:
         return "error_status"
-    if outcome in {"resolved", "redirect_target_not_admitted"} and not _same_site_host(target, str(probe["final_url"])):
+    # A redirect whose off-host target was refused or never answered still left
+    # the primary host; whether the target answered does not change that.
+    redirected_away = {"resolved", "redirect_target_not_admitted", "redirect_target_fetch_failed"}
+    if outcome in redirected_away and not _same_site_host(target, str(probe["final_url"])):
         return "left_primary_host"
     return None
 
@@ -413,7 +446,7 @@ def _neutral_access_state(target: str, probe: Mapping[str, object]) -> str:
     reason = _trap_reason(target, probe)
     if reason:
         return f"trap:{reason}"
-    if probe["outcome"] in {"not_admitted", "redirect_target_not_admitted"}:
+    if probe["outcome"] in NOT_ADMITTED_OUTCOMES | FETCH_FAILED_OUTCOMES:
         return str(probe["outcome"])
     if probe["final_status"] != 200:
         return f"resolved_status_{probe['final_status']}"

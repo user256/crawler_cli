@@ -13,6 +13,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from urllib.parse import urlsplit
 
+from .accept_language_audit import normalized_probe_outcome
+
 _NEUTRAL_VARIANTS = frozenset({"none", "none-repeat"})
 _TESTED_RECORD_TYPES = frozenset({"observation", "candidate"})
 
@@ -96,8 +98,18 @@ def _failure(probe: Mapping[str, object] | None) -> dict[str, object] | None:
     hops = [hop for hop in chain if isinstance(hop, Mapping)] if isinstance(chain, list) else []
     for index, hop in enumerate(hops):
         if _http_status(hop.get("status")) is None:
-            return {"outcome": outcome, "skip_reason": hop.get("skip_reason"), "hop": index}
+            skip_reason = hop.get("skip_reason")
+            # Older bundles labelled a timeout ``not_admitted``; the skip reason corrects it.
+            return {"outcome": normalized_probe_outcome(outcome, skip_reason), "skip_reason": skip_reason, "hop": index}
     return {"outcome": outcome, "skip_reason": None, "hop": None}
+
+
+def _outcome(probe: Mapping[str, object] | None) -> object:
+    """The probe's outcome as the current collector labels it; None when not probed."""
+    if probe is None:
+        return None
+    failure = _failure(probe)
+    return failure["outcome"] if failure is not None else probe.get("outcome")
 
 
 def _initial_location(probe: Mapping[str, object] | None) -> str | None:
@@ -198,8 +210,8 @@ def locale_probe_records(evidence: Sequence[Mapping[str, object]]) -> list[dict[
                     "primary_content_differs": _content_differs(baseline, probe, repeat),
                     "primary_content_basis": probe.get("primary_content_basis"),
                     "raw_body_differs": _raw_body_differs(baseline, probe),
-                    "baseline_outcome": baseline.get("outcome") if baseline is not None else None,
-                    "variant_outcome": probe.get("outcome"),
+                    "baseline_outcome": _outcome(baseline),
+                    "variant_outcome": _outcome(probe),
                     "baseline_failure": _failure(baseline),
                     "variant_failure": _failure(probe),
                     "collection_qualification": probe.get("qualification"),

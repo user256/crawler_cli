@@ -108,7 +108,7 @@ async def test_unanswered_variant_is_untested_not_a_status_change(skip_reason: s
     assert "baseline_location" not in es and "variant_location" not in es
     assert es["primary_content_differs"] is None
     assert es["variant_failure"] == {
-        "outcome": "fetch_error" if skip_reason is None else "not_admitted",
+        "outcome": {None: "fetch_error", "fetch_error:TimeoutError": "fetch_failed"}.get(skip_reason, "not_admitted"),
         "skip_reason": skip_reason,
         "hop": 0,
     }
@@ -296,3 +296,33 @@ def test_raw_body_hash_alone_never_claims_primary_content_differs() -> None:
     assert records[0]["collection_qualification"] == (
         "accept_language_probe_observation_requires_intent_and_crawler_access_review"
     )
+
+
+# --- ticket 412 follow-up: saved bundles with the pre-split timeout label -------
+
+
+@pytest.mark.asyncio
+async def test_legacy_not_admitted_timeout_is_read_as_fetch_failed() -> None:
+    def handler(url: str, language: str | None) -> Response:
+        if _spanish(language):
+            return 0, {}, None, "fetch_error:TimeoutError"
+        return _ok(_page(_EN_MAIN))
+
+    evidence = await collect_accept_language_evidence(_Engine(handler), [ROOT])
+    # Rewrite the evidence the way the collector labelled a timeout before the split.
+    legacy = [{**row, "outcome": "not_admitted"} if row.get("outcome") == "fetch_failed" else row for row in evidence]
+    assert any(row.get("outcome") == "not_admitted" for row in legacy)
+
+    current, old = locale_probe_records(evidence), locale_probe_records(legacy)
+    assert old == current
+    es = _record(old)
+    assert es["variant_outcome"] == "fetch_failed"
+    assert es["variant_failure"] == {"outcome": "fetch_failed", "skip_reason": "fetch_error:TimeoutError", "hop": 0}
+    # A real refusal saved with the same label is left alone.
+    robots = [
+        {**row, "redirect_chain": [{**hop, "skip_reason": "robots_txt_disallow"} for hop in row["redirect_chain"]]}
+        if row.get("outcome") == "not_admitted"
+        else row
+        for row in legacy
+    ]
+    assert _record(locale_probe_records(robots))["variant_outcome"] == "not_admitted"
