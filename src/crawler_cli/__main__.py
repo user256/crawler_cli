@@ -2782,7 +2782,13 @@ def _publish_google_sheet(
     Returns the ``PublishReceipt``, or None after printing an error (including a
     ``PublishReceiptError`` when the read-back differs from what was sent).
     """
-    from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services, load_template_contract
+    from .google_sheets import (
+        GoogleSheetsTemplatePublisher,
+        credential_path,
+        google_api_error,
+        google_services,
+        load_template_contract,
+    )
 
     try:
         contract = load_template_contract(getattr(args, "google_sheets_contract", None))
@@ -2796,11 +2802,23 @@ def _publish_google_sheet(
     except (RuntimeError, ValueError) as exc:
         print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
         return None
+    except Exception as exc:
+        message = google_api_error(exc)
+        if message is None:
+            raise
+        print(f"Error: Google Sheets publish failed: {message}", file=sys.stderr)
+        return None
 
 
 def _check_google_sheets_template(args: argparse.Namespace) -> int:
     """Compare the template's dropdown sources with the contract's value sets; read-only."""
-    from .google_sheets import check_template_validation, credential_path, google_services, load_template_contract
+    from .google_sheets import (
+        check_template_validation,
+        credential_path,
+        google_api_error,
+        google_services,
+        load_template_contract,
+    )
 
     try:
         contract = load_template_contract(getattr(args, "google_sheets_contract", None))
@@ -2808,6 +2826,12 @@ def _check_google_sheets_template(args: argparse.Namespace) -> int:
         report = check_template_validation(sheets, contract, template=getattr(args, "google_sheets_template", None))
     except (RuntimeError, ValueError) as exc:
         print(f"Error: Google Sheets template check failed: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    except Exception as exc:
+        message = google_api_error(exc)
+        if message is None:
+            raise
+        print(f"Error: Google Sheets template check failed: {message}", file=sys.stderr)
         return EXIT_VALIDATION
     for line in report.lines():
         print(line)

@@ -21,7 +21,7 @@ complete. Probe-producer follow-ups in that ticket remain open.
 - Saved Rainbet bundle plus TLS observations replays with unchanged totals:
   **1 Issue, 22 Needs validation, 1 Healthy, 80 Pending**; only Q39's
   denominator and ticket units changed.
-- Not yet certified: live public-site probes (419) and live Sheets publish (420).
+- Not yet certified: live public-site probes (419) and the full-`drive` live Sheets publish (420; the drive.file path was verified live 2026-10-07).
 
 - `410` `done` [Keep failed robots fetches as unknown observations](./ticket-410-ai-governance-unread-robots-bundle.md) — **P1**.
 - `411` `done` [Keep capped AI-governance probes below Healthy](./ticket-411-ai-governance-capped-coverage.md) — **P1**.
@@ -33,10 +33,10 @@ complete. Probe-producer follow-ups in that ticket remain open.
 - `417` `done` [Restore the pinned formatting gate](./ticket-417-postmerge-format-gate.md) — **P2**.
 - `418` `done` [Restore per-report snapshot capability checks after PR #118](./ticket-418-legacy-snapshot-capability-checks.md) — **P1**.
 - `419` `done` [Live public-site QA of the reattached probes](./ticket-419-live-probe-qa.md) — **P1.**
-- `420` `proposed` [Live Google Sheets publish QA for the template-contract publisher](./ticket-420-live-sheets-publish-qa.md) — **P1.**
+- `420` `partial` [Live Google Sheets publish QA for the template-contract publisher](./ticket-420-live-sheets-publish-qa.md) — **P1.** drive.file fallback, failure paths and `--check-template` verified live 2026-10-07 (two defects fixed in `b6d8812`); the full-`drive` publish needs a user-consented token.
 - `421` `proposed` [Decide whether links that wrap a heading count for Q39](./ticket-421-q39-heading-link-definition.md) — **P2.**
-- `422` `proposed` [Make database-backed tests safe to run and run them in CI](./ticket-422-db-test-safety-and-ci-dsn.md) — **P2.**
-- `423` `proposed` [Record why an /llms.txt fetch failed in AI-governance observations](./ticket-423-llms-txt-failure-reasons.md) — **P3.**
+- `422` `done` [Make database-backed tests safe to run and run them in CI](./ticket-422-db-test-safety-and-ci-dsn.md) — **P2.**
+- `423` `done` [Record why an /llms.txt fetch failed in AI-governance observations](./ticket-423-llms-txt-failure-reasons.md) — **P3.**
 - `424` `done` [Sheets publisher follow-ups carried over from ticket 223](./ticket-424-sheets-publisher-polish.md) — **P3.**
 - `425` `done` [Treat a bot challenge as unanswered in the Accept-Language probe](./ticket-425-locale-probe-challenge-not-a-status.md) — **P1, 419 live QA D1.**
 - `426` `done` [Mark the locale-probe collection partial when comparisons were not answered](./ticket-426-locale-probe-partial-coverage.md) — **P2, 419 live QA D2.**
@@ -44,7 +44,7 @@ complete. Probe-producer follow-ups in that ticket remain open.
 
 Next unreserved ticket number is **428**.
 
-Next unreserved ticket number: **419**. Earlier positions below are historical.
+Earlier positions below are historical.
 
 ### Current position (2026-09-29)
 

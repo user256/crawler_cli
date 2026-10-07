@@ -191,11 +191,26 @@ class _Spreadsheets:
             {"sheetId": 0, "title": "Tickets", "index": 0},
         ]
         self.tabs_api = _SheetTabs(self)
+        # Grid data (dataValidation only) per source tab title, as includeGridData returns it.
+        self.source_data: dict[str, list[dict[str, object]]] = {}
+        self.source_error = None
 
     def get(self, *, spreadsheetId, **_kwargs):
         self.gets.append(spreadsheetId)
         if spreadsheetId == "template-sheet":
-            return _Response({"sheets": [{"properties": tab} for tab in self.source_tabs]})
+            if self.source_error is not None:
+                raise self.source_error
+            return _Response(
+                {
+                    "sheets": [
+                        {
+                            "properties": tab,
+                            **({"data": self.source_data[tab["title"]]} if tab["title"] in self.source_data else {}),
+                        }
+                        for tab in self.source_tabs
+                    ]
+                }
+            )
         return _Response(
             {
                 "sheets": [
@@ -494,6 +509,95 @@ def test_refused_drive_copy_rebuilds_the_template_tab_by_tab(status):
     # The header is still checked on the destination before writing.
     assert api.values_api.reads == [("rebuilt-sheet", "'Tickets'!A1:Z40"), ("rebuilt-sheet", "'Tickets'!B6:I6")]
     assert api.values_api.updates == [("'Tickets'!B6", [_ROW])]
+
+
+def test_fallback_restores_cross_tab_dropdowns_that_copy_to_drops():
+    # Ticket 420 live run: sheets.copyTo dropped every Config-sourced rule on
+    # Tickets!F6:G26, so the rebuilt workbook had no Priority/Classification
+    # dropdowns. The source rules are set again after the renames.
+    classification = {"condition": {"type": "ONE_OF_RANGE", "values": [{"userEnteredValue": "=Config!$B$2:$B"}]}}
+    priority = {"condition": {"type": "ONE_OF_RANGE", "values": [{"userEnteredValue": "=Config!$A$2:$A"}]}}
+    drive, sheets = _Drive(error=_HttpError(404)), _Sheets()
+    api = sheets.spreadsheets_api
+    rows = [{"values": [{"dataValidation": classification}, {"dataValidation": priority}]} for _ in range(21)]
+    rows[3] = {"values": [{}, {"dataValidation": priority}]}  # a gap splits the F run
+    api.source_data["Tickets"] = [{"startRow": 5, "startColumn": 5, "rowData": rows}]
+    api.source_data["Config"] = [{"rowData": [{"values": [{}, {}]}]}]
+
+    GoogleSheetsTemplatePublisher(drive, sheets).publish(
+        template="template-sheet", title="Audit", tables={"Tickets": _tickets()}
+    )
+
+    requests = api.batch_updates[0]["requests"]
+    renames = [index for index, request in enumerate(requests) if "updateSheetProperties" in request]
+    restores = [request["setDataValidation"] for request in requests if "setDataValidation" in request]
+    assert all(requests.index({"setDataValidation": rule}) > max(renames) for rule in restores)
+    assert restores == [
+        {
+            "range": {"sheetId": 501, "startRowIndex": 5, "endRowIndex": 8, "startColumnIndex": 5, "endColumnIndex": 6},
+            "rule": classification,
+        },
+        {
+            "range": {
+                "sheetId": 501,
+                "startRowIndex": 9,
+                "endRowIndex": 26,
+                "startColumnIndex": 5,
+                "endColumnIndex": 6,
+            },
+            "rule": classification,
+        },
+        {
+            "range": {
+                "sheetId": 501,
+                "startRowIndex": 5,
+                "endRowIndex": 26,
+                "startColumnIndex": 6,
+                "endColumnIndex": 7,
+            },
+            "rule": priority,
+        },
+    ]
+
+
+def test_fallback_explains_a_template_the_token_cannot_read():
+    drive, sheets = _Drive(error=_HttpError(404)), _Sheets()
+    sheets.spreadsheets_api.source_error = _HttpError(404)
+    with pytest.raises(RuntimeError, match=r"cannot read it either \(HTTP 404\).*spreadsheets"):
+        GoogleSheetsTemplatePublisher(drive, sheets).publish(
+            template="template-sheet", title="Audit", tables={"Tickets": _tickets()}
+        )
+    assert sheets.spreadsheets_api.creates == []
+
+
+def test_cli_reports_google_api_errors_instead_of_a_traceback(monkeypatch, capsys):
+    # Ticket 420 live run: a drive.file-only token made --check-template and
+    # the publish path die with an HttpError traceback (exit 1).
+    import crawler_cli.google_sheets as google_sheets
+    from crawler_cli.__main__ import _build_parser, _publish_google_sheet, _run_technical_audit_questions
+
+    sheets = _Sheets()
+    sheets.spreadsheets_api.values_api.get = lambda **_kwargs: (_ for _ in ()).throw(_HttpError(404))
+    monkeypatch.setattr(google_sheets, "google_services", lambda _credentials: (_Drive(), sheets))
+    args = argparse.Namespace(
+        google_sheets_contract=None,
+        google_sheets_credentials=None,
+        google_sheets_template="template-sheet",
+        google_sheets_title=None,
+        google_sheets_folder=None,
+    )
+    assert _publish_google_sheet(args, "Audit", {"Tickets": _tickets()}) is None
+    assert "Google API returned HTTP 404" in capsys.readouterr().err
+
+    check = _build_parser().parse_args(
+        ["technical-audit-questions", "--check-template", "--google-sheets-template", "template-sheet"]
+    )
+    assert _run_technical_audit_questions(check) == 2
+    assert "template check failed: Google API returned HTTP 404" in capsys.readouterr().err
+
+    sheets.spreadsheets_api.values_api.get = lambda **_kwargs: (_ for _ in ()).throw(KeyError("not an API error"))
+    with pytest.raises(KeyError):
+        _publish_google_sheet(args, "Audit", {"Tickets": _tickets()})
 
 
 def test_other_drive_copy_errors_are_not_masked_by_the_fallback():
