@@ -3,11 +3,8 @@
 These tests are skipped when CRAWLER_CLI_TEST_DSN is not set.  In CI they
 run against a postgres:16 service container.
 
-Local usage:
-    docker run -d -e POSTGRES_USER=crawler -e POSTGRES_PASSWORD=crawler \
-        -e POSTGRES_DB=crawler_test -p 5432:5432 postgres:16
-    CRAWLER_CLI_TEST_DSN=postgresql://crawler:crawler@localhost:5432/crawler_test \
-        pytest tests/test_persistence_integration.py -v
+The DSN's database name must start with ``crawler_cli_test_`` (conftest
+refuses anything else; ticket 422). Local recipe: docs/testing-with-postgres.md.
 """
 
 from __future__ import annotations

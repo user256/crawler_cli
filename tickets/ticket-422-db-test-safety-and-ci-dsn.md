@@ -19,18 +19,20 @@ from data loss, and during the 2026-10-07 QA it ran once by accident.
 
 ## Tasks and acceptance criteria
 
-- [ ] Gate every statement that creates or drops a database (the drop-probe
+- [x] Gate every statement that creates or drops a database (the drop-probe
       test and any fixture teardown) behind an explicit opt-in such as
       `CRAWLER_CLI_TEST_ALLOW_DATABASE_DDL=1`; without it the test skips with a
       message naming the flag. Database names stay literal; no pattern matches.
-- [ ] Add a conftest guard that refuses a `CRAWLER_CLI_TEST_DSN` whose database
+- [x] Add a conftest guard that refuses a `CRAWLER_CLI_TEST_DSN` whose database
       name does not start with `crawler_cli_test_`, so a production DSN cannot
       be used by mistake.
-- [ ] Add a PostgreSQL service to the CI workflow with a `crawler_cli_test_ci`
+- [x] Add a PostgreSQL service to the CI workflow with a `crawler_cli_test_ci`
       database and the opt-in flag set, so the 52 tests run on every PR.
-- [ ] Document the local recipe (scratch database per run, exact-name drop)
+- [x] Document the local recipe (scratch database per run, exact-name drop)
       in `docs/` or the test README.
 
 ## Status
 
-proposed (Priority: **P2**). Filed 2026-10-07. Related: 414, 418.
+done (Priority: **P2**). Filed 2026-10-07. Related: 414, 418.
+
+Done 2026-10-07: conftest refuses non-`crawler_cli_test_*` DSNs, the drop probe (now `crawler_cli_test_drop_probe`) needs `CRAWLER_CLI_TEST_ALLOW_DATABASE_DDL=1`, CI's integration job uses `crawler_cli_test_ci` with the flag, recipe in docs/testing-with-postgres.md; 52 DSN tests passed live on a scratch `crawler_cli_test_t422` DB, dropped by exact name.

@@ -515,10 +515,17 @@ async def test_create_crawl_run_rejects_duplicate(store: AsyncpgStore) -> None:
 
 
 @pytest.mark.asyncio
-async def test_drop_crawl_database_isolated_from_test_dsn(dsn: str) -> None:
-    """drop_crawl_database only drops the named DB; recreate for subsequent tests."""
+async def test_drop_crawl_database_isolated_from_test_dsn(dsn: str, allow_database_ddl: None) -> None:
+    """drop_crawl_database only drops the named DB; recreate for subsequent tests.
+
+    Creates and drops a database on the DSN's server, so it only runs with
+    CRAWLER_CLI_TEST_ALLOW_DATABASE_DDL=1 (ticket 422). The probe name is an
+    exact literal carrying the crawler_cli_test_ prefix; never a pattern.
+    """
     parsed = urlparse(dsn)
-    db_name = "crawler_cli_drop_probe"
+    db_name = "crawler_cli_test_drop_probe"
+    assert db_name.startswith("crawler_cli_test_")
+    assert db_name != parsed.path.lstrip("/"), "probe must not be the test database itself"
     maintenance = f"{parsed.scheme}://{parsed.netloc}/postgres"
     # Preserve query (sslmode) if present on original DSN for admin connects.
     if parsed.query:
