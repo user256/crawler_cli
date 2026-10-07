@@ -12,6 +12,7 @@ import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -29,6 +30,7 @@ from crawler_cli.config import CrawlConfig
 from crawler_cli.destination_policy import DestinationRejection
 from crawler_cli.engine import CrawlEngine
 from crawler_cli.models import FetchResponse
+from crawler_cli.robots import _RobotsRules
 from crawler_cli.technical_audit import build_technical_audit
 from crawler_cli.technical_audit_observed_answers import AI_CRAWLERS
 from crawler_cli.technical_audit_questions import answer_questions, load_question_registry
@@ -129,6 +131,8 @@ async def test_unread_robots_is_kept_as_unknown_and_other_collections_survive(tm
             "status": None,
             "body": None,
             "llms_txt_status": None,
+            "llms_txt_outcome": "unknown",
+            "llms_txt_unknown_reason": "not_probed",
         }
     ]
     assert robots["population"]["unread"] == ["one.example"]
@@ -241,6 +245,162 @@ def test_answerer_honours_population_even_if_a_supplied_bundle_says_complete() -
     audit["observations"]["collections"] = [capped]
     answer = next(row for row in answer_questions(audit, REGISTRY, ALLOW_PROFILE) if row["id"] == "Q96")
     assert answer["status"] == "Needs validation"
+
+
+# --- ticket 423: unread /llms.txt ----------------------------------------------
+
+
+class _ReadableRobots:
+    """A readable allow-all robots.txt for the real ``collect_ai_governance``."""
+
+    def __init__(self) -> None:
+        self.rules = _RobotsRules("one.example", "User-agent: *\nAllow: /", status=200)
+
+    async def get_rules(self, _origin: str) -> _RobotsRules:
+        return self.rules
+
+    async def check(self, url: str):
+        return self.rules.check(urlsplit(url).path or "/", "crawler_cli/0.1")
+
+
+def _llms_response(path: str, status: int, body: bytes = b"", content_type: str = "text/plain") -> FetchResponse:
+    url = f"https://one.example{path}"
+    return FetchResponse(
+        url=url,
+        requested_url=url,
+        status=status,
+        headers={"Content-Type": content_type},
+        body=body,
+        text=body.decode(),
+        wire_bytes=len(body),
+        decoded_bytes=len(body),
+    )
+
+
+async def _run_llms(tmp_path: Path, llms_outcome: object) -> tuple[int, str, dict | None]:
+    """Run ``--ai-governance`` with the real collector: robots.txt reads, /llms.txt gives ``llms_outcome``."""
+    outcomes: dict[str, object] = {
+        "/robots.txt": ALLOW_ALL,
+        "/.well-known/llms.txt": _llms_response("/.well-known/llms.txt", 404),
+        "/llms.txt": llms_outcome,
+        "/llms-full.txt": _llms_response("/llms-full.txt", 404),
+    }
+
+    async def fetch(url: str, on_skip=None):
+        outcome = outcomes[urlsplit(url).path]
+        if isinstance(outcome, str):
+            if on_skip is not None:
+                on_skip(outcome)
+            return None
+        return outcome
+
+    store = SimpleNamespace(close=AsyncMock())
+    reports = SimpleNamespace(
+        _run_id=AsyncMock(return_value="qa"),
+        technical_audit_context=AsyncMock(return_value={**CONTEXT, "seed_hosts": ["one.example"]}),
+        https_response_headers=AsyncMock(return_value=[]),
+    )
+    engine = SimpleNamespace(
+        _bounded_fetch_response=AsyncMock(side_effect=fetch), _robots=_ReadableRobots(), close=AsyncMock()
+    )
+    target = tmp_path / "observations.json"
+    args = cli._build_parser().parse_args(
+        ["technical-audit-observations", "--crawl-run-id", "qa", "--out", str(target), "--ai-governance"]
+    )
+    stderr = io.StringIO()
+    with (
+        patch.object(cli, "_store_from_args", return_value=store),
+        patch.object(cli, "CrawlReports", return_value=reports),
+        patch.object(cli, "CrawlEngine", return_value=engine),
+        contextlib.redirect_stdout(io.StringIO()),
+        contextlib.redirect_stderr(stderr),
+    ):
+        code = await cli._run_technical_audit_observations(args)
+    bundle = json.loads(target.read_text()) if target.exists() else None
+    return code, stderr.getvalue(), bundle
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["timeout:ReadTimeout", "destination_denied:private_address"])
+async def test_unread_llms_txt_is_unknown_with_its_reason_never_absent(tmp_path, reason) -> None:
+    code, error, bundle = await _run_llms(tmp_path, reason)
+
+    assert code == cli.EXIT_SUCCESS, error
+    robots = _robots(bundle)
+    [record] = robots["records"]
+    # robots.txt itself was read; only the /llms.txt probe is unknown.
+    assert record["fetch_outcome"] == "fetched"
+    assert record["status"] == 200
+    assert record["llms_txt_status"] == "fetch_unavailable"
+    assert record["llms_txt_outcome"] == "unknown"
+    assert record["llms_txt_unknown_reason"] == reason
+    assert f"/llms.txt not read (untested): one.example ({reason})" in robots["scope"]
+    notes = " ".join(_q96(bundle)["notes"])
+    assert f"one.example /llms.txt untested ({reason})" in notes
+    assert "absent" not in notes
+
+
+@pytest.mark.asyncio
+async def test_llms_txt_404_is_a_fetched_absence(tmp_path) -> None:
+    code, error, bundle = await _run_llms(tmp_path, _llms_response("/llms.txt", 404))
+
+    assert code == cli.EXIT_SUCCESS, error
+    robots = _robots(bundle)
+    [record] = robots["records"]
+    assert record["fetch_outcome"] == "fetched"
+    assert record["llms_txt_status"] == "absent"
+    assert record["llms_txt_outcome"] == "fetched"
+    assert "llms_txt_unknown_reason" not in record
+    assert "/llms.txt not read" not in robots["scope"]
+    assert robots["coverage_state"] == "complete"
+    notes = " ".join(_q96(bundle)["notes"])
+    assert "one.example /llms.txt absent (reported only; not a defect)" in notes
+    assert "untested" not in notes
+
+
+def test_pre_423_bundle_without_llms_outcome_loads_and_reads_unread_state_as_untested() -> None:
+    record = {"host": "one.example", "fetch_outcome": "fetched", "status": 200, "body": "User-agent: *\nAllow: /"}
+    bundle = _bundle([{**record, "llms_txt_status": "fetch_unavailable"}], coverage_state="complete")
+    validate_observation_bundle(bundle)
+    notes = " ".join(_q96(new_bundle("qa", bundle["collections"]))["notes"])
+    assert "one.example /llms.txt untested (fetch_unavailable)" in notes
+    assert "absent" not in notes
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"llms_txt_outcome": "unknown"}, "needs an llms_txt_unknown_reason"),
+        ({"llms_txt_outcome": "fetched"}, "needs an llms_txt_status"),
+        (
+            {"llms_txt_outcome": "fetched", "llms_txt_status": "absent", "llms_txt_unknown_reason": "x"},
+            "must not carry an llms_txt_unknown_reason",
+        ),
+        ({"llms_txt_outcome": "maybe", "llms_txt_status": "absent"}, "llms_txt_outcome must be"),
+        ({"llms_txt_unknown_reason": "x"}, "needs llms_txt_outcome 'unknown'"),
+    ],
+)
+def test_validation_refuses_ambiguous_llms_txt_fields(fields, message) -> None:
+    record = {"host": "one.example", "fetch_outcome": "fetched", "status": 200, "body": "", **fields}
+    with pytest.raises(ObservationError, match=message):
+        new_bundle("qa", _bundle([record])["collections"])
+
+
+def test_validation_accepts_both_llms_txt_shapes() -> None:
+    validate_observation_bundle(
+        _bundle(
+            [
+                robots_txt_record("one.example", ALLOW_ALL, "absent"),
+                robots_txt_record(
+                    "two.example",
+                    ALLOW_ALL,
+                    "fetch_unavailable",
+                    llms_txt_outcome_value="unknown",
+                    llms_txt_unknown_reason="timeout:ReadTimeout",
+                ),
+            ]
+        )
+    )
 
 
 # --- bundle validation --------------------------------------------------------

@@ -19,22 +19,62 @@ _NEUTRAL_VARIANTS = frozenset({"none", "none-repeat"})
 _TESTED_RECORD_TYPES = frozenset({"observation", "candidate"})
 
 
-def llms_txt_status_by_host(collected: Mapping[str, object]) -> dict[str, str]:
-    """Map each origin's host to the recorded state of its /llms.txt."""
+# /llms.txt states that mean the file was never read: presence is untested.
+LLMS_TXT_UNREAD_STATES = frozenset(
+    {"fetch_unavailable", "robots_unavailable_not_fetched", "robots_disallowed_not_fetched"}
+)
+_LLMS_TXT_UNREAD_REASONS = {
+    "fetch_unavailable": "no_response",
+    "robots_unavailable_not_fetched": "robots_unavailable",
+    "robots_disallowed_not_fetched": "robots_disallowed",
+}
+
+
+def llms_txt_outcome(state: object, outcome: object = None, unknown_reason: object = None) -> tuple[str, str | None]:
+    """The ``(outcome, unknown_reason)`` of one /llms.txt probe (ticket 423).
+
+    An explicit ``unknown`` outcome keeps its reason. Without one (a collector
+    from before ticket 423, or no probe at all) the state decides: no state or
+    an unread state is ``unknown``; any classified response is ``fetched``.
+    """
+    reason = unknown_reason if isinstance(unknown_reason, str) and unknown_reason.strip() else None
+    if outcome == "unknown":
+        return "unknown", reason or (_LLMS_TXT_UNREAD_REASONS.get(str(state)) or "no_response")
+    if not isinstance(state, str) or not state:
+        return "unknown", reason or "not_probed"
+    if state in LLMS_TXT_UNREAD_STATES:
+        return "unknown", reason or _LLMS_TXT_UNREAD_REASONS[state]
+    return "fetched", None
+
+
+def llms_txt_probe_by_host(collected: Mapping[str, object]) -> dict[str, dict[str, str | None]]:
+    """Map each origin's host to its /llms.txt state, fetch outcome and unknown reason."""
     rows = collected.get("llms_files")
-    status: dict[str, str] = {}
+    probes: dict[str, dict[str, str | None]] = {}
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, Mapping) or row.get("path") != "/llms.txt":
             continue
         host = urlsplit(str(row.get("origin") or row.get("url") or "")).netloc.casefold()
         state = row.get("state")
         if host and isinstance(state, str):
-            status[host] = state
-    return status
+            outcome, reason = llms_txt_outcome(state, row.get("fetch_outcome"), row.get("unknown_reason"))
+            probes[host] = {"status": state, "outcome": outcome, "unknown_reason": reason}
+    return probes
+
+
+def llms_txt_status_by_host(collected: Mapping[str, object]) -> dict[str, str]:
+    """Map each origin's host to the recorded state of its /llms.txt."""
+    return {host: str(probe["status"]) for host, probe in llms_txt_probe_by_host(collected).items()}
 
 
 def robots_txt_record(
-    host: str, response: object, llms_txt_status: str | None, *, unknown_reason: str | None = None
+    host: str,
+    response: object,
+    llms_txt_status: str | None,
+    *,
+    unknown_reason: str | None = None,
+    llms_txt_outcome_value: str | None = None,
+    llms_txt_unknown_reason: str | None = None,
 ) -> dict[str, object]:
     """One ``robots-txt`` record from a guarded fetch.
 
@@ -43,7 +83,15 @@ def robots_txt_record(
     body, no response) keeps its host with ``fetch_outcome: "unknown"``, a null
     status and body, and the reason, so the answerer counts the host as
     untested instead of the bundle losing it (ticket 410).
+
+    The /llms.txt probe carries its own ``llms_txt_outcome`` and, when it was
+    not read, ``llms_txt_unknown_reason`` (ticket 423), so a timeout or denied
+    destination is never mistaken for an absent file.
     """
+    llms_outcome, llms_reason = llms_txt_outcome(llms_txt_status, llms_txt_outcome_value, llms_txt_unknown_reason)
+    llms_fields: dict[str, object] = {"llms_txt_status": llms_txt_status, "llms_txt_outcome": llms_outcome}
+    if llms_outcome == "unknown":
+        llms_fields["llms_txt_unknown_reason"] = llms_reason
     status = getattr(response, "status", None) if response is not None else None
     if not isinstance(status, int) or isinstance(status, bool) or status <= 0:
         return {
@@ -52,7 +100,7 @@ def robots_txt_record(
             "unknown_reason": unknown_reason or ("no_response" if response is None else "no_status"),
             "status": None,
             "body": None,
-            "llms_txt_status": llms_txt_status,
+            **llms_fields,
         }
     text = getattr(response, "text", None)
     body = str(text) if 200 <= status < 300 and isinstance(text, str) else None
@@ -61,7 +109,7 @@ def robots_txt_record(
         "fetch_outcome": "fetched",
         "status": status,
         "body": body,
-        "llms_txt_status": llms_txt_status,
+        **llms_fields,
     }
 
 

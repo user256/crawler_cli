@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .audit_observations import observation_collections
+from .audit_observation_adapters import LLMS_TXT_UNREAD_STATES
 from .robots import _RobotsRules
 from .transport_security import HSTS_PRELOAD_MIN_MAX_AGE, parse_strict_transport_security
 from .technical_audit_evidence import (
@@ -878,6 +879,22 @@ def _utility_paths(record: Json, _q: Json, _p: Json | None) -> object:
     return None
 
 
+def _llms_txt_note(record: Mapping[str, object]) -> str | None:
+    """How a robots-txt record's /llms.txt probe reads in a note (ticket 423).
+
+    An unread file (explicit ``llms_txt_outcome: "unknown"``, or a pre-423
+    bundle whose state says it was never fetched) is untested, never absent.
+    """
+    status = record.get("llms_txt_status")
+    outcome = record.get("llms_txt_outcome")
+    if outcome is None and status is None:
+        return None
+    if outcome == "unknown" or (outcome is None and status in LLMS_TXT_UNREAD_STATES):
+        reason = record.get("llms_txt_unknown_reason") or status
+        return f"untested ({reason})" if reason else "untested"
+    return str(status) if status is not None else None
+
+
 def _ai_crawler_policy(audit: Json, question: Json, profile: Json | None) -> Evidence:
     observed = _Observed(audit, "robots-txt")
     if not observed.collections:
@@ -892,8 +909,9 @@ def _ai_crawler_policy(audit: Json, question: Json, profile: Json | None) -> Evi
     for record in observed.records:
         host = str(record["host"])
         status = _int_or_none(record.get("status"))
-        if record.get("llms_txt_status") is not None:
-            llms.append(f"{host} /llms.txt {record['llms_txt_status']}")
+        llms_note = _llms_txt_note(record)
+        if llms_note:
+            llms.append(f"{host} /llms.txt {llms_note}")
         if record.get("fetch_outcome") == "unknown":
             # Ticket 410: the fetch never produced a readable response.
             reason = record.get("unknown_reason")
