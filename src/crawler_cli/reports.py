@@ -38,6 +38,66 @@ _TAG = re.compile(r"<[^>]+>")
 _HOMEPAGE_PATHS = frozenset({"", "/", "/index.html", "/index.htm", "/index.php"})
 _MAX_CLUSTER_URLS = 50
 
+# page_run_snapshots columns added by migrations after the table first
+# shipped.  A database crawled by an older version can lack any of them, so
+# technical_audit_context reports each one in ``schema_capabilities``.
+SNAPSHOT_OPTIONAL_COLUMNS = (
+    "amphtml_url",
+    "analytics_json",
+    "canonical_evidence_json",
+    "canonical_urls_json",
+    "cls",
+    "content_extracted",
+    "hreflang_json",
+    "images_json",
+    "indexability_evidence_json",
+    "inp_ms",
+    "lcp_ms",
+    "links_json",
+    "redirect_chain_json",
+    "render_discovery_attempted",
+    "render_discovery_complete",
+    "render_discovery_skip_reason",
+    "robots_json",
+    "schema_json",
+    "total_duration_seconds",
+    "ttfb_seconds",
+    "variant_kind",
+)
+
+# Capabilities each technical-audit report's SQL needs.  The audit skips a
+# report whose capabilities are missing, so its checks read as unavailable
+# instead of the run crashing on an older snapshot table.  A report absent
+# from this map reads only columns every snapshot table has, or guards its
+# own.  tests/test_technical_audit_legacy_schema.py keeps the map in step
+# with the SQL each report issues.
+TECHNICAL_AUDIT_REPORT_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "orphans": (
+        "canonical_urls_json",
+        "content_extracted",
+        "links_json",
+        "render_discovery_attempted",
+        "render_discovery_complete",
+    ),
+    "schema-compatibility": ("schema_json",),
+    "image-issues": ("images_json",),
+    "internal-link-quality": ("canonical_urls_json", "links_json"),
+    "tracking-parameter-links": ("links_json",),
+    "near-duplicates": ("content_hash_simhash",),
+    "internal-authority": ("links_json",),
+    "locale-content-alignment": ("content_extracted", "hreflang_json", "run_intent_signatures"),
+    "render-attempts": (
+        "render_discovery_attempted",
+        "render_discovery_complete",
+        "render_discovery_skip_reason",
+    ),
+    "metadata-duplicates": ("canonical_urls_json", "content_extracted"),
+    "hreflang-validation": ("canonical_urls_json", "content_extracted", "hreflang_json"),
+    "profile-indexability-pages": ("canonical_urls_json", "content_extracted", "links_json"),
+    "discovery-source-provenance": ("links_json",),
+    "performance-pages": ("ttfb_seconds",),
+}
+
 
 def _json_value(value: object) -> object:
     """Decode a JSONB column: asyncpg returns it as text unless a codec is set."""
@@ -328,23 +388,25 @@ class CrawlReports:
         stats["run_sitemap_source_count"] = _int_or_none(sitemap_sources[0].get("n")) if sitemap_sources else 0
         # Q81: did the origin slow down while the run read it?  Compare the
         # median TTFB of the first and last tenth of timed fetches.
-        drift = await self._fetch(
-            """
-            WITH timed AS (
-                SELECT ttfb_seconds, ntile(10) OVER (ORDER BY fetched_at) AS decile
-                FROM page_run_snapshots WHERE run_id = $1 AND ttfb_seconds IS NOT NULL
+        # Snapshot tables older than the timing columns have no TTFB to compare.
+        if "ttfb_seconds" in snapshot_columns:
+            drift = await self._fetch(
+                """
+                WITH timed AS (
+                    SELECT ttfb_seconds, ntile(10) OVER (ORDER BY fetched_at) AS decile
+                    FROM page_run_snapshots WHERE run_id = $1 AND ttfb_seconds IS NOT NULL
+                )
+                SELECT COUNT(*)::INT AS ttfb_sample_count,
+                       (percentile_cont(0.5) WITHIN GROUP (ORDER BY ttfb_seconds) FILTER (WHERE decile = 1) * 1000)::DOUBLE PRECISION
+                           AS ttfb_early_median_ms,
+                       (percentile_cont(0.5) WITHIN GROUP (ORDER BY ttfb_seconds) FILTER (WHERE decile = 10) * 1000)::DOUBLE PRECISION
+                           AS ttfb_late_median_ms
+                FROM timed
+                """,
+                run_id,
             )
-            SELECT COUNT(*)::INT AS ttfb_sample_count,
-                   (percentile_cont(0.5) WITHIN GROUP (ORDER BY ttfb_seconds) FILTER (WHERE decile = 1) * 1000)::DOUBLE PRECISION
-                       AS ttfb_early_median_ms,
-                   (percentile_cont(0.5) WITHIN GROUP (ORDER BY ttfb_seconds) FILTER (WHERE decile = 10) * 1000)::DOUBLE PRECISION
-                       AS ttfb_late_median_ms
-            FROM timed
-            """,
-            run_id,
-        )
-        if drift:
-            stats.update(drift[0])
+            if drift:
+                stats.update(drift[0])
         # Q39: the internal-link-quality report keeps only failing links, so
         # count the whole H2/H3 link population here.  A link is tested when
         # its target has a saved status in this run.
@@ -372,7 +434,7 @@ class CrawlReports:
             heading_link_count = _int_or_none(heading[0].get("heading_link_count")) if heading else 0
             heading_link_tested_count = _int_or_none(heading[0].get("heading_link_tested_count")) if heading else 0
         locale_signature_count: int | None = None
-        if has_signatures:
+        if has_signatures and has_extraction_state and "hreflang_json" in snapshot_columns:
             signature_coverage = await self._fetch(
                 """
                 SELECT COUNT(DISTINCT sig.signature_hash)::INT AS locale_signature_count
@@ -416,9 +478,7 @@ class CrawlReports:
             "seed_hosts": seed_hosts,
             "declared_allowed_hosts": declared_hosts,
             "schema_capabilities": {
-                "content_extracted": has_extraction_state,
-                "images_json": has_images,
-                "links_json": "links_json" in snapshot_columns,
+                **{column: column in snapshot_columns for column in SNAPSHOT_OPTIONAL_COLUMNS},
                 "content_hash_simhash": "content_hash_simhash" in snapshot_columns,
                 "run_intent_signatures": has_signatures,
             },

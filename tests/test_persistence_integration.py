@@ -35,7 +35,7 @@ from crawler_cli.models import (
 from crawler_cli import CrawlConfig, CrawlEngine
 from crawler_cli.intent_overlap import compute_exclusion
 from crawler_cli.persistence import AsyncpgStore, CRAWL_TABLES, SCHEMA_STATEMENTS
-from crawler_cli.reports import CrawlReports
+from crawler_cli.reports import SNAPSHOT_OPTIONAL_COLUMNS, CrawlReports
 
 
 _DSN = os.environ.get("CRAWLER_CLI_TEST_DSN", "")
@@ -112,38 +112,40 @@ async def test_technical_audit_marks_legacy_snapshot_reports_unavailable(store: 
     )
     await store.update_crawl_run_status(run_id, "complete")
     assert store.pool is not None
-    async with store.pool.acquire() as conn:
-        await conn.execute(
-            """ALTER TABLE page_run_snapshots
-               DROP COLUMN content_extracted,
-               DROP COLUMN indexability_evidence_json,
-               DROP COLUMN redirect_chain_json,
-               DROP COLUMN canonical_evidence_json"""
-        )
-
     out = tmp_path / "legacy-technical-audit.json"
     args = _build_parser().parse_args(
         ["technical-audit", "--postgres-dsn", store.dsn, "--crawl-run-id", run_id, "--out", str(out)]
     )
     try:
-        assert await _dispatch(args) == 0
-        payload = json.loads(out.read_text())
-        checks = {check["id"]: check for check in payload["checks"]}
-        for check_id in (
-            "orphan-candidates",
-            "redirect-chains",
-            "metadata-and-locale",
-            "canonical-consistency",
-            "hreflang-consistency",
-            "performance-and-conditional-requests",
-            "internal-authority-inventory",
-        ):
-            assert checks[check_id]["status"] in {"partial", "unavailable"}
-
+        async with store.pool.acquire() as conn:
+            await conn.execute("ALTER TABLE page_run_snapshots DROP COLUMN content_extracted")
         reports = CrawlReports(store, run_id=run_id)
         history = await reports.current_site_join_inventory()
         assert len(history) == 1
         assert history[0]["content_extracted"] is None
+
+        # Drop every other column a migration added after the table first shipped.
+        async with store.pool.acquire() as conn:
+            await conn.execute(
+                "ALTER TABLE page_run_snapshots "
+                + ", ".join(
+                    f"DROP COLUMN {column}" for column in SNAPSHOT_OPTIONAL_COLUMNS if column != "content_extracted"
+                )
+            )
+        assert await _dispatch(args) == 0
+        payload = json.loads(out.read_text())
+        assert not any(payload["run_context"]["schema_capabilities"][column] for column in SNAPSHOT_OPTIONAL_COLUMNS)
+        checks = {check["id"]: check for check in payload["checks"]}
+        for check_id in (
+            "orphan-candidates",
+            "internal-link-targets",
+            "internal-authority",
+            "image-markup",
+            "metadata-duplicates-aliases",
+            "hreflang-html-http",
+            "performance-distribution",
+        ):
+            assert checks[check_id]["status"] in {"partial", "unavailable"}, check_id
     finally:
         # Restore the shared integration schema even when an assertion fails.
         await store.initialize()

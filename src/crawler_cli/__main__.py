@@ -86,7 +86,7 @@ from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
-from .reports import CrawlReports
+from .reports import TECHNICAL_AUDIT_REPORT_CAPABILITIES, CrawlReports
 from .technical_audit import TECHNICAL_AUDIT_REPORTS, audit_sheet_tables, build_technical_audit
 from .technical_audit_tickets import TicketLanguageError, build_ticket_register, load_ticket_language
 from .validators import (
@@ -2626,13 +2626,6 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         capabilities = run_context.get("schema_capabilities", {})
         if not isinstance(capabilities, dict):
             capabilities = {}
-        capability_by_report = {
-            "image-issues": "images_json",
-            "internal-link-quality": "links_json",
-            "tracking-parameter-links": "links_json",
-            "near-duplicates": "content_hash_simhash",
-            "locale-content-alignment": "run_intent_signatures",
-        }
         evidence = {}
         supplied_inputs: dict[str, list[dict[str, object]]] = {}
         if args.search_evidence:
@@ -2659,11 +2652,10 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 continue
             if name in {"inventory-interactions", "supplied-search-evidence"}:
                 continue
-            if name in {"render-url-candidates", "render-attempts"}:
-                evidence[name] = await _fetch_report(reports, name, args)
-                continue
-            capability = capability_by_report.get(name)
-            if capability and capabilities.get(capability) is not True:
+            # An older snapshot table lacks newer columns: leave the report
+            # out so its checks read as unavailable instead of failing the run.
+            required = TECHNICAL_AUDIT_REPORT_CAPABILITIES.get(name, ())
+            if any(capabilities.get(capability) is not True for capability in required):
                 continue
             evidence[name] = await _fetch_report(reports, name, args)
         final_run = await store.get_crawl_run(run_id)
