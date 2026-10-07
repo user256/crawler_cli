@@ -27,8 +27,9 @@ complete. Probe-producer follow-ups in that ticket remain open.
 - `415` `proposed` [Use the shared HSTS parser in the Q63 answerer](./ticket-415-q63-shared-hsts-parser.md) — **P2**.
 - `416` `proposed` [Preserve denominator units in question-derived tickets](./ticket-416-question-ticket-denominator-units.md) — **P2**.
 - `417` `proposed` [Restore the pinned formatting gate](./ticket-417-postmerge-format-gate.md) — **P2**.
+- `418` `done` [Restore per-report snapshot capability checks after PR #118](./ticket-418-legacy-snapshot-capability-checks.md) — **P1**.
 
-Next unreserved ticket number: **418**. Earlier positions below are historical.
+Next unreserved ticket number: **419**. Earlier positions below are historical.
 
 ### Current position (2026-09-29)
 
