@@ -2455,18 +2455,9 @@ class AsyncpgStore:
             urls = [u for u, _ in url_detail_pairs]
             url_id_map = await self._bulk_get_or_create_urls(conn, urls)
             rows = [(url_id_map[url], source, detail) for url, detail in url_detail_pairs if url in url_id_map]
-            # Sort by url_id so concurrent inserts lock url_sources rows in a
-            # consistent order (deadlock avoidance).
-            rows.sort(key=lambda r: r[0])
-            if rows:
-                await conn.executemany(
-                    """
-                    INSERT INTO url_sources (url_id, source, detail)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (url_id, source, detail_key) DO NOTHING
-                    """,
-                    rows,
-                )
+            # Same global + run-scoped write as record_source; it sorts by
+            # url_id so concurrent inserts lock rows in a consistent order.
+            await self._insert_source_rows(conn, rows, run_id=self.active_run_id)
 
     async def persist_sitemap_hreflang_bulk(
         self,
