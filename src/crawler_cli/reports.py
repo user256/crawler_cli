@@ -498,14 +498,25 @@ class CrawlReports:
             return None
 
     async def https_response_headers(self) -> list[dict[str, object]]:
-        """Final status and response headers of every stored HTTPS response, for the TLS probe adapter."""
+        """Final response identity, status and headers of every stored HTTPS response (ticket 414).
+
+        ``headers_json`` and ``final_status_code`` describe the *final*
+        response after redirects, so the row is selected and attributed by
+        ``final_url`` (the snapshot's ``final_url_id``), not by the requested
+        URL. ``requested_url`` is kept only as provenance. A snapshot with no
+        retained final URL has no known response identity and is not
+        returned. An HTTP seed that finished on HTTPS is included; an HTTPS
+        seed that finished on HTTP is not HTTPS evidence and is excluded.
+        """
         run_id = await self._run_id()
         return await self._fetch(
             """
-            SELECT u.url, s.final_status_code, s.headers_json
-            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
-            WHERE s.run_id = $1 AND u.url LIKE 'https://%'
-            ORDER BY u.url
+            SELECT u.url AS requested_url, fu.url AS final_url, s.final_status_code, s.headers_json
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            JOIN urls fu ON fu.id = s.final_url_id
+            WHERE s.run_id = $1 AND lower(fu.url) LIKE 'https://%'
+            ORDER BY fu.url, u.url
             """,
             run_id,
         )

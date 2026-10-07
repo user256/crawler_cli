@@ -19,11 +19,16 @@ Run `PYTHONPATH=src python tickets/qa-new-audit-2026-10-06/reproduce.py` from th
 
 ## Tasks and acceptance criteria
 
-- [ ] Join the run snapshot's final_url_id to urls and pass final_url to the transport report.
-- [ ] Select/classify by the observed response scheme; retain requested URL separately as provenance.
-- [ ] Cover cross-host redirects, HTTP-to-HTTPS, HTTPS-to-HTTP and multiple requested aliases of one final host; never infer the source host's policy from the destination.
+- [x] Join the run snapshot's final_url_id to urls and pass final_url to the transport report.
+- [x] Select/classify by the observed response scheme; retain requested URL separately as provenance.
+- [x] Cover cross-host redirects, HTTP-to-HTTPS, HTTPS-to-HTTP and multiple requested aliases of one final host; never infer the source host's policy from the destination.
 
 ## Status
 
-proposed (Priority: **P1**). Filed by post-merge QA, 2026-10-06.
-Related existing tickets: 362, 409. This records a fix request; no product fix has been applied.
+done (Priority: **P1**). Fixed on branch `fix/postmerge-qa-tls`, 2026-10-07.
+
+Fix: `CrawlReports.https_response_headers` now joins `page_run_snapshots.final_url_id` to `urls` and returns `requested_url` and `final_url`; it filters on the final response's scheme (`lower(fu.url) LIKE 'https://%'`), so an HTTP seed that ends on HTTPS is included and an HTTPS seed that ends on HTTP is not. `transport_security_report` takes scheme and host only from `final_url`, keeps the requested URLs as `requested_urls` provenance on each host row, and adds `response_identity_unknown_rows` and `hsts_attribution` to the coverage row.
+
+Decision (conservative): a row with no retained final URL is counted as `response_identity_unknown_rows` and not attributed. It no longer falls back to the requested URL. The same applies to a snapshot whose `final_url_id` is NULL, because the inner join leaves it out. A redirecting source host gets no HSTS row unless it has a final response of its own.
+
+Tests: `tests/test_transport_security.py` covers the cross-host redirect, a source host that is not inferred from its destination, HTTP-to-HTTPS, HTTPS-to-HTTP, several aliases ending on one final host, and the old projection with no final URL. `tests/test_tls_final_response_identity.py` covers the SQL contract and a PostgreSQL round-trip. The round-trip test is skipped without `CRAWLER_CLI_TEST_DSN` and was not run locally. In `reproduce.py`, key 414 `production_projection` is now `[]`, and `with_response_identity` gives `new.example`.
