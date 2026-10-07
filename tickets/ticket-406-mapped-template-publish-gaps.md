@@ -14,17 +14,18 @@ QA review of feature/full-manual-review-audit, finding 4.
 
 ## Tasks
 
-- [ ] Read the mapping from the template contract; add the copyTo fallback; verify headers on the destination; test a mismatch.
+- [x] Read the mapping from the template contract; add the copyTo fallback; verify headers on the destination; test a mismatch.
 
 ## Definition of Done
 
-- [ ] A mapped publish fails loudly on a changed template and works with drive.file tokens.
+- [x] A mapped publish fails loudly on a changed template and works with drive.file tokens
+  (with fakes; no live publish was run, see the 2026-10-07 completion note).
 
 ## Status
 
-partly done (Priority: **P2**). Source: master reconciliation QA, 2026-10-06.
-Destination header check and fail-before-write done 2026-10-07; template-contract mapping and the
-copyTo fallback remain open (see below).
+done (Priority: **P2**). Source: master reconciliation QA, 2026-10-06.
+Destination header check and fail-before-write done 2026-10-07 for the question path, then
+for every path together with the template contract and the copyTo fallback (see below).
 
 ## Post-merge QA, 2026-10-06
 
