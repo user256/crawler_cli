@@ -2699,24 +2699,37 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
     output.write_text(json.dumps(audit, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     print(f"Wrote deterministic technical audit to {output}")
 
-    if args.google_sheets_template:
-        from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services
-
-        try:
-            drive, sheets = google_services(credential_path(args.google_sheets_credentials))
-            title = args.google_sheets_title or f"Technical SEO Audit – {run_id}"
-            url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
-                template=args.google_sheets_template,
-                title=title,
-                folder_id=args.google_sheets_folder,
-                tables=audit_sheet_tables(audit),
-            )
-        except (RuntimeError, ValueError) as exc:
-            print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
+    if _google_sheets_requested(args):
+        url = _publish_google_sheet(args, f"Technical SEO Audit – {run_id}", audit_sheet_tables(audit))
+        if url is None:
             return EXIT_VALIDATION
         print(f"Published technical audit workbook: {url}")
 
     return EXIT_SUCCESS
+
+
+def _google_sheets_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "google_sheets_template", None) or getattr(args, "google_sheets_contract", None))
+
+
+def _publish_google_sheet(
+    args: argparse.Namespace, default_title: str, tables: dict[str, list[list[object]]]
+) -> str | None:
+    """Copy the contract's template (or --google-sheets-template) and publish; None after printing an error."""
+    from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services, load_template_contract
+
+    try:
+        contract = load_template_contract(getattr(args, "google_sheets_contract", None))
+        drive, sheets = google_services(credential_path(args.google_sheets_credentials))
+        return GoogleSheetsTemplatePublisher(drive, sheets, contract).publish(
+            template=args.google_sheets_template,
+            title=args.google_sheets_title or default_title,
+            folder_id=args.google_sheets_folder,
+            tables=tables,
+        )
+    except (RuntimeError, ValueError) as exc:
+        print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
+        return None
 
 
 def _run_technical_audit_questions(args: argparse.Namespace) -> int:
@@ -2768,21 +2781,13 @@ def _run_technical_audit_questions(args: argparse.Namespace) -> int:
     summary = ", ".join(f"{name} {counts.get(name, 0)}" for name in ("Issue", "Needs validation", "Healthy", "Pending"))
     print(f"Wrote {len(answers)} question answers and {len(tickets)} draft tickets to {output} ({summary})")
 
-    if args.google_sheets_template:
-        from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services
-
-        try:
-            drive, sheets = google_services(credential_path(args.google_sheets_credentials))
-            title = args.google_sheets_title or f"Technical SEO Audit – {audit.get('crawl_run_id')}"
-            url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
-                template=args.google_sheets_template,
-                title=title,
-                folder_id=args.google_sheets_folder,
-                tables=questions_sheet_tables(audit, registry, answers, tickets),
-                locate_ticket_header=True,
-            )
-        except (RuntimeError, ValueError) as exc:
-            print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
+    if _google_sheets_requested(args):
+        url = _publish_google_sheet(
+            args,
+            f"Technical SEO Audit – {audit.get('crawl_run_id')}",
+            questions_sheet_tables(audit, registry, answers, tickets),
+        )
+        if url is None:
             return EXIT_VALIDATION
         print(f"Published question workbook: {url}")
     return EXIT_SUCCESS
@@ -4719,10 +4724,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     audit_parser.add_argument(
         "--google-sheets-template",
-        help="Copy this Google Sheets template and publish the Tickets and evidence tabs.",
+        help="Copy this Google Sheets template (default: the template contract's) and publish the Tickets and evidence tabs.",
     )
     audit_parser.add_argument("--google-sheets-title", help="Title for the copied Google Sheet.")
     audit_parser.add_argument("--google-sheets-folder", help="Optional Google Drive folder ID for the copied sheet.")
+    audit_parser.add_argument(
+        "--google-sheets-contract",
+        help="Template contract JSON (template ID, Tickets tab, columns, dropdown values, protected tabs); "
+        "default templates/google-sheets-template-contract.json. Its template is used when "
+        "--google-sheets-template is omitted.",
+    )
     audit_parser.add_argument(
         "--google-sheets-credentials",
         help="Service-account credential file; otherwise GOOGLE_DOCS_OAUTH_TOKEN_FILE is used.",
@@ -4757,11 +4768,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     questions_parser.add_argument(
         "--google-sheets-template",
-        help="Copy this Google Sheets template and publish the Questions, Tickets and data tabs.",
+        help="Copy this Google Sheets template (default: the template contract's) and publish the Questions, Tickets and data tabs.",
     )
     questions_parser.add_argument("--google-sheets-title", help="Title for the copied Google Sheet.")
     questions_parser.add_argument(
         "--google-sheets-folder", help="Optional Google Drive folder ID for the copied sheet."
+    )
+    questions_parser.add_argument(
+        "--google-sheets-contract",
+        help="Template contract JSON (template ID, Tickets tab, columns, dropdown values, protected tabs); "
+        "default templates/google-sheets-template-contract.json. Its template is used when "
+        "--google-sheets-template is omitted.",
     )
     questions_parser.add_argument(
         "--google-sheets-credentials",

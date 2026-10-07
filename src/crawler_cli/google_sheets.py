@@ -6,6 +6,7 @@ audit itself stays fully local and deterministic.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Mapping
@@ -58,36 +59,126 @@ class TemplateHeaderError(ValueError):
     """The copied template's Tickets header does not match the generated columns."""
 
 
-class GoogleSheetsTemplatePublisher:
-    """Copy one template and replace only named, generated audit tabs."""
+class TemplateContractError(ValueError):
+    """The template contract is malformed, or the generated tables break it."""
 
-    def __init__(self, drive: Any, sheets: Any) -> None:
+
+TEMPLATE_CONTRACT_VERSION = "crawler-cli/google-sheets-template-contract/1"
+
+
+def default_template_contract_path() -> Path:
+    return Path(__file__).parents[2] / "templates" / "google-sheets-template-contract.json"
+
+
+def load_template_contract(path: str | Path | None = None) -> dict[str, Any]:
+    """Load and validate the template contract the publisher maps tables through."""
+    target = Path(path) if path else default_template_contract_path()
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TemplateContractError(f"could not load template contract {target}: {exc}") from exc
+    return validate_template_contract(payload, source=str(target))
+
+
+def validate_template_contract(payload: object, *, source: str = "template contract") -> dict[str, Any]:
+    def fail(message: str) -> TemplateContractError:
+        return TemplateContractError(f"{source}: {message}")
+
+    if not isinstance(payload, dict):
+        raise fail("must be a JSON object")
+    if payload.get("version") != TEMPLATE_CONTRACT_VERSION:
+        raise fail(f"version must be {TEMPLATE_CONTRACT_VERSION!r}")
+    template = payload.get("template")
+    if not isinstance(template, dict) or not isinstance(template.get("url"), str):
+        raise fail("template.url must be a Google Sheets URL or spreadsheet ID")
+    try:
+        google_sheet_id(template["url"])
+    except ValueError as exc:
+        raise fail(f"template.url is not a Google Sheets URL or spreadsheet ID: {template['url']!r}") from exc
+    tickets = payload.get("tickets")
+    if not isinstance(tickets, dict):
+        raise fail("tickets must be an object")
+    if not isinstance(tickets.get("tab"), str) or not tickets["tab"].strip():
+        raise fail("tickets.tab must be a non-empty tab name")
+    columns = tickets.get("columns")
+    if (
+        not isinstance(columns, list)
+        or not columns
+        or not all(isinstance(column, str) and column.strip() for column in columns)
+    ):
+        raise fail("tickets.columns must be a non-empty list of column names")
+    if len({_header_key(column) for column in columns}) != len(columns):
+        raise fail("tickets.columns must not repeat a column")
+    search = tickets.get("header_search", {"max_rows": 40, "max_columns": 26})
+    if not isinstance(search, dict):
+        raise fail("tickets.header_search must be an object")
+    for key, ceiling in (("max_rows", 1000), ("max_columns", 702)):
+        value = search.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= ceiling:
+            raise fail(f"tickets.header_search.{key} must be an integer from 1 to {ceiling}")
+    if search["max_columns"] < len(columns):
+        raise fail("tickets.header_search.max_columns is narrower than the ticket header")
+    value_sets = tickets.get("value_sets", {})
+    if not isinstance(value_sets, dict):
+        raise fail("tickets.value_sets must be an object")
+    known = {_header_key(column) for column in columns}
+    for column, allowed in value_sets.items():
+        if _header_key(column) not in known:
+            raise fail(f"tickets.value_sets names {column!r}, which is not a ticket column")
+        if not isinstance(allowed, list) or not allowed or not all(isinstance(value, str) for value in allowed):
+            raise fail(f"tickets.value_sets[{column!r}] must be a non-empty list of strings")
+    protected = payload.get("protected_tabs", [])
+    if not isinstance(protected, list) or not all(isinstance(name, str) for name in protected):
+        raise fail("protected_tabs must be a list of tab names")
+    if tickets["tab"] in protected:
+        raise fail("the tickets tab cannot also be a protected tab")
+    return {
+        **payload,
+        "tickets": {**tickets, "header_search": search, "value_sets": value_sets},
+        "protected_tabs": protected,
+    }
+
+
+class GoogleSheetsTemplatePublisher:
+    """Copy one template and replace only named, generated audit tabs.
+
+    The template ID, Tickets tab name, ticket columns, allowed dropdown values
+    and protected tabs come from a template contract
+    (``templates/google-sheets-template-contract.json`` by default).  The
+    generated ``Tickets`` table is always written beneath the copied
+    workbook's own header, which is located and checked before any write;
+    there is no fixed-row or A2 fallback.
+    """
+
+    def __init__(self, drive: Any, sheets: Any, contract: Mapping[str, Any] | None = None) -> None:
         self.drive = drive
         self.sheets = sheets
+        self.contract = validate_template_contract(dict(contract)) if contract is not None else load_template_contract()
 
     def publish(
         self,
         *,
-        template: str,
         title: str,
         tables: Mapping[str, list[list[object]]],
+        template: str | None = None,
         folder_id: str | None = None,
-        locate_ticket_header: bool = False,
     ) -> str:
-        body: dict[str, object] = {"name": title}
-        if folder_id:
-            body["parents"] = [folder_id]
-        copied = (
-            self.drive.files()
-            .copy(
-                fileId=google_sheet_id(template),
-                body=body,
-                fields="id,webViewLink",
-                supportsAllDrives=True,
+        ticket_contract = self.contract["tickets"]
+        ticket_tab = str(ticket_contract["tab"])
+        tickets = tables.get("Tickets")
+        generic = {name: values for name, values in tables.items() if name != "Tickets"}
+        # Refuse a table set that breaks the contract before anything is
+        # copied: nothing is created or written for a bad request.
+        blocked = sorted(name for name in generic if name in {ticket_tab, *self.contract["protected_tabs"]})
+        if blocked:
+            raise TemplateContractError(
+                f"generated tables would overwrite template-owned tabs {blocked}; nothing was copied or written"
             )
-            .execute()
-        )
-        spreadsheet_id = str(copied["id"])
+        if tickets is not None:
+            self._check_generated_tickets(tickets)
+
+        source_id = google_sheet_id(template or str(self.contract["template"]["url"]))
+        spreadsheet_id, link = self._copy_template(source_id, title, folder_id)
         metadata = (
             self.sheets.spreadsheets()
             .get(
@@ -103,14 +194,13 @@ class GoogleSheetsTemplatePublisher:
         # Verify the destination Tickets header before the first write to the
         # copy, so a changed template fails without touching client content.
         ticket_anchor: tuple[int, int] | None = None
-        tickets = tables.get("Tickets")
-        if locate_ticket_header and tickets:
-            if "Tickets" not in sheet_ids:
+        if tickets is not None:
+            if ticket_tab not in sheet_ids:
                 raise TemplateHeaderError(
-                    f"copied workbook {spreadsheet_id} has no Tickets tab; nothing was written to it"
+                    f"copied workbook {spreadsheet_id} has no {ticket_tab} tab; nothing was written to it"
                 )
-            ticket_anchor = self._ticket_header_anchor(spreadsheet_id, "Tickets", [str(cell) for cell in tickets[0]])
-        missing = [title for title in tables if title not in sheet_ids]
+            ticket_anchor = self._ticket_header_anchor(spreadsheet_id, ticket_tab, list(ticket_contract["columns"]))
+        missing = [name for name in generic if name not in sheet_ids]
         if missing:
             created = (
                 self.sheets.spreadsheets()
@@ -125,30 +215,28 @@ class GoogleSheetsTemplatePublisher:
                 if properties:
                     sheet_ids[str(properties["title"])] = int(properties["sheetId"])
 
-        for name, values in tables.items():
+        if tickets is not None and ticket_anchor is not None:
             # The client template owns the Tickets header, counter formula and
             # dropdown validation.  Write generated rows beneath that header
             # instead of clearing A:ZZ, which would erase the formula the
             # copied template uses to count tickets.
-            if name == "Tickets" and name in sheet_ids:
-                column_count = max(len(values[0]) if values else 0, 1)
-                start_index, start_row = ticket_anchor or (1, 2)
-                start_column = _column_letter(start_index)
-                end_column = _column_letter(start_index + column_count - 1)
-                self.sheets.spreadsheets().values().clear(
+            start_index, start_row = ticket_anchor
+            start_column = _column_letter(start_index)
+            end_column = _column_letter(start_index + len(ticket_contract["columns"]) - 1)
+            self.sheets.spreadsheets().values().clear(
+                spreadsheetId=spreadsheet_id,
+                range=f"'{ticket_tab}'!{start_column}{start_row}:{end_column}10000",
+                body={},
+            ).execute()
+            data_rows = tickets[1:]
+            if data_rows:
+                self.sheets.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
-                    range=f"'{name}'!{start_column}{start_row}:{end_column}10000",
-                    body={},
+                    range=f"'{ticket_tab}'!{start_column}{start_row}",
+                    valueInputOption="RAW",
+                    body={"values": data_rows},
                 ).execute()
-                data_rows = values[1:] if len(values) > 1 else []
-                if data_rows:
-                    self.sheets.spreadsheets().values().update(
-                        spreadsheetId=spreadsheet_id,
-                        range=f"'{name}'!{start_column}{start_row}",
-                        valueInputOption="RAW",
-                        body={"values": data_rows},
-                    ).execute()
-                continue
+        for name, values in generic.items():
             self.sheets.spreadsheets().values().clear(
                 spreadsheetId=spreadsheet_id,
                 range=f"'{name}'!A:ZZ",
@@ -188,19 +276,128 @@ class GoogleSheetsTemplatePublisher:
                     ]
                 },
             ).execute()
-        return str(copied.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit")
+        return link or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+
+    def _check_generated_tickets(self, tickets: list[list[object]]) -> None:
+        """The generated Tickets table must use the contract's columns and dropdown values."""
+        ticket_contract = self.contract["tickets"]
+        columns = [str(column) for column in ticket_contract["columns"]]
+        header = [_header_key(cell) for cell in tickets[0]] if tickets else []
+        if header != [_header_key(column) for column in columns]:
+            raise TemplateContractError(
+                f"generated Tickets columns {list(tickets[0]) if tickets else []} differ from the template "
+                f"contract {columns}; nothing was copied or written"
+            )
+        positions = {_header_key(column): index for index, column in enumerate(columns)}
+        for column, allowed in ticket_contract["value_sets"].items():
+            index = positions[_header_key(column)]
+            permitted = {_header_key(value) for value in allowed} | {""}
+            for row_number, row in enumerate(tickets[1:], start=1):
+                value = row[index] if index < len(row) else ""
+                if _header_key(value) not in permitted:
+                    raise TemplateContractError(
+                        f"generated ticket {row_number} has {column} {value!r}, outside the template's "
+                        f"dropdown values {allowed}; nothing was copied or written"
+                    )
+
+    def _copy_template(self, source_id: str, title: str, folder_id: str | None) -> tuple[str, str | None]:
+        """Copy the template with Drive, or tab by tab when a drive.file token is refused."""
+        body: dict[str, object] = {"name": title}
+        if folder_id:
+            body["parents"] = [folder_id]
+        try:
+            copied = (
+                self.drive.files()
+                .copy(fileId=source_id, body=body, fields="id,webViewLink", supportsAllDrives=True)
+                .execute()
+            )
+        except Exception as exc:  # googleapiclient is optional; match its HttpError by shape.
+            if _http_status(exc) not in {403, 404}:
+                raise
+            return self._copy_template_tabs(source_id, title, folder_id)
+        return str(copied["id"]), copied.get("webViewLink")
+
+    def _copy_template_tabs(self, source_id: str, title: str, folder_id: str | None) -> tuple[str, str | None]:
+        """Rebuild the template in a new workbook with ``sheets.copyTo``.
+
+        A ``drive.file`` token cannot copy a file this app did not create, but
+        the Sheets scope can still copy each tab with its formatting, formulas
+        and data validation.  Tabs are copied in template order, the default
+        empty tab is removed, and each ``Copy of X`` is renamed back to ``X``
+        so cross-tab references such as the Config dropdown sources resolve.
+        """
+        source = (
+            self.sheets.spreadsheets()
+            .get(spreadsheetId=source_id, fields="sheets.properties(sheetId,title,index)")
+            .execute()
+        )
+        tabs = sorted(
+            (sheet["properties"] for sheet in source.get("sheets", [])),
+            key=lambda properties: int(properties.get("index", 0)),
+        )
+        if not tabs:
+            raise RuntimeError(f"template {source_id} has no tabs to copy")
+        created = (
+            self.sheets.spreadsheets()
+            .create(
+                body={"properties": {"title": title}},
+                fields="spreadsheetId,spreadsheetUrl,sheets.properties(sheetId,title)",
+            )
+            .execute()
+        )
+        spreadsheet_id = str(created["spreadsheetId"])
+        placeholder_ids = [int(sheet["properties"]["sheetId"]) for sheet in created.get("sheets", [])]
+        requests: list[dict[str, object]] = []
+        for tab in tabs:
+            copied = (
+                self.sheets.spreadsheets()
+                .sheets()
+                .copyTo(
+                    spreadsheetId=source_id,
+                    sheetId=int(tab["sheetId"]),
+                    body={"destinationSpreadsheetId": spreadsheet_id},
+                )
+                .execute()
+            )
+            requests.append(
+                {
+                    "updateSheetProperties": {
+                        "properties": {"sheetId": int(copied["sheetId"]), "title": str(tab["title"])},
+                        "fields": "title",
+                    }
+                }
+            )
+        # Delete the placeholder first so its name cannot collide with a
+        # template tab being renamed back (for example "Sheet1").
+        self.sheets.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"deleteSheet": {"sheetId": sheet_id}} for sheet_id in placeholder_ids] + requests},
+        ).execute()
+        if folder_id:
+            previous = self.drive.files().get(fileId=spreadsheet_id, fields="parents", supportsAllDrives=True).execute()
+            self.drive.files().update(
+                fileId=spreadsheet_id,
+                addParents=folder_id,
+                removeParents=",".join(previous.get("parents", [])),
+                fields="id",
+                supportsAllDrives=True,
+            ).execute()
+        return spreadsheet_id, created.get("spreadsheetUrl")
 
     def _ticket_header_anchor(self, spreadsheet_id: str, name: str, header: list[str]) -> tuple[int, int]:
         """Return the 1-based column and first data row beneath the copied template's ticket header.
 
-        Templates differ in where the header sits (row 1 column A, or row 6
-        column B beneath a title block).  The whole header must appear, in
-        order, in consecutive cells; an absent, partial or reordered header
+        Templates differ in where the header sits (row 1 column A, or row 5
+        column B beneath a title block in the Canonicals template).  The whole
+        header must appear, in order, in consecutive cells within the
+        contract's search window; an absent, partial or reordered header
         raises instead of defaulting to A2, which would overwrite client
         content and put generated fields under the wrong columns.
         """
+        search = self.contract["tickets"]["header_search"]
+        window = f"A1:{_column_letter(int(search['max_columns']))}{int(search['max_rows'])}"
         found = (
-            self.sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=f"'{name}'!A1:Z40").execute()
+            self.sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=f"'{name}'!{window}").execute()
         )
         expected = [_header_key(cell) for cell in header]
         closest = ""
@@ -218,7 +415,7 @@ class GoogleSheetsTemplatePublisher:
                 )
         raise TemplateHeaderError(
             f"the {name} tab of copied workbook {spreadsheet_id} has no header row "
-            f"matching {' | '.join(header)}{closest}; nothing was written to it"
+            f"matching {' | '.join(header)} in {window}{closest}; nothing was written to it"
         )
 
 
@@ -230,6 +427,17 @@ def credential_path(value: str | None) -> str | None:
     if not path.is_file():
         raise ValueError("--google-sheets-credentials must name a credential file")
     return str(path)
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """Return the HTTP status of a googleapiclient ``HttpError`` without importing it."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _header_key(value: object) -> str:
