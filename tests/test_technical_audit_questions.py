@@ -393,7 +393,7 @@ def test_sheet_tables_link_questions_to_tickets_and_data_tabs() -> None:
     assert len(questions) == 104
     assert questions["Q16"][4:6] == ["Yes", "Issue"]
     assert questions["Q16"][11] == "Q16 Structured data" and "Q16 Structured data" in tables
-    assert tables["Tickets"][int(questions["Q16"][12])][0].startswith("Q16 Structured data: 1 pages")
+    assert tables["Tickets"][int(questions["Q16"][12])][0].startswith("Q16 Structured data: 1 page")
     assert questions["Q2"][11] == "" and questions["Q2"][12] == ""
     ticket = next(row for row in tickets if row["question_id"] == "Q22")
     assert ticket["Suggested Solution"]  # reused from the internal-link-targets ticket language
@@ -443,4 +443,33 @@ def test_ticket_percentages_survive_thousands_separated_denominators() -> None:
     tickets = question_ticket_rows(audit, registry, answer_questions(audit, registry), load_ticket_language())
 
     q16 = next(row for row in tickets if row["question_id"] == "Q16")
-    assert "1 pages, across 10,852 pages tested (0%)" in q16["Description"]
+    assert "1 page, across 10,852 pages tested (0%)" in q16["Description"]
+
+
+def test_ticket_names_the_denominator_unit_when_it_differs_from_the_finding_unit() -> None:
+    # Ticket 416: Q22 counts links, but its contract denominator counts parsed pages.
+    audit = _audit()
+    registry = load_question_registry()
+    answers = answer_questions(audit, registry)
+    tickets = {
+        row["question_id"]: row for row in question_ticket_rows(audit, registry, answers, load_ticket_language())
+    }
+
+    assert _by_id(answers)["Q22"]["denominator_unit"] == "pages"
+    assert "Yes: 2 links, across 100 pages tested in run run-1." in tickets["Q22"]["Description"]
+    assert "Yes: 1 page, across 100 pages tested (1%) in run run-1." in tickets["Q16"]["Description"]
+
+
+def test_every_answered_question_carries_an_explicit_denominator_unit() -> None:
+    for answer in answer_questions(_audit(), load_question_registry()):
+        if answer["denominator"] is not None:
+            assert answer["denominator_unit"] not in {None, "items"}, answer["id"]
+
+
+def test_unit_label_uses_singular_for_one() -> None:
+    from crawler_cli.technical_audit_evidence import unit_label
+
+    assert unit_label(1, "host-agent policies") == "1 host-agent policy"
+    assert unit_label(2, "host-agent policies") == "2 host-agent policies"
+    assert unit_label(1, "URLs") == "1 URL" and unit_label(1, "URL families") == "1 URL family"
+    assert unit_label(1, "user agents") == "1 user agent" and unit_label(1_200, "pages") == "1,200 pages"

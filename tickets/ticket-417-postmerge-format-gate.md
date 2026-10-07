@@ -15,10 +15,13 @@ introduced every formatting change. No functional defect is implied.
 
 ## Acceptance criteria
 
-- [ ] Apply the pinned formatter only to the three named files.
-- [ ] `ruff check src tests` and `ruff format --check src tests` both pass.
-- [ ] Keep the formatting-only change separate from functional fixes.
+- [x] Apply the pinned formatter only to the three named files.
+- [x] `ruff check src tests` and `ruff format --check src tests` both pass.
+- [x] Keep the formatting-only change separate from functional fixes.
 
 ## Status
 
-proposed (Priority: **P2**). Post-merge QA, 2026-10-06.
+done (Priority: **P2**). Post-merge QA, 2026-10-06.
+
+Fixed on `fix/postmerge-qa-misc`: ran pinned Ruff 0.16.6 `ruff format` on only the three named
+files, in a formatting-only commit. `ruff check src tests` and `ruff format --check src tests` pass.

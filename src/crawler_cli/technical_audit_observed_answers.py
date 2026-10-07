@@ -50,6 +50,21 @@ AI_CRAWLERS = (
     "CCBot",
 )
 _QUESTION_RULE_CODES = {"canonical_changed", "indexing_directive_changed", "hreflang_changed"}
+# What one tested record of each observation kind counts, when an answer is
+# not grouped by template.  The denominator unit is often not the finding unit.
+_RECORD_UNITS = {
+    "html-signals": "pages",
+    "render-trace": "pages",
+    "render-parity": "pages",
+    "mobile-render": "pages",
+    "listing-controls": "pages",
+    "google-render-inspection": "URLs",
+    "verified-google-fetch": "URLs",
+    "utility-path-probe": "URLs",
+    "external-link-recheck": "links",
+    "competitor-topic-gap": "topics",
+    "tls-probe": "hosts",
+}
 # robots.txt statuses that prove there is no file; every other non-2xx response is unread.
 _NO_ROBOTS_STATUSES = frozenset({404, 410})
 
@@ -141,6 +156,7 @@ def _evaluate(
         coverage_complete=observed.complete,
         qualification=qualification,
         note=" ".join(notes),
+        denominator_unit="templates" if by_template else _RECORD_UNITS.get(kind, f"{kind} records"),
     )
 
 
@@ -1001,16 +1017,19 @@ OBSERVED_ANSWERERS: dict[str, Answerer] = {
             by_template=True,
         ),
     ),
-    "Q25": Answerer("locale-probe status, Location and content per variant", _locale_probes),
+    "Q25": Answerer("locale-probe status, Location and content per variant", _locale_probes, denominator_unit="URLs"),
     "Q27": Answerer(
         "host-probe of profile non-production hosts",
         _needs_profile("nonproduction_hosts", _host_exposure(mitigations=("noindex",))),
+        denominator_unit="hosts",
     ),
     "Q28": Answerer(
         "external-link-recheck status and affiliate rel",
         _observe("external-link-recheck", _external_links, fields=("source_url", "target_url", "status", "rel")),
     ),
-    "Q29": Answerer("render-trace lab vitals and image dimensions per template", _lab_vitals),
+    "Q29": Answerer(
+        "render-trace lab vitals and image dimensions per template", _lab_vitals, denominator_unit="templates"
+    ),
     "Q31": Answerer(
         "supplied verified-Google versus visitor fetch comparison",
         _observe("verified-google-fetch", _verified_google_fetch, fields=("url", "google_fetch_method")),
@@ -1037,6 +1056,7 @@ OBSERVED_ANSWERERS: dict[str, Answerer] = {
     "Q43": Answerer(
         "html-signals followed external links by page share",
         _needs_profile("allowed_external_domains", _sitewide_external_links),
+        denominator_unit="pages",
     ),
     "Q45": Answerer(
         "html-signals pages with hreflang alternates and no sibling link",
@@ -1059,7 +1079,9 @@ OBSERVED_ANSWERERS: dict[str, Answerer] = {
         _observe("render-trace", _preconnects, by_template=True),
     ),
     "Q65": Answerer("html-signals analytics preloads", _observe("html-signals", _tracking_preloads, by_template=True)),
-    "Q66": Answerer("image-resources content types of in-content raster images", _image_formats),
+    "Q66": Answerer(
+        "image-resources content types of in-content raster images", _image_formats, denominator_unit="images"
+    ),
     "Q67": Answerer(
         "html-signals inline @font-face rules and font preloads",
         _observe(
@@ -1078,6 +1100,7 @@ OBSERVED_ANSWERERS: dict[str, Answerer] = {
         _needs_profile(
             "nonproduction_hosts", _host_exposure(mitigations=("noindex", "canonical_to_main_host", "robots_blocked"))
         ),
+        denominator_unit="hosts",
     ),
     "Q85": Answerer(
         "render-parity canonical, title, robots and hreflang changes",
@@ -1087,12 +1110,17 @@ OBSERVED_ANSWERERS: dict[str, Answerer] = {
         "html-signals render-blocking head resources",
         _observe("html-signals", _render_blocking_head, by_template=True),
     ),
-    "Q92": Answerer("html-signals form actions", _insecure_forms),
+    "Q92": Answerer("html-signals form actions", _insecure_forms, denominator_unit="forms"),
     "Q95": Answerer(
         "mobile-render overlay share and primary-content ratio",
         _observe("mobile-render", _interstitial, by_template=True),
     ),
-    "Q96": Answerer("robots-txt verdicts for AI crawlers against the profile policy", _ai_crawler_policy),
+    # Q96 tests one declared policy per host and AI user agent.
+    "Q96": Answerer(
+        "robots-txt verdicts for AI crawlers against the profile policy",
+        _ai_crawler_policy,
+        denominator_unit="host-agent policies",
+    ),
     "Q102": Answerer(
         "utility-path-probe against the approved path classes",
         _observe(

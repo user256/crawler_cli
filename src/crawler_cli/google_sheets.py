@@ -54,6 +54,10 @@ def google_services(credentials_file: str | None = None) -> tuple[Any, Any]:
     return build("drive", "v3", credentials=credentials), build("sheets", "v4", credentials=credentials)
 
 
+class TemplateHeaderError(ValueError):
+    """The copied template's Tickets header does not match the generated columns."""
+
+
 class GoogleSheetsTemplatePublisher:
     """Copy one template and replace only named, generated audit tabs."""
 
@@ -96,6 +100,16 @@ class GoogleSheetsTemplatePublisher:
             str(sheet["properties"]["title"]): int(sheet["properties"]["sheetId"])
             for sheet in metadata.get("sheets", [])
         }
+        # Verify the destination Tickets header before the first write to the
+        # copy, so a changed template fails without touching client content.
+        ticket_anchor: tuple[int, int] | None = None
+        tickets = tables.get("Tickets")
+        if locate_ticket_header and tickets:
+            if "Tickets" not in sheet_ids:
+                raise TemplateHeaderError(
+                    f"copied workbook {spreadsheet_id} has no Tickets tab; nothing was written to it"
+                )
+            ticket_anchor = self._ticket_header_anchor(spreadsheet_id, "Tickets", [str(cell) for cell in tickets[0]])
         missing = [title for title in tables if title not in sheet_ids]
         if missing:
             created = (
@@ -118,9 +132,7 @@ class GoogleSheetsTemplatePublisher:
             # copied template uses to count tickets.
             if name == "Tickets" and name in sheet_ids:
                 column_count = max(len(values[0]) if values else 0, 1)
-                start_index, start_row = 1, 2
-                if locate_ticket_header and values:
-                    start_index, start_row = self._ticket_header_anchor(spreadsheet_id, name, str(values[0][0]))
+                start_index, start_row = ticket_anchor or (1, 2)
                 start_column = _column_letter(start_index)
                 end_column = _column_letter(start_index + column_count - 1)
                 self.sheets.spreadsheets().values().clear(
@@ -178,20 +190,36 @@ class GoogleSheetsTemplatePublisher:
             ).execute()
         return str(copied.get("webViewLink") or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit")
 
-    def _ticket_header_anchor(self, spreadsheet_id: str, name: str, first_header: str) -> tuple[int, int]:
-        """Return the 1-based column and first data row beneath the template's ticket header.
+    def _ticket_header_anchor(self, spreadsheet_id: str, name: str, header: list[str]) -> tuple[int, int]:
+        """Return the 1-based column and first data row beneath the copied template's ticket header.
 
         Templates differ in where the header sits (row 1 column A, or row 6
-        column B beneath a title block); fall back to A2 when it is absent.
+        column B beneath a title block).  The whole header must appear, in
+        order, in consecutive cells; an absent, partial or reordered header
+        raises instead of defaulting to A2, which would overwrite client
+        content and put generated fields under the wrong columns.
         """
         found = (
             self.sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=f"'{name}'!A1:Z40").execute()
         )
+        expected = [_header_key(cell) for cell in header]
+        closest = ""
         for row_index, row in enumerate(found.get("values", []), start=1):
-            for column_index, cell in enumerate(row, start=1):
-                if str(cell).strip() == first_header:
+            cells = [_header_key(cell) for cell in row]
+            for column_index, cell in enumerate(cells, start=1):
+                if cell != expected[0]:
+                    continue
+                actual = cells[column_index - 1 : column_index - 1 + len(expected)]
+                if actual == expected:
                     return column_index, row_index + 1
-        return 1, 2
+                closest = closest or (
+                    f"; found at {_column_letter(column_index)}{row_index}: "
+                    + " | ".join(str(value) for value in row[column_index - 1 : column_index - 1 + len(expected)])
+                )
+        raise TemplateHeaderError(
+            f"the {name} tab of copied workbook {spreadsheet_id} has no header row "
+            f"matching {' | '.join(header)}{closest}; nothing was written to it"
+        )
 
 
 def credential_path(value: str | None) -> str | None:
@@ -202,6 +230,10 @@ def credential_path(value: str | None) -> str | None:
     if not path.is_file():
         raise ValueError("--google-sheets-credentials must name a credential file")
     return str(path)
+
+
+def _header_key(value: object) -> str:
+    return " ".join(str(value).split()).casefold()
 
 
 def _column_letter(column_count: int) -> str:
