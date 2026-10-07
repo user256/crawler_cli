@@ -2898,25 +2898,58 @@ async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
                 )
             if getattr(args, "ai_governance", False):
                 assert probe_engine is not None
-                origins = seed_origins[: max(1, args.ai_governance_max_origins)]
-                collected = await collect_ai_governance(
-                    probe_engine, seed_origins=origins, max_origins=max(1, args.ai_governance_max_origins)
-                )
+                # Ticket 411: the cap selects a sample of the eligible seed
+                # origins; the omitted ones stay in the collection's population
+                # and make its coverage partial even when every fetch succeeds.
+                eligible = list(dict.fromkeys(origin.lower() for origin in seed_origins))
+                cap = max(1, args.ai_governance_max_origins)
+                origins, omitted_origins = eligible[:cap], eligible[cap:]
+                collected = await collect_ai_governance(probe_engine, seed_origins=origins, max_origins=cap)
                 llms = llms_txt_status_by_host(collected)
                 records = []
                 for origin in origins:
                     host = urlsplit(origin).netloc.lower()
-                    response = await probe_engine._bounded_fetch_response(f"{origin.rstrip('/')}/robots.txt")
-                    records.append(robots_txt_record(host, response, llms.get(host)))
-                unread = [str(record["host"]) for record in records if record["status"] is None]
+                    reasons: list[str] = []
+                    response = await probe_engine._bounded_fetch_response(
+                        f"{origin.rstrip('/')}/robots.txt", on_skip=reasons.append
+                    )
+                    # Ticket 410: an unread file stays as an unknown record for its host.
+                    records.append(
+                        robots_txt_record(
+                            host, response, llms.get(host), unknown_reason=reasons[-1] if reasons else None
+                        )
+                    )
+                unread = [
+                    f"{record['host']} ({record['unknown_reason']})"
+                    for record in records
+                    if record.get("fetch_outcome") == "unknown"
+                ]
+                omitted_hosts = [urlsplit(origin).netloc for origin in omitted_origins]
+                scope = f"{len(origins)} of {len(eligible)} eligible seed origins (cap {cap})"
+                if omitted_hosts:
+                    scope += f"; omitted by cap: {', '.join(omitted_hosts)}"
+                if unread:
+                    scope += f"; not read: {', '.join(unread)}"
                 collections.append(
                     collection(
                         "robots-txt",
                         records,
                         source="crawler-cli technical-audit-observations --ai-governance: guarded live robots.txt and /llms.txt fetch",
-                        scope=f"{len(records)} seed origins"
-                        + (f"; not fetched: {', '.join(unread)}" if unread else ""),
-                        coverage_state="partial" if unread else "complete",
+                        scope=scope,
+                        coverage_state="partial" if unread or omitted_hosts else "complete",
+                        population={
+                            "unit": "seed origins",
+                            "eligible_count": len(eligible),
+                            "selected_count": len(origins),
+                            "omitted_count": len(omitted_origins),
+                            "cap": cap,
+                            "eligible": [urlsplit(origin).netloc for origin in eligible],
+                            "selected": [urlsplit(origin).netloc for origin in origins],
+                            "omitted": omitted_hosts,
+                            "unread": [
+                                str(record["host"]) for record in records if record.get("fetch_outcome") == "unknown"
+                            ],
+                        },
                     )
                 )
             if getattr(args, "probe_accept_language", False):

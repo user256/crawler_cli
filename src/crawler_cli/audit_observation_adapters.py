@@ -31,14 +31,36 @@ def llms_txt_status_by_host(collected: Mapping[str, object]) -> dict[str, str]:
     return status
 
 
-def robots_txt_record(host: str, response: object, llms_txt_status: str | None) -> dict[str, object]:
-    """One ``robots-txt`` record from a guarded fetch; an unfetched file has no status and no body."""
+def robots_txt_record(
+    host: str, response: object, llms_txt_status: str | None, *, unknown_reason: str | None = None
+) -> dict[str, object]:
+    """One ``robots-txt`` record from a guarded fetch.
+
+    The host is the record's identity; the fetch outcome is separate. A file
+    that was never read (timeout, denied destination, challenge, truncated
+    body, no response) keeps its host with ``fetch_outcome: "unknown"``, a null
+    status and body, and the reason, so the answerer counts the host as
+    untested instead of the bundle losing it (ticket 410).
+    """
     status = getattr(response, "status", None) if response is not None else None
-    if not isinstance(status, int):
-        return {"host": host, "status": None, "body": None, "llms_txt_status": llms_txt_status}
+    if not isinstance(status, int) or isinstance(status, bool) or status <= 0:
+        return {
+            "host": host,
+            "fetch_outcome": "unknown",
+            "unknown_reason": unknown_reason or ("no_response" if response is None else "no_status"),
+            "status": None,
+            "body": None,
+            "llms_txt_status": llms_txt_status,
+        }
     text = getattr(response, "text", None)
     body = str(text) if 200 <= status < 300 and isinstance(text, str) else None
-    return {"host": host, "status": status, "body": body, "llms_txt_status": llms_txt_status}
+    return {
+        "host": host,
+        "fetch_outcome": "fetched",
+        "status": status,
+        "body": body,
+        "llms_txt_status": llms_txt_status,
+    }
 
 
 def _initial_status(probe: Mapping[str, object] | None) -> int | None:

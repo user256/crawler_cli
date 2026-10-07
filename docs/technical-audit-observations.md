@@ -29,7 +29,13 @@ crawler-cli technical-audit-questions --audit audit.json --site-profile profile.
 - `--robots-txt HOST=FILE` takes a robots.txt body saved by the operator.
 - `--ai-governance` fetches each seed origin's robots.txt and /llms.txt through
   the guarded engine and writes `robots-txt` records (status, body,
-  llms_txt_status).
+  llms_txt_status). A robots.txt that was not read (timeout, denied
+  destination, challenge, truncated body, no response) is kept as a record with
+  `fetch_outcome: "unknown"`, a null status and an `unknown_reason`, and makes
+  the collection partial. `--ai-governance-max-origins` caps the probed seed
+  origins; the collection's `population` records the eligible, selected and
+  omitted origins, and a cap below the eligible count makes coverage partial,
+  so Q96 cannot reach Healthy from a sample.
 - `--probe-accept-language` probes the seed and locale roots with a fixed
   Accept-Language set (ticket 260), persists the session (ticket 264) and
   writes `locale-probe` records.
@@ -90,7 +96,7 @@ that collected them.
 | `utility-path-probe` | url | path_class (`protected` or `public-utility`, from the approved policy), status, auth_required, exposes_content, noindex, robots_blocked (a public-utility path needs both noindex and robots_blocked recorded) | Q102 |
 | `external-link-recheck` | source_url, target_url | status, rel (required for an affiliate link; null when the anchor has none), affiliate | Q28 |
 | `tls-probe` | host | hsts_header (null when absent), preload_status, ocsp_stapled | Q63 |
-| `robots-txt` | host, status | body (required with a 2xx status; a 404 or 410 means no file and allows everything; a redirect, any other 4xx or a 5xx is unread), llms_txt_status | Q96 |
+| `robots-txt` | host; plus an integer status, or `fetch_outcome: "unknown"` with an `unknown_reason` and no status | body (required with a 2xx status; a 404 or 410 means no file and allows everything; a redirect, any other 4xx or a 5xx is unread), llms_txt_status | Q96 |
 | `google-render-inspection` | url, template, tool | primary_content_present, blocked_resources, render_error | Q18 |
 | `verified-google-fetch` | url | content_differs, links_differ, directives_differ (all three must be recorded for a matching fetch), google_fetch_method | Q31 |
 | `competitor-topic-gap` | topic, site_covers, competitors_covering | query, method | Q50 |

@@ -19,11 +19,15 @@ Run `PYTHONPATH=src python tickets/qa-new-audit-2026-10-06/reproduce.py` from th
 
 ## Tasks and acceptance criteria
 
-- [ ] Separate record identity (host) from fetch outcome; permit an explicit unknown status with a reason.
-- [ ] Retain failed hosts and all successful collections; Q96 must remain Pending or Needs validation for incomplete evidence.
-- [ ] Add command-level coverage for timeout, denied destination, challenge, truncated response and mixed successful/failed hosts.
+- [x] Separate record identity (host) from fetch outcome; permit an explicit unknown status with a reason.
+- [x] Retain failed hosts and all successful collections; Q96 must remain Pending or Needs validation for incomplete evidence.
+- [x] Add command-level coverage for timeout, denied destination, challenge, truncated response and mixed successful/failed hosts.
 
 ## Status
 
-proposed (Priority: **P1**). Filed by post-merge QA, 2026-10-06.
-Related existing tickets: 370, 388, 409. This records a fix request; no product fix has been applied.
+done (Priority: **P1**). Filed by post-merge QA, 2026-10-06; fixed on `fix/postmerge-qa-robots`, 2026-10-07.
+Related existing tickets: 370, 388, 409.
+
+Fix: `robots-txt` identity is now `host` only. A record states its outcome: an integer `status` (`fetch_outcome: "fetched"`), or `fetch_outcome: "unknown"` with a non-empty `unknown_reason` and null status/body. Validation still refuses a record with no status and no explicit unknown outcome, an unknown record that carries a status or body, and a non-integer status. `CrawlEngine._bounded_fetch_response` takes an optional `on_skip` callback that reports why it returned None (`timeout:<exc>`, `destination_denied:<reason>`, `scope_manifest_denied:<reason>`, `challenge:<kind>`, `truncated:<reason>`, `circuit_breaker_open`, `fetch_error:<exc>`, `no_response`); `--ai-governance` records that reason, keeps the host, marks the collection partial, and the other collections (for example `--tls-probe`) are still written. Q96 counts unknown hosts as untested: all-unknown is Pending, mixed read/unread is Needs validation, never Healthy.
+
+Tests: `tests/test_ai_governance_observations.py` (command-level timeout, denied destination, challenge, truncated, circuit-open and no-reason cases, mixed hosts, validation, engine skip reasons). `reproduce.py` key 410 now writes the bundle with exit 0.

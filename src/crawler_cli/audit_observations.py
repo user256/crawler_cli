@@ -44,7 +44,9 @@ OBSERVATION_KINDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "utility-path-probe": ("unauthenticated request to a preview, draft, admin or CMS path", ("url",)),
     "external-link-recheck": ("live recheck of an outbound link", ("source_url", "target_url")),
     "tls-probe": ("HSTS header, HSTS preload status and OCSP stapling per host", ("host",)),
-    "robots-txt": ("robots.txt response per host, with optional llms.txt presence", ("host", "status")),
+    # status is not identity: an unread file carries fetch_outcome "unknown" and
+    # an unknown_reason instead (ticket 410); see _validate_robots_txt_record.
+    "robots-txt": ("robots.txt response per host, with optional llms.txt presence", ("host",)),
     "google-render-inspection": (
         "supplied URL Inspection or Rich Results Test render per key template",
         ("url", "template", "tool"),
@@ -117,10 +119,50 @@ def validate_observation_bundle(bundle: Mapping[str, object]) -> None:
             missing = [key for key in identity if record.get(key) is None or record.get(key) == ""]
             if missing:
                 errors.append(f"{label} record {index}: missing {', '.join(missing)}")
+            elif kind == "robots-txt":
+                errors.extend(f"{label} record {index}: {problem}" for problem in _robots_txt_record_problems(record))
+        errors.extend(f"{label}: {problem}" for problem in _population_problems(collection))
         if len(errors) > 20:
             break
     if errors:
         raise ObservationError("; ".join(errors[:20]))
+
+
+def _robots_txt_record_problems(record: Mapping[str, object]) -> list[str]:
+    """A robots-txt record has an integer status, or says explicitly why it has none."""
+    status = record.get("status")
+    outcome = record.get("fetch_outcome")
+    if outcome == "unknown":
+        problems = [] if _text(record.get("unknown_reason")) else ["fetch_outcome unknown needs an unknown_reason"]
+        if status is not None or record.get("body") is not None:
+            problems.append("fetch_outcome unknown must not carry a status or body")
+        return problems
+    if outcome not in (None, "fetched"):
+        return [f"fetch_outcome must be 'fetched' or 'unknown', got {outcome!r}"]
+    if status is None or status == "":
+        return ["missing status (record an unread file as fetch_outcome unknown with an unknown_reason)"]
+    if not isinstance(status, int) or isinstance(status, bool):
+        return [f"status must be an integer, got {status!r}"]
+    return []
+
+
+def _population_problems(collection: Mapping[str, object]) -> list[str]:
+    """A collection that omitted part of its eligible population cannot claim complete coverage."""
+    population = collection.get("population")
+    if population is None:
+        return []
+    if not isinstance(population, Mapping):
+        return ["population must be an object"]
+    problems = []
+    counts = {key: population.get(key) for key in ("eligible_count", "selected_count", "omitted_count")}
+    if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in counts.values()):
+        problems.append("population needs non-negative integer eligible_count, selected_count and omitted_count")
+    elif counts["selected_count"] + counts["omitted_count"] != counts["eligible_count"]:  # type: ignore[operator]
+        problems.append("population selected_count + omitted_count must equal eligible_count")
+    omitted = population.get("omitted_count")
+    if collection.get("coverage_state") == "complete" and (omitted or population.get("omitted")):
+        problems.append("coverage_state complete but population omits eligible items")
+    return problems
 
 
 def attach_observations(audit: Mapping[str, object], bundles: Sequence[Mapping[str, object]]) -> dict[str, object]:
@@ -188,8 +230,9 @@ def collection(
     scope: str,
     coverage_state: str,
     collected_at: str | None = None,
+    population: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    built: dict[str, object] = {
         "kind": kind,
         "source": source,
         "scope": scope,
@@ -197,6 +240,11 @@ def collection(
         "collected_at": collected_at or datetime.now(UTC).isoformat(),
         "records": [dict(record) for record in records],
     }
+    if population is not None:
+        # Structured eligible/selected/omitted counts and identities, so a
+        # capped sample is never read as the whole population (ticket 411).
+        built["population"] = dict(population)
+    return built
 
 
 def collection_from_html_signals(

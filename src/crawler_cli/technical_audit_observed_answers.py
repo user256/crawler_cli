@@ -843,6 +843,11 @@ def _ai_crawler_policy(audit: Json, question: Json, profile: Json | None) -> Evi
         status = _int_or_none(record.get("status"))
         if record.get("llms_txt_status") is not None:
             llms.append(f"{host} /llms.txt {record['llms_txt_status']}")
+        if record.get("fetch_outcome") == "unknown":
+            # Ticket 410: the fetch never produced a readable response.
+            reason = record.get("unknown_reason")
+            unknown_hosts.append(f"{host} ({reason})" if reason else host)
+            continue
         if 200 <= (status or 0) < 300 and record.get("body") is not None:
             body = str(record["body"])
         elif status in _NO_ROBOTS_STATUSES:
@@ -873,9 +878,12 @@ def _ai_crawler_policy(audit: Json, question: Json, profile: Json | None) -> Evi
                         **record["_provenance"],
                     }
                 )
+    omitted = _omitted_population(observed.collections)
     note = f"Observations: {observed.scopes()}. Verdicts are for the site root path."
     if unknown_hosts:
         note += f" robots.txt unavailable or unread for: {', '.join(unknown_hosts)}."
+    if omitted:
+        note += f" Eligible hosts never probed (capped): {', '.join(omitted)}."
     if llms:
         note += f" {'; '.join(llms)} (reported only; not a defect)."
     if not policy:
@@ -891,10 +899,25 @@ def _ai_crawler_policy(audit: Json, question: Json, profile: Json | None) -> Evi
     return Evidence(
         rows=rows,
         denominator=tested,
-        scope_complete=not unknown_hosts and not undeclared,
-        coverage_complete=observed.complete,
+        scope_complete=not unknown_hosts and not undeclared and not omitted,
+        coverage_complete=observed.complete and not omitted,
         note=note,
     )
+
+
+def _omitted_population(collections: Iterable[Mapping[str, Any]]) -> list[str]:
+    """Eligible items a collection's population says were never selected (ticket 411)."""
+    omitted: list[str] = []
+    for item in collections:
+        population = item.get("population")
+        if not isinstance(population, Mapping):
+            continue
+        names = population.get("omitted")
+        if isinstance(names, list) and names:
+            omitted.extend(str(name) for name in names)
+        elif isinstance(population.get("omitted_count"), int) and population["omitted_count"] > 0:
+            omitted.append(f"{population['omitted_count']} unnamed")
+    return omitted
 
 
 # --- supplied third-party evidence -------------------------------------------

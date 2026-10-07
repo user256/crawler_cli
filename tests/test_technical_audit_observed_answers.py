@@ -393,6 +393,9 @@ def test_records_without_the_rule_fields_are_untested(qid: str) -> None:
     from crawler_cli.audit_observations import OBSERVATION_KINDS
 
     identity = OBSERVATION_KINDS[kind][1]
+    if kind == "robots-txt":
+        # Ticket 410: host is the identity; a valid record also states its fetch outcome.
+        identity = (*identity, "status")
     bare = [{key: record[key] for key in identity} for record in finding]
     answer = _answers([_obs(kind, bare)])[qid]
     assert answer["status"] == "Pending", answer["notes"]

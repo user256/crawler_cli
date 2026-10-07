@@ -59,13 +59,17 @@ def test_robots_txt_record_keeps_the_body_only_for_a_2xx() -> None:
     ok = robots_txt_record("example.com", SimpleNamespace(status=200, text="User-agent: *\nDisallow: /x"), "valid")
     assert ok == {
         "host": "example.com",
+        "fetch_outcome": "fetched",
         "status": 200,
         "body": "User-agent: *\nDisallow: /x",
         "llms_txt_status": "valid",
     }
     assert robots_txt_record("example.com", SimpleNamespace(status=301, text="moved"), None)["body"] is None
+    # Ticket 410: an unread file is an explicit unknown outcome with a reason.
     assert robots_txt_record("example.com", None, None) == {
         "host": "example.com",
+        "fetch_outcome": "unknown",
+        "unknown_reason": "no_response",
         "status": None,
         "body": None,
         "llms_txt_status": None,
