@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from .technical_audit import TECHNICAL_AUDIT_CHECK_CONTRACT, TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES
 from .technical_audit_evidence import (
+    HEADING_LINK_XPATH_PATTERN,
     Answerer,
     Evidence,
     Json,
@@ -280,7 +281,7 @@ def _with_template(
 
 
 def _heading_link(row: Json) -> bool:
-    return bool(re.search(r"/h[23](?:\[\d+\])?(?:/|$)", str(row.get("xpath", "")), re.IGNORECASE))
+    return bool(re.search(HEADING_LINK_XPATH_PATTERN, str(row.get("xpath", "")), re.IGNORECASE))
 
 
 def _heading_target_failure(row: Json) -> bool:
@@ -293,28 +294,49 @@ def _heading_target_failure(row: Json) -> bool:
 
 
 def _heading_link_targets(audit: Json, question: Json, profile: Json | None) -> Evidence:
-    """Q39: failing heading-link targets; the heading-link population itself is never counted.
+    """Q39: failing heading-link targets over the counted H2/H3 link population.
 
     The internal-link-targets collector returns only links whose target fails,
-    so neither the parsed-page count nor the failure rows say how many H2/H3
-    links were tested.  A run without failing heading links therefore cannot
-    show the rule passed: it may simply have no heading links.  Report no
-    denominator and keep a clean result below Healthy.
+    so the population comes from ``run_context``: ``heading_link_count`` (all
+    H2/H3 links) and ``heading_link_tested_count`` (those whose target has a
+    saved status in the run).  The tested count is the denominator; zero means
+    the rule could not be tested.  An audit saved before these counts existed
+    reports no denominator and keeps a clean result below Healthy.
     """
     evidence = _from_check("internal-link-targets", keep=_heading_target_failure)(audit, question, profile)
     if not evidence.available:
         return evidence
-    note = (
-        "The heading-link population is not counted (the internal-link-targets collector keeps only failing "
-        "links), so a run without failing heading links is not confirmed Healthy."
-    )
+    raw_context = audit.get("run_context")
+    context = raw_context if isinstance(raw_context, Mapping) else {}
+    found = _int_or_none(context.get("heading_link_count"))
+    tested = _int_or_none(context.get("heading_link_tested_count"))
+    if found is None or tested is None:
+        note = (
+            "The heading-link population is not counted in this audit (the internal-link-targets collector keeps "
+            "only failing links), so a run without failing heading links is not confirmed Healthy; regenerate the "
+            "audit to count it."
+        )
+        return Evidence(
+            **{
+                **evidence.__dict__,
+                "denominator": None,
+                "denominator_unit": "heading links",
+                "scope_complete": False,
+                "note": note,
+            }
+        )
+    notes = [evidence.note] if evidence.note else []
+    if found > tested:
+        notes.append(
+            f"{found - tested:,} of {unit_label(found, 'heading links')} point to targets without a saved status "
+            "in this run and were not tested."
+        )
     return Evidence(
         **{
             **evidence.__dict__,
-            "denominator": None,
+            "denominator": tested,
             "denominator_unit": "heading links",
-            "scope_complete": False,
-            "note": note,
+            "note": "; ".join(notes),
         }
     )
 

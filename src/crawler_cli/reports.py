@@ -12,6 +12,7 @@ from .html_audit import canonical_targets, inspect_stored_html
 from .hreflang_audit import hreflang_facts
 from .semantic_html_audit import inspect_semantic_html
 from .persistence import AsyncpgStore
+from .technical_audit_evidence import HEADING_LINK_XPATH_PATTERN
 
 
 _TRACKING_PARAMETERS = {
@@ -344,6 +345,32 @@ class CrawlReports:
         )
         if drift:
             stats.update(drift[0])
+        # Q39: the internal-link-quality report keeps only failing links, so
+        # count the whole H2/H3 link population here.  A link is tested when
+        # its target has a saved status in this run.
+        heading_link_count: int | None = None
+        heading_link_tested_count: int | None = None
+        if "links_json" in snapshot_columns:
+            heading = await self._fetch(
+                """
+                WITH heading_links AS (
+                    SELECT DISTINCT s.url_id AS source_id, link ->> 'href' AS target_url, link ->> 'xpath' AS xpath
+                    FROM page_run_snapshots s
+                    CROSS JOIN LATERAL jsonb_array_elements(s.links_json) link
+                    WHERE s.run_id = $1 AND (link ->> 'xpath') ~* $2
+                )
+                SELECT COUNT(*)::INT AS heading_link_count,
+                       COUNT(*) FILTER (WHERE target.final_status_code IS NOT NULL)::INT
+                           AS heading_link_tested_count
+                FROM heading_links h
+                LEFT JOIN urls target_url ON target_url.url = h.target_url
+                LEFT JOIN page_run_snapshots target ON target.run_id = $1 AND target.url_id = target_url.id
+                """,
+                run_id,
+                HEADING_LINK_XPATH_PATTERN,
+            )
+            heading_link_count = _int_or_none(heading[0].get("heading_link_count")) if heading else 0
+            heading_link_tested_count = _int_or_none(heading[0].get("heading_link_tested_count")) if heading else 0
         locale_signature_count: int | None = None
         if has_signatures:
             signature_coverage = await self._fetch(
@@ -399,6 +426,8 @@ class CrawlReports:
             "frontier_pending": frontier[1],
             "frontier_done": frontier[2],
             "locale_signature_count": locale_signature_count,
+            "heading_link_count": heading_link_count,
+            "heading_link_tested_count": heading_link_tested_count,
             **stats,
         }
 
