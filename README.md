@@ -687,7 +687,26 @@ template) and writes rows beneath it; if the header is missing, partial or
 reordered it stops before any write. With a `drive.file` OAuth token, where
 Drive refuses to copy a template the app did not create, it creates a new
 workbook and copies each tab with `sheets.copyTo`, then restores the tab names
-so the dropdowns sourced from `Config` still resolve.
+so the dropdowns sourced from `Config` still resolve. Evidence tabs are
+inserted after `Tickets` and before `Config`. After writing, the publisher
+reads back the ticket rows (`Tickets!B6:I<n>`) and each evidence tab's used
+range and stops with `PublishReceiptError` if anything differs from what was
+sent (numbers read back as text and trimmed empty cells are not differences);
+on success it prints a receipt with the sheet ID, ranges and row counts.
+
+To check the template's Priority and Ticket Classification dropdowns against
+the contract without publishing anything, run
+
+    crawler-cli technical-audit-questions --check-template \
+      [--google-sheets-template <url-or-id>] [--google-sheets-contract <json>] \
+      [--google-sheets-credentials <service-account.json>]
+
+It reads the data validation on the first 100 rows under the Tickets header,
+resolves `ONE_OF_LIST` values or `ONE_OF_RANGE` sources (for example
+`Config!A2:A5`), prints each column's values against the contract, and exits
+with code 2 on any difference. It makes no writes and needs no `--audit` or
+`--out`; authentication is the same as for publishing
+(`GOOGLE_DOCS_OAUTH_TOKEN_FILE` or `--google-sheets-credentials`).
 
 #### Discovery source reconciliation
 
