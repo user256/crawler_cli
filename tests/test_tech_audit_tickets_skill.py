@@ -25,7 +25,14 @@ GOOD = [
 
 def sheet(*tickets, count=None):
     n = len(tickets) if count is None else count
-    return [[], ["", "", "", "Site.com – Technical SEO Audit"], ["", f"Count of tickets: {n}"], ["", "Audit performed by: A"], HEADER, *tickets]
+    return [
+        [],
+        ["", "", "", "Site.com – Technical SEO Audit"],
+        ["", f"Count of tickets: {n}"],
+        ["", "Audit performed by: A"],
+        HEADER,
+        *tickets,
+    ]
 
 
 def messages(rows, tabs=frozenset({"Tickets", "Sportsbook routes"})):
@@ -94,7 +101,10 @@ def test_apply_writes_rows_numbers_and_header(tmp_path, monkeypatch):
     ticket = dict(zip(audit_sheet.FIELDS, GOOD[1:]))
     path = tmp_path / "t.json"
     path.write_text(json.dumps([ticket, ticket]))
-    assert audit_sheet.main(["apply", "abc", str(path), "--author", "Jo", "--title", "Site.com – Technical SEO Audit"]) == 0
+    assert (
+        audit_sheet.main(["apply", "abc", str(path), "--author", "Jo", "--title", "Site.com – Technical SEO Audit"])
+        == 0
+    )
     data = {d["range"]: d["values"] for d in calls[0]["data"]}
     assert data["'Tickets'!B6:I56"][:2] == [GOOD[1:], GOOD[1:]]
     assert data["'Tickets'!A6:A7"] == [["1."], ["2."]]
@@ -114,7 +124,9 @@ def test_apply_refuses_to_overwrite(tmp_path, monkeypatch):
 def test_imperative_labels_multi_tab_notes_and_url_spelling():
     t = list(GOOD)
     t[1] = "Consolidate the Google-indexed mirror host"
-    t[8] = "See Sportsbook routes; Missing tab\nDocumentation: https://developers.google.com/international/localized-versions"
+    t[8] = (
+        "See Sportsbook routes; Missing tab\nDocumentation: https://developers.google.com/international/localized-versions"
+    )
     out = messages(sheet(t))
     assert ("Label", "warn", "Starts with 'Consolidate': state the problem, not the fix.") in out
     assert any(s == "error" and "'Missing tab'" in m for _, s, m in out)
@@ -126,7 +138,12 @@ def test_note_links_and_runs():
     text = "See Soft 404 Probes; Reference - Archive History\nDocumentation: https://example.com/x\nAudit ID: BCG-02 · Suggested team: Routing"
     tabs = {"Soft 404 Probes": "u#gid=1", "Reference - Archive History": "u#gid=2", "Tickets": "u#gid=0"}
     spans = audit_sheet.note_links(text, tabs, {"BCG-02": "u#gid=3&range=A3"})
-    assert [text[s:e] for s, e, _ in spans] == ["Soft 404 Probes", "Reference - Archive History", "https://example.com/x", "BCG-02"]
+    assert [text[s:e] for s, e, _ in spans] == [
+        "Soft 404 Probes",
+        "Reference - Archive History",
+        "https://example.com/x",
+        "BCG-02",
+    ]
     runs = audit_sheet.text_runs(text, spans)
     assert [r["startIndex"] for r in runs] == sorted({r["startIndex"] for r in runs})
     assert runs[0] == {"startIndex": 0, "format": {}}
