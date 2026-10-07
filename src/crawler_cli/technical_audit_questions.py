@@ -15,7 +15,15 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .technical_audit import TECHNICAL_AUDIT_CHECK_CONTRACT, TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES
-from .technical_audit_evidence import Answerer, Evidence, Json, _int_or_none, _path_and_query, _profile_value
+from .technical_audit_evidence import (
+    Answerer,
+    Evidence,
+    Json,
+    _int_or_none,
+    _path_and_query,
+    _profile_value,
+    unit_label,
+)
 from .technical_audit_tickets import _placeholders, _render, _sample_urls, ticket_sheet_table
 from .profile_indexability_audit import analyse_profile_indexability
 from .crawl_depth_audit import analyse_priority_crawl_depth
@@ -204,6 +212,20 @@ def _check(audit: Json, identifier: str) -> Json | None:
     return None
 
 
+# What each contract check's denominator counts.  Most count stored or parsed
+# HTML pages; the rest are listed here.
+_CHECK_DENOMINATOR_UNITS = {
+    "nonhtml-search-assets": "documents",
+    "locale-html-lang": "content signatures",
+    "rendered-robots-links": "interaction captures",
+    "supplied-search-evidence": "records",
+}
+
+
+def _check_denominator_unit(identifier: str) -> str:
+    return _CHECK_DENOMINATOR_UNITS.get(identifier, "pages")
+
+
 def _from_check(
     identifier: str,
     *,
@@ -231,6 +253,7 @@ def _from_check(
             qualification=str(check["qualification"]) if check.get("qualification") else None,
             note=scope_note,
             language_check=identifier,
+            denominator_unit=_check_denominator_unit(identifier),
         )
 
     return answer
@@ -308,6 +331,7 @@ def _duplicate_head_elements(audit: Json, question: Json, profile: Json | None) 
         denominator=metadata.denominator,
         coverage_complete=metadata.coverage_complete and canonical.coverage_complete,
         language_check="metadata-basics",
+        denominator_unit=metadata.denominator_unit,
     )
 
 
@@ -324,7 +348,7 @@ def _within_indexable_pages(audit: Json, evidence: Evidence) -> Evidence:
     count = _indexable_page_count(audit)
     if not evidence.available or count is None:
         return evidence
-    return Evidence(**{**evidence.__dict__, "denominator": count})
+    return Evidence(**{**evidence.__dict__, "denominator": count, "denominator_unit": "indexable pages"})
 
 
 def _indexable_heading_issues(audit: Json, question: Json, profile: Json | None) -> Evidence:
@@ -371,6 +395,7 @@ def _header_html_parity(audit: Json, question: Json, profile: Json | None) -> Ev
         denominator=robots.denominator,
         coverage_complete=robots.coverage_complete and canonical.coverage_complete,
         language_check="indexability-segmentation",
+        denominator_unit=robots.denominator_unit,
     )
 
 
@@ -396,6 +421,7 @@ def _semantic_landmarks(audit: Json, question: Json, profile: Json | None) -> Ev
         qualification="review_required",
         note="Rows are page-level source candidates; confirm their template grouping before raising a ticket.",
         language_check="semantic-html",
+        denominator_unit="pages",
     )
 
 
@@ -407,6 +433,7 @@ def _semantic_toc(audit: Json, question: Json, profile: Json | None) -> Evidence
         denominator=len(eligible) if available else None,
         available=available,
         language_check="semantic-html",
+        denominator_unit="pages",
     )
 
 
@@ -436,6 +463,7 @@ def _profile_indexability(question_id: str) -> Callable[[Json, Json, Json | None
             coverage_complete=result.complete,
             note="; ".join(result.unavailable_reasons),
             language_check="profile-indexability-pages",
+            denominator_unit="pages",
         )
 
     return answer
@@ -465,6 +493,7 @@ def _semantic_figure_caption(audit: Json, question: Json, profile: Json | None) 
         qualification="review_required",
         note=note,
         language_check="semantic-html",
+        denominator_unit="images",
     )
 
 
@@ -527,6 +556,7 @@ def _crawl_depth(audit: Json, question: Json, profile: Json | None) -> Evidence:
         coverage_complete=result.complete,
         note="; ".join([*notes, *result.unavailable_reasons]),
         language_check="crawl-depth-pages",
+        denominator_unit="priority pages",
     )
 
 
@@ -565,6 +595,7 @@ def _performance_distribution(audit: Json, question: Json, profile: Json | None)
         coverage_complete=result.complete,
         note="; ".join(result.unavailable_reasons),
         language_check="performance-pages",
+        denominator_unit="timed pages",
     )
 
 
@@ -614,6 +645,7 @@ def _empty_anchors(audit: Json, question: Json, profile: Json | None) -> Evidenc
         ),
         note="; ".join(notes),
         language_check="empty-anchor-links",
+        denominator_unit="links",
     )
 
 
@@ -642,7 +674,7 @@ def _run_gate(audit: Json, question: Json, profile: object) -> Evidence:
         count = _int_or_none(context.get(key))
         if count and html and count / html > limit:
             fail(label, f"{count:,} of {html:,}", f"<= {limit:.0%}")
-    return Evidence(rows=failures, denominator=1)
+    return Evidence(rows=failures, denominator=1, denominator_unit="runs")
 
 
 _MIN_DRIFT_SAMPLES = 20
@@ -682,6 +714,7 @@ def _rate_limit_gate(audit: Json, question: Json, profile: object) -> Evidence:
         scope_complete=drift_tested,
         coverage_complete=context.get("completion_state") == "complete",
         note=note,
+        denominator_unit="runs",
     )
 
 
@@ -809,6 +842,7 @@ def _answer_one(
         "answer": "",
         "affected_count": None,
         "denominator": None,
+        "denominator_unit": None,
         "notes": notes,
         "rows": [],
         "ticket": False,
@@ -835,6 +869,8 @@ def _answer_one(
     answer.update(
         affected_count=affected,
         denominator=evidence.denominator,
+        # Fall back to "items" rather than assume the denominator counts the finding unit.
+        denominator_unit=evidence.denominator_unit or answerer.denominator_unit or "items",
         rows=rows,
         language_check=evidence.language_check,
         qualification=evidence.qualification,
@@ -842,7 +878,7 @@ def _answer_one(
     if not rows and evidence.denominator == 0:
         # An empty tested population is not evidence that the rule passed.
         notes.append("No items in the tested population, so the rule could not be tested.")
-        answer.update(affected_count=None, denominator=None, rows=[])
+        answer.update(affected_count=None, denominator=None, denominator_unit=None, rows=[])
         return answer
     matched = _meets_threshold(affected, evidence.denominator, entry.get("threshold"))
     if matched is None:
@@ -922,15 +958,19 @@ def question_ticket_rows(
         }
         values = _placeholders(audit, pseudo_check, evidence)
         values["unit"] = str(entry["unit"])
+        denominator_unit = _denominator_unit(answer)
+        values["denominator_unit"] = denominator_unit
         source = language_checks.get(answer.get("language_check")) if isinstance(language_checks, Mapping) else None
         source = source if isinstance(source, Mapping) else {}
         classification, priority = _ticket_grade(entry)
-        count = f"{affected:,} {entry['unit']}"
+        count = unit_label(affected, str(entry["unit"]))
         tested = ""
         if answer.get("denominator"):
-            # Contract denominators count parsed HTML pages, whatever the question's unit.
-            share = f" ({values['affected_pct']})" if entry["unit"] == "pages" else ""
-            tested = f", across {int(answer['denominator']):,} pages tested{share}"
+            # The denominator counts its own population (pages, hosts, policies...),
+            # which need not be the question's finding unit; a share needs both to match.
+            same_unit = denominator_unit.casefold() == str(entry["unit"]).casefold()
+            share = f" ({values['affected_pct']})" if same_unit and values["affected_pct"] else ""
+            tested = f", across {unit_label(int(answer['denominator']), denominator_unit)} tested{share}"
         description = "\n\n".join(
             part
             for part in (
@@ -969,6 +1009,18 @@ def question_ticket_rows(
             }
         )
     return rows
+
+
+def _denominator_unit(answer: Json) -> str:
+    return str(answer.get("denominator_unit") or "items")
+
+
+def _tested_summary(answer: Json) -> str:
+    """Tested population with its unit, for the Questions tab notes."""
+    denominator = _int_or_none(answer.get("denominator"))
+    if denominator is None:
+        return ""
+    return f"Tested: {unit_label(denominator, _denominator_unit(answer))}."
 
 
 def _ticket_grade(entry: Json) -> tuple[str, str]:
@@ -1020,7 +1072,11 @@ def questions_sheet_tables(
                 "" if denominator is None else denominator,
                 entry["issue_if"],
                 entry["why"],
-                " ".join(str(note) for note in answer.get("notes", []) or []),
+                " ".join(
+                    part
+                    for part in (_tested_summary(answer), *(str(note) for note in answer.get("notes", []) or []))
+                    if part
+                ),
                 tab,
                 ticket_numbers.get(str(entry["id"]), ""),
             ]

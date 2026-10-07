@@ -31,12 +31,34 @@ class Evidence:
     qualification: str | None = None
     note: str = ""
     language_check: str | None = None
+    # Plural noun for what the denominator counts (pages, hosts, host-agent
+    # policies...).  It often differs from the question's finding unit.
+    denominator_unit: str | None = None
 
 
 @dataclass(frozen=True)
 class Answerer:
     basis: str
     answer: Callable[[Json, Json, Json | None], Evidence]
+    # Fallback denominator unit when the evidence does not name one.
+    denominator_unit: str | None = None
+
+
+def unit_label(count: int, unit: str) -> str:
+    """``count`` with ``unit`` (a plural noun phrase) in singular or plural form."""
+
+    return f"{count:,} {unit if count != 1 else singular_unit(unit)}"
+
+
+def singular_unit(unit: str) -> str:
+    """Singular form of a plural unit noun phrase: "host-agent policies" -> "host-agent policy"."""
+
+    head, _, last = unit.rpartition(" ")
+    if last.endswith("ies") and len(last) > 3:
+        last = last[:-3] + "y"
+    elif last.endswith("s") and not last.endswith("ss"):
+        last = last[:-1]
+    return f"{head} {last}" if head else last
 
 
 def _profile_value(profile: Mapping[str, object], dotted_key: str) -> object | None:

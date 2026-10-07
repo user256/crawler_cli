@@ -25,6 +25,7 @@ from crawler_cli.technical_audit_questions import (
     default_site_profile_example_path,
     load_question_registry,
     question_ticket_rows,
+    questions_sheet_tables,
 )
 
 
@@ -684,3 +685,86 @@ def test_fallback_template_grouping_ignores_locale_prefixes() -> None:
     answer = _answers([_obs("html-signals", [*pages, _signals(f"{SITE}/casino")])], profile=None)["Q86"]
     assert [row["template"] for row in answer["rows"]] == ["/casino/"]
     assert answer["rows"][0]["affected_pages"] == 3 and answer["denominator"] == 1
+
+
+# --- ticket 416: denominator units ---------------------------------------------
+
+_EXPECTED_DENOMINATOR_UNITS = {
+    "Q5": "pages",
+    "Q18": "templates",
+    "Q25": "URLs",
+    "Q27": "hosts",
+    "Q28": "links",
+    "Q29": "templates",
+    "Q31": "URLs",
+    "Q33": "pages",
+    "Q35": "templates",
+    "Q38": "templates",
+    "Q43": "pages",
+    "Q45": "pages",
+    "Q46": "templates",
+    "Q50": "topics",
+    "Q63": "hosts",
+    "Q64": "templates",
+    "Q65": "templates",
+    "Q66": "images",
+    "Q67": "templates",
+    "Q68": "templates",
+    "Q69": "templates",
+    "Q77": "hosts",
+    "Q85": "pages",
+    "Q86": "templates",
+    "Q92": "forms",
+    "Q95": "templates",
+    "Q96": "host-agent policies",
+    "Q102": "URLs",
+}
+
+
+def test_every_observed_answer_names_its_denominator_unit() -> None:
+    assert set(_EXPECTED_DENOMINATOR_UNITS) == set(CASES)
+    for qid, (kind, finding, _clean) in CASES.items():
+        answer = _answers([_obs(kind, finding)])[qid]
+        assert answer["denominator_unit"] == _EXPECTED_DENOMINATOR_UNITS[qid], qid
+
+
+def _draft(qid: str, kind: str, records: list[dict[str, object]]) -> dict[str, str]:
+    audit = attach_observations(_audit(), [new_bundle("run-1", [_obs(kind, records)])])
+    answers = [answer for answer in answer_questions(audit, REGISTRY, PROFILE) if answer["id"] == qid]
+    return question_ticket_rows(audit, REGISTRY, answers)[0]
+
+
+def test_q63_ticket_counts_hosts_in_singular() -> None:
+    kind, finding, _clean = CASES["Q63"]
+    ticket = _draft("Q63", kind, finding)
+
+    assert "Yes: 1 host, across 1 host tested (100%) in run run-1." in ticket["Description"]
+    assert "pages tested" not in ticket["Description"]
+    assert ticket["Label"].endswith(": 1 host")
+
+
+def test_q96_ticket_counts_host_agent_policies_not_user_agents_or_pages() -> None:
+    kind, finding, _clean = CASES["Q96"]
+    hosts = [finding[0], {**finding[0], "host": "www.example.com"}]
+    ticket = _draft("Q96", kind, hosts)
+
+    # Finding unit (user agents) and denominator unit (policies) differ, so no share is shown.
+    assert "Yes: 2 user agents, across 14 host-agent policies tested in run run-1." in ticket["Description"]
+    single = _draft("Q96", kind, finding)
+    assert "Yes: 1 user agent, across 7 host-agent policies tested in run run-1." in single["Description"]
+
+
+def test_template_and_link_tickets_name_their_populations() -> None:
+    kind, finding, _clean = CASES["Q65"]
+    assert "Yes: 1 template, across 1 template tested (100%)" in _draft("Q65", kind, finding)["Description"]
+    kind, finding, _clean = CASES["Q28"]
+    assert "Yes: 1 link, across 1 link tested (100%)" in _draft("Q28", kind, finding)["Description"]
+
+
+def test_questions_tab_notes_state_the_tested_population_unit() -> None:
+    kind, finding, _clean = CASES["Q63"]
+    audit = attach_observations(_audit(), [new_bundle("run-1", [_obs(kind, finding)])])
+    answers = answer_questions(audit, REGISTRY, PROFILE)
+    tables = questions_sheet_tables(audit, REGISTRY, answers, question_ticket_rows(audit, REGISTRY, answers))
+    row = next(row for row in tables["Questions"][1:] if row[1] == "Q63")
+    assert row[7] == 1 and row[10].startswith("Tested: 1 host.")
