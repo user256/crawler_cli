@@ -22,7 +22,9 @@ QA review of feature/full-manual-review-audit, finding 4.
 
 ## Status
 
-proposed (Priority: **P2**). Source: master reconciliation QA, 2026-10-06.
+partly done (Priority: **P2**). Source: master reconciliation QA, 2026-10-06.
+Destination header check and fail-before-write done 2026-10-07; template-contract mapping and the
+copyTo fallback remain open (see below).
 
 ## Post-merge QA, 2026-10-06
 
@@ -35,9 +37,27 @@ existing note and unrecognised header calls `values.clear` on
 is checked. The source template is preserved, but client content in the copy
 can be overwritten and generated fields can land under wrong columns.
 
-- [ ] Fail before any clear/update if the expected destination header is missing
+- [x] Fail before any clear/update if the expected destination header is missing
   or its full column mapping does not match; do not default to A2.
-- [ ] Test the current question publisher with absent, partial and reordered
+- [x] Test the current question publisher with absent, partial and reordered
   headers, plus correctly located headers beneath a title block.
 
 This supplements the existing ticket rather than filing a duplicate.
+
+### Fix, 2026-10-07 (`fix/postmerge-qa-misc`)
+
+Post-merge criteria done. With `locate_ticket_header` (the question publisher),
+`GoogleSheetsTemplatePublisher.publish` now reads the copied workbook's Tickets tab
+right after copying and before any `addSheet`, `values.clear` or `values.update`.
+The full generated header must appear in order in consecutive cells (whitespace and
+case are normalised); an absent, partial, reordered or interleaved header, or a copy
+without a Tickets tab, raises `TemplateHeaderError` (a `ValueError`, so the CLI exits
+with a validation error) naming the copy and the closest header found. There is no A2
+fallback on this path. The copied workbook is left as copied, not deleted. Tests in
+`tests/test_google_sheets.py` use fakes and assert no writes on failure.
+
+Still open from the original ticket: reading the mapping from a template contract
+instead of the hard-coded template ID, the `sheets.copyTo` fallback for drive.file
+tokens, and verifying `header_row: 6` against the real template. The non-question
+`technical-audit --google-sheets-template` path (no `locate_ticket_header`) still
+writes Tickets rows at A2 without a header check.
