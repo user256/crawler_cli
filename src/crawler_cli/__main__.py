@@ -86,7 +86,7 @@ from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
-from .reports import TECHNICAL_AUDIT_REPORT_CAPABILITIES, CrawlReports
+from .reports import TECHNICAL_AUDIT_REPORT_CAPABILITIES, CrawlReports, mark_heading_wrapping_links
 from .technical_audit import TECHNICAL_AUDIT_REPORTS, audit_sheet_tables, build_technical_audit
 from .technical_audit_tickets import TicketLanguageError, build_ticket_register, load_ticket_language
 from .validators import (
@@ -2658,6 +2658,15 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
             if any(capabilities.get(capability) is not True for capability in required):
                 continue
             evidence[name] = await _fetch_report(reports, name, args)
+        # Q39 (tickets 393, 421): count the heading-link population, inside or
+        # wrapping an H2/H3, and flag failing links whose page links to the
+        # same target from an anchor that wraps a heading.
+        has_links_json = capabilities.get("links_json") is True
+        run_context.update(await reports.heading_link_population(has_links_json=has_links_json))
+        if has_links_json and "internal-link-quality" in evidence:
+            evidence["internal-link-quality"] = mark_heading_wrapping_links(
+                evidence["internal-link-quality"], await reports.heading_wrapping_links()
+            )
         final_run = await store.get_crawl_run(run_id)
         initial_updated_at = run_context.get("updated_at")
         final_updated_at = final_run.get("updated_at") if final_run else None

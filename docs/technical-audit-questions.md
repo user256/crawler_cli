@@ -1030,15 +1030,15 @@ Generated from [`templates/technical-audit-questions.json`](../templates/technic
 
 ### Q39 · Internal linking
 
-**Does any link inside an H2 or H3 point at a redirecting, error or non-canonical URL?**
+**Does any link inside or wrapping an H2 or H3 point at a redirecting, error or non-canonical URL?**
 
-- Issue if: At least one link whose xpath is within an h2/h3 has a non-200 or non-canonical target.
+- Issue if: At least one heading link (one whose xpath is within an h2/h3, or one that wraps an h2/h3 as a > h2|h3 or a > * > h2|h3) has a non-200 or non-canonical target.
 - Why it matters: Section-heading links usually point to the most important related pages. When they redirect or break, the link that matters most on the page passes the least.
 - Group: crawl · Ticket: Warning / Low · Unit: links
-- Needs: crawl
-- Runner: answered today (internal-link-targets error, redirect and non-canonical targets linked from an H2/H3)
+- Needs: crawl, stored-html
+- Runner: answered today (internal-link-targets error, redirect and non-canonical targets linked from inside or around an H2/H3)
 - Evidence owners: `internal-link-targets`
-- Note: A subset of Q22 reported separately because it is usually a separate content fix.
+- Note: A subset of Q22 reported separately because it is usually a separate content fix. Decision (ticket 421, 2026-10-07, question owner): links that wrap a heading (a > h2|h3 and a > * > h2|h3, such as a card title <a><h3>...</h3></a>) are heading links and count in the population alongside links inside an H2/H3. They are found in the stored HTML, because the link's own xpath ends in /a and links_json keeps one link per target per page; a failing link counts when its page links to the same target from an anchor that wraps a heading.
 - Original: Do content headings (H2/H3) or section titles link to outdated, redirecting, or mismatched slugs rather than direct canonical destinations?
 
 ### Q42 · Status codes & errors
