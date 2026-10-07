@@ -18,8 +18,8 @@ def _page(url: str, hsts: str | None, *, status: int = 200, final_url: str | Non
     if hsts is not None:
         headers["Strict-Transport-Security"] = hsts
     return {
-        "url": url,
-        "final_url": final_url,
+        "requested_url": url,
+        "final_url": final_url or url,
         "kind": "html",
         "final_status_code": status,
         "headers_json": json.dumps(headers),
@@ -199,3 +199,82 @@ def test_report_attributes_headers_to_the_final_response_host():
     assert coverage["https_host_count"] == 1
     assert row["host"] == "www.example.com"
     assert coverage["http_redirect_evidence"] == "unavailable_not_probed"
+
+
+def _redirect(requested: str, final: str, hsts: str | None, *, status: int = 200) -> dict[str, object]:
+    return {**_page(requested, hsts, status=status), "final_url": final}
+
+
+def test_cross_host_redirect_headers_belong_to_the_destination_host_only():
+    coverage, row = transport_security_report(
+        [_redirect("https://old.example/", "https://new.example/", "max-age=300")]
+    )
+
+    assert coverage["https_host_count"] == 1
+    assert row["host"] == "new.example"
+    assert row["hsts"]["max_age"] == 300
+    assert row["response_url"] == "https://new.example/"
+    assert row["requested_urls"] == ["https://old.example/"]
+    # The source host has no response of its own, so it gets no policy at all.
+    assert "old.example" not in {r.get("host") for r in [coverage, row]}
+
+
+def test_source_host_policy_is_never_inferred_from_the_destination():
+    rows = transport_security_report(
+        [
+            _redirect("https://old.example/", "https://new.example/", FULL),
+            _page("https://old.example/kept", None),
+        ]
+    )
+
+    by_host = {row["host"]: row for row in rows[1:]}
+    assert by_host["new.example"]["hsts"]["present"] is True
+    assert by_host["old.example"]["hsts"]["present"] is False
+    assert by_host["old.example"]["warnings"][0] == "hsts_header_missing"
+
+
+def test_http_seed_that_finishes_on_https_is_https_evidence():
+    coverage, row = transport_security_report([_redirect("http://example.com/", "https://example.com/", FULL)])
+
+    assert coverage["https_host_count"] == 1
+    assert coverage["http_rows_ignored_for_hsts"] == 0
+    assert row["host"] == "example.com"
+    assert row["hsts"]["valid"] is True
+    assert row["requested_urls"] == ["http://example.com/"]
+
+
+def test_https_seed_that_finishes_on_http_is_not_https_evidence():
+    (coverage,) = transport_security_report([_redirect("https://example.com/", "http://example.com/", FULL)])
+
+    assert coverage["https_host_count"] == 0
+    assert coverage["http_rows_ignored_for_hsts"] == 1
+
+
+def test_multiple_requested_aliases_of_one_final_host_give_one_host_row():
+    coverage, row = transport_security_report(
+        [
+            _redirect("https://a.example/", "https://final.example/", FULL),
+            _redirect("http://b.example/", "https://final.example/", FULL),
+            _page("https://final.example/", FULL),
+        ]
+    )
+
+    assert coverage["https_host_count"] == 1
+    assert row["host"] == "final.example"
+    assert row["requested_urls"] == ["http://b.example/", "https://a.example/", "https://final.example/"]
+
+
+def test_row_without_retained_final_response_url_is_not_attributed():
+    """The pre-414 projection (requested URL + final headers, no final URL) must not guess a host."""
+    (coverage,) = transport_security_report(
+        [
+            {
+                "url": "https://old.example/",
+                "final_status_code": 200,
+                "headers_json": {"strict-transport-security": "max-age=300"},
+            }
+        ]
+    )
+
+    assert coverage["https_host_count"] == 0
+    assert coverage["response_identity_unknown_rows"] == 1

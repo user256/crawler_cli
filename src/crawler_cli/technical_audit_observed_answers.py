@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 from .audit_observations import observation_collections
 from .robots import _RobotsRules
+from .transport_security import HSTS_PRELOAD_MIN_MAX_AGE, parse_strict_transport_security
 from .technical_audit_evidence import (
     Answerer,
     Evidence,
@@ -802,17 +803,22 @@ def _hsts_ocsp(record: Json, _q: Json, _p: Json | None) -> object:
     if "hsts_header" not in record:
         return UNTESTED
     problems = []
-    header = str(record.get("hsts_header") or "")
-    if not header:
+    raw = record.get("hsts_header")
+    # One RFC 6797 parser for every HSTS consumer (ticket 415): optional
+    # whitespace and quoted values are valid, a repeated directive is not.
+    policy = parse_strict_transport_security(raw if isinstance(raw, str) else None)
+    if not policy.present:
         problems.append("no Strict-Transport-Security header")
+    elif not policy.valid:
+        # A user agent ignores an invalid header outright, so none of its directives count.
+        problems.append(f"invalid Strict-Transport-Security header ({', '.join(policy.errors)})")
     else:
-        directives = [part.strip().casefold() for part in header.split(";")]
-        max_age = next((part.split("=", 1)[1].strip('" ') for part in directives if part.startswith("max-age=")), "")
-        if not max_age.isdigit() or int(max_age) < 31_536_000:
-            problems.append(f"max-age {max_age or 'missing'}")
-        for directive in ("includesubdomains", "preload"):
-            if directive not in directives:
-                problems.append(f"no {directive}")
+        if policy.max_age is None or policy.max_age < HSTS_PRELOAD_MIN_MAX_AGE:
+            problems.append(f"max-age {policy.max_age}")
+        if not policy.include_subdomains:
+            problems.append("no includesubdomains")
+        if not policy.preload:
+            problems.append("no preload")
     preload = record.get("preload_status")
     if preload is not None and str(preload).casefold() != "preloaded":
         problems.append(f"preload list status {preload}")
