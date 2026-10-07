@@ -19,6 +19,7 @@ from urllib.parse import quote as _urlquote, urlsplit
 
 if TYPE_CHECKING:
     from .models import CrawlJobResult, CrawlResult
+    from .google_sheets import PublishReceipt
 
 from .adaptive_rate import format_pressure_summary
 from .archive import audit_archive_urls
@@ -2692,10 +2693,12 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
     print(f"Wrote deterministic technical audit to {output}")
 
     if _google_sheets_requested(args):
-        url = _publish_google_sheet(args, f"Technical SEO Audit – {run_id}", audit_sheet_tables(audit))
-        if url is None:
+        receipt = _publish_google_sheet(args, f"Technical SEO Audit – {run_id}", audit_sheet_tables(audit))
+        if receipt is None:
             return EXIT_VALIDATION
-        print(f"Published technical audit workbook: {url}")
+        print(f"Published technical audit workbook: {receipt.url}")
+        for line in receipt.summary_lines():
+            print(line)
 
     return EXIT_SUCCESS
 
@@ -2706,8 +2709,12 @@ def _google_sheets_requested(args: argparse.Namespace) -> bool:
 
 def _publish_google_sheet(
     args: argparse.Namespace, default_title: str, tables: dict[str, list[list[object]]]
-) -> str | None:
-    """Copy the contract's template (or --google-sheets-template) and publish; None after printing an error."""
+) -> PublishReceipt | None:
+    """Copy the contract's template (or --google-sheets-template), publish and read back.
+
+    Returns the ``PublishReceipt``, or None after printing an error (including a
+    ``PublishReceiptError`` when the read-back differs from what was sent).
+    """
     from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services, load_template_contract
 
     try:
@@ -2724,8 +2731,29 @@ def _publish_google_sheet(
         return None
 
 
+def _check_google_sheets_template(args: argparse.Namespace) -> int:
+    """Compare the template's dropdown sources with the contract's value sets; read-only."""
+    from .google_sheets import check_template_validation, credential_path, google_services, load_template_contract
+
+    try:
+        contract = load_template_contract(getattr(args, "google_sheets_contract", None))
+        _drive, sheets = google_services(credential_path(getattr(args, "google_sheets_credentials", None)))
+        report = check_template_validation(sheets, contract, template=getattr(args, "google_sheets_template", None))
+    except (RuntimeError, ValueError) as exc:
+        print(f"Error: Google Sheets template check failed: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    for line in report.lines():
+        print(line)
+    return EXIT_SUCCESS if report.ok else EXIT_VALIDATION
+
+
 def _run_technical_audit_questions(args: argparse.Namespace) -> int:
     """Answer every registry question from one saved audit bundle; no database or network."""
+    if getattr(args, "check_template", False):
+        return _check_google_sheets_template(args)
+    if not getattr(args, "audit", None) or not getattr(args, "out", None):
+        print("Error: technical-audit-questions needs --audit and --out (unless --check-template)", file=sys.stderr)
+        return EXIT_VALIDATION
     from .audit_observations import ObservationError, attach_observations, load_observation_bundle
     from .technical_audit_questions import (
         QuestionRegistryError,
@@ -2774,14 +2802,16 @@ def _run_technical_audit_questions(args: argparse.Namespace) -> int:
     print(f"Wrote {len(answers)} question answers and {len(tickets)} draft tickets to {output} ({summary})")
 
     if _google_sheets_requested(args):
-        url = _publish_google_sheet(
+        receipt = _publish_google_sheet(
             args,
             f"Technical SEO Audit – {audit.get('crawl_run_id')}",
             questions_sheet_tables(audit, registry, answers, tickets),
         )
-        if url is None:
+        if receipt is None:
             return EXIT_VALIDATION
-        print(f"Published question workbook: {url}")
+        print(f"Published question workbook: {receipt.url}")
+        for line in receipt.summary_lines():
+            print(line)
     return EXIT_SUCCESS
 
 
@@ -4754,9 +4784,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Answer the audit template's Questions tab from a saved technical-audit JSON",
     )
     questions_parser.add_argument(
-        "--audit", required=True, help="technical-audit JSON written by technical-audit --out"
+        "--audit", help="technical-audit JSON written by technical-audit --out (required unless --check-template)"
     )
-    questions_parser.add_argument("--out", required=True, help="Write the question answers JSON to this path")
+    questions_parser.add_argument(
+        "--out", help="Write the question answers JSON to this path (required unless --check-template)"
+    )
     questions_parser.add_argument(
         "--site-profile",
         help="Site profile JSON (see templates/site-profile.example.json); questions needing it stay Pending without it.",
@@ -4791,6 +4823,14 @@ def _build_parser() -> argparse.ArgumentParser:
     questions_parser.add_argument(
         "--google-sheets-credentials",
         help="Service-account credential file; otherwise GOOGLE_DOCS_OAUTH_TOKEN_FILE is used.",
+    )
+    questions_parser.add_argument(
+        "--check-template",
+        action="store_true",
+        help="Read-only: compare the template's Priority / Ticket Classification dropdown sources "
+        "(--google-sheets-template, else the contract's) with the contract's value sets, print the "
+        "diff and exit non-zero on a mismatch. Answers nothing and writes nothing; --audit and --out "
+        "are not needed.",
     )
 
     observations_parser = subparsers.add_parser(

@@ -7,9 +7,11 @@ audit itself stays fully local and deterministic.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +63,46 @@ class TemplateHeaderError(ValueError):
 
 class TemplateContractError(ValueError):
     """The template contract is malformed, or the generated tables break it."""
+
+
+class PublishReceiptError(RuntimeError):
+    """Reading the written ranges back did not return what was sent."""
+
+    def __init__(self, message: str, *, spreadsheet_id: str, url: str, mismatches: Sequence[str]) -> None:
+        super().__init__(message)
+        self.spreadsheet_id = spreadsheet_id
+        self.url = url
+        self.mismatches = tuple(mismatches)
+
+
+@dataclass(frozen=True)
+class PublishedRange:
+    """One range written by a publish and confirmed by reading it back."""
+
+    tab: str
+    range: str
+    rows: int
+
+
+@dataclass(frozen=True)
+class PublishReceipt:
+    """What a publish wrote, every range of it verified by a read-back."""
+
+    spreadsheet_id: str
+    url: str
+    ranges: tuple[PublishedRange, ...] = field(default_factory=tuple)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "spreadsheet_id": self.spreadsheet_id,
+            "url": self.url,
+            "ranges": [{"tab": item.tab, "range": item.range, "rows": item.rows} for item in self.ranges],
+        }
+
+    def summary_lines(self) -> list[str]:
+        lines = [f"Receipt: spreadsheet {self.spreadsheet_id}; {len(self.ranges)} ranges verified by read-back"]
+        lines.extend(f"  {item.range}: {item.rows} rows" for item in self.ranges)
+        return lines
 
 
 TEMPLATE_CONTRACT_VERSION = "crawler-cli/google-sheets-template-contract/1"
@@ -162,7 +204,12 @@ class GoogleSheetsTemplatePublisher:
         tables: Mapping[str, list[list[object]]],
         template: str | None = None,
         folder_id: str | None = None,
-    ) -> str:
+    ) -> PublishReceipt:
+        """Copy the template, write the tables, read every written range back and return a receipt.
+
+        Raises ``PublishReceiptError`` when a read-back differs from what was
+        sent, so a partial or altered write is never reported as success.
+        """
         ticket_contract = self.contract["tickets"]
         ticket_tab = str(ticket_contract["tab"])
         tickets = tables.get("Tickets")
@@ -183,14 +230,16 @@ class GoogleSheetsTemplatePublisher:
             self.sheets.spreadsheets()
             .get(
                 spreadsheetId=spreadsheet_id,
-                fields="sheets.properties(sheetId,title)",
+                fields="sheets.properties(sheetId,title,index)",
             )
             .execute()
         )
-        sheet_ids = {
-            str(sheet["properties"]["title"]): int(sheet["properties"]["sheetId"])
-            for sheet in metadata.get("sheets", [])
-        }
+        sheet_ids: dict[str, int] = {}
+        sheet_indexes: dict[str, int] = {}
+        for position, sheet in enumerate(metadata.get("sheets", [])):
+            properties = sheet["properties"]
+            sheet_ids[str(properties["title"])] = int(properties["sheetId"])
+            sheet_indexes[str(properties["title"])] = int(properties.get("index", position))
         # Verify the destination Tickets header before the first write to the
         # copy, so a changed template fails without touching client content.
         ticket_anchor: tuple[int, int] | None = None
@@ -202,12 +251,16 @@ class GoogleSheetsTemplatePublisher:
             ticket_anchor = self._ticket_header_anchor(spreadsheet_id, ticket_tab, list(ticket_contract["columns"]))
         missing = [name for name in generic if name not in sheet_ids]
         if missing:
+            insert_at = _evidence_tab_index(sheet_indexes, ticket_tab, self.contract["protected_tabs"])
+            requests = []
+            for offset, name in enumerate(missing):
+                tab_properties: dict[str, object] = {"title": name}
+                if insert_at is not None:
+                    tab_properties["index"] = insert_at + offset
+                requests.append({"addSheet": {"properties": tab_properties}})
             created = (
                 self.sheets.spreadsheets()
-                .batchUpdate(
-                    spreadsheetId=spreadsheet_id,
-                    body={"requests": [{"addSheet": {"properties": {"title": name}}} for name in missing]},
-                )
+                .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
                 .execute()
             )
             for reply in created.get("replies", []):
@@ -215,6 +268,8 @@ class GoogleSheetsTemplatePublisher:
                 if properties:
                     sheet_ids[str(properties["title"])] = int(properties["sheetId"])
 
+        # (range read back, range shown on the receipt, tab, rows sent)
+        written: list[tuple[str, str, str, list[list[object]]]] = []
         if tickets is not None and ticket_anchor is not None:
             # The client template owns the Tickets header, counter formula and
             # dropdown validation.  Write generated rows beneath that header
@@ -223,31 +278,41 @@ class GoogleSheetsTemplatePublisher:
             start_index, start_row = ticket_anchor
             start_column = _column_letter(start_index)
             end_column = _column_letter(start_index + len(ticket_contract["columns"]) - 1)
+            tab = _quote_tab(ticket_tab)
             self.sheets.spreadsheets().values().clear(
                 spreadsheetId=spreadsheet_id,
-                range=f"'{ticket_tab}'!{start_column}{start_row}:{end_column}10000",
+                range=f"{tab}!{start_column}{start_row}:{end_column}10000",
                 body={},
             ).execute()
-            data_rows = tickets[1:]
+            data_rows = [list(row) for row in tickets[1:]]
             if data_rows:
                 self.sheets.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
-                    range=f"'{ticket_tab}'!{start_column}{start_row}",
+                    range=f"{tab}!{start_column}{start_row}",
                     valueInputOption="RAW",
                     body={"values": data_rows},
                 ).execute()
+            # With no tickets, the first data row is read back and must be empty.
+            last_row = start_row + max(len(data_rows), 1) - 1
+            ticket_range = f"{tab}!{start_column}{start_row}:{end_column}{last_row}"
+            written.append((ticket_range, ticket_range, ticket_tab, data_rows))
         for name, values in generic.items():
+            tab = _quote_tab(name)
             self.sheets.spreadsheets().values().clear(
                 spreadsheetId=spreadsheet_id,
-                range=f"'{name}'!A:ZZ",
+                range=f"{tab}!A:ZZ",
                 body={},
             ).execute()
             self.sheets.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id,
-                range=f"'{name}'!A1",
+                range=f"{tab}!A1",
                 valueInputOption="RAW",
                 body={"values": values},
             ).execute()
+            width = max((len(row) for row in values), default=1) or 1
+            # The whole tab is read back, so stale cells beyond the sent grid
+            # (outside the A:ZZ clear) are caught as well.
+            written.append((tab, f"{tab}!A1:{_column_letter(width)}{max(len(values), 1)}", name, list(values)))
 
         # A template's formatting remains intact.  These requests provide a
         # usable green header only for detail tabs created by this run.
@@ -276,7 +341,35 @@ class GoogleSheetsTemplatePublisher:
                     ]
                 },
             ).execute()
-        return link or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+        url = link or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+        return self._verify_written(spreadsheet_id, url, written)
+
+    def _verify_written(
+        self, spreadsheet_id: str, url: str, written: list[tuple[str, str, str, list[list[object]]]]
+    ) -> PublishReceipt:
+        """Read each written range back and compare it with what was sent (ticket 189's check)."""
+        mismatches: list[str] = []
+        ranges: list[PublishedRange] = []
+        for read_range, shown_range, tab, sent in written:
+            response = (
+                self.sheets.spreadsheets()
+                .values()
+                .get(spreadsheetId=spreadsheet_id, range=read_range, valueRenderOption="UNFORMATTED_VALUE")
+                .execute()
+            )
+            received = response.get("values", []) if isinstance(response, Mapping) else []
+            mismatches.extend(_grid_differences(shown_range, sent, received if isinstance(received, list) else []))
+            ranges.append(PublishedRange(tab=tab, range=shown_range, rows=len(sent)))
+        if mismatches:
+            shown = "; ".join(mismatches[:5]) + (f"; and {len(mismatches) - 5} more" if len(mismatches) > 5 else "")
+            raise PublishReceiptError(
+                f"read-back of workbook {spreadsheet_id} does not match what was sent: {shown}. "
+                f"The workbook was left in place for inspection: {url}",
+                spreadsheet_id=spreadsheet_id,
+                url=url,
+                mismatches=mismatches,
+            )
+        return PublishReceipt(spreadsheet_id=spreadsheet_id, url=url, ranges=tuple(ranges))
 
     def _check_generated_tickets(self, tickets: list[list[object]]) -> None:
         """The generated Tickets table must use the contract's columns and dropdown values."""
@@ -394,29 +487,276 @@ class GoogleSheetsTemplatePublisher:
         raises instead of defaulting to A2, which would overwrite client
         content and put generated fields under the wrong columns.
         """
-        search = self.contract["tickets"]["header_search"]
-        window = f"A1:{_column_letter(int(search['max_columns']))}{int(search['max_rows'])}"
-        found = (
-            self.sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=f"'{name}'!{window}").execute()
+        return _locate_ticket_header(
+            self.sheets,
+            spreadsheet_id,
+            name,
+            header,
+            self.contract["tickets"]["header_search"],
+            subject=f"copied workbook {spreadsheet_id}",
+            consequence="; nothing was written to it",
         )
-        expected = [_header_key(cell) for cell in header]
-        closest = ""
-        for row_index, row in enumerate(found.get("values", []), start=1):
-            cells = [_header_key(cell) for cell in row]
-            for column_index, cell in enumerate(cells, start=1):
-                if cell != expected[0]:
-                    continue
-                actual = cells[column_index - 1 : column_index - 1 + len(expected)]
-                if actual == expected:
-                    return column_index, row_index + 1
-                closest = closest or (
-                    f"; found at {_column_letter(column_index)}{row_index}: "
-                    + " | ".join(str(value) for value in row[column_index - 1 : column_index - 1 + len(expected)])
+
+
+def _locate_ticket_header(
+    sheets: Any,
+    spreadsheet_id: str,
+    name: str,
+    header: list[str],
+    search: Mapping[str, Any],
+    *,
+    subject: str,
+    consequence: str,
+) -> tuple[int, int]:
+    """Find the full ticket header in a workbook; return its 1-based column and the first data row."""
+    window = f"A1:{_column_letter(int(search['max_columns']))}{int(search['max_rows'])}"
+    found = (
+        sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=f"{_quote_tab(name)}!{window}").execute()
+    )
+    expected = [_header_key(cell) for cell in header]
+    closest = ""
+    for row_index, row in enumerate(found.get("values", []), start=1):
+        cells = [_header_key(cell) for cell in row]
+        for column_index, cell in enumerate(cells, start=1):
+            if cell != expected[0]:
+                continue
+            actual = cells[column_index - 1 : column_index - 1 + len(expected)]
+            if actual == expected:
+                return column_index, row_index + 1
+            closest = closest or (
+                f"; found at {_column_letter(column_index)}{row_index}: "
+                + " | ".join(str(value) for value in row[column_index - 1 : column_index - 1 + len(expected)])
+            )
+    raise TemplateHeaderError(
+        f"the {name} tab of {subject} has no header row matching {' | '.join(header)} in {window}{closest}{consequence}"
+    )
+
+
+@dataclass(frozen=True)
+class ValidationSourceCheck:
+    """One contract value set compared with the template's dropdown source for that column."""
+
+    column: str
+    cell: str
+    source: str
+    template_values: tuple[str, ...]
+    contract_values: tuple[str, ...]
+    problem: str = ""
+    unvalidated_rows: tuple[int, ...] = ()
+
+    @property
+    def only_in_template(self) -> tuple[str, ...]:
+        return tuple(value for value in self.template_values if value not in self.contract_values)
+
+    @property
+    def only_in_contract(self) -> tuple[str, ...]:
+        return tuple(value for value in self.contract_values if value not in self.template_values)
+
+    @property
+    def ok(self) -> bool:
+        return not self.problem and not self.only_in_template and not self.only_in_contract
+
+
+@dataclass(frozen=True)
+class TemplateCheckReport:
+    """Result of ``check_template_validation``; nothing is written to the template."""
+
+    template_id: str
+    tab: str
+    header_cell: str
+    rows_checked: tuple[int, int]
+    checks: tuple[ValidationSourceCheck, ...]
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.checks) and all(check.ok for check in self.checks)
+
+    def lines(self) -> list[str]:
+        first, last = self.rows_checked
+        lines = [
+            f"Template {self.template_id}: {self.tab} header at {self.header_cell}; "
+            f"data validation read on rows {first}-{last}"
+        ]
+        if not self.checks:
+            lines.append("FAIL the template contract has no value sets to compare")
+        for check in self.checks:
+            label = "OK  " if check.ok else "FAIL"
+            lines.append(f"{label} {check.column} ({check.cell}): {check.source or 'no data validation'}")
+            if check.problem:
+                lines.append(f"     {check.problem}")
+            if check.template_values or not check.ok:
+                lines.append(f"     template: {', '.join(check.template_values) or '(none)'}")
+                lines.append(f"     contract: {', '.join(check.contract_values)}")
+            if check.only_in_template:
+                lines.append(f"     only in template: {', '.join(check.only_in_template)}")
+            if check.only_in_contract:
+                lines.append(f"     only in contract: {', '.join(check.only_in_contract)}")
+            if check.unvalidated_rows:
+                rows = check.unvalidated_rows
+                lines.append(
+                    f"     note: {len(rows)} of {last - first + 1} rows checked have no validation "
+                    f"(first: row {rows[0]})"
                 )
-        raise TemplateHeaderError(
-            f"the {name} tab of copied workbook {spreadsheet_id} has no header row "
-            f"matching {' | '.join(header)} in {window}{closest}; nothing was written to it"
+        lines.append(
+            "Template check passed." if self.ok else "Template check FAILED: the dropdowns disagree with the contract."
         )
+        return lines
+
+
+_DATA_VALIDATION_FIELDS = "sheets(properties(title),data(startRow,startColumn,rowData(values(dataValidation))))"
+_RANGE_FORMULA = re.compile(
+    r"^=?\s*(?:(?:'((?:[^']|'')+)'|([^'!]+))!)?\s*(\$?[A-Za-z]+\$?\d*(?::\$?[A-Za-z]+\$?\d*)?)\s*$"
+)
+
+
+def check_template_validation(
+    sheets: Any,
+    contract: Mapping[str, Any] | None = None,
+    *,
+    template: str | None = None,
+    sample_rows: int = 100,
+) -> TemplateCheckReport:
+    """Compare the template's dropdown sources with the contract's value sets, read-only.
+
+    The Tickets header is located as the publisher does, then the data
+    validation of the first ``sample_rows`` data rows is read with
+    ``spreadsheets.get`` (``includeGridData`` limited to ``dataValidation``).
+    ``ONE_OF_LIST`` rules give their values directly; ``ONE_OF_RANGE`` rules
+    (the Canonicals template points them at ``Config``) are resolved with a
+    ``values.get`` of the referenced range.  Only reads are made.
+    """
+    contract = validate_template_contract(dict(contract)) if contract is not None else load_template_contract()
+    tickets = contract["tickets"]
+    tab = str(tickets["tab"])
+    columns = [str(column) for column in tickets["columns"]]
+    template_id = google_sheet_id(template or str(contract["template"]["url"]))
+    start_column, first_row = _locate_ticket_header(
+        sheets,
+        template_id,
+        tab,
+        columns,
+        tickets["header_search"],
+        subject=f"template {template_id}",
+        consequence="",
+    )
+    last_row = first_row + max(int(sample_rows), 1) - 1
+    grid_range = (
+        f"{_quote_tab(tab)}!{_column_letter(start_column)}{first_row}:"
+        f"{_column_letter(start_column + len(columns) - 1)}{last_row}"
+    )
+    response = (
+        sheets.spreadsheets()
+        .get(spreadsheetId=template_id, ranges=[grid_range], includeGridData=True, fields=_DATA_VALIDATION_FIELDS)
+        .execute()
+    )
+    # (0-based row, 0-based column) -> dataValidation rule
+    rules: dict[tuple[int, int], Mapping[str, Any]] = {}
+    for sheet in response.get("sheets", []):
+        for block in sheet.get("data", []) or []:
+            row_base, column_base = int(block.get("startRow", 0)), int(block.get("startColumn", 0))
+            for row_offset, row in enumerate(block.get("rowData", []) or []):
+                for column_offset, cell in enumerate(row.get("values", []) or []):
+                    rule = cell.get("dataValidation") if isinstance(cell, Mapping) else None
+                    if rule:
+                        rules[(row_base + row_offset, column_base + column_offset)] = rule
+
+    range_cache: dict[str, tuple[str, ...]] = {}
+    positions = {_header_key(column): index for index, column in enumerate(columns)}
+    checks: list[ValidationSourceCheck] = []
+    for column, allowed in tickets["value_sets"].items():
+        grid_column = start_column - 1 + positions[_header_key(column)]
+        cell = f"{_column_letter(grid_column + 1)}{first_row}"
+        contract_values = tuple(str(value).strip() for value in allowed)
+        column_rules = {row: rules.get((row - 1, grid_column)) for row in range(first_row, last_row + 1)}
+        unvalidated = tuple(row for row, rule in column_rules.items() if not rule)
+        first_rule = column_rules[first_row]
+        if not first_rule:
+            checks.append(
+                ValidationSourceCheck(
+                    column=column,
+                    cell=cell,
+                    source="",
+                    template_values=(),
+                    contract_values=contract_values,
+                    problem=f"{tab}!{cell} has no data validation, so the template has no {column} dropdown",
+                    unvalidated_rows=unvalidated,
+                )
+            )
+            continue
+        source, values, problem = _resolve_validation(sheets, template_id, tab, first_rule, range_cache)
+        if not problem:
+            for row, rule in column_rules.items():
+                if not rule or rule == first_rule:
+                    continue
+                other_source, other_values, other_problem = _resolve_validation(
+                    sheets, template_id, tab, rule, range_cache
+                )
+                if other_problem or set(other_values) != set(values):
+                    problem = (
+                        f"row {row} uses a different rule ({other_source or other_problem}) "
+                        f"from row {first_row} ({source})"
+                    )
+                    break
+        checks.append(
+            ValidationSourceCheck(
+                column=column,
+                cell=cell,
+                source=source,
+                template_values=values,
+                contract_values=contract_values,
+                problem=problem,
+                unvalidated_rows=unvalidated,
+            )
+        )
+    return TemplateCheckReport(
+        template_id=template_id,
+        tab=tab,
+        header_cell=f"{_column_letter(start_column)}{first_row - 1}",
+        rows_checked=(first_row, last_row),
+        checks=tuple(checks),
+    )
+
+
+def _resolve_validation(
+    sheets: Any,
+    template_id: str,
+    default_tab: str,
+    rule: Mapping[str, Any],
+    cache: dict[str, tuple[str, ...]],
+) -> tuple[str, tuple[str, ...], str]:
+    """Return (source description, allowed values, problem) for one dataValidation rule."""
+    condition = rule.get("condition") or {}
+    kind = str(condition.get("type", ""))
+    entered = [str(value.get("userEnteredValue", "")) for value in condition.get("values", []) or []]
+    if kind == "ONE_OF_LIST":
+        return "list", _distinct(entered), ""
+    if kind != "ONE_OF_RANGE":
+        return f"{kind or 'unknown'} rule", (), f"unsupported validation type {kind or '(none)'}; expected a dropdown"
+    formula = entered[0] if entered else ""
+    matched = _RANGE_FORMULA.match(formula.strip())
+    if not matched:
+        return f"range {formula!r}", (), f"could not parse the dropdown source range {formula!r}"
+    source_tab = (matched.group(1) or "").replace("''", "'") or (matched.group(2) or "").strip() or default_tab
+    a1 = f"{_quote_tab(source_tab)}!{matched.group(3).replace('$', '')}"
+    if a1 not in cache:
+        response = (
+            sheets.spreadsheets()
+            .values()
+            .get(spreadsheetId=template_id, range=a1, valueRenderOption="FORMATTED_VALUE")
+            .execute()
+        )
+        cache[a1] = _distinct(str(cell) for row in response.get("values", []) or [] for cell in row)
+    return f"range {a1}", cache[a1], ""
+
+
+def _distinct(values: Any) -> tuple[str, ...]:
+    """Trimmed, non-empty values in first-seen order."""
+    seen: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text and text not in seen:
+            seen.append(text)
+    return tuple(seen)
 
 
 def credential_path(value: str | None) -> str | None:
@@ -438,6 +778,94 @@ def _http_status(exc: BaseException) -> int | None:
         return int(status) if status is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _quote_tab(name: str) -> str:
+    """Quote a tab name for an A1 range, doubling any apostrophe."""
+    return "'" + name.replace("'", "''") + "'"
+
+
+def _evidence_tab_index(indexes: Mapping[str, int], ticket_tab: str, protected: Sequence[str]) -> int | None:
+    """Index for new evidence tabs: right after Tickets, else before the first protected tab (Config)."""
+    if ticket_tab in indexes:
+        return indexes[ticket_tab] + 1
+    positions = [indexes[name] for name in protected if name in indexes]
+    return min(positions) if positions else None
+
+
+def _cell_text(value: object) -> str:
+    """Canonical text of one cell as sent or as read back.
+
+    Sheets returns strings for formatted reads and numbers for unformatted
+    ones, drops empty and ``None`` cells, and stores line breaks as ``\\n``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return value.replace("\r\n", "\n").replace("\r", "\n")
+    return str(value)
+
+
+def _cells_equal(sent: str, received: str) -> bool:
+    if sent == received:
+        return True
+    try:
+        left, right = float(sent), float(received)
+    except ValueError:
+        return False
+    return math.isfinite(left) and math.isfinite(right) and math.isclose(left, right, rel_tol=1e-9, abs_tol=0.0)
+
+
+def _trimmed_grid(rows: Sequence[object]) -> list[list[str]]:
+    """Normalise a grid and drop trailing empty cells and rows, as Sheets does."""
+    grid: list[list[str]] = []
+    for row in rows:
+        cells = [_cell_text(cell) for cell in row] if isinstance(row, (list, tuple)) else [_cell_text(row)]
+        while cells and cells[-1] == "":
+            cells.pop()
+        grid.append(cells)
+    while grid and not grid[-1]:
+        grid.pop()
+    return grid
+
+
+def _grid_differences(range_name: str, sent: Sequence[object], received: Sequence[object]) -> list[str]:
+    """Human-readable cell differences between what was sent and what was read back."""
+    tab, _, start = range_name.partition("!")
+    match = re.match(r"([A-Z]+)(\d+)", start)
+    first_column = _column_number(match.group(1)) if match else 1
+    first_row = int(match.group(2)) if match else 1
+    expected, actual = _trimmed_grid(sent), _trimmed_grid(received)
+    differences: list[str] = []
+    if len(expected) != len(actual):
+        differences.append(f"{range_name}: sent {len(expected)} rows, read back {len(actual)}")
+    for row_offset in range(max(len(expected), len(actual))):
+        sent_row = expected[row_offset] if row_offset < len(expected) else []
+        read_row = actual[row_offset] if row_offset < len(actual) else []
+        for column_offset in range(max(len(sent_row), len(read_row))):
+            left = sent_row[column_offset] if column_offset < len(sent_row) else ""
+            right = read_row[column_offset] if column_offset < len(read_row) else ""
+            if not _cells_equal(left, right):
+                cell = f"{tab}!{_column_letter(first_column + column_offset)}{first_row + row_offset}"
+                differences.append(f"{cell}: sent {_preview(left)}, read back {_preview(right)}")
+    return differences
+
+
+def _preview(value: str, limit: int = 60) -> str:
+    return repr(value if len(value) <= limit else value[: limit - 1] + "…")
+
+
+def _column_number(label: str) -> int:
+    number = 0
+    for character in label:
+        number = number * 26 + ord(character) - 64
+    return number
 
 
 def _header_key(value: object) -> str:

@@ -9,8 +9,10 @@ import pytest
 from crawler_cli.google_sheets import (
     TEMPLATE_CONTRACT_VERSION,
     GoogleSheetsTemplatePublisher,
+    PublishReceiptError,
     TemplateContractError,
     TemplateHeaderError,
+    check_template_validation,
     google_sheet_id,
     load_template_contract,
     validate_template_contract,
@@ -77,24 +79,92 @@ class _Drive:
         return self.files_api
 
 
+def _column(label):
+    number = 0
+    for character in label:
+        number = number * 26 + ord(character) - 64
+    return number
+
+
+def _parse_range(a1):
+    """'Tab'!B6:I10, 'Tab'!A:ZZ, 'Tab'!B6 or 'Tab' -> (tab, row1, col1, row2, col2); None = open."""
+    tab, _, cells = a1.partition("!")
+    tab = tab[1:-1].replace("''", "'") if tab.startswith("'") else tab
+    if not cells:
+        return tab, 1, 1, None, None
+    bounds = []
+    for part in cells.split(":"):
+        letters = "".join(c for c in part if c.isalpha())
+        digits = "".join(c for c in part if c.isdigit())
+        bounds.append((int(digits) if digits else None, _column(letters) if letters else None))
+    (row1, col1), (row2, col2) = bounds[0], bounds[-1]
+    return tab, row1 or 1, col1 or 1, row2, col2
+
+
+def _trim(rows):
+    rows = [list(row) for row in rows]
+    for row in rows:
+        while row and row[-1] in ("", None):
+            row.pop()
+    while rows and not rows[-1]:
+        rows.pop()
+    return rows
+
+
 class _Values:
+    """A stateful grid per tab, so writes can be read back like the real API."""
+
     def __init__(self, header_rows=None):
         self.clears: list[str] = []
         self.updates: list[tuple[str, list[list[object]]]] = []
         self.reads: list[tuple[str, str]] = []
-        self.header_rows = _REAL_TICKETS_LAYOUT if header_rows is None else header_rows
+        self.render_options: list[str | None] = []
+        header_rows = _REAL_TICKETS_LAYOUT if header_rows is None else header_rows
+        self.grids: dict[str, dict[tuple[int, int], object]] = {}
+        self._fill("Tickets", 1, 1, header_rows)
+        # Called with (range, values) before an update is stored; may return altered values.
+        self.on_update = None
 
-    def get(self, *, spreadsheetId, range, **_kwargs):
+    def _fill(self, tab, row1, col1, rows):
+        grid = self.grids.setdefault(tab, {})
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                if value is None:
+                    continue  # the API leaves the cell unchanged for null
+                grid[(row1 + r, col1 + c)] = value
+
+    def get(self, *, spreadsheetId, range, valueRenderOption=None, **_kwargs):
         self.reads.append((spreadsheetId, range))
-        return _Response({"values": self.header_rows})
+        self.render_options.append(valueRenderOption)
+        tab, row1, col1, row2, col2 = _parse_range(range)
+        grid = self.grids.get(tab, {})
+        if not grid:
+            return _Response({})
+        last_row = row2 or max(r for r, _ in grid)
+        last_col = col2 or max(c for _, c in grid)
+        rows = [[grid.get((r, c), "") for c in range_(col1, last_col + 1)] for r in range_(row1, last_row + 1)]
+        return _Response({"values": _trim(rows)})
 
     def clear(self, *, range, **_kwargs):
         self.clears.append(range)
+        tab, row1, col1, row2, col2 = _parse_range(range)
+        grid = self.grids.setdefault(tab, {})
+        for r, c in list(grid):
+            if r >= row1 and c >= col1 and (row2 is None or r <= row2) and (col2 is None or c <= col2):
+                del grid[(r, c)]
         return _Response({})
 
     def update(self, *, range, body, **_kwargs):
         self.updates.append((range, body["values"]))
+        values = body["values"]
+        if self.on_update is not None:
+            values = self.on_update(range, copy.deepcopy(values))
+        tab, row1, col1, _row2, _col2 = _parse_range(range)
+        self._fill(tab, row1, col1, values)
         return _Response({})
+
+
+range_ = range
 
 
 class _SheetTabs:
@@ -127,7 +197,12 @@ class _Spreadsheets:
         if spreadsheetId == "template-sheet":
             return _Response({"sheets": [{"properties": tab} for tab in self.source_tabs]})
         return _Response(
-            {"sheets": [{"properties": {"sheetId": i, "title": title}} for i, title in enumerate(self.titles, 1)]}
+            {
+                "sheets": [
+                    {"properties": {"sheetId": i, "title": title, "index": i - 1}}
+                    for i, title in enumerate(self.titles, 1)
+                ]
+            }
         )
 
     def create(self, *, body, **_kwargs):
@@ -180,7 +255,7 @@ def test_plain_audit_publish_writes_beneath_the_real_template_header_not_at_a2()
     )
 
     values = sheets.spreadsheets_api.values_api
-    assert values.reads == [("copied-sheet", "'Tickets'!A1:Z40")]
+    assert values.reads[0] == ("copied-sheet", "'Tickets'!A1:Z40")
     assert "'Tickets'!B6:I10000" in values.clears
     assert ("'Tickets'!B6", [_ROW]) in values.updates
     assert not any(target.startswith("'Tickets'!A") for target in [*values.clears, *(u[0] for u in values.updates)])
@@ -308,13 +383,15 @@ def _contract(**changes):
 
 def test_contract_names_the_tickets_tab_and_header_search_window():
     sheets = _Sheets(titles=("Backlog",))
+    values = sheets.spreadsheets_api.values_api
+    values.grids["Backlog"] = values.grids.pop("Tickets")
     contract = _contract(tickets__tab="Backlog", tickets__header_search={"max_rows": 12, "max_columns": 10})
     GoogleSheetsTemplatePublisher(_Drive(), sheets, contract).publish(
         template="template-sheet", title="Audit", tables={"Tickets": _tickets()}
     )
 
     values = sheets.spreadsheets_api.values_api
-    assert values.reads == [("copied-sheet", "'Backlog'!A1:J12")]
+    assert values.reads == [("copied-sheet", "'Backlog'!A1:J12"), ("copied-sheet", "'Backlog'!B6:I6")]
     assert values.updates == [("'Backlog'!B6", [_ROW])]
     assert sheets.spreadsheets_api.batch_updates == []  # no stray "Tickets" tab is added
 
@@ -387,12 +464,13 @@ def test_cli_reports_a_bad_contract_before_reading_credentials(tmp_path, capsys)
 @pytest.mark.parametrize("status", [403, 404])
 def test_refused_drive_copy_rebuilds_the_template_tab_by_tab(status):
     drive, sheets = _Drive(error=_HttpError(status)), _Sheets()
-    url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
+    receipt = GoogleSheetsTemplatePublisher(drive, sheets).publish(
         template="template-sheet", title="Audit", folder_id="client-folder", tables={"Tickets": _tickets()}
     )
 
     api = sheets.spreadsheets_api
-    assert url == "https://docs.google.com/spreadsheets/d/rebuilt-sheet/edit"
+    assert receipt.url == "https://docs.google.com/spreadsheets/d/rebuilt-sheet/edit"
+    assert receipt.spreadsheet_id == "rebuilt-sheet"
     assert api.creates == [{"properties": {"title": "Audit"}}]
     # Template order (Tickets, then Config), into the new workbook.
     assert api.tabs_api.copies == [
@@ -414,7 +492,7 @@ def test_refused_drive_copy_rebuilds_the_template_tab_by_tab(status):
         }
     ]
     # The header is still checked on the destination before writing.
-    assert api.values_api.reads == [("rebuilt-sheet", "'Tickets'!A1:Z40")]
+    assert api.values_api.reads == [("rebuilt-sheet", "'Tickets'!A1:Z40"), ("rebuilt-sheet", "'Tickets'!B6:I6")]
     assert api.values_api.updates == [("'Tickets'!B6", [_ROW])]
 
 
@@ -425,3 +503,361 @@ def test_other_drive_copy_errors_are_not_masked_by_the_fallback():
             template="template-sheet", title="Audit", tables={"Tickets": _tickets()}
         )
     assert sheets.spreadsheets_api.creates == [] and sheets.spreadsheets_api.tabs_api.copies == []
+
+
+# Evidence tab placement (ticket 424) ------------------------------------------
+
+
+def _add_sheet_requests(sheets):
+    return [
+        request["addSheet"]["properties"]
+        for body in sheets.spreadsheets_api.batch_updates
+        for request in body["requests"]
+        if "addSheet" in request
+    ]
+
+
+def test_evidence_tabs_are_inserted_after_tickets_and_before_config():
+    sheets = _publish_question_workbook(_REAL_TICKETS_LAYOUT, titles=("Tickets", "Config"))
+
+    # Tickets is index 0 and Config index 1 in the copy, so the new tabs take
+    # indexes 1 and 2 and push Config to the end: Tickets, Questions, Q16 Data, Config.
+    assert _add_sheet_requests(sheets) == [
+        {"title": "Questions", "index": 1},
+        {"title": "Q16 Data", "index": 2},
+    ]
+
+
+def test_evidence_tabs_follow_tickets_wherever_it_sits():
+    sheets = _publish_question_workbook(_REAL_TICKETS_LAYOUT, titles=("Cover", "Tickets", "Config"))
+
+    assert [props["index"] for props in _add_sheet_requests(sheets)] == [2, 3]
+
+
+def test_without_a_tickets_table_evidence_tabs_go_before_the_protected_config_tab():
+    sheets = _Sheets(titles=("Cover", "Config"))
+    GoogleSheetsTemplatePublisher(_Drive(), sheets).publish(
+        template="template-sheet", title="Audit", tables={"Overview": [["Metric"]]}
+    )
+
+    assert _add_sheet_requests(sheets) == [{"title": "Overview", "index": 1}]
+
+
+# Read-back receipt (ticket 424, reusing ticket 189's check) -------------------
+
+
+_EVIDENCE = {
+    "Questions": [["Theme", "ID", "Affected"], ["Crawl", "Q16", 12], ["Crawl", "Q17", 0.25]],
+    "Q16 Data": [["url", "status"], ["https://example.com/a", 404]],
+}
+
+
+def _publish_with_evidence(on_update=None, tickets=None):
+    sheets = _Sheets(titles=("Tickets", "Config"))
+    sheets.spreadsheets_api.values_api.on_update = on_update
+    receipt = GoogleSheetsTemplatePublisher(_Drive(), sheets).publish(
+        template="template-sheet",
+        title="Audit",
+        tables={**copy.deepcopy(_EVIDENCE), "Tickets": tickets or _tickets(list(_ROW), ["second", *_ROW[1:]])},
+    )
+    return sheets, receipt
+
+
+def test_publish_reads_every_written_range_back_and_returns_a_receipt():
+    sheets, receipt = _publish_with_evidence()
+
+    values = sheets.spreadsheets_api.values_api
+    assert receipt.spreadsheet_id == "copied-sheet"
+    assert receipt.url == "https://docs.google.com/spreadsheets/d/copied-sheet/edit"
+    assert receipt.as_dict()["ranges"] == [
+        {"tab": "Tickets", "range": "'Tickets'!B6:I7", "rows": 2},
+        {"tab": "Questions", "range": "'Questions'!A1:C3", "rows": 3},
+        {"tab": "Q16 Data", "range": "'Q16 Data'!A1:B2", "rows": 2},
+    ]
+    # The ticket rows are read back exactly; evidence tabs as their whole used range.
+    assert values.reads[-3:] == [
+        ("copied-sheet", "'Tickets'!B6:I7"),
+        ("copied-sheet", "'Questions'"),
+        ("copied-sheet", "'Q16 Data'"),
+    ]
+    assert values.render_options[-3:] == ["UNFORMATTED_VALUE"] * 3
+    assert receipt.summary_lines()[0] == "Receipt: spreadsheet copied-sheet; 3 ranges verified by read-back"
+    assert "  'Tickets'!B6:I7: 2 rows" in receipt.summary_lines()
+
+
+def test_read_back_tolerates_strings_for_numbers_and_trimmed_empty_cells():
+    def as_sheets_returns(_range, values):
+        # Formatted strings, no trailing empty cells, CRLF stored as LF.
+        rows = [[str(cell) if isinstance(cell, (int, float)) else cell for cell in row] for row in values]
+        return [row[: max((i + 1 for i, cell in enumerate(row) if cell != ""), default=0)] for row in rows]
+
+    tickets = _tickets(["multi\r\nline", "", "", "", "Issue", "High", "", ""])
+    _sheets, receipt = _publish_with_evidence(as_sheets_returns, tickets=tickets)
+    assert [item.rows for item in receipt.ranges] == [1, 3, 2]
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        pytest.param(
+            lambda r, v: v[:-1] if r.startswith("'Tickets'") else v, "sent 2 rows, read back 1", id="lost-row"
+        ),
+        pytest.param(
+            lambda r, v: [[*row[:1], "changed", *row[2:]] for row in v] if r.startswith("'Q16") else v,
+            "'Q16 Data'!B1: sent 'status', read back 'changed'",
+            id="changed-cell",
+        ),
+        pytest.param(
+            lambda r, v: [[*row, "stale"] for row in v] if r.startswith("'Questions'") else v,
+            "'Questions'!D1: sent '', read back 'stale'",
+            id="extra-cell",
+        ),
+        pytest.param(
+            lambda r, v: [row[:5] for row in v] if r.startswith("'Tickets'") else v,
+            "'Tickets'!G6: sent 'High', read back ''",
+            id="truncated-columns",
+        ),
+    ],
+)
+def test_a_read_back_mismatch_raises_publish_receipt_error(tamper, message):
+    with pytest.raises(PublishReceiptError) as raised:
+        _publish_with_evidence(tamper)
+
+    assert message in str(raised.value)
+    assert raised.value.spreadsheet_id == "copied-sheet" and raised.value.mismatches
+    assert "left in place for inspection" in str(raised.value)
+
+
+def test_no_tickets_means_the_first_data_row_reads_back_empty():
+    sheets = _Sheets()
+    values = sheets.spreadsheets_api.values_api
+    values.on_update = None
+    receipt = GoogleSheetsTemplatePublisher(_Drive(), sheets).publish(
+        template="template-sheet", title="Audit", tables={"Tickets": [list(TICKET_COLUMNS)]}
+    )
+    assert receipt.as_dict()["ranges"] == [{"tab": "Tickets", "range": "'Tickets'!B6:I6", "rows": 0}]
+
+    # A stale row the clear missed is caught.
+    sheets = _Sheets(header_rows=[*_REAL_TICKETS_LAYOUT[:5], [1, "old ticket"]])
+    sheets.spreadsheets_api.values_api.clear = lambda **_kwargs: _Response({})
+    with pytest.raises(PublishReceiptError, match="old ticket"):
+        GoogleSheetsTemplatePublisher(_Drive(), sheets).publish(
+            template="template-sheet", title="Audit", tables={"Tickets": [list(TICKET_COLUMNS)]}
+        )
+
+
+def test_cli_prints_the_receipt(monkeypatch, capsys):
+    import crawler_cli.google_sheets as google_sheets
+    from crawler_cli.__main__ import _publish_google_sheet
+
+    sheets = _Sheets(titles=("Tickets", "Config"))
+    monkeypatch.setattr(google_sheets, "google_services", lambda _credentials: (_Drive(), sheets))
+    args = argparse.Namespace(
+        google_sheets_contract=None,
+        google_sheets_credentials=None,
+        google_sheets_template="template-sheet",
+        google_sheets_title=None,
+        google_sheets_folder=None,
+    )
+    receipt = _publish_google_sheet(args, "Audit", {"Tickets": _tickets()})
+    assert receipt.ranges[0].range == "'Tickets'!B6:I6"
+
+    sheets = _Sheets(titles=("Tickets", "Config"))
+    sheets.spreadsheets_api.values_api.on_update = lambda _range, values: []
+    assert _publish_google_sheet(args, "Audit", {"Tickets": _tickets()}) is None
+    assert "read-back of workbook copied-sheet does not match" in capsys.readouterr().err
+
+
+# --check-template: dropdown sources against the contract (ticket 424) ---------
+
+
+def _rule(kind, *values):
+    return {"condition": {"type": kind, "values": [{"userEnteredValue": value} for value in values]}, "strict": True}
+
+
+_CONFIG_RANGE = _rule("ONE_OF_RANGE", "=Config!$A$2:$A$5")
+_PRIORITY_RANGE = _rule("ONE_OF_RANGE", "='Config'!B2:B")
+
+
+class _TemplateSpreadsheets:
+    """The template as Sheets returns it to a read-only validation check; any write fails the test."""
+
+    def __init__(self, rules=None, config=None, header_rows=None, rows=100):
+        self.values_api = _Values(header_rows)
+        config = config or [
+            ["Classification", "Priority"],
+            ["Error", "High"],
+            ["Issue", "Medium"],
+            ["Warning", "Low"],
+            ["Improvement"],
+        ]
+        self.values_api._fill("Config", 1, 1, config)
+        # Rules for columns F (classification) and G (priority), on every sampled row.
+        self.rules = {"F": _CONFIG_RANGE, "G": _PRIORITY_RANGE} if rules is None else rules
+        self.rows = rows
+        self.grid_requests: list[dict[str, object]] = []
+
+    def get(self, **kwargs):
+        self.grid_requests.append(kwargs)
+        assert kwargs["includeGridData"] is True and "dataValidation" in kwargs["fields"]
+        tab, row1, col1, row2, col2 = _parse_range(kwargs["ranges"][0])
+        row_data = []
+        for row in range(row1, min(row2, row1 + self.rows - 1) + 1):
+            cells = []
+            for column in range(col1, col2 + 1):
+                label = _column_letter_for_test(column)
+                rule = self.rules.get(label)
+                rule = rule(row) if callable(rule) else rule
+                cells.append({"dataValidation": rule} if rule else {})
+            row_data.append({"values": cells})
+        return _Response(
+            {
+                "sheets": [
+                    {
+                        "properties": {"title": tab},
+                        "data": [{"startRow": row1 - 1, "startColumn": col1 - 1, "rowData": row_data}],
+                    }
+                ]
+            }
+        )
+
+    def values(self):
+        return self.values_api
+
+    def batchUpdate(self, **_kwargs):  # pragma: no cover - asserting no writes
+        raise AssertionError("the template check must not write")
+
+
+def _column_letter_for_test(number):
+    label = ""
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        label = chr(65 + remainder) + label
+    return label
+
+
+class _TemplateSheets:
+    def __init__(self, **kwargs):
+        self.spreadsheets_api = _TemplateSpreadsheets(**kwargs)
+
+    def spreadsheets(self):
+        return self.spreadsheets_api
+
+
+def _assert_no_writes(sheets):
+    values = sheets.spreadsheets_api.values_api
+    assert values.updates == [] and values.clears == []
+
+
+def test_check_template_resolves_config_ranges_and_passes_when_they_match_the_contract():
+    sheets = _TemplateSheets()
+    report = check_template_validation(sheets, template="template-sheet")
+
+    assert report.ok
+    assert (report.header_cell, report.rows_checked) == ("B5", (6, 105))
+    assert sheets.spreadsheets_api.grid_requests[0]["ranges"] == ["'Tickets'!B6:I105"]
+    by_column = {check.column: check for check in report.checks}
+    assert by_column["Priority"].source == "range 'Config'!B2:B"
+    assert by_column["Priority"].template_values == ("High", "Medium", "Low")
+    assert by_column["Ticket Classification"].cell == "F6"
+    assert report.lines()[-1] == "Template check passed."
+    _assert_no_writes(sheets)
+
+
+def test_check_template_reports_a_clear_diff_when_config_disagrees():
+    config = [["Classification", "Priority"], ["Error", "High"], ["Issue", "Medium"], ["Warning", "Critical"], ["Bug"]]
+    sheets = _TemplateSheets(config=config)
+    report = check_template_validation(sheets, template="template-sheet")
+
+    assert not report.ok
+    text = "\n".join(report.lines())
+    assert "FAIL Priority (G6): range 'Config'!B2:B" in text
+    assert "only in template: Critical" in text and "only in contract: Low" in text
+    assert "only in template: Bug" in text and "only in contract: Improvement" in text
+    assert "Template check FAILED" in text
+    _assert_no_writes(sheets)
+
+
+def test_check_template_reads_one_of_list_rules():
+    rules = {
+        "F": _rule("ONE_OF_LIST", "Error", "Issue", "Warning", "Improvement"),
+        "G": _rule("ONE_OF_LIST", "High", "Medium", "Low", "Urgent"),
+    }
+    report = check_template_validation(_TemplateSheets(rules=rules), template="template-sheet")
+
+    by_column = {check.column: check for check in report.checks}
+    assert by_column["Ticket Classification"].ok and by_column["Ticket Classification"].source == "list"
+    assert by_column["Priority"].only_in_template == ("Urgent",) and not report.ok
+
+
+@pytest.mark.parametrize(
+    ("rules", "problem"),
+    [
+        pytest.param({"F": _CONFIG_RANGE}, "has no data validation", id="missing"),
+        pytest.param(
+            {"F": _CONFIG_RANGE, "G": _rule("NUMBER_BETWEEN", "1", "3")}, "unsupported validation type", id="wrong-type"
+        ),
+        pytest.param(
+            {"F": _CONFIG_RANGE, "G": lambda row: _PRIORITY_RANGE if row < 50 else _rule("ONE_OF_LIST", "P1", "P2")},
+            "row 50 uses a different rule",
+            id="rule-changes-down-the-column",
+        ),
+    ],
+)
+def test_check_template_fails_on_missing_or_inconsistent_rules(rules, problem):
+    report = check_template_validation(_TemplateSheets(rules=rules), template="template-sheet")
+
+    assert not report.ok
+    assert problem in "\n".join(report.lines())
+
+
+def test_check_template_notes_rows_without_validation_but_does_not_fail_on_them():
+    rules = {"F": _CONFIG_RANGE, "G": lambda row: _PRIORITY_RANGE if row < 56 else None}
+    report = check_template_validation(_TemplateSheets(rules=rules), template="template-sheet")
+
+    assert report.ok
+    assert "note: 50 of 100 rows checked have no validation (first: row 56)" in "\n".join(report.lines())
+
+
+def test_check_template_fails_when_the_template_header_is_missing():
+    with pytest.raises(TemplateHeaderError, match="template template-sheet"):
+        check_template_validation(_TemplateSheets(header_rows=[["Nothing here"]]), template="template-sheet")
+
+
+def test_check_template_defaults_to_the_contract_template():
+    sheets = _TemplateSheets()
+    check_template_validation(sheets)
+    assert sheets.spreadsheets_api.grid_requests[0]["spreadsheetId"] == "1T9BRLgaFDZ99Lx3q53Av75eZZM32BIJc0nahVPQpGmU"
+
+
+def test_check_template_cli_is_stand_alone_and_exits_non_zero_on_a_mismatch(monkeypatch, capsys):
+    import crawler_cli.google_sheets as google_sheets
+    from crawler_cli.__main__ import _build_parser, _run_technical_audit_questions
+
+    sheets = _TemplateSheets()
+    seen = []
+    monkeypatch.setattr(
+        google_sheets, "google_services", lambda credentials: seen.append(credentials) or (None, sheets)
+    )
+    args = _build_parser().parse_args(
+        ["technical-audit-questions", "--check-template", "--google-sheets-template", "template-sheet"]
+    )
+    assert args.audit is None and args.out is None
+    assert _run_technical_audit_questions(args) == 0
+    out = capsys.readouterr().out
+    assert "OK   Priority (G6)" in out and "Template check passed." in out
+    assert seen == [None]
+
+    bad = _TemplateSheets(config=[["Classification", "Priority"], ["Error", "High"]])
+    monkeypatch.setattr(google_sheets, "google_services", lambda _credentials: (None, bad))
+    assert _run_technical_audit_questions(args) == 2
+    assert "only in contract: Medium, Low" in capsys.readouterr().out
+    _assert_no_writes(bad)
+
+
+def test_questions_cli_still_needs_audit_and_out_without_check_template(capsys):
+    from crawler_cli.__main__ import _build_parser, _run_technical_audit_questions
+
+    args = _build_parser().parse_args(["technical-audit-questions"])
+    assert _run_technical_audit_questions(args) == 2
+    assert "needs --audit and --out" in capsys.readouterr().err

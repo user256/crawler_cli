@@ -37,7 +37,7 @@ complete. Probe-producer follow-ups in that ticket remain open.
 - `421` `proposed` [Decide whether links that wrap a heading count for Q39](./ticket-421-q39-heading-link-definition.md) — **P2.**
 - `422` `proposed` [Make database-backed tests safe to run and run them in CI](./ticket-422-db-test-safety-and-ci-dsn.md) — **P2.**
 - `423` `proposed` [Record why an /llms.txt fetch failed in AI-governance observations](./ticket-423-llms-txt-failure-reasons.md) — **P3.**
-- `424` `proposed` [Sheets publisher follow-ups carried over from ticket 223](./ticket-424-sheets-publisher-polish.md) — **P3.**
+- `424` `done` [Sheets publisher follow-ups carried over from ticket 223](./ticket-424-sheets-publisher-polish.md) — **P3.**
 
 Next unreserved ticket number is **425**.
 
