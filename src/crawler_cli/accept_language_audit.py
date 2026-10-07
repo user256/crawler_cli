@@ -23,6 +23,7 @@ from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
+from .challenge import detect_challenge
 from .hashing import simhash64
 from .redaction import redact_url_without_digest
 
@@ -61,6 +62,22 @@ _TRANSPORT_FAILURE_PREFIXES = ("fetch_error:", "timeout:", "javascript_fetch_err
 # and no skip reason at all) predates this split and stays a bot-trap signal.
 NOT_ADMITTED_OUTCOMES = frozenset({"not_admitted", "redirect_target_not_admitted"})
 FETCH_FAILED_OUTCOMES = frozenset({"fetch_failed", "redirect_target_fetch_failed"})
+# Ticket 425: a response that carries a real status code but is not language
+# evidence.  A bot challenge (the engine's ``bot_challenge`` skip, or a
+# ``cf-mitigated: challenge`` header when detection is off) and a rate limit
+# (429, or 503 with Retry-After) answer the client's pace or identity, not its
+# Accept-Language; any other engine skip on an answered response (for example
+# ``body_truncated``) withholds the body the comparison needs.
+CHALLENGED_OUTCOMES = frozenset({"challenged", "redirect_target_challenged"})
+RATE_LIMITED_OUTCOMES = frozenset({"rate_limited", "redirect_target_rate_limited"})
+WITHHELD_OUTCOMES = frozenset({"response_withheld", "redirect_target_response_withheld"})
+UNANSWERED_OUTCOMES = (
+    NOT_ADMITTED_OUTCOMES | FETCH_FAILED_OUTCOMES | CHALLENGED_OUTCOMES | RATE_LIMITED_OUTCOMES | WITHHELD_OUTCOMES
+)
+_CHALLENGE_SKIP_REASON = "bot_challenge"
+# Challenge signatures are only trusted on error statuses when the engine's own
+# detection is off: a real 200 page that embeds Turnstile matches them too.
+_CHALLENGE_STATUSES = frozenset({403, 429, 503})
 
 
 def is_transport_failure(skip_reason: object) -> bool:
@@ -74,15 +91,30 @@ def unanswered_outcome(skip_reason: str, hop_index: int) -> str:
     return f"{prefix}{'fetch_failed' if is_transport_failure(skip_reason) else 'not_admitted'}"
 
 
-def normalized_probe_outcome(outcome: object, skip_reason: object) -> object:
-    """Read a saved probe outcome, relabelling the pre-split ``not_admitted`` for a timeout.
+def hop_failure(hop: Mapping[str, object], hop_index: int) -> dict[str, object] | None:
+    """Why one recorded hop is not language evidence; None for an answered response.
 
-    Bundles written before the split labelled a transport failure (skip reason
-    ``fetch_error:...``) ``not_admitted``; the skip reason tells them apart.
+    Returns ``{"outcome", "skip_reason"}``.  A hop is unanswered when it has no
+    real HTTP status (fetch error, timeout, admission refusal), when it was a
+    bot challenge or a rate limit whatever its status code (ticket 425), or
+    when the engine skipped its body.  Works on fresh hops and on hops read
+    back from saved bundles, which may lack the ``challenge``/``retry_after``
+    fields.
     """
-    if outcome in NOT_ADMITTED_OUTCOMES and is_transport_failure(skip_reason):
-        return "fetch_failed" if outcome == "not_admitted" else "redirect_target_fetch_failed"
-    return outcome
+    prefix = "" if hop_index == 0 else "redirect_target_"
+    status = hop.get("status")
+    skip_reason = hop.get("skip_reason")
+    if skip_reason == _CHALLENGE_SKIP_REASON or hop.get("challenge"):
+        return {"outcome": f"{prefix}challenged", "skip_reason": skip_reason or f"challenge:{hop['challenge']}"}
+    if not _http_status(status):
+        if not skip_reason:
+            return {"outcome": "fetch_error", "skip_reason": None}
+        return {"outcome": unanswered_outcome(str(skip_reason), hop_index), "skip_reason": skip_reason}
+    if skip_reason:
+        return {"outcome": f"{prefix}response_withheld", "skip_reason": skip_reason}
+    if status == 429 or (status == 503 and hop.get("retry_after")):
+        return {"outcome": f"{prefix}rate_limited", "skip_reason": f"rate_limited:{status}"}
+    return None
 
 
 def select_accept_language_targets(
@@ -157,6 +189,7 @@ async def collect_accept_language_evidence(
     candidates: list[dict[str, object]] = []
     probe_count = 0
     request_count = 0
+    unanswered: dict[str, int] = {}
     variants = [*ACCEPT_LANGUAGE_VARIANTS, (_REPEAT_VARIANT, None)]
     for target in targets:
         probes: dict[str, dict[str, object]] = {}
@@ -165,6 +198,8 @@ async def collect_accept_language_evidence(
             probe_count += 1
             request_count += len(_hops(probe))
             probes[label] = probe
+            if probe["outcome"] in UNANSWERED_OUTCOMES or probe["outcome"] == "fetch_error":
+                unanswered[str(probe["outcome"])] = unanswered.get(str(probe["outcome"]), 0) + 1
         target_observations, target_candidates = _classify_target(target, probes)
         observations.extend(target_observations)
         candidates.extend(target_candidates)
@@ -172,7 +207,12 @@ async def collect_accept_language_evidence(
     coverage: dict[str, object] = {
         "record_type": "coverage",
         "observed_at": _now(),
-        "complete": len(targets) >= population,
+        # Ticket 426: complete only when every target was probed AND every
+        # baseline, repeat and variant request was answered.
+        "complete": len(targets) >= population and not unanswered,
+        "all_targets_probed": len(targets) >= population,
+        "unanswered_probe_count": sum(unanswered.values()),
+        "unanswered_probe_outcomes": dict(sorted(unanswered.items())),
         "target_count": len(targets),
         "eligible_target_count": population,
         "probe_count": probe_count,
@@ -224,13 +264,12 @@ async def _probe(
             result = await engine.crawl(current, purpose="probe" if hop_index == 0 else "redirect")
             location = _header(result.headers, "location")
             resolved = urljoin(current, location) if location else None
-            hops.append(_hop_record(current, result, resolved))
+            hop = _hop_record(current, result, resolved)
+            hops.append(hop)
             final = result
-            if result.status == 0:
-                if not result.skip_reason:
-                    outcome = "fetch_error"
-                else:
-                    outcome = unanswered_outcome(result.skip_reason, hop_index)
+            failure = hop_failure(hop, hop_index)
+            if failure is not None:
+                outcome = str(failure["outcome"])
                 break
             if result.status not in _REDIRECT_STATUSES:
                 outcome = "resolved"
@@ -298,7 +337,28 @@ def _hop_record(url: str, result: Any, location: str | None) -> dict[str, object
         "content_language": _header(result.headers, "content-language"),
         "set_cookies": _set_cookie_summary(_header(result.headers, "set-cookie")),
         "skip_reason": result.skip_reason,
+        "challenge": _challenge_vendor(result),
+        "retry_after": _header(result.headers, "retry-after"),
     }
+
+
+def _challenge_vendor(result: Any) -> str | None:
+    """The bot-challenge vendor for one response, even when engine detection is off (ticket 425).
+
+    The engine sets ``challenge`` when its detector ran.  With detection off
+    (``--no-challenge-detection``, used where Turnstile widgets false-positive
+    real pages) the ``cf-mitigated: challenge`` header still marks a challenge,
+    and the body signatures are trusted on 403/429/503 responses only.
+    """
+    vendor = getattr(result, "challenge", None)
+    if vendor:
+        return str(vendor)
+    if (_header(result.headers, "cf-mitigated") or "").strip().lower() == "challenge":
+        return "cloudflare"
+    status = result.status
+    if status in _CHALLENGE_STATUSES:
+        return detect_challenge(status, dict(result.headers), getattr(result, "raw_html", None))
+    return None
 
 
 def _classify_target(
@@ -389,12 +449,11 @@ def _classify_target(
 
 def _differences(baseline: Mapping[str, object], probe: Mapping[str, object], *, content_stable: bool) -> list[str]:
     # A hop that was never answered (status 0: fetch error, timeout, robots or
-    # scope rejection) has no HTTP status, Location or URL to compare (ticket 412).
+    # scope rejection; or a challenge or rate limit whatever its status) has no
+    # HTTP status, Location or URL to compare (tickets 412, 425).
     differences = []
-    first_hops_answered = _http_status(_first_hop(baseline).get("status")) and _http_status(
-        _first_hop(probe).get("status")
-    )
-    last_hops_answered = _http_status(baseline["final_status"]) and _http_status(probe["final_status"])
+    first_hops_answered = _first_hop_answered(baseline) and _first_hop_answered(probe)
+    last_hops_answered = _last_hop_answered(baseline) and _last_hop_answered(probe)
     if first_hops_answered and _first_hop(baseline).get("status") != _first_hop(probe).get("status"):
         differences.append("first_status_changed")
     if first_hops_answered and _first_hop(baseline).get("location") != _first_hop(probe).get("location"):
@@ -409,6 +468,16 @@ def _differences(baseline: Mapping[str, object], probe: Mapping[str, object], *,
         if content_stable and not _same_content(baseline, probe, strict=False):
             differences.append("content_changed")
     return differences
+
+
+def _first_hop_answered(probe: Mapping[str, object]) -> bool:
+    hops = _hops(probe)
+    return bool(hops) and hop_failure(hops[0], 0) is None
+
+
+def _last_hop_answered(probe: Mapping[str, object]) -> bool:
+    hops = _hops(probe)
+    return bool(hops) and hop_failure(hops[-1], len(hops) - 1) is None
 
 
 def _http_status(status: object) -> bool:
@@ -436,7 +505,7 @@ def _trap_reason(target: str, probe: Mapping[str, object]) -> str | None:
         return "error_status"
     # A redirect whose off-host target was refused or never answered still left
     # the primary host; whether the target answered does not change that.
-    redirected_away = {"resolved", "redirect_target_not_admitted", "redirect_target_fetch_failed"}
+    redirected_away = {"resolved"} | {label for label in UNANSWERED_OUTCOMES if label.startswith("redirect_target_")}
     if outcome in redirected_away and not _same_site_host(target, str(probe["final_url"])):
         return "left_primary_host"
     return None
@@ -446,7 +515,7 @@ def _neutral_access_state(target: str, probe: Mapping[str, object]) -> str:
     reason = _trap_reason(target, probe)
     if reason:
         return f"trap:{reason}"
-    if probe["outcome"] in NOT_ADMITTED_OUTCOMES | FETCH_FAILED_OUTCOMES:
+    if probe["outcome"] in UNANSWERED_OUTCOMES:
         return str(probe["outcome"])
     if probe["final_status"] != 200:
         return f"resolved_status_{probe['final_status']}"

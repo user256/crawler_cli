@@ -839,6 +839,73 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
     )
 
 
+def _probe_engine_config(args: argparse.Namespace, seed_origins: list[str], allowed_hosts: set[str]) -> CrawlConfig:
+    """Guarded engine config for the live observation probes (ticket 427).
+
+    Takes the same transport and identity options as ``crawl`` (``--http-backend``,
+    ``--impersonate``, ``--custom-ua``, ``--no-challenge-detection``) plus a
+    per-request delay, so a protected site can be probed the way it was crawled.
+    As in ``crawl``, an impersonated fingerprint keeps the profile's own
+    User-Agent unless ``--custom-ua`` is given.  The address-pinned destination
+    guard only reaches aiohttp sockets, so curl_cffi probes use the resolver
+    guard, which is what ``crawl`` uses by default.
+    """
+    impersonate = getattr(args, "curl_impersonate", "") or ""
+    custom_ua = getattr(args, "custom_ua", None)
+    backend = getattr(args, "http_backend", None) or (
+        "curl_cffi" if impersonate and impersonate != "none" else "aiohttp"
+    )
+    if impersonate and impersonate != "none" and backend != "curl_cffi":
+        raise ValueError("--impersonate needs --http-backend curl_cffi")
+    if impersonate and impersonate != "none" and not custom_ua:
+        user_agent = ""
+    else:
+        user_agent = custom_ua or "canonicalbot/0.1"
+    delay = getattr(args, "probe_delay", 1.0)
+    if delay is None or delay < 0:
+        raise ValueError("--probe-delay must be zero or more seconds")
+    return CrawlConfig(
+        backend=backend,
+        user_agent=user_agent,
+        curl_impersonate=impersonate,
+        # 0 rate means no limiter; a delay is the minimum gap between requests.
+        rate_limit_per_second=(1.0 / delay) if delay > 0 else 0.0,
+        detect_challenges=not getattr(args, "no_challenge_detection", False),
+        same_host_only=True,
+        allowed_hosts=sorted(allowed_hosts),
+        respect_robots_txt=True,
+        max_concurrency=2,
+        per_host_concurrency=1,
+        max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
+        destination_guard="pinned" if backend == "aiohttp" else "resolver",
+        challenge_escalate_to_browser=False,
+        scope_predicate=cast(Any, build_site_file_scope(seed_origins, allowed_hosts, None)),
+    )
+
+
+def _locale_probe_scope(
+    evidence: list[dict[str, object]], records: list[dict[str, object]], target_count: int, population: int
+) -> tuple[str, str]:
+    """Scope text and coverage state for the locale-probe collection (ticket 426).
+
+    Complete only when every eligible root was probed and every baseline,
+    repeat and variant request was answered; a challenged, rate-limited,
+    refused or failed request leaves the collection partial.
+    """
+    coverage = next((row for row in evidence if row.get("record_type") == "coverage"), {})
+    unanswered = coverage.get("unanswered_probe_outcomes")
+    unanswered = unanswered if isinstance(unanswered, dict) else {}
+    incomparable = sum(1 for record in records if record.get("baseline_failure") or record.get("variant_failure"))
+    scope = f"{target_count} of {population} eligible roots; {len(records)} header variants"
+    if unanswered:
+        reasons = ", ".join(f"{outcome} {count}" for outcome, count in sorted(unanswered.items()))
+        scope += f"; {sum(unanswered.values())} probe requests unanswered ({reasons})"
+    if incomparable:
+        scope += f"; {incomparable} of {len(records)} comparisons lack an answered baseline or variant"
+    complete = bool(population) and target_count >= population and not unanswered and not incomparable
+    return scope, "complete" if complete else "partial"
+
+
 def _add_postgres_args(parser: argparse.ArgumentParser) -> None:
     pg = parser.add_argument_group("PostgreSQL connection")
     pg.add_argument("--postgres-dsn", help="Full PostgreSQL DSN string")
@@ -2880,19 +2947,7 @@ async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
                 print("Error: the run records no seed hosts, so live probes have no origin to target", file=sys.stderr)
                 return EXIT_VALIDATION
             if getattr(args, "ai_governance", False) or getattr(args, "probe_accept_language", False):
-                probe_engine = CrawlEngine(
-                    CrawlConfig(
-                        same_host_only=True,
-                        allowed_hosts=sorted(allowed_hosts),
-                        respect_robots_txt=True,
-                        max_concurrency=2,
-                        per_host_concurrency=1,
-                        max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
-                        destination_guard="pinned",
-                        challenge_escalate_to_browser=False,
-                        scope_predicate=cast(Any, build_site_file_scope(seed_origins, allowed_hosts, None)),
-                    )
-                )
+                probe_engine = CrawlEngine(_probe_engine_config(args, seed_origins, allowed_hosts))
             if getattr(args, "ai_governance", False):
                 assert probe_engine is not None
                 # Ticket 411: the cap selects a sample of the eligible seed
@@ -2963,13 +3018,14 @@ async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
                 )
                 await store.persist_language_probe_evidence(run_id, evidence, session_id=str(uuid.uuid4()))
                 records = locale_probe_records(evidence)
+                scope, coverage_state = _locale_probe_scope(evidence, records, len(targets), population)
                 collections.append(
                     collection(
                         "locale-probe",
                         records,
                         source="crawler-cli technical-audit-observations --probe-accept-language: guarded Accept-Language probes",
-                        scope=f"{len(targets)} of {population} eligible roots; {len(records)} header variants",
-                        coverage_state="complete" if population and len(targets) >= population else "partial",
+                        scope=scope,
+                        coverage_state=coverage_state,
                     )
                 )
             if getattr(args, "tls_probe", False):
@@ -4828,6 +4884,39 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     observations_parser.add_argument(
         "--accept-language-max-hops", type=int, default=5, help="Redirect hops followed per Accept-Language probe."
+    )
+    probe_transport = observations_parser.add_argument_group(
+        "Live probe transport (--ai-governance, --probe-accept-language)",
+        "Same transport and identity options as crawl, so a protected site is probed the way it was crawled.",
+    )
+    probe_transport.add_argument("--http-backend", choices=["aiohttp", "curl_cffi"], help="HTTP backend for probes")
+    probe_transport.add_argument(
+        "--impersonate",
+        dest="curl_impersonate",
+        default="",
+        metavar="TARGET",
+        help="curl_cffi only: browser TLS/HTTP fingerprint for probes (e.g. firefox). Implies "
+        "--http-backend curl_cffi. Pass a matching --custom-ua: Cloudflare blocks a mismatched one.",
+    )
+    probe_transport.add_argument(
+        "--custom-ua",
+        "--user-agent",
+        dest="custom_ua",
+        help="User-Agent for probes (default canonicalbot/0.1, or the impersonated profile's own).",
+    )
+    probe_transport.add_argument(
+        "--no-challenge-detection",
+        action="store_true",
+        help="Turn off the engine's body-signature challenge detector for probes (Turnstile pages "
+        "false-positive). A cf-mitigated: challenge header or a challenge page on 403/429/503 is still "
+        "recorded as challenged and never compared.",
+    )
+    probe_transport.add_argument(
+        "--probe-delay",
+        type=non_negative_float,
+        default=1.0,
+        metavar="SECONDS",
+        help="Minimum gap between probe requests (default 1.0; 0 disables the limiter).",
     )
     observations_parser.add_argument(
         "--tls-probe",
