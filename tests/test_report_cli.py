@@ -107,6 +107,12 @@ class FakeReports:
     async def empty_anchor_links(self):
         return []
 
+    async def heading_link_population(self, *, has_links_json):
+        return {"heading_link_count": 0, "heading_link_tested_count": 0, "heading_link_wrapping_count": 0}
+
+    async def heading_wrapping_links(self):
+        return []
+
     async def profile_indexability_pages(self):
         return []
 

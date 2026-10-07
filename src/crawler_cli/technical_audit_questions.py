@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from .technical_audit import TECHNICAL_AUDIT_CHECK_CONTRACT, TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES
 from .technical_audit_evidence import (
     HEADING_LINK_XPATH_PATTERN,
+    HEADING_WRAPPING_LINK_FIELD,
     Answerer,
     Evidence,
     Json,
@@ -281,6 +282,9 @@ def _with_template(
 
 
 def _heading_link(row: Json) -> bool:
+    """A link inside an H2/H3 (by XPath) or one whose target is also linked by an anchor wrapping one."""
+    if row.get(HEADING_WRAPPING_LINK_FIELD) is True:
+        return True
     return bool(re.search(HEADING_LINK_XPATH_PATTERN, str(row.get("xpath", "")), re.IGNORECASE))
 
 
@@ -296,12 +300,16 @@ def _heading_target_failure(row: Json) -> bool:
 def _heading_link_targets(audit: Json, question: Json, profile: Json | None) -> Evidence:
     """Q39: failing heading-link targets over the counted H2/H3 link population.
 
-    The internal-link-targets collector returns only links whose target fails,
-    so the population comes from ``run_context``: ``heading_link_count`` (all
-    H2/H3 links) and ``heading_link_tested_count`` (those whose target has a
-    saved status in the run).  The tested count is the denominator; zero means
-    the rule could not be tested.  An audit saved before these counts existed
-    reports no denominator and keeps a clean result below Healthy.
+    A heading link sits inside an H2/H3 or wraps one (``a > h2|h3`` or
+    ``a > * > h2|h3``; decided in ticket 421).  The internal-link-targets
+    collector returns only links whose target fails, so the population comes
+    from ``run_context``: ``heading_link_count`` (all heading links) and
+    ``heading_link_tested_count`` (those whose target has a saved status in
+    the run).  The tested count is the denominator; zero means the rule could
+    not be tested.  An audit saved before these counts existed reports no
+    denominator and keeps a clean result below Healthy, and one that could not
+    check the wrapping form (``heading_link_wrapping_count`` missing) is not
+    Healthy either.
     """
     evidence = _from_check("internal-link-targets", keep=_heading_target_failure)(audit, question, profile)
     if not evidence.available:
@@ -326,6 +334,15 @@ def _heading_link_targets(audit: Json, question: Json, profile: Json | None) -> 
             }
         )
     notes = [evidence.note] if evidence.note else []
+    wrapping = _int_or_none(context.get("heading_link_wrapping_count"))
+    if wrapping is None:
+        notes.append(
+            "Links that wrap an H2/H3 (<a><h3>...</h3></a>) were not checked: the run stored no HTML or the audit "
+            "predates ticket 421, so only links inside a heading were counted; regenerate the audit to count them."
+        )
+    elif wrapping:
+        verb = "wraps its" if wrapping == 1 else "wrap their"
+        notes.append(f"{unit_label(wrapping, 'heading links')} {verb} heading (<a><h3>...</h3></a>).")
     if found > tested:
         notes.append(
             f"{found - tested:,} of {unit_label(found, 'heading links')} point to targets without a saved status "
@@ -337,7 +354,8 @@ def _heading_link_targets(audit: Json, question: Json, profile: Json | None) -> 
             "denominator": tested,
             "denominator_unit": "heading links",
             # Untested heading links are unknown, so a clean result over part of the population is not Healthy.
-            "scope_complete": evidence.scope_complete and found <= tested,
+            # So is a population that could not include links wrapping a heading.
+            "scope_complete": evidence.scope_complete and found <= tested and wrapping is not None,
             "note": "; ".join(notes),
         }
     )
@@ -811,7 +829,7 @@ ANSWERERS: dict[str, Answerer] = {
     "Q30": Answerer("supplied Search Console / URL Inspection records", _from_check("supplied-search-evidence")),
     "Q32": Answerer("locale-html-lang shared-signature rows", _from_check("locale-html-lang")),
     "Q39": Answerer(
-        "internal-link-targets error, redirect and non-canonical targets linked from an H2/H3",
+        "internal-link-targets error, redirect and non-canonical targets linked from inside or around an H2/H3",
         _heading_link_targets,
     ),
     "Q41": Answerer(

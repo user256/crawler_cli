@@ -20,7 +20,14 @@ Json = Mapping[str, Any]
 # A link inside an H2 or H3 heading, matched against its saved XPath.  The
 # pattern is valid both as a Python ``re`` and as a PostgreSQL ``~*`` regex, so
 # the Q39 answerer and the heading-link population count agree on the rule.
+# Links that wrap a heading (``a > h2|h3``, ``a > * > h2|h3``) also count for
+# Q39 (ticket 421), but no XPath pattern can find them: the link's own XPath
+# ends in ``/a``, and ``links_json`` keeps only the first link per target on a
+# page, so a card whose image link comes first drops its heading link.  They
+# come from the stored HTML instead, and failing links to their targets carry
+# ``HEADING_WRAPPING_LINK_FIELD``.
 HEADING_LINK_XPATH_PATTERN = r"/h[23](\[[0-9]+\])?(/|$)"
+HEADING_WRAPPING_LINK_FIELD = "wraps_heading"
 
 
 @dataclass(frozen=True)
