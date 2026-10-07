@@ -11,16 +11,18 @@ as a confirmed absence when nothing was actually read.
 
 ## Tasks and acceptance criteria
 
-- [ ] Route the `/llms.txt` fetch through the same `on_skip` reporting as the
+- [x] Route the `/llms.txt` fetch through the same `on_skip` reporting as the
       robots fetch and carry `llms_txt_outcome` (`fetched` / `unknown`) and
       `llms_txt_unknown_reason` on the record; keep `llms_txt_status`.
-- [ ] Validation accepts both shapes; saved bundles without the new fields
+- [x] Validation accepts both shapes; saved bundles without the new fields
       still load.
-- [ ] Any answerer or report that uses llms.txt presence treats `unknown` as
+- [x] Any answerer or report that uses llms.txt presence treats `unknown` as
       untested, never as absent.
-- [ ] Command-level tests for timeout, denied destination and 404 on
+- [x] Command-level tests for timeout, denied destination and 404 on
       `/llms.txt` with a readable robots.txt.
 
 ## Status
 
-proposed (Priority: **P3**). Filed 2026-10-07. Related: 370, 410, 411.
+done (Priority: **P3**). Filed 2026-10-07; fixed on `fix/ticket-423`, 2026-10-07. Related: 370, 410, 411.
+
+Fix: /llms.txt probes go through `_bounded_fetch_response(..., on_skip=...)`; each `robots-txt` record carries `llms_txt_status`, `llms_txt_outcome` (`fetched`/`unknown`) and, when unread, `llms_txt_unknown_reason` (skip reason, `robots_unavailable`, `robots_disallowed` or `not_probed`); old bundles still validate and Q96 reports an unread /llms.txt as untested, never absent.

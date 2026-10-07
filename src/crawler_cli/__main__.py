@@ -2852,7 +2852,7 @@ async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
         import asyncpg
 
         from .audit_observation_adapters import (
-            llms_txt_status_by_host,
+            llms_txt_probe_by_host,
             locale_probe_records,
             robots_txt_record,
             tls_probe_records,
@@ -2902,7 +2902,7 @@ async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
                 cap = max(1, args.ai_governance_max_origins)
                 origins, omitted_origins = eligible[:cap], eligible[cap:]
                 collected = await collect_ai_governance(probe_engine, seed_origins=origins, max_origins=cap)
-                llms = llms_txt_status_by_host(collected)
+                llms = llms_txt_probe_by_host(collected)
                 records = []
                 for origin in origins:
                     host = urlsplit(origin).netloc.lower()
@@ -2911,9 +2911,16 @@ async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
                         f"{origin.rstrip('/')}/robots.txt", on_skip=reasons.append
                     )
                     # Ticket 410: an unread file stays as an unknown record for its host.
+                    # Ticket 423: an unread /llms.txt is unknown with its reason, never absent.
+                    llms_probe = llms.get(host, {})
                     records.append(
                         robots_txt_record(
-                            host, response, llms.get(host), unknown_reason=reasons[-1] if reasons else None
+                            host,
+                            response,
+                            llms_probe.get("status"),
+                            unknown_reason=reasons[-1] if reasons else None,
+                            llms_txt_outcome_value=llms_probe.get("outcome"),
+                            llms_txt_unknown_reason=llms_probe.get("unknown_reason"),
                         )
                     )
                 unread = [
@@ -2927,6 +2934,15 @@ async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
                     scope += f"; omitted by cap: {', '.join(omitted_hosts)}"
                 if unread:
                     scope += f"; not read: {', '.join(unread)}"
+                llms_unread = [
+                    f"{record['host']} ({record['llms_txt_unknown_reason']})"
+                    for record in records
+                    if record.get("llms_txt_outcome") == "unknown"
+                ]
+                if llms_unread:
+                    # /llms.txt is reported only (not a Q96 verdict input), so it
+                    # does not change robots coverage, but its gaps stay visible.
+                    scope += f"; /llms.txt not read (untested): {', '.join(llms_unread)}"
                 collections.append(
                     collection(
                         "robots-txt",

@@ -130,6 +130,26 @@ def validate_observation_bundle(bundle: Mapping[str, object]) -> None:
 
 def _robots_txt_record_problems(record: Mapping[str, object]) -> list[str]:
     """A robots-txt record has an integer status, or says explicitly why it has none."""
+    return _robots_fetch_problems(record) + _llms_txt_problems(record)
+
+
+def _llms_txt_problems(record: Mapping[str, object]) -> list[str]:
+    """The optional /llms.txt probe fields (ticket 423); bundles without them stay valid."""
+    outcome = record.get("llms_txt_outcome")
+    reason = record.get("llms_txt_unknown_reason")
+    if outcome is None:
+        return [] if reason is None else ["llms_txt_unknown_reason needs llms_txt_outcome 'unknown'"]
+    if outcome == "unknown":
+        return [] if _text(reason) else ["llms_txt_outcome unknown needs an llms_txt_unknown_reason"]
+    if outcome == "fetched":
+        problems = [] if _text(record.get("llms_txt_status")) else ["llms_txt_outcome fetched needs an llms_txt_status"]
+        if reason is not None:
+            problems.append("llms_txt_outcome fetched must not carry an llms_txt_unknown_reason")
+        return problems
+    return [f"llms_txt_outcome must be 'fetched' or 'unknown', got {outcome!r}"]
+
+
+def _robots_fetch_problems(record: Mapping[str, object]) -> list[str]:
     status = record.get("status")
     outcome = record.get("fetch_outcome")
     if outcome == "unknown":

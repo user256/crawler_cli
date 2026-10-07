@@ -35,7 +35,13 @@ crawler-cli technical-audit-questions --audit audit.json --site-profile profile.
   the collection partial. `--ai-governance-max-origins` caps the probed seed
   origins; the collection's `population` records the eligible, selected and
   omitted origins, and a cap below the eligible count makes coverage partial,
-  so Q96 cannot reach Healthy from a sample.
+  so Q96 cannot reach Healthy from a sample. The /llms.txt probe carries its
+  own `llms_txt_outcome` (`fetched` or `unknown`) and, when unread (timeout,
+  denied destination, challenge, robots unavailable or disallowed),
+  `llms_txt_unknown_reason`; the scope lists unread hosts and Q96 reports them
+  as untested, never absent. /llms.txt is reported only, so it does not change
+  robots coverage. Bundles without these fields still load; an unread
+  `llms_txt_status` there is also read as untested.
 - `--probe-accept-language` probes the seed and locale roots with a fixed
   Accept-Language set (ticket 260), persists the session (ticket 264) and
   writes `locale-probe` records.
@@ -96,7 +102,7 @@ that collected them.
 | `utility-path-probe` | url | path_class (`protected` or `public-utility`, from the approved policy), status, auth_required, exposes_content, noindex, robots_blocked (a public-utility path needs both noindex and robots_blocked recorded) | Q102 |
 | `external-link-recheck` | source_url, target_url | status, rel (required for an affiliate link; null when the anchor has none), affiliate | Q28 |
 | `tls-probe` | host | hsts_header (null when absent), preload_status, ocsp_stapled | Q63 |
-| `robots-txt` | host; plus an integer status, or `fetch_outcome: "unknown"` with an `unknown_reason` and no status | body (required with a 2xx status; a 404 or 410 means no file and allows everything; a redirect, any other 4xx or a 5xx is unread), llms_txt_status | Q96 |
+| `robots-txt` | host; plus an integer status, or `fetch_outcome: "unknown"` with an `unknown_reason` and no status | body (required with a 2xx status; a 404 or 410 means no file and allows everything; a redirect, any other 4xx or a 5xx is unread), llms_txt_status, llms_txt_outcome (`fetched` needs llms_txt_status; `unknown` needs llms_txt_unknown_reason) | Q96 |
 | `google-render-inspection` | url, template, tool | primary_content_present, blocked_resources, render_error | Q18 |
 | `verified-google-fetch` | url | content_differs, links_differ, directives_differ (all three must be recorded for a matching fetch), google_fetch_method | Q31 |
 | `competitor-topic-gap` | topic, site_covers, competitors_covering | query, method | Q50 |

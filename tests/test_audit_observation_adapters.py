@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from crawler_cli.__main__ import _build_parser
 from crawler_cli.audit_observation_adapters import (
+    llms_txt_probe_by_host,
     llms_txt_status_by_host,
     locale_probe_records,
     robots_txt_record,
@@ -65,6 +66,7 @@ def test_robots_txt_record_keeps_the_body_only_for_a_2xx() -> None:
         "status": 200,
         "body": "User-agent: *\nDisallow: /x",
         "llms_txt_status": "valid",
+        "llms_txt_outcome": "fetched",
     }
     assert robots_txt_record("example.com", SimpleNamespace(status=301, text="moved"), None)["body"] is None
     # Ticket 410: an unread file is an explicit unknown outcome with a reason.
@@ -75,6 +77,8 @@ def test_robots_txt_record_keeps_the_body_only_for_a_2xx() -> None:
         "status": None,
         "body": None,
         "llms_txt_status": None,
+        "llms_txt_outcome": "unknown",
+        "llms_txt_unknown_reason": "not_probed",
     }
 
 
@@ -86,6 +90,34 @@ def test_llms_status_is_keyed_by_host() -> None:
         ]
     }
     assert llms_txt_status_by_host(collected) == {"example.com": "valid"}
+
+
+def test_llms_probe_carries_outcome_and_reason_and_derives_them_for_old_rows() -> None:
+    collected = {
+        "llms_files": [
+            {"origin": "https://a.example", "path": "/llms.txt", "state": "absent", "fetch_outcome": "fetched"},
+            {
+                "origin": "https://b.example",
+                "path": "/llms.txt",
+                "state": "fetch_unavailable",
+                "fetch_outcome": "unknown",
+                "unknown_reason": "timeout:ReadTimeout",
+            },
+            # Rows from a collector that predates ticket 423 carry only a state.
+            {"origin": "https://c.example", "path": "/llms.txt", "state": "fetch_unavailable"},
+            {"origin": "https://d.example", "path": "/llms.txt", "state": "robots_disallowed_not_fetched"},
+        ]
+    }
+    assert llms_txt_probe_by_host(collected) == {
+        "a.example": {"status": "absent", "outcome": "fetched", "unknown_reason": None},
+        "b.example": {"status": "fetch_unavailable", "outcome": "unknown", "unknown_reason": "timeout:ReadTimeout"},
+        "c.example": {"status": "fetch_unavailable", "outcome": "unknown", "unknown_reason": "no_response"},
+        "d.example": {
+            "status": "robots_disallowed_not_fetched",
+            "outcome": "unknown",
+            "unknown_reason": "robots_disallowed",
+        },
+    }
 
 
 def test_tls_probe_records_never_claim_preload_or_ocsp_that_was_not_observed() -> None:
