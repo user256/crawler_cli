@@ -124,6 +124,8 @@ class _Values:
         self._fill("Tickets", 1, 1, header_rows)
         # Called with (range, values) before an update is stored; may return altered values.
         self.on_update = None
+        # Called with the parsed range of a values.clear.
+        self.on_clear = None
 
     def _fill(self, tab, row1, col1, rows):
         grid = self.grids.setdefault(tab, {})
@@ -148,6 +150,8 @@ class _Values:
     def clear(self, *, range, **_kwargs):
         self.clears.append(range)
         tab, row1, col1, row2, col2 = _parse_range(range)
+        if self.on_clear is not None:
+            self.on_clear(tab, row1, col1, row2, col2)
         grid = self.grids.setdefault(tab, {})
         for r, c in list(grid):
             if r >= row1 and c >= col1 and (row2 is None or r <= row2) and (col2 is None or c <= col2):
@@ -165,6 +169,18 @@ class _Values:
 
 
 range_ = range
+
+
+def _letter(number):
+    label = ""
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        label = chr(65 + remainder) + label
+    return label
+
+
+def _quote(tab):
+    return "'" + tab.replace("'", "''") + "'"
 
 
 class _SheetTabs:
@@ -200,6 +216,20 @@ class _Spreadsheets:
         # and its tab titles by sheetId (renames in a batchUpdate are applied).
         self.copy_rules: dict[tuple[int, int, int], dict[str, object]] = {}
         self.copy_titles: dict[int, str] = {i: title for i, title in enumerate(titles, 1)}
+        # updateCells value clears, as "'Tab'!B6:I" (open-ended rows).
+        self.cell_clears: list[str] = []
+        self.ignore_cell_clears = False
+        self.values_api.on_clear = self._values_clear_drops_dropdowns
+
+    def _values_clear_drops_dropdowns(self, tab, row1, col1, row2, col2):
+        # Live, 2026-10-07: values.clear on the template's Tickets cells also
+        # deleted their (UI-made) Config dropdowns; updateCells(userEnteredValue) keeps them.
+        for sheet_id, row, column in list(self.copy_rules):
+            if self.copy_titles.get(sheet_id) != tab:
+                continue
+            if row + 1 >= row1 and column + 1 >= col1 and (row2 is None or row + 1 <= row2):
+                if col2 is None or column + 1 <= col2:
+                    del self.copy_rules[(sheet_id, row, column)]
 
     def get(self, *, spreadsheetId, **kwargs):
         self.gets.append(spreadsheetId)
@@ -278,6 +308,18 @@ class _Spreadsheets:
             if "updateSheetProperties" in request:
                 properties = request["updateSheetProperties"]["properties"]
                 self.copy_titles[properties["sheetId"]] = properties["title"]
+            if "updateCells" in request and request["updateCells"]["fields"] == "userEnteredValue":
+                grid = request["updateCells"]["range"]
+                tab = self.copy_titles[grid["sheetId"]]
+                first_col, last_col = grid["startColumnIndex"] + 1, grid["endColumnIndex"]
+                self.cell_clears.append(
+                    f"{_quote(tab)}!{_letter(first_col)}{grid['startRowIndex'] + 1}:{_letter(last_col)}"
+                )
+                if not self.ignore_cell_clears:
+                    cells = self.values_api.grids.setdefault(tab, {})
+                    for r, c in list(cells):
+                        if r > grid["startRowIndex"] and first_col <= c <= last_col:
+                            del cells[(r, c)]
             if "setDataValidation" in request:
                 grid = request["setDataValidation"]["range"]
                 for r in range_(grid["startRowIndex"], grid["endRowIndex"]):
@@ -316,7 +358,8 @@ def test_plain_audit_publish_writes_beneath_the_real_template_header_not_at_a2()
 
     values = sheets.spreadsheets_api.values_api
     assert values.reads[0] == ("copied-sheet", "'Tickets'!A1:Z40")
-    assert "'Tickets'!B6:I10000" in values.clears
+    assert sheets.spreadsheets_api.cell_clears == ["'Tickets'!B6:I"]
+    assert not any(target.startswith("'Tickets'") for target in values.clears)  # values.clear drops dropdowns
     assert ("'Tickets'!B6", [_ROW]) in values.updates
     assert not any(target.startswith("'Tickets'!A") for target in [*values.clears, *(u[0] for u in values.updates)])
 
@@ -393,7 +436,7 @@ def test_question_publish_writes_beneath_a_full_header_under_a_title_block():
     sheets = _publish_question_workbook(header, titles=("Questions", "Tickets"))
 
     values = sheets.spreadsheets_api.values_api
-    assert "'Tickets'!B5:I10000" in values.clears
+    assert sheets.spreadsheets_api.cell_clears == ["'Tickets'!B5:I"]
     assert ("'Tickets'!B5", [_ROW]) in values.updates
 
 
@@ -453,7 +496,8 @@ def test_contract_names_the_tickets_tab_and_header_search_window():
     values = sheets.spreadsheets_api.values_api
     assert values.reads == [("copied-sheet", "'Backlog'!A1:J12"), ("copied-sheet", "'Backlog'!B6:I6")]
     assert values.updates == [("'Backlog'!B6", [_ROW])]
-    assert sheets.spreadsheets_api.batch_updates == []  # no stray "Tickets" tab is added
+    assert _add_sheet_requests(sheets) == []  # no stray "Tickets" tab is added
+    assert sheets.spreadsheets_api.cell_clears == ["'Backlog'!B6:I"]
 
 
 @pytest.mark.parametrize(
@@ -708,7 +752,9 @@ def test_dropdowns_are_applied_to_every_populated_ticket_row_past_the_template_r
             "rule": _PRIORITY_RULE,
         },
     ]
-    assert len(api.batch_updates) == 1  # one batchUpdate, one request per column
+    # One batchUpdate for the dropdowns, one request per column, after the value clear.
+    assert [len(body["requests"]) for body in api.batch_updates] == [1, 2]
+    assert "updateCells" in api.batch_updates[0]["requests"][0]
     assert set(api.batch_targets) == {"copied-sheet"}  # never the template
     rows_with = {row for (sheet_id, row, column) in api.copy_rules if sheet_id == 1 and column == 6}
     assert rows_with == set(range(5, 35))  # rows 6-35; nothing written below the last ticket
@@ -731,7 +777,9 @@ def test_dropdown_extension_leaves_template_rows_below_the_last_ticket_alone():
         (5, 8),
         (5, 8),
     ]
-    assert api.copy_rules == before  # rows 9-26 keep the template's own rules
+    # Rows 9-26 keep the template's own rules. The old values.clear of B6:I10000
+    # deleted them (live, files.copy path), which the fake reproduces.
+    assert api.copy_rules == before
 
 
 def test_dropdowns_reach_every_ticket_row_on_the_copy_to_fallback():
@@ -764,13 +812,14 @@ def test_no_dropdown_writes_without_tickets_or_without_a_first_row_rule():
     receipt = GoogleSheetsTemplatePublisher(_Drive(), sheets).publish(
         template="template-sheet", title="Audit", tables={"Tickets": [list(TICKET_COLUMNS)]}
     )
-    assert sheets.spreadsheets_api.batch_updates == [] and receipt.dropdowns == ()
+    assert _validation_requests(sheets.spreadsheets_api) == [] and receipt.dropdowns == ()
+    assert sheets.spreadsheets_api.grid_reads == []  # no rule is read when there is nothing to extend it to
 
     sheets = _Sheets(titles=("Tickets", "Config"))  # a template with no dropdowns
     receipt = GoogleSheetsTemplatePublisher(_Drive(), sheets).publish(
         template="template-sheet", title="Audit", tables={"Tickets": _many_tickets(30)}
     )
-    assert sheets.spreadsheets_api.batch_updates == [] and receipt.dropdowns == ()
+    assert _validation_requests(sheets.spreadsheets_api) == [] and receipt.dropdowns == ()
     assert "dropdowns" not in "\n".join(receipt.summary_lines())
 
 
@@ -908,7 +957,7 @@ def test_no_tickets_means_the_first_data_row_reads_back_empty():
 
     # A stale row the clear missed is caught.
     sheets = _Sheets(header_rows=[*_REAL_TICKETS_LAYOUT[:5], [1, "old ticket"]])
-    sheets.spreadsheets_api.values_api.clear = lambda **_kwargs: _Response({})
+    sheets.spreadsheets_api.ignore_cell_clears = True
     with pytest.raises(PublishReceiptError, match="old ticket"):
         GoogleSheetsTemplatePublisher(_Drive(), sheets).publish(
             template="template-sheet", title="Audit", tables={"Tickets": [list(TICKET_COLUMNS)]}

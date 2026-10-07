@@ -704,7 +704,9 @@ fixed block of ticket rows (6–26 in the current template), so after writing
 n tickets the publisher reads each dropdown column's rule from the copy's
 first data row and applies it to every populated row (6 through 5+n) with one
 `setDataValidation` per column; rows below the last ticket and the template
-itself are not changed, and the receipt lists the ranges. After writing, the publisher
+itself are not changed, and the receipt lists the ranges. Old ticket values
+are cleared with `updateCells` limited to `userEnteredValue`, because
+`values.clear` also deleted the template's dropdowns on the cleared cells. After writing, the publisher
 reads back the ticket rows (`Tickets!B6:I<n>`) and each evidence tab's used
 range and stops with `PublishReceiptError` if anything differs from what was
 sent (numbers read back as text and trimmed empty cells are not differences);

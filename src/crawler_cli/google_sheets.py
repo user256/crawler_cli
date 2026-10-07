@@ -285,12 +285,35 @@ class GoogleSheetsTemplatePublisher:
             start_column = _column_letter(start_index)
             end_column = _column_letter(start_index + len(ticket_contract["columns"]) - 1)
             tab = _quote_tab(ticket_tab)
-            self.sheets.spreadsheets().values().clear(
-                spreadsheetId=spreadsheet_id,
-                range=f"{tab}!{start_column}{start_row}:{end_column}10000",
-                body={},
-            ).execute()
+            column_count = len(ticket_contract["columns"])
             data_rows = [list(row) for row in tickets[1:]]
+            # Read the template's dropdown rules before the first write.
+            rules = (
+                self._first_row_rules(spreadsheet_id, ticket_tab, start_index, start_row, column_count)
+                if data_rows
+                else {}
+            )
+            # Clear old values with updateCells limited to userEnteredValue.
+            # values.clear also deleted the template's own dropdowns on the
+            # cleared cells (ticket 428 live run, files.copy path: F6:G26 lost).
+            self.sheets.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={
+                    "requests": [
+                        {
+                            "updateCells": {
+                                "range": {
+                                    "sheetId": sheet_ids[ticket_tab],
+                                    "startRowIndex": start_row - 1,
+                                    "startColumnIndex": start_index - 1,
+                                    "endColumnIndex": start_index - 1 + column_count,
+                                },
+                                "fields": "userEnteredValue",
+                            }
+                        }
+                    ]
+                },
+            ).execute()
             if data_rows:
                 self.sheets.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
@@ -303,13 +326,7 @@ class GoogleSheetsTemplatePublisher:
             ticket_range = f"{tab}!{start_column}{start_row}:{end_column}{last_row}"
             written.append((ticket_range, ticket_range, ticket_tab, data_rows))
             dropdowns = self._extend_ticket_dropdowns(
-                spreadsheet_id,
-                ticket_tab,
-                sheet_ids[ticket_tab],
-                start_index,
-                start_row,
-                len(ticket_contract["columns"]),
-                len(data_rows),
+                spreadsheet_id, ticket_tab, sheet_ids[ticket_tab], start_row, rules, len(data_rows)
             )
         for name, values in generic.items():
             tab = _quote_tab(name)
@@ -359,27 +376,10 @@ class GoogleSheetsTemplatePublisher:
         url = link or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
         return self._verify_written(spreadsheet_id, url, written, dropdowns)
 
-    def _extend_ticket_dropdowns(
-        self,
-        spreadsheet_id: str,
-        ticket_tab: str,
-        sheet_id: int,
-        start_index: int,
-        start_row: int,
-        column_count: int,
-        ticket_count: int,
-    ) -> list[str]:
-        """Apply each ticket column's first-row dropdown to every populated ticket row.
-
-        The real template validates only rows 6-26 (ticket 420), so tickets
-        past the 21st had no Priority / Classification dropdown.  The rule is
-        read from the copy's first data row (the template's own rule; the
-        copyTo fallback has already restored it), never hard-coded, and set
-        with one ``setDataValidation`` per column over exactly the populated
-        rows.  Rows below the last ticket are left as the template has them.
-        """
-        if ticket_count <= 0:
-            return []
+    def _first_row_rules(
+        self, spreadsheet_id: str, ticket_tab: str, start_index: int, start_row: int, column_count: int
+    ) -> dict[int, Mapping[str, Any]]:
+        """The data-validation rule of each ticket column on the copy's first data row, by 0-based column."""
         first_cell = f"{_column_letter(start_index)}{start_row}"
         last_cell = f"{_column_letter(start_index + column_count - 1)}{start_row}"
         response = (
@@ -401,7 +401,28 @@ class GoogleSheetsTemplatePublisher:
                         rule = cell.get("dataValidation") if isinstance(cell, Mapping) else None
                         if rule:
                             rules[column_base + offset] = rule
-        if not rules:
+        return rules
+
+    def _extend_ticket_dropdowns(
+        self,
+        spreadsheet_id: str,
+        ticket_tab: str,
+        sheet_id: int,
+        start_row: int,
+        rules: Mapping[int, Mapping[str, Any]],
+        ticket_count: int,
+    ) -> list[str]:
+        """Apply each ticket column's first-row dropdown to every populated ticket row.
+
+        The real template validates only rows 6-26 (ticket 420), so tickets
+        past the 21st had no Priority / Classification dropdown.  The rules
+        come from the copy's first data row, read before any write (the
+        template's own rule; the copyTo fallback has already restored it),
+        never hard-coded, and are set with one ``setDataValidation`` per
+        column over exactly the populated rows.  Rows below the last ticket
+        are left as the template has them.
+        """
+        if ticket_count <= 0 or not rules:
             return []
         last_row = start_row + ticket_count - 1
         requests = [
