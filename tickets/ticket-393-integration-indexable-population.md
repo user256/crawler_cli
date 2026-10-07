@@ -24,4 +24,13 @@ Stream B QA review, defect 3. Rainbet bundle: metadata-basics denominator 10,852
 
 ## Status
 
-implemented (local); Q39 part open (Priority: **P1**). Source: stream integration QA, 2026-10-06.
+implemented (local); Q39 gap fixed conservatively (Priority: **P1**). Source: stream integration QA, 2026-10-06.
+
+Q39 follow-up (post-merge QA, 2026-10-06), fixed on `fix/postmerge-qa-misc`: the Q39 answerer no
+longer uses the parsed-page count as its denominator. Because the internal-link-targets collector
+returns only failing links, the heading-link population is unknown, so Q39 now reports no
+denominator (unit `heading links`) and marks its scope incomplete. A run with no failing heading
+links, including an empty link population, answers `Needs validation` / `No (partial)` with a note,
+never Healthy. Failing heading links still answer Yes. Regression:
+`test_q39_heading_links_cover_error_redirect_and_noncanonical_targets`. Remaining (not done): a
+producer that counts all H2/H3 links per run, which would let a clean Q39 reach Healthy.

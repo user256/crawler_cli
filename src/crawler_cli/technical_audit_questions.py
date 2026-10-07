@@ -292,6 +292,33 @@ def _heading_target_failure(row: Json) -> bool:
     )
 
 
+def _heading_link_targets(audit: Json, question: Json, profile: Json | None) -> Evidence:
+    """Q39: failing heading-link targets; the heading-link population itself is never counted.
+
+    The internal-link-targets collector returns only links whose target fails,
+    so neither the parsed-page count nor the failure rows say how many H2/H3
+    links were tested.  A run without failing heading links therefore cannot
+    show the rule passed: it may simply have no heading links.  Report no
+    denominator and keep a clean result below Healthy.
+    """
+    evidence = _from_check("internal-link-targets", keep=_heading_target_failure)(audit, question, profile)
+    if not evidence.available:
+        return evidence
+    note = (
+        "The heading-link population is not counted (the internal-link-targets collector keeps only failing "
+        "links), so a run without failing heading links is not confirmed Healthy."
+    )
+    return Evidence(
+        **{
+            **evidence.__dict__,
+            "denominator": None,
+            "denominator_unit": "heading links",
+            "scope_complete": False,
+            "note": note,
+        }
+    )
+
+
 def _trailing_slash_redirect(row: Json) -> bool:
     if row.get("issue") != "redirect_target":
         return False
@@ -761,7 +788,7 @@ ANSWERERS: dict[str, Answerer] = {
     "Q32": Answerer("locale-html-lang shared-signature rows", _from_check("locale-html-lang")),
     "Q39": Answerer(
         "internal-link-targets error, redirect and non-canonical targets linked from an H2/H3",
-        _from_check("internal-link-targets", keep=_heading_target_failure),
+        _heading_link_targets,
     ),
     "Q41": Answerer(
         "hreflang-html-http locale-folder mismatches",

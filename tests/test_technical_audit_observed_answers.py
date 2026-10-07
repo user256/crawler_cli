@@ -563,8 +563,14 @@ def test_q39_heading_links_cover_error_redirect_and_noncanonical_targets() -> No
     found = answer([heading, redirect, noindex, body])
     # A noindex 200 heading target is outside Q39's non-200/non-canonical rule.
     assert (found["status"], found["affected_count"]) == ("Issue", 2)
+    assert (found["denominator"], found["denominator_unit"]) == (None, "heading links")
+    # Ticket 393/Q39: the collector keeps only failing links, so the heading-link
+    # population is unknown and a clean or empty result is not Healthy.
     clean = answer([body, noindex])
-    assert (clean["status"], clean["answer"]) == ("Healthy", "No")
+    assert (clean["status"], clean["answer"], clean["denominator"]) == ("Needs validation", "No (partial)", None)
+    empty = answer([])
+    assert (empty["status"], empty["answer"], empty["denominator"]) == ("Needs validation", "No (partial)", None)
+    assert any("heading-link population is not counted" in note for note in empty["notes"])
     assert answer(None)["status"] == "Pending"
 
 
