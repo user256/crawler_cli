@@ -676,6 +676,19 @@ The audit records a finding only when that completed action exposes additional
 URLs. The copied workbook receives the exact `Tickets` columns plus Overview,
 Audit Log and URL-level evidence tabs.
 
+The template ID, Tickets tab name, ticket columns, allowed Priority and
+Ticket Classification values and protected tabs (`Config`) come from
+[`templates/google-sheets-template-contract.json`](templates/google-sheets-template-contract.json);
+pass `--google-sheets-contract` to use another, and omit
+`--google-sheets-template` to copy the contract's template. Generated tickets
+are checked against the contract before anything is copied. After copying, the
+publisher finds the full Tickets header in the copy (B5 in the current
+template) and writes rows beneath it; if the header is missing, partial or
+reordered it stops before any write. With a `drive.file` OAuth token, where
+Drive refuses to copy a template the app did not create, it creates a new
+workbook and copies each tab with `sheets.copyTo`, then restores the tab names
+so the dropdowns sourced from `Config` still resolve.
+
 #### Discovery source reconciliation
 
 `reconcile-sources` joins one run's internal link graph with XML sitemaps, a
