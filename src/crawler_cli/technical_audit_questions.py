@@ -1116,7 +1116,13 @@ def questions_sheet_tables(
     answers: Sequence[Json],
     tickets: Sequence[Mapping[str, str]],
 ) -> dict[str, list[list[object]]]:
-    """Questions tab with answers, the Tickets tab, and one data tab per Yes answer."""
+    """The workbook for actual issues only: Questions, Tickets and one data tab per ticketed answer.
+
+    An answer is an issue when it produces a ticket (``answer["ticket"]``, the
+    same gate as ``question_ticket_rows``).  Healthy, Pending, No and
+    Needs-validation-without-a-ticket answers are left out of every tab; the
+    answers JSON written by ``--out`` keeps all of them.
+    """
 
     entries = {str(entry["id"]): entry for entry in registry["questions"]}
     ticket_numbers: dict[str, int] = {}
@@ -1125,10 +1131,12 @@ def questions_sheet_tables(
     question_rows: list[list[object]] = [list(QUESTION_SHEET_COLUMNS)]
     data_tabs: dict[str, list[list[object]]] = {}
     for answer in answers:
+        if not answer.get("ticket"):
+            continue
         entry = entries[str(answer["id"])]
         rows = answer.get("rows") or []
         tab = ""
-        if rows and answer.get("answer") == "Yes":
+        if rows:
             tab = data_tab_name(entry)
             data_tabs[tab] = _data_table(rows)
         denominator = answer.get("denominator")

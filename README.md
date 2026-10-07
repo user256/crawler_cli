@@ -676,6 +676,17 @@ The audit records a finding only when that completed action exposes additional
 URLs. The copied workbook receives the exact `Tickets` columns plus Overview,
 Audit Log and URL-level evidence tabs.
 
+The workbook reports actual issues only. For `technical-audit`, Overview lists
+the run metadata and only the checks that have affected rows or produced a
+ticket, and an evidence tab is written only for a check with affected rows;
+passing, unavailable and not-applicable checks without a ticket, and the
+tested-but-clean rows of a passing check, stay in the JSON only. For
+`technical-audit-questions`, the Questions tab holds only the answers that
+produce a ticket (same columns and header), and a data tab is written only for
+those answers; Healthy, Pending, No and Needs-validation-without-a-ticket
+answers appear nowhere in the workbook. The `--out` JSON always keeps every
+check and every answer.
+
 The template ID, Tickets tab name, ticket columns, allowed Priority and
 Ticket Classification values and protected tabs (`Config`) come from
 [`templates/google-sheets-template-contract.json`](templates/google-sheets-template-contract.json);
@@ -688,7 +699,12 @@ reordered it stops before any write. With a `drive.file` OAuth token, where
 Drive refuses to copy a template the app did not create, it creates a new
 workbook and copies each tab with `sheets.copyTo`, then restores the tab names
 so the dropdowns sourced from `Config` still resolve. Evidence tabs are
-inserted after `Tickets` and before `Config`. After writing, the publisher
+inserted after `Tickets` and before `Config`. The template validates only a
+fixed block of ticket rows (6–26 in the current template), so after writing
+n tickets the publisher reads each dropdown column's rule from the copy's
+first data row and applies it to every populated row (6 through 5+n) with one
+`setDataValidation` per column; rows below the last ticket and the template
+itself are not changed, and the receipt lists the ranges. After writing, the publisher
 reads back the ticket rows (`Tickets!B6:I<n>`) and each evidence tab's used
 range and stops with `PublishReceiptError` if anything differs from what was
 sent (numbers read back as text and trimmed empty cells are not differences);

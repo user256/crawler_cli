@@ -89,7 +89,12 @@ from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
 from .reports import TECHNICAL_AUDIT_REPORT_CAPABILITIES, CrawlReports, mark_heading_wrapping_links
 from .technical_audit import TECHNICAL_AUDIT_REPORTS, audit_sheet_tables, build_technical_audit
-from .technical_audit_tickets import TicketLanguageError, build_ticket_register, load_ticket_language
+from .technical_audit_tickets import (
+    TicketLanguageError,
+    build_ticket_register,
+    load_ticket_language,
+    ticketed_check_ids,
+)
 from .validators import (
     non_negative_float,
     non_negative_int,
@@ -2759,7 +2764,8 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
 
     audit = build_technical_audit(crawl_run_id=run_id, reports=evidence, run_context=run_context)
     try:
-        audit["ticket_register"] = build_ticket_register(audit, load_ticket_language(args.ticket_language))
+        ticket_language = load_ticket_language(args.ticket_language)
+        audit["ticket_register"] = build_ticket_register(audit, ticket_language)
     except TicketLanguageError as exc:
         print(f"Error: ticket language {exc}", file=sys.stderr)
         return EXIT_VALIDATION
@@ -2769,7 +2775,11 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
     print(f"Wrote deterministic technical audit to {output}")
 
     if _google_sheets_requested(args):
-        receipt = _publish_google_sheet(args, f"Technical SEO Audit – {run_id}", audit_sheet_tables(audit))
+        receipt = _publish_google_sheet(
+            args,
+            f"Technical SEO Audit – {run_id}",
+            audit_sheet_tables(audit, ticketed_check_ids(audit, ticket_language)),
+        )
         if receipt is None:
             return EXIT_VALIDATION
         print(f"Published technical audit workbook: {receipt.url}")
@@ -4851,7 +4861,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     audit_parser.add_argument(
         "--google-sheets-template",
-        help="Copy this Google Sheets template (default: the template contract's) and publish the Tickets and evidence tabs.",
+        help="Copy this Google Sheets template (default: the template contract's) and publish the Tickets and the evidence tabs of checks with issues.",
     )
     audit_parser.add_argument("--google-sheets-title", help="Title for the copied Google Sheet.")
     audit_parser.add_argument("--google-sheets-folder", help="Optional Google Drive folder ID for the copied sheet.")
@@ -4897,7 +4907,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     questions_parser.add_argument(
         "--google-sheets-template",
-        help="Copy this Google Sheets template (default: the template contract's) and publish the Questions, Tickets and data tabs.",
+        help="Copy this Google Sheets template (default: the template contract's) and publish the ticketed answers only: Questions, Tickets and their data tabs.",
     )
     questions_parser.add_argument("--google-sheets-title", help="Title for the copied Google Sheet.")
     questions_parser.add_argument(

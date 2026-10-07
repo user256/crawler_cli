@@ -69,17 +69,11 @@ def build_ticket_register(audit: Mapping[str, object], language: Mapping[str, ob
         entry = language_checks[identifier]
         if not isinstance(entry, Mapping) or entry.get("ticket") is False:
             continue
+        source = _ticket_source(check, entry)
+        if source is None:
+            continue
         status = str(check.get("status", "unavailable"))
         evidence = check.get("evidence", [])
-        affected = _integer(check.get("affected_count"))
-        use_unavailable = status == "unavailable" and isinstance(entry.get("unavailable_ticket"), Mapping)
-        if status == "finding" or (status == "partial" and affected > 0):
-            source = entry
-        elif use_unavailable:
-            source = entry["unavailable_ticket"]
-            assert isinstance(source, Mapping)
-        else:
-            continue
         values = _placeholders(audit, check, evidence)
         description = _render(source.get("description"), values)
         notes = _render(source.get("notes", ""), values)
@@ -106,6 +100,35 @@ def build_ticket_register(audit: Mapping[str, object], language: Mapping[str, ob
             }
         )
     return rows
+
+
+def ticketed_check_ids(audit: Mapping[str, object], language: Mapping[str, object]) -> set[str]:
+    """IDs of the audit checks that ``build_ticket_register`` turns into a ticket."""
+    checks = audit.get("checks")
+    language_checks = language.get("checks")
+    if not isinstance(checks, list) or not isinstance(language_checks, Mapping):
+        return set()
+    ticketed: set[str] = set()
+    for check in checks:
+        if not isinstance(check, Mapping):
+            continue
+        entry = language_checks.get(str(check.get("id")))
+        if isinstance(entry, Mapping) and _ticket_source(check, entry) is not None:
+            ticketed.add(str(check["id"]))
+    return ticketed
+
+
+def _ticket_source(check: Mapping[str, object], entry: Mapping[str, object]) -> Mapping[str, object] | None:
+    """The ticket-language entry a check is ticketed from, or None when it gets no ticket."""
+    if entry.get("ticket") is False:
+        return None
+    status = str(check.get("status", "unavailable"))
+    if status == "finding" or (status == "partial" and _integer(check.get("affected_count")) > 0):
+        return entry
+    unavailable = entry.get("unavailable_ticket")
+    if status == "unavailable" and isinstance(unavailable, Mapping):
+        return unavailable
+    return None
 
 
 def ticket_sheet_table(rows: list[Mapping[str, str]]) -> list[list[object]]:

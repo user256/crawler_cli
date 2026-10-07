@@ -8,7 +8,12 @@ from crawler_cli.technical_audit import (
     audit_sheet_tables,
     build_technical_audit,
 )
-from crawler_cli.technical_audit_tickets import TICKET_COLUMNS, build_ticket_register, load_ticket_language
+from crawler_cli.technical_audit_tickets import (
+    TICKET_COLUMNS,
+    build_ticket_register,
+    load_ticket_language,
+    ticketed_check_ids,
+)
 
 
 def _skill_contract_ids() -> list[str]:
@@ -97,6 +102,32 @@ def test_sheet_tables_only_include_detail_tabs_with_evidence():
     assert set(tables) == {"Overview", "Audit Log", "Tracking parameters"}
     assert tables["Audit Log"][0][0] == "Problem"
     assert tables["Tracking parameters"][0] == ["target_url"]
+    # Ticket 428: Overview lists the run metadata and only the checks with affected rows.
+    titles = {str(check["title"]): check for check in audit["checks"]}
+    check_rows = [row for row in tables["Overview"][1:] if row[0] in titles]
+    assert check_rows == [[titles_of_finding, "finding"] for titles_of_finding in _finding_titles(audit)]
+    assert len(check_rows) == 1
+
+
+def _finding_titles(audit):
+    return [str(check["title"]) for check in audit["checks"] if check["evidence"]]
+
+
+def test_sheet_tables_report_ticketed_checks_without_rows_but_no_other_non_issues():
+    # Ticket 428: an unavailable check that raises a collection ticket is an
+    # issue; unavailable and passing checks without a ticket are not published.
+    audit = build_technical_audit(crawl_run_id="run-1", reports={})
+    ticketed = ticketed_check_ids(audit, load_ticket_language())
+    assert ticketed and len(ticketed) == len(build_ticket_register(audit, load_ticket_language()))
+    tables = audit_sheet_tables(audit, ticketed)
+
+    titles = {str(check["id"]): str(check["title"]) for check in audit["checks"]}
+    listed = {row[0] for row in tables["Overview"][1:]}
+    assert {titles[identifier] for identifier in ticketed} <= listed
+    assert not {titles[identifier] for identifier in set(titles) - ticketed} & listed
+    assert set(tables) == {"Overview", "Audit Log"}  # no affected rows, so no detail tabs
+    # Without the ticketed IDs only checks with affected rows are listed: none here.
+    assert {row[0] for row in audit_sheet_tables(audit)["Overview"][1:]}.isdisjoint(titles.values())
 
 
 def test_missing_run_context_and_missing_source_are_not_reported_as_passes():
@@ -182,7 +213,7 @@ def test_missing_material_inputs_create_specific_collection_tickets():
     assert "Grant Search Console access or supply exports" in labels
 
 
-def test_passing_search_and_inventory_checks_retain_their_tested_evidence_tab():
+def test_passing_search_and_inventory_checks_publish_no_tested_evidence_tab():
     audit = build_technical_audit(
         crawl_run_id="run-1",
         reports={
@@ -207,7 +238,14 @@ def test_passing_search_and_inventory_checks_retain_their_tested_evidence_tab():
         run_context={"completion_state": "complete"},
     )
 
-    tables = audit_sheet_tables(audit)
+    tables = audit_sheet_tables(audit, ticketed_check_ids(audit, load_ticket_language()))
 
-    assert tables["Rendered robots links"][1][0] == "https://example.test/games"
-    assert tables["Supplied search evidence"][1][0] == "https://example.test/game"
+    # Ticket 428: the workbook reports actual issues only. The tested population
+    # of a passing check stays in the audit JSON but gets no tab or Overview row.
+    assert "Rendered robots links" not in tables and "Supplied search evidence" not in tables
+    checks = {check["id"]: check for check in audit["checks"]}
+    assert checks["rendered-robots-links"]["verified_evidence"][0]["source_url"] == "https://example.test/games"
+    assert checks["supplied-search-evidence"]["verified_evidence"][0]["url"] == "https://example.test/game"
+    listed = {row[0] for row in tables["Overview"][1:]}
+    assert checks["rendered-robots-links"]["title"] not in listed
+    assert checks["supplied-search-evidence"]["title"] not in listed

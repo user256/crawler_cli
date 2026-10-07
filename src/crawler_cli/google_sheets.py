@@ -91,17 +91,22 @@ class PublishReceipt:
     spreadsheet_id: str
     url: str
     ranges: tuple[PublishedRange, ...] = field(default_factory=tuple)
+    # Ticket columns whose first-row dropdown was applied to every populated row.
+    dropdowns: tuple[str, ...] = field(default_factory=tuple)
 
     def as_dict(self) -> dict[str, object]:
         return {
             "spreadsheet_id": self.spreadsheet_id,
             "url": self.url,
             "ranges": [{"tab": item.tab, "range": item.range, "rows": item.rows} for item in self.ranges],
+            "dropdowns": list(self.dropdowns),
         }
 
     def summary_lines(self) -> list[str]:
         lines = [f"Receipt: spreadsheet {self.spreadsheet_id}; {len(self.ranges)} ranges verified by read-back"]
         lines.extend(f"  {item.range}: {item.rows} rows" for item in self.ranges)
+        if self.dropdowns:
+            lines.append(f"  dropdowns applied to every ticket row: {', '.join(self.dropdowns)}")
         return lines
 
 
@@ -270,6 +275,7 @@ class GoogleSheetsTemplatePublisher:
 
         # (range read back, range shown on the receipt, tab, rows sent)
         written: list[tuple[str, str, str, list[list[object]]]] = []
+        dropdowns: list[str] = []
         if tickets is not None and ticket_anchor is not None:
             # The client template owns the Tickets header, counter formula and
             # dropdown validation.  Write generated rows beneath that header
@@ -296,6 +302,15 @@ class GoogleSheetsTemplatePublisher:
             last_row = start_row + max(len(data_rows), 1) - 1
             ticket_range = f"{tab}!{start_column}{start_row}:{end_column}{last_row}"
             written.append((ticket_range, ticket_range, ticket_tab, data_rows))
+            dropdowns = self._extend_ticket_dropdowns(
+                spreadsheet_id,
+                ticket_tab,
+                sheet_ids[ticket_tab],
+                start_index,
+                start_row,
+                len(ticket_contract["columns"]),
+                len(data_rows),
+            )
         for name, values in generic.items():
             tab = _quote_tab(name)
             self.sheets.spreadsheets().values().clear(
@@ -342,10 +357,80 @@ class GoogleSheetsTemplatePublisher:
                 },
             ).execute()
         url = link or f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
-        return self._verify_written(spreadsheet_id, url, written)
+        return self._verify_written(spreadsheet_id, url, written, dropdowns)
+
+    def _extend_ticket_dropdowns(
+        self,
+        spreadsheet_id: str,
+        ticket_tab: str,
+        sheet_id: int,
+        start_index: int,
+        start_row: int,
+        column_count: int,
+        ticket_count: int,
+    ) -> list[str]:
+        """Apply each ticket column's first-row dropdown to every populated ticket row.
+
+        The real template validates only rows 6-26 (ticket 420), so tickets
+        past the 21st had no Priority / Classification dropdown.  The rule is
+        read from the copy's first data row (the template's own rule; the
+        copyTo fallback has already restored it), never hard-coded, and set
+        with one ``setDataValidation`` per column over exactly the populated
+        rows.  Rows below the last ticket are left as the template has them.
+        """
+        if ticket_count <= 0:
+            return []
+        first_cell = f"{_column_letter(start_index)}{start_row}"
+        last_cell = f"{_column_letter(start_index + column_count - 1)}{start_row}"
+        response = (
+            self.sheets.spreadsheets()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                ranges=[f"{_quote_tab(ticket_tab)}!{first_cell}:{last_cell}"],
+                includeGridData=True,
+                fields=_DATA_VALIDATION_FIELDS,
+            )
+            .execute()
+        )
+        rules: dict[int, Mapping[str, Any]] = {}
+        for sheet in response.get("sheets", []) or []:
+            for block in sheet.get("data", []) or []:
+                column_base = int(block.get("startColumn", 0))
+                for row in (block.get("rowData", []) or [])[:1]:
+                    for offset, cell in enumerate(row.get("values", []) or []):
+                        rule = cell.get("dataValidation") if isinstance(cell, Mapping) else None
+                        if rule:
+                            rules[column_base + offset] = rule
+        if not rules:
+            return []
+        last_row = start_row + ticket_count - 1
+        requests = [
+            {
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": start_row - 1,
+                        "endRowIndex": last_row,
+                        "startColumnIndex": column,
+                        "endColumnIndex": column + 1,
+                    },
+                    "rule": dict(rule),
+                }
+            }
+            for column, rule in sorted(rules.items())
+        ]
+        self.sheets.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
+        return [
+            f"{_quote_tab(ticket_tab)}!{_column_letter(column + 1)}{start_row}:{_column_letter(column + 1)}{last_row}"
+            for column in sorted(rules)
+        ]
 
     def _verify_written(
-        self, spreadsheet_id: str, url: str, written: list[tuple[str, str, str, list[list[object]]]]
+        self,
+        spreadsheet_id: str,
+        url: str,
+        written: list[tuple[str, str, str, list[list[object]]]],
+        dropdowns: Sequence[str] = (),
     ) -> PublishReceipt:
         """Read each written range back and compare it with what was sent (ticket 189's check)."""
         mismatches: list[str] = []
@@ -369,7 +454,7 @@ class GoogleSheetsTemplatePublisher:
                 url=url,
                 mismatches=mismatches,
             )
-        return PublishReceipt(spreadsheet_id=spreadsheet_id, url=url, ranges=tuple(ranges))
+        return PublishReceipt(spreadsheet_id=spreadsheet_id, url=url, ranges=tuple(ranges), dropdowns=tuple(dropdowns))
 
     def _check_generated_tickets(self, tickets: list[list[object]]) -> None:
         """The generated Tickets table must use the contract's columns and dropdown values."""

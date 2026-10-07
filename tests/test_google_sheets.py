@@ -183,6 +183,8 @@ class _Spreadsheets:
         self.values_api = _Values(header_rows)
         self.titles = titles
         self.batch_updates: list[dict[str, object]] = []
+        self.batch_targets: list[str] = []
+        self.grid_reads: list[tuple[str, list[str]]] = []
         self.gets: list[str] = []
         self.creates: list[dict[str, object]] = []
         # Source template tabs, deliberately listed out of index order.
@@ -194,9 +196,16 @@ class _Spreadsheets:
         # Grid data (dataValidation only) per source tab title, as includeGridData returns it.
         self.source_data: dict[str, list[dict[str, object]]] = {}
         self.source_error = None
+        # The copy's data validation, (sheetId, 0-based row, 0-based column) -> rule,
+        # and its tab titles by sheetId (renames in a batchUpdate are applied).
+        self.copy_rules: dict[tuple[int, int, int], dict[str, object]] = {}
+        self.copy_titles: dict[int, str] = {i: title for i, title in enumerate(titles, 1)}
 
-    def get(self, *, spreadsheetId, **_kwargs):
+    def get(self, *, spreadsheetId, **kwargs):
         self.gets.append(spreadsheetId)
+        if spreadsheetId != "template-sheet" and kwargs.get("ranges"):
+            self.grid_reads.append((spreadsheetId, list(kwargs["ranges"])))
+            return _Response(self._copy_grid(kwargs["ranges"][0]))
         if spreadsheetId == "template-sheet":
             if self.source_error is not None:
                 raise self.source_error
@@ -214,14 +223,15 @@ class _Spreadsheets:
         return _Response(
             {
                 "sheets": [
-                    {"properties": {"sheetId": i, "title": title, "index": i - 1}}
-                    for i, title in enumerate(self.titles, 1)
+                    {"properties": {"sheetId": sheet_id, "title": title, "index": index}}
+                    for index, (sheet_id, title) in enumerate(self.copy_titles.items())
                 ]
             }
         )
 
     def create(self, *, body, **_kwargs):
         self.creates.append(body)
+        self.copy_titles = {0: "Sheet1"}
         return _Response(
             {
                 "spreadsheetId": "rebuilt-sheet",
@@ -236,8 +246,43 @@ class _Spreadsheets:
     def values(self):
         return self.values_api
 
+    def _copy_grid(self, a1):
+        tab, row1, col1, row2, col2 = _parse_range(a1)
+        sheet_id = next(key for key, title in self.copy_titles.items() if title == tab)
+        rows = [
+            {
+                "values": [
+                    {"dataValidation": self.copy_rules[(sheet_id, r - 1, c - 1)]}
+                    if (sheet_id, r - 1, c - 1) in self.copy_rules
+                    else {}
+                    for c in range_(col1, col2 + 1)
+                ]
+            }
+            for r in range_(row1, row2 + 1)
+        ]
+        return {
+            "sheets": [
+                {
+                    "properties": {"title": tab},
+                    "data": [{"startRow": row1 - 1, "startColumn": col1 - 1, "rowData": rows}],
+                }
+            ]
+        }
+
     def batchUpdate(self, **kwargs):
         self.batch_updates.append(kwargs["body"])
+        self.batch_targets.append(kwargs["spreadsheetId"])
+        for request in kwargs["body"]["requests"]:
+            if "deleteSheet" in request:
+                self.copy_titles.pop(request["deleteSheet"]["sheetId"], None)
+            if "updateSheetProperties" in request:
+                properties = request["updateSheetProperties"]["properties"]
+                self.copy_titles[properties["sheetId"]] = properties["title"]
+            if "setDataValidation" in request:
+                grid = request["setDataValidation"]["range"]
+                for r in range_(grid["startRowIndex"], grid["endRowIndex"]):
+                    for c in range_(grid["startColumnIndex"], grid["endColumnIndex"]):
+                        self.copy_rules[(grid["sheetId"], r, c)] = request["setDataValidation"]["rule"]
         added = [request["addSheet"]["properties"] for request in kwargs["body"]["requests"] if "addSheet" in request]
         return _Response(
             {"replies": [{"addSheet": {"properties": {**props, "sheetId": 100 + i}}} for i, props in enumerate(added)]}
@@ -607,6 +652,126 @@ def test_other_drive_copy_errors_are_not_masked_by_the_fallback():
             template="template-sheet", title="Audit", tables={"Tickets": _tickets()}
         )
     assert sheets.spreadsheets_api.creates == [] and sheets.spreadsheets_api.tabs_api.copies == []
+
+
+# Dropdowns on every populated ticket row (ticket 428) -------------------------
+
+# The real template's rules, read 2026-10-07: Ticket Classification (F) from
+# Config!B2:B and Priority (G) from Config!A2:A, on rows 6-26 only.
+_CLASSIFICATION_RULE = {
+    "condition": {"type": "ONE_OF_RANGE", "values": [{"userEnteredValue": "=Config!$B$2:$B"}]},
+    "showCustomUi": True,
+}
+_PRIORITY_RULE = {
+    "condition": {"type": "ONE_OF_RANGE", "values": [{"userEnteredValue": "=Config!$A$2:$A"}]},
+    "strict": True,
+}
+
+
+def _many_tickets(count):
+    return _tickets(*([f"ticket {n}", *_ROW[1:]] for n in range(1, count + 1)))
+
+
+def _validation_requests(api):
+    return [
+        request["setDataValidation"]
+        for body in api.batch_updates
+        for request in body["requests"]
+        if "setDataValidation" in request
+    ]
+
+
+def _seed_template_rules(rules, sheet_id, first=5, last=26):
+    for row in range(first, last):
+        rules[(sheet_id, row, 5)] = copy.deepcopy(_CLASSIFICATION_RULE)
+        rules[(sheet_id, row, 6)] = copy.deepcopy(_PRIORITY_RULE)
+
+
+def test_dropdowns_are_applied_to_every_populated_ticket_row_past_the_template_range():
+    sheets = _Sheets(titles=("Tickets", "Config"))
+    api = sheets.spreadsheets_api
+    _seed_template_rules(api.copy_rules, sheet_id=1)
+
+    receipt = GoogleSheetsTemplatePublisher(_Drive(), sheets).publish(
+        template="template-sheet", title="Audit", tables={"Tickets": _many_tickets(30)}
+    )
+
+    # The rule is read from the copy's first data row, not hard-coded.
+    assert api.grid_reads == [("copied-sheet", ["'Tickets'!B6:I6"])]
+    assert _validation_requests(api) == [
+        {
+            "range": {"sheetId": 1, "startRowIndex": 5, "endRowIndex": 35, "startColumnIndex": 5, "endColumnIndex": 6},
+            "rule": _CLASSIFICATION_RULE,
+        },
+        {
+            "range": {"sheetId": 1, "startRowIndex": 5, "endRowIndex": 35, "startColumnIndex": 6, "endColumnIndex": 7},
+            "rule": _PRIORITY_RULE,
+        },
+    ]
+    assert len(api.batch_updates) == 1  # one batchUpdate, one request per column
+    assert set(api.batch_targets) == {"copied-sheet"}  # never the template
+    rows_with = {row for (sheet_id, row, column) in api.copy_rules if sheet_id == 1 and column == 6}
+    assert rows_with == set(range(5, 35))  # rows 6-35; nothing written below the last ticket
+    assert receipt.dropdowns == ("'Tickets'!F6:F35", "'Tickets'!G6:G35")
+    assert receipt.as_dict()["dropdowns"] == ["'Tickets'!F6:F35", "'Tickets'!G6:G35"]
+    assert "  dropdowns applied to every ticket row: 'Tickets'!F6:F35, 'Tickets'!G6:G35" in receipt.summary_lines()
+
+
+def test_dropdown_extension_leaves_template_rows_below_the_last_ticket_alone():
+    sheets = _Sheets(titles=("Tickets", "Config"))
+    api = sheets.spreadsheets_api
+    _seed_template_rules(api.copy_rules, sheet_id=1)
+    before = copy.deepcopy(api.copy_rules)
+
+    GoogleSheetsTemplatePublisher(_Drive(), sheets).publish(
+        template="template-sheet", title="Audit", tables={"Tickets": _many_tickets(3)}
+    )
+
+    assert [(item["range"]["startRowIndex"], item["range"]["endRowIndex"]) for item in _validation_requests(api)] == [
+        (5, 8),
+        (5, 8),
+    ]
+    assert api.copy_rules == before  # rows 9-26 keep the template's own rules
+
+
+def test_dropdowns_reach_every_ticket_row_on_the_copy_to_fallback():
+    drive, sheets = _Drive(error=_HttpError(404)), _Sheets()
+    api = sheets.spreadsheets_api
+    rows = [
+        {"values": [{"dataValidation": _CLASSIFICATION_RULE}, {"dataValidation": _PRIORITY_RULE}]} for _ in range(21)
+    ]
+    api.source_data["Tickets"] = [{"startRow": 5, "startColumn": 5, "rowData": rows}]
+
+    receipt = GoogleSheetsTemplatePublisher(drive, sheets).publish(
+        template="template-sheet", title="Audit", tables={"Tickets": _many_tickets(25)}
+    )
+
+    # The restore batch rebuilds F6:G26, then the extension covers rows 6-30.
+    restore, extend = api.batch_updates[0], api.batch_updates[-1]
+    assert sum("setDataValidation" in request for request in restore["requests"]) == 2
+    assert [request["setDataValidation"]["range"] for request in extend["requests"]] == [
+        {"sheetId": 501, "startRowIndex": 5, "endRowIndex": 30, "startColumnIndex": 5, "endColumnIndex": 6},
+        {"sheetId": 501, "startRowIndex": 5, "endRowIndex": 30, "startColumnIndex": 6, "endColumnIndex": 7},
+    ]
+    assert {row for (sheet_id, row, column) in api.copy_rules if sheet_id == 501 and column == 5} == set(range(5, 30))
+    assert set(api.batch_targets) == {"rebuilt-sheet"}
+    assert receipt.dropdowns == ("'Tickets'!F6:F30", "'Tickets'!G6:G30")
+
+
+def test_no_dropdown_writes_without_tickets_or_without_a_first_row_rule():
+    sheets = _Sheets(titles=("Tickets", "Config"))
+    _seed_template_rules(sheets.spreadsheets_api.copy_rules, sheet_id=1)
+    receipt = GoogleSheetsTemplatePublisher(_Drive(), sheets).publish(
+        template="template-sheet", title="Audit", tables={"Tickets": [list(TICKET_COLUMNS)]}
+    )
+    assert sheets.spreadsheets_api.batch_updates == [] and receipt.dropdowns == ()
+
+    sheets = _Sheets(titles=("Tickets", "Config"))  # a template with no dropdowns
+    receipt = GoogleSheetsTemplatePublisher(_Drive(), sheets).publish(
+        template="template-sheet", title="Audit", tables={"Tickets": _many_tickets(30)}
+    )
+    assert sheets.spreadsheets_api.batch_updates == [] and receipt.dropdowns == ()
+    assert "dropdowns" not in "\n".join(receipt.summary_lines())
 
 
 # Evidence tab placement (ticket 424) ------------------------------------------
