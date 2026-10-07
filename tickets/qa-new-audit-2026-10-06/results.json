@@ -1,45 +1,44 @@
 {
   "410": {
-    "bundle_written": false,
-    "error": "Error: collection 1 (robots-txt) record 1: missing status",
-    "exit_code": 2
+    "bundle_written": true,
+    "error": "",
+    "exit_code": 0
   },
   "411": {
     "answer": {
       "affected_count": 0,
-      "answer": "No",
+      "answer": "No (partial)",
       "denominator": 7,
       "id": "Q96",
-      "status": "Healthy",
+      "status": "Needs validation",
       "ticket": false
     },
-    "coverage_state": "complete",
+    "coverage_state": "partial",
     "exit_code": 0,
     "hosts_eligible": 2,
     "hosts_tested": 1
   },
   "412": {
     "answer": {
-      "affected_count": 1,
-      "answer": "Yes",
+      "affected_count": 0,
+      "answer": "No (partial)",
       "denominator": 1,
       "id": "Q25",
-      "status": "Issue",
-      "ticket": true
+      "status": "Needs validation",
+      "ticket": false
     },
-    "finding": "es-ES: status 200->0",
+    "finding": null,
     "spanish_raw_observation": {
       "body_sha256": null,
-      "differences_from_no_header": [
-        "first_status_changed",
-        "final_status_changed"
-      ],
+      "differences_from_no_header": [],
       "final_status": 0,
       "final_url": "https://one.example/",
       "html_lang": null,
       "observation_type": "accept_language_probe",
-      "observed_at": "2026-10-06T16:06:45+00:00",
+      "observed_at": "2026-10-07T06:36:23+00:00",
       "outcome": "fetch_error",
+      "primary_content_basis": null,
+      "primary_content_sha256": null,
       "qualification": "accept_language_probe_observation_requires_intent_and_crawler_access_review",
       "record_type": "observation",
       "redirect_chain": [
@@ -62,14 +61,14 @@
   },
   "413": {
     "answer": {
-      "affected_count": 1,
-      "answer": "Yes",
+      "affected_count": 0,
+      "answer": "No",
       "denominator": 1,
       "id": "Q25",
-      "status": "Issue",
-      "ticket": true
+      "status": "Healthy",
+      "ticket": false
     },
-    "finding": "es-ES: primary content differs",
+    "finding": null,
     "spanish_raw_observation": {
       "body_sha256": "6bca64161432dca9bc7087e260857ff27a5aeafaf50e812f740ba7b8cc2a8492",
       "differences_from_no_header": [],
@@ -77,8 +76,10 @@
       "final_url": "https://one.example/",
       "html_lang": "en",
       "observation_type": "accept_language_probe",
-      "observed_at": "2026-10-06T16:06:45+00:00",
+      "observed_at": "2026-10-07T06:36:23+00:00",
       "outcome": "resolved",
+      "primary_content_basis": "main_visible_text",
+      "primary_content_sha256": "c3d6fc1f7f752b8be69b8459d0013157dc8b1e4a2605a63925096a53207f3c90",
       "qualification": "accept_language_probe_observation_requires_intent_and_crawler_access_review",
       "record_type": "observation",
       "redirect_chain": [
@@ -100,14 +101,7 @@
     }
   },
   "414": {
-    "production_projection": [
-      {
-        "host": "old.example",
-        "hsts_header": "max-age=300",
-        "ocsp_stapled": null,
-        "preload_status": null
-      }
-    ],
+    "production_projection": [],
     "with_response_identity": [
       {
         "host": "new.example",
@@ -120,12 +114,12 @@
   "415": [
     {
       "answer": {
-        "affected_count": 1,
-        "answer": "Yes",
+        "affected_count": 0,
+        "answer": "No",
         "denominator": 1,
         "id": "Q63",
-        "status": "Issue",
-        "ticket": true
+        "status": "Healthy",
+        "ticket": false
       },
       "header": "max-age = 31536000; includeSubDomains; preload",
       "shared_parser_errors": [],
@@ -133,12 +127,12 @@
     },
     {
       "answer": {
-        "affected_count": 0,
-        "answer": "No",
+        "affected_count": 1,
+        "answer": "Yes",
         "denominator": 1,
         "id": "Q63",
-        "status": "Healthy",
-        "ticket": false
+        "status": "Issue",
+        "ticket": true
       },
       "header": "max-age=31536000; max-age=0; includeSubDomains; preload",
       "shared_parser_errors": [
@@ -156,18 +150,24 @@
       "status": "Issue",
       "ticket": true
     },
-    "ticket_description": "Is the Strict-Transport-Security header missing or weak, the domain absent from the HSTS preload list, or OCSP stapling off? Yes: 1 hosts, across 1 pages tested in run qa.\n\nRule: HSTS max-age < 31536000 or missing includeSubDomains/preload, the preload list status is not 'preloaded', or the TLS handshake has no stapled OCSP response.\n\nHSTS preload removes the first http-to-https redirect and prevents downgrade attacks; stapling shortens the TLS handshake. The search effect is small.\n\nSee the Q63 Server performance & security tab for every row."
+    "ticket_description": "Is the Strict-Transport-Security header missing or weak, the domain absent from the HSTS preload list, or OCSP stapling off? Yes: 1 host, across 1 host tested (100%) in run qa.\n\nRule: HSTS max-age < 31536000 or missing includeSubDomains/preload, the preload list status is not 'preloaded', or the TLS handshake has no stapled OCSP response.\n\nHSTS preload removes the first http-to-https redirect and prevents downgrade attacks; stapling shortens the TLS handshake. The search effect is small.\n\nSee the Q63 Server performance & security tab for every row."
   },
   "existing_393": {
     "affected_count": 0,
-    "answer": "No",
-    "denominator": 2,
+    "answer": "No (partial)",
+    "denominator": null,
     "id": "Q39",
-    "status": "Healthy",
+    "status": "Needs validation",
     "ticket": false
   },
   "existing_406": {
+    "error": "TemplateHeaderError",
     "matching_header": false,
-    "range_cleared": "'Tickets'!A2:H10000"
+    "write_calls": {
+      "spreadsheets.batchUpdate": 0,
+      "values.batchUpdate": 0,
+      "values.clear": 0,
+      "values.update": 0
+    }
   }
 }

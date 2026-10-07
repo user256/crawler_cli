@@ -2,7 +2,9 @@
 
 Exercises production adapters/answerers and command orchestration. Only I/O
 boundaries are substituted; no database, network or Google writes are made.
-Prints observed behavior, not a claim that these behaviors are correct.
+Prints the current behavior for each ticket key and exits 0; the QA-time
+(defective) output is described in the README and each ticket. results.json
+is regenerated from this script.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from crawler_cli.technical_audit import build_technical_audit
 from crawler_cli.technical_audit_observed_answers import AI_CRAWLERS
 from crawler_cli.technical_audit_questions import answer_questions, load_question_registry, question_ticket_rows
 from crawler_cli.transport_security import parse_strict_transport_security, transport_security_report
-from crawler_cli.google_sheets import GoogleSheetsTemplatePublisher
+from crawler_cli.google_sheets import GoogleSheetsTemplatePublisher, TemplateHeaderError
 from crawler_cli.technical_audit_tickets import TICKET_COLUMNS
 
 
@@ -206,13 +208,28 @@ async def main():
     values.get.return_value.execute.return_value = {
         "values": [["Client title"], ["Existing note"], ["Unrecognised header"]]
     }
-    GoogleSheetsTemplatePublisher(drive, sheets).publish(
-        template="template-sheet",
-        title="QA",
-        tables={"Tickets": [list(TICKET_COLUMNS), ["x"] * 8]},
-        locate_ticket_header=True,
-    )
-    findings["existing_406"] = {"matching_header": False, "range_cleared": values.clear.call_args.kwargs["range"]}
+    # Only the publisher's public contract is relied on: with no matching
+    # Tickets header it raises TemplateHeaderError before any write.
+    error = None
+    try:
+        GoogleSheetsTemplatePublisher(drive, sheets).publish(
+            template="template-sheet",
+            title="QA",
+            tables={"Tickets": [list(TICKET_COLUMNS), ["x"] * 8]},
+            locate_ticket_header=True,
+        )
+    except TemplateHeaderError as exc:
+        error = type(exc).__name__
+    findings["existing_406"] = {
+        "matching_header": False,
+        "error": error,
+        "write_calls": {
+            "values.clear": values.clear.call_count,
+            "values.update": values.update.call_count,
+            "values.batchUpdate": values.batchUpdate.call_count,
+            "spreadsheets.batchUpdate": sheets.spreadsheets.return_value.batchUpdate.call_count,
+        },
+    }
 
     empty_links = build_technical_audit(crawl_run_id="qa", reports={"internal-link-quality": []}, run_context=CONTEXT)
     findings["existing_393"] = brief(answer(empty_links, "Q39"))
