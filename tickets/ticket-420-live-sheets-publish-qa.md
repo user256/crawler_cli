@@ -17,21 +17,50 @@ actual dropdown sources.
       question answers via `technical-audit-questions --google-sheets-template`
       into a scratch folder; confirm rows land at `B6:I`, B3's `COUNTA(B6:B)`
       counts them, the header at B5 is intact and Config is untouched.
-- [ ] Repeat with a `drive.file`-only token so `files().copy` is refused;
+- [x] Repeat with a `drive.file`-only token so `files().copy` is refused;
       confirm the `copyTo` fallback produces a workbook with tabs `Tickets`,
       `Config` (plus evidence tabs), dropdowns resolve, and the workbook is in
       the requested folder.
-- [ ] Publish once with a deliberately mismatched contract column list and
+- [x] Publish once with a deliberately mismatched contract column list and
       once against a copy whose header was edited; confirm
       `TemplateContractError` / `TemplateHeaderError` and that the copy has no
       writes (compare revision history).
-- [ ] Read the template's data-validation rules and compare their sources with
+- [x] Read the template's data-validation rules and compare their sources with
       the contract's `priority_values` / `classification_values`; add that
       comparison as a `--check-template` dry run or a documented script.
-- [ ] Delete the scratch workbooks afterwards; record sheet IDs, token scopes
+- [x] Delete the scratch workbooks afterwards; record sheet IDs, token scopes
       and outcomes in `tickets/qa-new-audit-2026-10-06/live-sheets-run.md`.
 
 ## Status
 
-proposed (Priority: **P1**). Filed 2026-10-07; fixes under test are in PR #119.
-Related: 189, 223, 406, 424.
+partial (Priority: **P1**). Filed 2026-10-07; fixes under test are in PR #119.
+Related: 189, 223, 406, 424. Live run 2026-10-07 on `fix/ticket-420`: four of five
+criteria done. The full-`drive` publish (first box) is still open because no full-drive
+token exists and creating one needs the user's interactive browser consent. The exact
+commands are in the run record.
+
+## Live run, 2026-10-07
+
+Full record, with sheet IDs, token scopes and commands:
+[qa-new-audit-2026-10-06/live-sheets-run.md](./qa-new-audit-2026-10-06/live-sheets-run.md).
+All scratch workbooks and the scratch folder were trashed. The template was only read and was
+unchanged afterwards.
+
+- **`drive.file` (+ `spreadsheets`) token:** `files.copy` was refused (404) and the `copyTo`
+  fallback ran. The Rainbet publish put 9 rows at `Tickets!B6:I14` and B3 shows "Count of
+  tickets: 9". The B5 header and the frozen rows are intact, and Config is identical to the template. The tabs read
+  Tickets, Questions, 13 evidence tabs, Config. The workbook was in the requested folder, and the receipt
+  printed 15 ranges verified by read-back. **Defect, fixed:** `copyTo` dropped all 42
+  Config-sourced dropdown cells (`F6:G26`). The fallback now restores the source validation after
+  the renames. After the fix, 42 of 42 cells were restored and `--check-template` on the published copy passes.
+- **A `drive.file`-only token (no `spreadsheets` scope)** cannot read the template at all, so
+  the publish cannot work. **Defect, fixed:** it crashed with an `HttpError` traceback (exit 1) on both
+  publish and `--check-template`. It now prints a clear error and exits 2, and nothing is created.
+- **Mismatched contract columns:** `TemplateContractError`, exit 2, and no file created.
+  **Edited header (`Severity` in G5):** `TemplateHeaderError` naming B5. The copy has a single
+  revision, `modifiedTime` = `createdTime`, no added tabs and an empty `B6:I`.
+- **`--check-template` on the real template:** passes, exit 0. The `Config!B2:B` and `Config!A2:A`
+  values match the contract's Ticket Classification and Priority sets.
+- **Observation:** the template validates only rows 6–26, so ticket rows 27+ get no dropdown.
+
+Fix commit: `b6d8812` (tests for both defects; full suite 2047 passed).
