@@ -8,6 +8,7 @@ from typing import Callable
 
 import pytest
 
+from crawler_cli.__main__ import _locale_probe_scope
 from crawler_cli.accept_language_audit import collect_accept_language_evidence
 from crawler_cli.audit_observation_adapters import locale_probe_records
 from crawler_cli.audit_observations import attach_observations, collection, new_bundle
@@ -326,3 +327,284 @@ async def test_legacy_not_admitted_timeout_is_read_as_fetch_failed() -> None:
         for row in legacy
     ]
     assert _record(locale_probe_records(robots))["variant_outcome"] == "not_admitted"
+
+
+# --- ticket 425: a challenge or rate limit is never an answered status ----------
+
+
+class _RawEngine(_Engine):
+    """Like ``_Engine`` but hands back the body for every status, and the engine's challenge vendor."""
+
+    def __init__(self, handler: Handler, challenge: Callable[[str, str | None], str | None] | None = None) -> None:
+        super().__init__(handler)
+        self.challenge = challenge or (lambda url, language: None)
+
+    async def crawl(self, url: str, **kwargs: object) -> SimpleNamespace:
+        language = self.config.request_headers.get("Accept-Language")
+        status, headers, body, skip_reason = self.handler(url, language)
+        return SimpleNamespace(
+            status=status,
+            headers=headers,
+            skip_reason=skip_reason,
+            challenge=self.challenge(url, language),
+            raw_html=body,
+            extracted=SimpleNamespace(html_lang="en") if status == 200 and not skip_reason else None,
+        )
+
+
+async def _run_engine(engine: _Engine) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
+    evidence = await collect_accept_language_evidence(engine, [ROOT])
+    records = locale_probe_records(evidence)
+    scope, coverage_state = _locale_probe_scope(evidence, records, 1, 1)
+    audit = build_technical_audit(crawl_run_id="qa", reports={}, run_context={"completion_state": "complete"})
+    bundle = new_bundle(
+        "qa", [collection("locale-probe", records, source="t", scope=scope, coverage_state=coverage_state)]
+    )
+    answer = next(row for row in answer_questions(attach_observations(audit, [bundle]), REGISTRY) if row["id"] == "Q25")
+    return evidence, records, answer
+
+
+_CHALLENGE_PAGE = "<html><head><title>Just a moment...</title></head><body>cf_chl_opt</body></html>"
+
+
+@pytest.mark.asyncio
+async def test_challenged_variant_against_an_answered_baseline_is_untested_not_200_to_429() -> None:
+    # The live rainbet shape: Cloudflare starts challenging part-way through a target's variants.
+    def handler(url: str, language: str | None) -> Response:
+        if language is None:
+            return _ok(_page(_EN_MAIN))
+        return 429, {"cf-mitigated": "challenge"}, _CHALLENGE_PAGE, "bot_challenge"
+
+    evidence, records, answer = await _run_engine(
+        _RawEngine(handler, lambda url, language: None if language is None else "cloudflare")
+    )
+
+    es = _record(records)
+    assert (es["baseline_status"], es["variant_status"]) == (200, None)
+    assert es["variant_outcome"] == "challenged"
+    assert es["variant_failure"] == {"outcome": "challenged", "skip_reason": "bot_challenge", "hop": 0}
+    assert es["primary_content_differs"] is None
+    assert answer["status"] == "Pending" and answer["ticket"] is False and not answer["rows"]
+    assert "bot_challenge" in " ".join(answer["notes"])
+    # Not a bot trap and not a language difference in the collector either.
+    assert not [row for row in evidence if row.get("record_type") == "candidate"]
+    raw = next(r for r in evidence if r.get("observation_type") == "accept_language_probe" and r["variant"] == "es-ES")
+    assert raw["outcome"] == "challenged" and raw["differences_from_no_header"] == []
+
+
+def test_live_rainbet_evidence_with_a_200_baseline_never_reports_status_200_to_429() -> None:
+    """Regression from the ticket 419 live run (D1 repro): rows exactly as persisted, baseline set to 200."""
+
+    def hop(url: str, status: int, skip: str | None, location: str | None = None) -> dict[str, object]:
+        return {
+            "url": url,
+            "vary": "accept-encoding",
+            "status": status,
+            "location": location,
+            "set_cookies": [],
+            "skip_reason": skip,
+            "content_language": None,
+        }
+
+    def row(variant: str, chain: list[dict[str, object]], target: str = "https://rainbet.com/") -> dict:
+        answered = chain[-1]["skip_reason"] is None
+        return {
+            "record_type": "observation",
+            "observation_type": "accept_language_probe",
+            "target_url": target,
+            "variant": variant,
+            # The pre-fix collector labelled the challenged 429 ``resolved``.
+            "outcome": "resolved",
+            "final_url": chain[-1]["url"],
+            "final_status": chain[-1]["status"],
+            "html_lang": None,
+            "body_sha256": "b" * 64 if answered else None,
+            "primary_content_sha256": "a" * 64 if answered else None,
+            "primary_content_basis": "main_visible_text" if answered else None,
+            "redirect_chain": chain,
+            "qualification": "accept_language_probe_observation_requires_intent_and_crawler_access_review",
+        }
+
+    apex, www = "https://rainbet.com/", "https://www.rainbet.com/"
+    evidence = [row(v, [hop(apex, 200, None)]) for v in ("none", "none-repeat")]
+    evidence += [row(v, [hop(apex, 429, "bot_challenge")]) for v in ("wildcard", "en-US", "es-ES", "de-DE")]
+    # www: a real 307 language redirect whose apex target was challenged.
+    evidence += [row(v, [hop(www, 308, None, "https://rainbet.com")], www) for v in ("none", "none-repeat")]
+    evidence.append(
+        row(
+            "es-ES",
+            [
+                hop(www, 307, None, "https://www.rainbet.com/es"),
+                hop("https://www.rainbet.com/es", 308, None, "https://rainbet.com"),
+                hop("https://rainbet.com", 429, "bot_challenge"),
+            ],
+            www,
+        )
+    )
+
+    records = locale_probe_records(evidence)
+    apex_rows = [r for r in records if r["url"] == apex]
+    assert apex_rows and all(r["variant_status"] is None for r in apex_rows)
+    assert {r["variant_outcome"] for r in apex_rows} == {"challenged"}
+    www_es = next(r for r in records if r["url"] == www)
+    assert (www_es["baseline_status"], www_es["variant_status"]) == (308, 307)
+    assert www_es["variant_failure"] == {
+        "outcome": "redirect_target_challenged",
+        "skip_reason": "bot_challenge",
+        "hop": 2,
+    }
+
+    audit = build_technical_audit(crawl_run_id="qa", reports={}, run_context={"completion_state": "complete"})
+    bundle = new_bundle("qa", [collection("locale-probe", records, source="t", scope="2", coverage_state="partial")])
+    answer = next(row for row in answer_questions(attach_observations(audit, [bundle]), REGISTRY) if row["id"] == "Q25")
+    findings = " ".join(row["finding"] for row in answer["rows"])
+    assert "429" not in findings
+    # The real www language redirect survives, but partial coverage keeps it below Issue.
+    assert "status 308->307" in findings
+    assert answer["status"] not in {"Issue", "Healthy"}
+
+
+@pytest.mark.asyncio
+async def test_cf_mitigated_header_marks_a_challenge_when_engine_detection_is_off() -> None:
+    def handler(url: str, language: str | None) -> Response:
+        if _spanish(language):
+            return 403, {"cf-mitigated": "challenge"}, _CHALLENGE_PAGE, None
+        if language == "de-DE,de;q=0.9":
+            return 503, {}, _CHALLENGE_PAGE, None  # signature on an error status
+        return _ok(_page(_EN_MAIN))
+
+    _, records, answer = await _run_engine(_RawEngine(handler))
+
+    assert _record(records)["variant_failure"] == {
+        "outcome": "challenged",
+        "skip_reason": "challenge:cloudflare",
+        "hop": 0,
+    }
+    assert _record(records, "de-DE")["variant_outcome"] == "challenged"
+    _not_confirmed(answer)
+
+
+@pytest.mark.asyncio
+async def test_turnstile_on_a_real_200_page_is_not_a_challenge_when_detection_is_off() -> None:
+    turnstile = '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>'
+
+    def handler(url: str, language: str | None) -> Response:
+        main = _ES_MAIN if _spanish(language) else _EN_MAIN
+        return _ok(_page(main, head=turnstile))
+
+    _, records, answer = await _run_engine(_RawEngine(handler))
+
+    assert _record(records)["variant_outcome"] == "resolved"
+    assert _record(records)["primary_content_differs"] is True
+    assert (answer["status"], answer["ticket"]) == ("Issue", True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "headers", "untested"),
+    [
+        (429, {}, True),  # plain rate limit, no challenge markers
+        (503, {"Retry-After": "30"}, True),  # overload with a retry hint
+        (503, {}, False),  # a bare 503 stays an observed status
+    ],
+)
+async def test_rate_limits_are_untested_whatever_the_markers(
+    status: int, headers: dict[str, str], untested: bool
+) -> None:
+    def handler(url: str, language: str | None) -> Response:
+        return (status, headers, "busy", None) if _spanish(language) else _ok(_page(_EN_MAIN))
+
+    _, records, answer = await _run_engine(_RawEngine(handler))
+
+    es = _record(records)
+    if untested:
+        assert es["variant_status"] is None
+        assert es["variant_failure"] == {"outcome": "rate_limited", "skip_reason": f"rate_limited:{status}", "hop": 0}
+        _not_confirmed(answer)
+    else:
+        assert es["variant_status"] == 503 and es["variant_failure"] is None
+        # The collection is complete, so the observed status change is reported.
+        assert answer["status"] == "Issue"
+
+
+def test_answerer_treats_a_saved_429_as_untested() -> None:
+    # A bundle adapted before ticket 425 kept the challenged 429 as variant_status.
+    audit = build_technical_audit(crawl_run_id="qa", reports={}, run_context={"completion_state": "complete"})
+    probe = {
+        "url": ROOT,
+        "variant": "es-ES",
+        "baseline_status": 200,
+        "variant_status": 429,
+        "baseline_location": None,
+        "variant_location": None,
+        "primary_content_differs": None,
+        "variant_outcome": "resolved",
+        "variant_failure": None,
+    }
+    bundle = new_bundle("qa", [collection("locale-probe", [probe], source="t", scope="1", coverage_state="complete")])
+    answer = next(row for row in answer_questions(attach_observations(audit, [bundle]), REGISTRY) if row["id"] == "Q25")
+    assert answer["status"] == "Pending" and answer["ticket"] is False
+    assert "rate_limited:429 1" in " ".join(answer["notes"])
+
+
+# --- ticket 426: unanswered probes make the collection partial ------------------
+
+
+@pytest.mark.asyncio
+async def test_unanswered_probes_make_locale_coverage_partial_in_bundle_and_coverage_row() -> None:
+    def handler(url: str, language: str | None) -> Response:
+        if url == ROOT and _spanish(language):
+            return 302, {"Location": "/es/"}, "", None
+        if language == "de-DE,de;q=0.9":
+            return 0, {}, None, "circuit_breaker_open"
+        return _ok(_page(_EN_MAIN))
+
+    evidence, records, answer = await _run_engine(_RawEngine(handler))
+
+    coverage = evidence[0]
+    assert coverage["record_type"] == "coverage"
+    assert coverage["complete"] is False and coverage["all_targets_probed"] is True
+    assert coverage["unanswered_probe_count"] == 1
+    assert coverage["unanswered_probe_outcomes"] == {"not_admitted": 1}
+    scope, state = _locale_probe_scope(evidence, records, 1, 1)
+    assert state == "partial"
+    assert "1 probe requests unanswered (not_admitted 1)" in scope
+    assert f"1 of {len(records)} comparisons lack an answered baseline or variant" in scope
+    # The real 302 finding is kept, its row says partial, and partial keeps it below Issue.
+    assert answer["rows"] and {row["coverage"] for row in answer["rows"]} == {"partial"}
+    assert answer["status"] == "Needs validation" and answer["status"] not in {"Issue", "Healthy"}
+
+
+@pytest.mark.asyncio
+async def test_fully_answered_locale_probe_stays_complete() -> None:
+    evidence, records, _ = await _run_engine(_RawEngine(lambda url, language: _ok(_page(_EN_MAIN))))
+    assert evidence[0]["complete"] is True and evidence[0]["unanswered_probe_count"] == 0
+    assert _locale_probe_scope(evidence, records, 1, 1)[1] == "complete"
+    assert _locale_probe_scope(evidence, records, 1, 2)[1] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_challenged_repeat_control_leaves_content_unknown_and_says_why() -> None:
+    # The ticket 425 live re-check: every variant answered 200 with the same main text,
+    # then Cloudflare challenged the repeated header-less control request.
+    calls = count()
+
+    def handler(url: str, language: str | None) -> Response:
+        if next(calls) == 8:  # the ninth request is the repeat control
+            return 429, {"cf-mitigated": "challenge"}, _CHALLENGE_PAGE, None
+        return _ok(_page(_EN_MAIN, head=f'<meta name="nonce" content="{language}">'))
+
+    evidence, records, answer = await _run_engine(_RawEngine(handler))
+
+    assert all(row["primary_content_differs"] is None for row in records)
+    assert all(row["raw_body_differs"] is True for row in records)
+    assert _record(records)["control_failure"] == {
+        "outcome": "challenged",
+        "skip_reason": "challenge:cloudflare",
+        "hop": 0,
+    }
+    assert evidence[0]["complete"] is False and evidence[0]["unanswered_probe_outcomes"] == {"challenged": 1}
+    assert answer["status"] == "Pending" and answer["ticket"] is False
+    assert "Repeated header-less control never answered, so content not compared (URLs): challenge:cloudflare 1" in (
+        " ".join(answer["notes"])
+    )

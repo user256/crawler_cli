@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from crawler_cli.__main__ import _build_parser
+import pytest
+
+from crawler_cli.__main__ import _build_parser, _probe_engine_config
 from crawler_cli.audit_observation_adapters import (
     llms_txt_probe_by_host,
     llms_txt_status_by_host,
@@ -174,3 +176,57 @@ def test_observations_parser_accepts_the_probe_flags() -> None:
     )
     assert args.ai_governance and args.probe_accept_language and args.tls_probe
     assert args.accept_language_max_targets == 3 and args.ai_governance_max_origins == 10
+
+
+def _observations_args(*extra: str):
+    return _build_parser().parse_args(
+        [
+            "technical-audit-observations",
+            "--crawl-run-id",
+            "run-1",
+            "--out",
+            "o.json",
+            "--probe-accept-language",
+            *extra,
+        ]
+    )
+
+
+def test_probe_engine_defaults_are_polite() -> None:
+    config = _probe_engine_config(_observations_args(), ["https://one.example/"], {"one.example"})
+    assert (config.backend, config.user_agent, config.curl_impersonate) == ("aiohttp", "canonicalbot/0.1", "")
+    assert config.min_interval_seconds == pytest.approx(1.0)
+    assert config.per_host_concurrency == 1 and config.detect_challenges is True
+    assert config.challenge_escalate_to_browser is False and config.destination_guard == "pinned"
+
+
+def test_probe_engine_takes_the_crawl_cloudflare_recipe() -> None:
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
+    args = _observations_args(
+        "--http-backend",
+        "curl_cffi",
+        "--impersonate",
+        "firefox",
+        "--custom-ua",
+        ua,
+        "--no-challenge-detection",
+        "--probe-delay",
+        "3",
+    )
+    config = _probe_engine_config(args, ["https://one.example/"], {"one.example"})
+    assert (config.backend, config.curl_impersonate, config.user_agent) == ("curl_cffi", "firefox", ua)
+    assert config.detect_challenges is False
+    assert config.min_interval_seconds == pytest.approx(3.0)
+    # The pinned guard cannot reach curl_cffi sockets; the crawl's resolver guard still applies.
+    assert config.destination_guard == "resolver"
+
+
+def test_probe_engine_impersonation_keeps_the_profile_user_agent_and_implies_curl_cffi() -> None:
+    config = _probe_engine_config(_observations_args("--impersonate", "firefox"), ["https://one.example/"], set())
+    assert (config.backend, config.user_agent) == ("curl_cffi", "")
+    assert _probe_engine_config(_observations_args("--probe-delay", "0"), [], set()).min_interval_seconds == 0.0
+
+
+def test_probe_engine_rejects_impersonation_on_aiohttp() -> None:
+    with pytest.raises(ValueError, match="curl_cffi"):
+        _probe_engine_config(_observations_args("--http-backend", "aiohttp", "--impersonate", "firefox"), [], set())

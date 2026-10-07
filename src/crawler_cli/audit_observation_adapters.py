@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from urllib.parse import urlsplit
 
-from .accept_language_audit import normalized_probe_outcome
+from .accept_language_audit import hop_failure
 
 _NEUTRAL_VARIANTS = frozenset({"none", "none-repeat"})
 _TESTED_RECORD_TYPES = frozenset({"observation", "candidate"})
@@ -128,27 +128,44 @@ def _first_hop(probe: Mapping[str, object]) -> Mapping[str, object] | None:
 
 
 def _initial_status(probe: Mapping[str, object] | None) -> int | None:
-    """Status of the first response; None when that request was never answered (ticket 412)."""
+    """Status of the first response; None when that request was never answered.
+
+    Unanswered covers status 0 (ticket 412) and a challenge, rate limit or
+    engine skip whatever its status code (ticket 425): a Cloudflare 429
+    challenge is not the site's answer to an Accept-Language header.
+    """
     if probe is None:
         return None
     hop = _first_hop(probe)
-    return _http_status(hop.get("status") if hop is not None else probe.get("final_status"))
+    if hop is not None:
+        return None if hop_failure(hop, 0) is not None else _http_status(hop.get("status"))
+    return _http_status(probe.get("final_status"))
+
+
+def _chain(probe: Mapping[str, object]) -> list[Mapping[str, object]]:
+    chain = probe.get("redirect_chain")
+    return [hop for hop in chain if isinstance(hop, Mapping)] if isinstance(chain, list) else []
 
 
 def _failure(probe: Mapping[str, object] | None) -> dict[str, object] | None:
-    """Why a probe did not resolve: its outcome plus the first unanswered hop's skip reason."""
+    """Why a probe did not resolve: its outcome plus the first unanswered hop's skip reason.
+
+    The hops are re-read rather than trusting the saved outcome, so a bundle
+    written before ticket 425 that labelled a challenged 429 ``resolved`` is
+    read as ``challenged`` like a fresh run.
+    """
     if probe is None:
         return {"outcome": "not_probed", "skip_reason": None, "hop": None}
     outcome = probe.get("outcome")
+    for index, hop in enumerate(_chain(probe)):
+        failure = hop_failure(hop, index)
+        if failure is None:
+            continue
+        # Older bundles labelled a timeout ``not_admitted``; the hop's skip
+        # reason gives the current label (``fetch_failed``).
+        return {"outcome": failure["outcome"], "skip_reason": failure["skip_reason"], "hop": index}
     if outcome == "resolved":
         return None
-    chain = probe.get("redirect_chain")
-    hops = [hop for hop in chain if isinstance(hop, Mapping)] if isinstance(chain, list) else []
-    for index, hop in enumerate(hops):
-        if _http_status(hop.get("status")) is None:
-            skip_reason = hop.get("skip_reason")
-            # Older bundles labelled a timeout ``not_admitted``; the skip reason corrects it.
-            return {"outcome": normalized_probe_outcome(outcome, skip_reason), "skip_reason": skip_reason, "hop": index}
     return {"outcome": outcome, "skip_reason": None, "hop": None}
 
 
@@ -169,7 +186,10 @@ def _initial_location(probe: Mapping[str, object] | None) -> str | None:
 
 def _resolved(probe: Mapping[str, object] | None) -> bool:
     return (
-        probe is not None and probe.get("outcome") == "resolved" and _http_status(probe.get("final_status")) is not None
+        probe is not None
+        and probe.get("outcome") == "resolved"
+        and _http_status(probe.get("final_status")) is not None
+        and _failure(probe) is None
     )
 
 
@@ -262,6 +282,9 @@ def locale_probe_records(evidence: Sequence[Mapping[str, object]]) -> list[dict[
                     "variant_outcome": _outcome(probe),
                     "baseline_failure": _failure(baseline),
                     "variant_failure": _failure(probe),
+                    # The repeated header-less control gates the content comparison (413);
+                    # its failure says why primary content stayed unknown (425).
+                    "control_failure": _failure(repeat),
                     "collection_qualification": probe.get("qualification"),
                 }
             )

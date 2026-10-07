@@ -213,3 +213,61 @@ plus a matching Firefox `--custom-ua`).
 File D1 (P1) and D2/D3 (P2) as tickets. When D3 is resolved, re-run this QA so that 413's primary-content path and
 the `fetch_failed` label get live evidence. Rainbet with the cloudflare recipe is a good choice. A non-Cloudflare
 multi-locale site would also exercise the success path.
+
+## Re-check after tickets 425–427 (2026-10-07, 11:49–11:56 BST)
+
+**Result: pass.** With the probe engine on the Cloudflare recipe, the Accept-Language probe read answered 200 pages on
+the `rainbet.com` apex. The 413 primary-content path ran live for the first time. When Cloudflare challenged one
+request, the probe recorded it as `challenged` and did not compare it (the D1 fix, seen live). The collection said
+`partial` (the D2 fix). No Issue or Healthy came from the probe.
+
+- Code: branch `fix/ticket-425-427` (fixes at `1ec7e99`, plus the Q25 control-note follow-up at `6972128`), run from
+  source with the main checkout's `.venv`.
+- Database: the 419 throwaway `t419_rainbet_qa_crawler`, read-only. The DSN set `default_transaction_read_only=on`,
+  and a wrapper replaced `AsyncpgStore.persist_language_probe_evidence` with a write to a JSON file, so no session
+  was stored. Everything else was the real `technical-audit-observations` path. Scratch outputs (gitignored):
+  `runs/t425-live/` in the 425 worktree, holding the wrapper `run_probe.py`, the evidence JSON, both bundles, both
+  question outputs and logs.
+- Scope: one target only (`--accept-language-max-targets 1`, the apex root), no `--ai-governance`. Each run made 9
+  probe requests plus the engine's robots.txt fetch. **Total live load: about 20 requests in two runs, 6 minutes
+  apart.**
+
+```sh
+FF_UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
+DSN='postgresql://sql_crawler:...@localhost:5432/t419_rainbet_qa_crawler?options=-c%20default_transaction_read_only%3Don'
+PYTHONPATH=src .venv/bin/python runs/t425-live/run_probe.py runs/t425-live/evidence-apex.json \
+  technical-audit-observations --crawl-run-id t419-rainbet --out runs/t425-live/apex.json \
+  --probe-accept-language --accept-language-max-targets 1 \
+  --http-backend curl_cffi --impersonate firefox --custom-ua "$FF_UA" --no-challenge-detection \
+  --probe-delay 3 --postgres-dsn "$DSN"
+# second run after a 5-minute cooldown: same command with --probe-delay 8 and apex2/evidence-apex2 outputs
+$PY technical-audit-questions --audit ../crawler_cli-t419/runs/t419-live/audit.json \
+  --observations runs/t425-live/apex2.json --out runs/t425-live/apex2-questions.json
+```
+
+| | Run 1 (`--probe-delay 3`) | Run 2 (`--probe-delay 8`, after 5 min) |
+|---|---|---|
+| Answered | 8 of 9: `none`, wildcard and all 6 locales returned 200 | 9 of 9 returned 200 |
+| Challenged | the 9th request, the `none-repeat` control: 429 with `cf-mitigated: challenge`, recorded as `challenged` (`challenge: cloudflare`) with engine detection **off** | none |
+| Primary content | the same `<main>` text hash on all 8 answered responses (`main_visible_text`); raw bodies all differ | the same `<main>` text hash on all 9; raw bodies all differ |
+| Records | `primary_content_differs: None` on all 7 records, because the repeat control was not answered | `primary_content_differs: False`, `raw_body_differs: True` on all 7 records; statuses 200/200, no Location |
+| Coverage row / bundle | `complete: false`, `unanswered_probe_outcomes: {challenged: 1}` / `partial`, scope "1 of 4 eligible roots; 7 header variants; 1 probe requests unanswered (challenged 1)" | `complete: false` (1 of 4 roots) / `partial` |
+| Candidates | none (no bot trap from the 429) | none; `neutral_access` `clean`, content stable across the repeat |
+| Q25 | **Pending**, no ticket: "7 probes lack a … content comparison" | **Needs validation / No (partial)**, no ticket, denominator 1: "7 probes differ only outside the primary content …; review-only evidence, not counted" |
+
+- The run-1 bundle was written before the control-note follow-up, so its Q25 note does not name the repeat control.
+  With `6972128`, Q25 adds "Repeated header-less control never answered, so content not compared (URLs):
+  challenge:cloudflare 1" for that evidence, and a unit test copies this case.
+- The apex serves the same English `<main>` whatever the Accept-Language. The www host's language redirect from the
+  419 run is a separate finding and was not probed again.
+- Pace, not identity, triggered the challenge: the recipe passed for 8 requests at 3 s, then got a 429. After a
+  5-minute pause it passed for 9 requests at 8 s. No retries and no escalation. Use `--probe-delay 8` or more on
+  this zone for anything bigger.
+- Still without live evidence: the `fetch_failed` (timeout) label. It is covered by
+  `tests/test_accept_language_audit.py` and `tests/test_locale_probe_verdicts.py`. No live timeout happened, and none
+  was forced.
+
+The ticket 419 Accept-Language box is now met. Refused variants were `not_admitted` and untested live (419 run).
+Challenged ones are now `challenged` and untested live. `primary_content_differs` was set live only from the
+`<main>` hash with a matching repeat (False, run 2), and stayed unknown live when the repeat was not answered
+(None, run 1).

@@ -18,7 +18,7 @@ Q25 and Q96 are not yet certified on live evidence.
       `fetch_outcome: unknown` with a reason, the capped run records
       `coverage_state: partial` with the omitted hosts, and other collections
       survive a failed robots fetch.
-- [ ] Confirm Accept-Language records: a timed-out or refused variant is
+- [x] Confirm Accept-Language records: a timed-out or refused variant is
       `fetch_failed` / `not_admitted` and untested; `primary_content_differs`
       is set only from the `<main>`/`<body>` hash with a matching repeat.
 - [x] Run `technical-audit-questions --observations` on the bundle; Q25 and
@@ -30,7 +30,7 @@ Q25 and Q96 are not yet certified on live evidence.
 
 ## Status
 
-partial (Priority: **P1**). Filed 2026-10-07 from the post-merge QA
+done (Priority: **P1**). Filed 2026-10-07 from the post-merge QA
 follow-up; the fixes themselves are in PR #119. Related: 344, 362, 370, 409,
 410–413.
 
@@ -56,3 +56,14 @@ Left open (the Accept-Language box stays unticked):
   evidence yet.
 
 Re-run this QA after D1 and D3 are fixed.
+
+Closed 2026-10-07 after D1–D3 were fixed as tickets 425 (challenge is unanswered),
+426 (partial coverage) and 427 (probe transport, UA and delay options) on branch
+`fix/ticket-425-427`. A small live re-check against the rainbet.com apex with
+the Cloudflare recipe (about 20 requests in two runs) read answered 200 pages.
+`primary_content_differs` was False from a matching `<main>` hash and repeat,
+and None when Cloudflare challenged the repeat control. That challenge was
+recorded as `challenged`, not compared, and the collection stayed `partial`.
+Q25 was Pending, then Needs validation, with no ticket. The timeout label
+(`fetch_failed`) still has unit-test evidence only. See the re-check section of
+[live-probe-run.md](./qa-new-audit-2026-10-06/live-probe-run.md).

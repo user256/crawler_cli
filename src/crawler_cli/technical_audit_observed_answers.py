@@ -666,16 +666,26 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
     changes_by_url: dict[str, list[str]] = {}
     untested = 0
     unanswered: dict[str, int] = {}
+    control_unanswered: dict[str, set[str]] = {}
     markup_only = 0
     for record in observed.records:
         changes = _locale_probe_changes(record)
         if changes is UNTESTED:
             untested += 1
-            for side in ("baseline_failure", "variant_failure"):
-                failure = record.get(side)
+            control = record.get("control_failure")
+            if isinstance(control, Mapping):
+                reason = str(control.get("skip_reason") or control.get("outcome") or "unknown")
+                control_unanswered.setdefault(reason, set()).add(str(record.get("url")))
+            for side in ("baseline", "variant"):
+                failure = record.get(f"{side}_failure")
                 if isinstance(failure, Mapping):
                     reason = str(failure.get("skip_reason") or failure.get("outcome") or "unknown")
-                    unanswered[reason] = unanswered.get(reason, 0) + 1
+                elif _int_or_none(record.get(f"{side}_status")) in _RATE_LIMIT_STATUSES:
+                    # A bundle adapted before ticket 425 kept a challenged 429 as a status.
+                    reason = f"rate_limited:{record[f'{side}_status']}"
+                else:
+                    continue
+                unanswered[reason] = unanswered.get(reason, 0) + 1
             continue
         if record.get("raw_body_differs") is True and record.get("primary_content_differs") is False:
             markup_only += 1
@@ -693,6 +703,9 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
     if unanswered:
         reasons = ", ".join(f"{reason} {count:,}" for reason, count in sorted(unanswered.items()))
         note += f" Requests never answered, so not compared: {reasons}."
+    if control_unanswered:
+        reasons = ", ".join(f"{reason} {len(urls):,}" for reason, urls in sorted(control_unanswered.items()))
+        note += f" Repeated header-less control never answered, so content not compared (URLs): {reasons}."
     if markup_only:
         note += (
             f" {markup_only:,} probes differ only outside the primary content (scripts, attributes or markup);"
@@ -709,17 +722,26 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
     )
 
 
+_RATE_LIMIT_STATUSES = frozenset({429})
+
+
 def _locale_probe_changes(probe: Json) -> object:
     """Differences one probe shows; UNTESTED when nothing differs and a comparison was never recorded.
 
     Only real HTTP statuses compare: a status of 0 or None means the request was
-    never answered (fetch error, timeout, robots or scope rejection), so that
-    variant is untested rather than a status change (ticket 412).  Raw-body
+    never answered (fetch error, timeout, robots or scope rejection, bot
+    challenge), so that variant is untested rather than a status change
+    (tickets 412, 425).  A 429 is a rate limit, never a language response.  Raw-body
     differences are review evidence only; just ``primary_content_differs``
     counts as changed content (ticket 413).
     """
 
     if _http_status(probe.get("baseline_status")) is None or _http_status(probe.get("variant_status")) is None:
+        return UNTESTED
+    # A challenge or rate limit answers the client's pace or identity, not its
+    # language; the adapter leaves its status None, and a 429 kept by a bundle
+    # adapted before ticket 425 is read the same way.
+    if probe.get("baseline_status") in _RATE_LIMIT_STATUSES or probe.get("variant_status") in _RATE_LIMIT_STATUSES:
         return UNTESTED
     what = []
     if probe["baseline_status"] != probe["variant_status"]:
