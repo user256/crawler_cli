@@ -443,7 +443,30 @@ def test_ticket_percentages_survive_thousands_separated_denominators() -> None:
     tickets = question_ticket_rows(audit, registry, answer_questions(audit, registry), load_ticket_language())
 
     q16 = next(row for row in tickets if row["question_id"] == "Q16")
-    assert "1 page, across 10,852 pages tested (0%)" in q16["Description"]
+    assert "1 page, across 10,852 pages tested (<1%)" in q16["Description"]
+
+
+def test_ticket_keeps_the_share_for_a_qualified_population_of_the_finding_unit() -> None:
+    # "993 pages across 9,211 indexable pages" is a like-for-like share.
+    audit = _audit()
+    registry = load_question_registry()
+    answers = [
+        {**answer, "ticket": True, "affected_count": 993, "denominator": 9_211, "denominator_unit": "indexable pages"}
+        for answer in answer_questions(audit, registry)
+        if answer["id"] == "Q16"
+    ]
+    (q16,) = question_ticket_rows(audit, registry, answers, load_ticket_language())
+    assert "993 pages, across 9,211 indexable pages tested (11%)" in q16["Description"]
+
+
+def test_ticket_share_never_rounds_a_finding_away() -> None:
+    from crawler_cli.technical_audit_tickets import _share
+
+    assert _share(500, 627_923) == "<1%"
+    assert _share(0, 10) == "0%"
+    assert _share(999, 1_000) == ">99%"
+    assert _share(10, 10) == "100%"
+    assert _share(1, 0) == ""
 
 
 def test_ticket_names_the_denominator_unit_when_it_differs_from_the_finding_unit() -> None:

@@ -40,3 +40,5 @@ with `Tested: N <unit>.`; the numeric Tested column is unchanged. A missing unit
 `items`, never `pages`. Q63 repro now reads `Yes: 1 host, across 1 host tested (100%) in run qa.`
 Regression tests: `tests/test_technical_audit_observed_answers.py` (ticket 416 section) and
 `tests/test_technical_audit_questions.py`. Ticket 399's Q88 population calculation is unchanged.
+
+Integration follow-up: a qualified population such as "indexable pages" keeps the share against a "pages" finding, and a non-zero share never rounds to 0% (shown as <1%).

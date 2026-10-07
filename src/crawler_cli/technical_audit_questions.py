@@ -995,7 +995,10 @@ def question_ticket_rows(
         if answer.get("denominator"):
             # The denominator counts its own population (pages, hosts, policies...),
             # which need not be the question's finding unit; a share needs both to match.
-            same_unit = denominator_unit.casefold() == str(entry["unit"]).casefold()
+            # A qualified population ("indexable pages") still shares the finding unit.
+            finding_unit = str(entry["unit"]).casefold()
+            population_unit = denominator_unit.casefold()
+            same_unit = population_unit == finding_unit or population_unit.endswith(" " + finding_unit)
             share = f" ({values['affected_pct']})" if same_unit and values["affected_pct"] else ""
             tested = f", across {unit_label(int(answer['denominator']), denominator_unit)} tested{share}"
         description = "\n\n".join(

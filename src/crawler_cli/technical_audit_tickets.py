@@ -128,7 +128,7 @@ def _placeholders(audit: Mapping[str, object], check: Mapping[str, object], evid
         "denominator": denominator,
         "tested_count": _integer_or_blank(check.get("tested_count")),
         # denominator is display text ("10,852"); compute from the raw count.
-        "affected_pct": f"{round(100 * affected / population)}%" if population else "",
+        "affected_pct": _share(affected, population),
         "unit": _unit_for(check),
         "sample_urls": "\n".join(_sample_urls(evidence)),
         "evidence_tab": str(check.get("detail_sheet", "Evidence")),
@@ -167,6 +167,19 @@ def _sample_urls(evidence: object) -> list[str]:
         if len(urls) == 5:
             break
     return urls
+
+
+def _share(affected: int, population: int) -> str:
+    """Whole-percent share; a non-zero count never rounds to 0% or a partial one to 100%."""
+
+    if not population:
+        return ""
+    pct = round(100 * affected / population)
+    if affected and pct == 0:
+        return "<1%"
+    if affected < population and pct == 100:
+        return ">99%"
+    return f"{pct}%"
 
 
 def _unit_for(check: Mapping[str, object]) -> str:
