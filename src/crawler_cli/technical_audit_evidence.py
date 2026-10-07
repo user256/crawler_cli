@@ -17,6 +17,11 @@ from typing import Any
 # Registry entries, audits and answers are JSON documents.
 Json = Mapping[str, Any]
 
+# A link inside an H2 or H3 heading, matched against its saved XPath.  The
+# pattern is valid both as a Python ``re`` and as a PostgreSQL ``~*`` regex, so
+# the Q39 answerer and the heading-link population count agree on the rule.
+HEADING_LINK_XPATH_PATTERN = r"/h[23](\[[0-9]+\])?(/|$)"
+
 
 @dataclass(frozen=True)
 class Evidence:

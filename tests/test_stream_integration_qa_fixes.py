@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 from crawler_cli.__main__ import _OPT_IN_REPORTS, _REPORT_NAMES
 from crawler_cli.reports import CrawlReports
 from crawler_cli.technical_audit import TECHNICAL_AUDIT_REPORTS, build_technical_audit
+from crawler_cli.technical_audit_evidence import HEADING_LINK_XPATH_PATTERN
 from crawler_cli.technical_audit_questions import answer_questions, load_question_registry
 
 SITE = "https://example.com"
@@ -88,6 +90,98 @@ def test_q71_and_q15_count_only_indexable_pages() -> None:
     answers = _answers(reports)
     for qid in ("Q15", "Q71"):
         assert (answers[qid]["status"], answers[qid]["denominator"]) == ("Healthy", 2), qid
+
+
+# --- 393 / Q39: the H2/H3 heading-link population is counted ---------------------
+
+
+def _heading_failure(issue: str = "error_target", xpath: str = "/html/body/h2/a") -> dict[str, object]:
+    return {"issue": issue, "source_url": f"{SITE}/a", "target_url": f"{SITE}/x", "xpath": xpath}
+
+
+def test_q39_is_healthy_over_a_counted_heading_link_population() -> None:
+    body_only = [_heading_failure(xpath="/html/body/p/a")]
+    answer = _answers({"internal-link-quality": body_only}, heading_link_count=6, heading_link_tested_count=6)["Q39"]
+    assert (answer["status"], answer["answer"]) == ("Healthy", "No")
+    assert (answer["denominator"], answer["denominator_unit"]) == (6, "heading links")
+
+
+def test_q39_heading_failures_stay_an_issue_with_a_ticket_over_the_tested_count() -> None:
+    reports = {"internal-link-quality": [_heading_failure(), _heading_failure("redirect_target", "/html/body/h3/a")]}
+    answer = _answers(reports, heading_link_count=9, heading_link_tested_count=7)["Q39"]
+    assert (answer["status"], answer["answer"], answer["ticket"]) == ("Issue", "Yes", True)
+    assert (answer["affected_count"], answer["denominator"]) == (2, 7)
+
+
+def test_q39_untested_heading_links_are_noted_but_do_not_block_healthy() -> None:
+    answer = _answers({"internal-link-quality": []}, heading_link_count=10, heading_link_tested_count=8)["Q39"]
+    assert (answer["status"], answer["denominator"]) == ("Healthy", 8)
+    assert any("2 of 10 heading links" in note and "not tested" in note for note in answer["notes"])
+
+
+def test_q39_cannot_pass_when_no_heading_link_was_found() -> None:
+    for found, tested in ((0, 0), (3, 0)):
+        answer = _answers({"internal-link-quality": []}, heading_link_count=found, heading_link_tested_count=tested)
+        q39 = answer["Q39"]
+        assert q39["status"] != "Healthy", (found, tested)
+        assert q39["denominator"] is None
+        assert any("could not be tested" in note for note in q39["notes"])
+
+
+def test_q39_audit_without_heading_link_counts_keeps_the_old_answer() -> None:
+    answer = _answers({"internal-link-quality": []})["Q39"]
+    assert (answer["status"], answer["answer"], answer["denominator"]) == ("Needs validation", "No (partial)", None)
+    assert any("heading-link population is not counted" in note for note in answer["notes"])
+
+
+class _ContextStore:
+    async def get_crawl_run(self, run_id: str) -> dict[str, object]:
+        return {"status": "complete", "mode": "crawl", "config": {}, "seed_urls": [f"{SITE}/"]}
+
+    async def frontier_stats(self, *, run_id: str) -> tuple[int, int, int]:
+        return (0, 0, 0)
+
+
+class _ContextReports(CrawlReports):
+    def __init__(self, columns: list[str]) -> None:
+        super().__init__(_ContextStore())  # type: ignore[arg-type]
+        self.columns = columns
+        self.queries: list[tuple[str, tuple[object, ...]]] = []
+
+    async def _run_id(self) -> str:
+        return "run-1"
+
+    async def _fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        self.queries.append((query, args))
+        if "information_schema.columns" in query:
+            return [{"column_name": name} for name in self.columns]
+        if "heading_links" in query:
+            return [{"heading_link_count": 5, "heading_link_tested_count": 4}]
+        return []
+
+
+def test_technical_audit_context_counts_the_heading_link_population() -> None:
+    reports = _ContextReports(["content_extracted", "links_json"])
+    context = asyncio.run(reports.technical_audit_context())
+    assert (context["heading_link_count"], context["heading_link_tested_count"]) == (5, 4)
+    query, args = next((query, args) for query, args in reports.queries if "heading_links" in query)
+    assert args == ("run-1", HEADING_LINK_XPATH_PATTERN)
+    assert "final_status_code IS NOT NULL" in query
+
+
+def test_technical_audit_context_leaves_heading_counts_unknown_without_links_json() -> None:
+    reports = _ContextReports(["content_extracted"])
+    context = asyncio.run(reports.technical_audit_context())
+    assert (context["heading_link_count"], context["heading_link_tested_count"]) == (None, None)
+    assert not any("heading_links" in query for query, _ in reports.queries)
+
+
+def test_heading_link_pattern_matches_only_h2_and_h3_links() -> None:
+    def matches(xpath: str) -> bool:
+        return re.search(HEADING_LINK_XPATH_PATTERN, xpath, re.IGNORECASE) is not None
+
+    assert matches("/html/body/h2/a") and matches("/html/body/div[2]/h3[4]/span/a") and matches("/HTML/BODY/H2/A")
+    assert not matches("/html/body/h1/a") and not matches("/html/body/h4/a") and not matches("/html/body/p/a")
 
 
 # --- 395: Q44 only trusts depths that are click depths from a homepage -----------
