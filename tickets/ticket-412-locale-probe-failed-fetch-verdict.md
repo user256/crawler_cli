@@ -19,11 +19,26 @@ Run `PYTHONPATH=src python tickets/qa-new-audit-2026-10-06/reproduce.py` from th
 
 ## Tasks and acceptance criteria
 
-- [ ] Carry outcome and admission/fetch failure evidence into the adapter; 0 must not become an observed HTTP status.
-- [ ] Treat unresolved comparisons as untested and retain successful variants without claiming complete coverage.
-- [ ] Cover timeout, robots/scope rejection, failed redirect hop and true observed HTTP status changes separately; preserve valid findings while unknown-only comparisons produce no confirmed defect.
+- [x] Carry outcome and admission/fetch failure evidence into the adapter; 0 must not become an observed HTTP status.
+- [x] Treat unresolved comparisons as untested and retain successful variants without claiming complete coverage.
+- [x] Cover timeout, robots/scope rejection, failed redirect hop and true observed HTTP status changes separately; preserve valid findings while unknown-only comparisons produce no confirmed defect.
 
 ## Status
 
-proposed (Priority: **P1**). Filed by post-merge QA, 2026-10-06.
-Related existing tickets: 344, 386, 409. This records a fix request; no product fix has been applied.
+done (Priority: **P1**). Fixed on branch `fix/postmerge-qa-locale`, 2026-10-07.
+
+Fix: `locale_probe_records` now only accepts real HTTP statuses (100-599); an unanswered request (status 0) gives
+`variant_status`/`baseline_status` None, Location keys are recorded only when both first requests were answered, and
+each record carries `baseline_outcome`/`variant_outcome` plus `baseline_failure`/`variant_failure` (outcome, skip
+reason, failing hop). The Q25 answerer also rejects status 0 from older saved bundles, counts such probes as untested
+and names the failure reasons in its note, so resolved variants stay tested but Q25 cannot reach Issue or Healthy from
+them (Needs validation / No (partial), no ticket; Pending when nothing could be compared). The collector's
+`differences_from_no_header` no longer reports `first_status_changed`/`final_status_changed` against an unanswered hop,
+so a failed fetch no longer raises a `missing_vary_header` candidate. A language redirect whose target is then refused
+keeps its real 200->302 + Location finding. Regression tests: `tests/test_locale_probe_verdicts.py` (no-reason fetch
+error, timeout, robots and scope rejection, unanswered baseline, all variants failing, failed redirect hop, real 404
+change, legacy status-0 record).
+
+Note: the collector still labels an engine timeout (status 0 with `skip_reason="fetch_error:..."`) as outcome
+`not_admitted`; the skip reason is carried through, and changing the outcome label would alter the bot-trap
+classification, so it was left as is.

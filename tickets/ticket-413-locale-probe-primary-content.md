@@ -19,11 +19,23 @@ Run `PYTHONPATH=src python tickets/qa-new-audit-2026-10-06/reproduce.py` from th
 
 ## Tasks and acceptance criteria
 
-- [ ] Record a primary-content comparison with provenance, or keep raw-body differences as review-only evidence.
-- [ ] Preserve collection qualifications across the adapter rather than silently promoting analyst observations.
-- [ ] Test script/config/nonce-only changes, rotating bodies and real translated main content; retain actual status and redirect differences.
+- [x] Record a primary-content comparison with provenance, or keep raw-body differences as review-only evidence.
+- [x] Preserve collection qualifications across the adapter rather than silently promoting analyst observations.
+- [x] Test script/config/nonce-only changes, rotating bodies and real translated main content; retain actual status and redirect differences.
 
 ## Status
 
-proposed (Priority: **P1**). Filed by post-merge QA, 2026-10-06.
-Related existing tickets: 344, 409. This records a fix request; no product fix has been applied.
+done (Priority: **P1**). Fixed on branch `fix/postmerge-qa-locale`, 2026-10-07.
+
+Fix: the collector records `primary_content_sha256` with `primary_content_basis` (visible text of `<main>`/`role=main`,
+else `<body>`; script, style, noscript and template text and all attributes ignored). The adapter sets
+`primary_content_differs` only from that hash, and only when baseline, repeated header-less control and variant all
+resolved, the control matched the baseline and the basis matches; otherwise None (untested). Whole-response byte
+differences are kept as `raw_body_differs`, review-only: the answerer notes them but never counts them. The collector's
+qualification is carried on every record as `collection_qualification`. Status and Location differences are unchanged.
+Regression tests in `tests/test_locale_probe_verdicts.py`: head-script locale, inline JSON config, rotating nonce/style,
+rotating main content (unknown, not Issue), translated main content (Issue), `<body>` fallback, and legacy evidence
+without a primary-content hash.
+
+Decision: a measured, control-stable primary-content difference stays a confirmed Q25 Issue, as the question's
+"Issue if" rule says; content comparison is unknown (not Healthy, not Issue) whenever any input is missing or volatile.

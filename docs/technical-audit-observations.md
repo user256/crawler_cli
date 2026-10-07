@@ -85,7 +85,7 @@ that collected them.
 | `mobile-render` | url | template, overlay_viewport_share (0–1), overlay_kind, raw_primary_words, rendered_primary_words | Q95 |
 | `listing-controls` | url, control | template, element, changes_listing, crawlable_href | Q38 |
 | `image-resources` | image_url, content_type | page_url, in_content | Q66 |
-| `locale-probe` | url, variant | baseline_status, variant_status, baseline_location, variant_location (null when there is no Location header), primary_content_differs; a probe is clean only when all five are recorded | Q25 |
+| `locale-probe` | url, variant | baseline_status, variant_status, baseline_location, variant_location (null when there is no Location header), primary_content_differs (visible text of `<main>` or `<body>`, scripts and attributes ignored, null unless a repeated header-less control matched; raw_body_differs is review-only); a probe is clean only when all five are recorded. A status of 0 or null means the request was never answered (fetch error, timeout, robots or scope rejection; see baseline_failure/variant_failure), so that variant is untested, never a status change | Q25 |
 | `host-probe` | host | status, content_type (unknown when null, so a 200 is a candidate for review, not an Issue), auth_required, noindex, canonical_to_main_host, robots_blocked, discovered_via | Q27, Q77 |
 | `utility-path-probe` | url | path_class (`protected` or `public-utility`, from the approved policy), status, auth_required, exposes_content, noindex, robots_blocked (a public-utility path needs both noindex and robots_blocked recorded) | Q102 |
 | `external-link-recheck` | source_url, target_url | status, rel (required for an affiliate link; null when the anchor has none), affiliate | Q28 |

@@ -155,7 +155,7 @@ async def main():
         result = answer(audit_with("locale-probe", records), "Q25")
         findings[ticket] = {
             "answer": brief(result),
-            "finding": result["rows"][0]["finding"],
+            "finding": result["rows"][0]["finding"] if result["rows"] else None,
             "spanish_raw_observation": next(
                 row
                 for row in evidence

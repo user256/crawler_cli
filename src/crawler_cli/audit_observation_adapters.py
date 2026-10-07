@@ -41,26 +41,65 @@ def robots_txt_record(host: str, response: object, llms_txt_status: str | None) 
     return {"host": host, "status": status, "body": body, "llms_txt_status": llms_txt_status}
 
 
-def _initial_status(probe: Mapping[str, object] | None) -> int | None:
-    if probe is None:
-        return None
+def _http_status(value: object) -> int | None:
+    """An observed HTTP status; the collector's 0 means no response was received."""
+    if isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 599:
+        return value
+    return None
+
+
+def _first_hop(probe: Mapping[str, object]) -> Mapping[str, object] | None:
     chain = probe.get("redirect_chain")
     if isinstance(chain, list) and chain and isinstance(chain[0], Mapping):
-        status = chain[0].get("status")
-        return status if isinstance(status, int) else None
-    status = probe.get("final_status")
-    return status if isinstance(status, int) else None
+        return chain[0]
+    return None
+
+
+def _initial_status(probe: Mapping[str, object] | None) -> int | None:
+    """Status of the first response; None when that request was never answered (ticket 412)."""
+    if probe is None:
+        return None
+    hop = _first_hop(probe)
+    return _http_status(hop.get("status") if hop is not None else probe.get("final_status"))
+
+
+def _failure(probe: Mapping[str, object] | None) -> dict[str, object] | None:
+    """Why a probe did not resolve: its outcome plus the first unanswered hop's skip reason."""
+    if probe is None:
+        return {"outcome": "not_probed", "skip_reason": None, "hop": None}
+    outcome = probe.get("outcome")
+    if outcome == "resolved":
+        return None
+    chain = probe.get("redirect_chain")
+    hops = [hop for hop in chain if isinstance(hop, Mapping)] if isinstance(chain, list) else []
+    for index, hop in enumerate(hops):
+        if _http_status(hop.get("status")) is None:
+            return {"outcome": outcome, "skip_reason": hop.get("skip_reason"), "hop": index}
+    return {"outcome": outcome, "skip_reason": None, "hop": None}
 
 
 def _initial_location(probe: Mapping[str, object] | None) -> str | None:
     """The Location header on the first response; None when the response carried none."""
-    if probe is None:
+    hop = _first_hop(probe) if probe is not None else None
+    location = hop.get("location") if hop is not None else None
+    return str(location) if location else None
+
+
+def _resolved(probe: Mapping[str, object] | None) -> bool:
+    return (
+        probe is not None and probe.get("outcome") == "resolved" and _http_status(probe.get("final_status")) is not None
+    )
+
+
+def _same_hash(left: Mapping[str, object] | None, right: Mapping[str, object] | None, field: str) -> bool | None:
+    """Whether two resolved responses carry the same hash; None when either is unknown."""
+    if not _resolved(left) or not _resolved(right):
         return None
-    chain = probe.get("redirect_chain")
-    if isinstance(chain, list) and chain and isinstance(chain[0], Mapping):
-        location = chain[0].get("location")
-        return str(location) if location else None
-    return None
+    assert left is not None and right is not None
+    a, b = left.get(field), right.get(field)
+    if not isinstance(a, str) or not isinstance(b, str):
+        return None
+    return a == b
 
 
 def _content_differs(
@@ -68,21 +107,40 @@ def _content_differs(
     probe: Mapping[str, object] | None,
     repeat: Mapping[str, object] | None,
 ) -> bool | None:
-    """Whether the variant body differs from the no-header body; None when that cannot be known."""
-    if baseline is None or probe is None:
+    """Whether the variant's primary content differs from the no-header response.
+
+    Compares the collector's primary-content hash (visible text of ``<main>``
+    or ``<body>``), never the raw response bytes (ticket 413).  None when that
+    cannot be known: a probe did not resolve, a hash is missing, the regions
+    were taken from different elements, or the repeated header-less control did
+    not resolve to the same primary content.
+    """
+    if baseline is None or probe is None or repeat is None:
         return None
-    base, variant = baseline.get("body_sha256"), probe.get("body_sha256")
-    if not isinstance(base, str) or not isinstance(variant, str):
+    field = "primary_content_sha256"
+    if _same_hash(baseline, repeat, field) is not True:
+        # Without a stable control request a difference proves nothing.
         return None
-    control = repeat.get("body_sha256") if isinstance(repeat, Mapping) else None
-    if isinstance(control, str) and control != base:
-        # Two identical requests differed, so a body difference proves nothing.
+    if baseline.get("primary_content_basis") != probe.get("primary_content_basis"):
         return None
-    return base != variant
+    same = _same_hash(baseline, probe, field)
+    return None if same is None else not same
+
+
+def _raw_body_differs(baseline: Mapping[str, object] | None, probe: Mapping[str, object] | None) -> bool | None:
+    """Whole-response byte difference: review-only evidence, never a primary-content verdict."""
+    same = _same_hash(baseline, probe, "body_sha256")
+    return None if same is None else not same
 
 
 def locale_probe_records(evidence: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """``locale-probe`` records: one per target and non-neutral Accept-Language variant."""
+    """``locale-probe`` records: one per target and non-neutral Accept-Language variant.
+
+    A request that was never answered (fetch error, timeout, robots or scope
+    rejection) has no status, Location or content to compare, so those fields
+    stay None or are left out and the answerer counts the comparison as
+    untested; the outcome and skip reason are kept as evidence (ticket 412).
+    """
     by_target: dict[str, dict[str, Mapping[str, object]]] = {}
     for row in evidence:
         if row.get("record_type") != "observation" or row.get("observation_type") != "accept_language_probe":
@@ -100,17 +158,32 @@ def locale_probe_records(evidence: Sequence[Mapping[str, object]]) -> list[dict[
             if variant in _NEUTRAL_VARIANTS:
                 continue
             probe = probes[variant]
-            records.append(
+            baseline_status = _initial_status(baseline)
+            variant_status = _initial_status(probe)
+            record: dict[str, object] = {
+                "url": target,
+                "variant": variant,
+                "baseline_status": baseline_status,
+                "variant_status": variant_status,
+            }
+            # A Location of None means the response had none; it is only
+            # recorded when both first requests were answered.
+            if baseline_status is not None and variant_status is not None:
+                record["baseline_location"] = _initial_location(baseline)
+                record["variant_location"] = _initial_location(probe)
+            record.update(
                 {
-                    "url": target,
-                    "variant": variant,
-                    "baseline_status": _initial_status(baseline),
-                    "variant_status": _initial_status(probe),
-                    "baseline_location": _initial_location(baseline),
-                    "variant_location": _initial_location(probe),
                     "primary_content_differs": _content_differs(baseline, probe, repeat),
+                    "primary_content_basis": probe.get("primary_content_basis"),
+                    "raw_body_differs": _raw_body_differs(baseline, probe),
+                    "baseline_outcome": baseline.get("outcome") if baseline is not None else None,
+                    "variant_outcome": probe.get("outcome"),
+                    "baseline_failure": _failure(baseline),
+                    "variant_failure": _failure(probe),
+                    "collection_qualification": probe.get("qualification"),
                 }
             )
+            records.append(record)
     return records
 
 

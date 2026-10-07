@@ -28,6 +28,8 @@ def _probe(variant: str, status: int, *, location: str | None = None, sha: str |
         "final_status": final,
         "html_lang": "en",
         "body_sha256": sha,
+        "primary_content_sha256": sha,
+        "primary_content_basis": "main_visible_text",
         "redirect_chain": [{"url": "https://example.com/", "status": status, "location": location}],
     }
 
