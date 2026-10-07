@@ -676,6 +676,56 @@ The audit records a finding only when that completed action exposes additional
 URLs. The copied workbook receives the exact `Tickets` columns plus Overview,
 Audit Log and URL-level evidence tabs.
 
+The workbook reports actual issues only. For `technical-audit`, Overview lists
+the run metadata and only the checks that have affected rows or produced a
+ticket, and an evidence tab is written only for a check with affected rows;
+passing, unavailable and not-applicable checks without a ticket, and the
+tested-but-clean rows of a passing check, stay in the JSON only. For
+`technical-audit-questions`, the Questions tab holds only the answers that
+produce a ticket (same columns and header), and a data tab is written only for
+those answers; Healthy, Pending, No and Needs-validation-without-a-ticket
+answers appear nowhere in the workbook. The `--out` JSON always keeps every
+check and every answer.
+
+The template ID, Tickets tab name, ticket columns, allowed Priority and
+Ticket Classification values and protected tabs (`Config`) come from
+[`templates/google-sheets-template-contract.json`](templates/google-sheets-template-contract.json);
+pass `--google-sheets-contract` to use another, and omit
+`--google-sheets-template` to copy the contract's template. Generated tickets
+are checked against the contract before anything is copied. After copying, the
+publisher finds the full Tickets header in the copy (B5 in the current
+template) and writes rows beneath it; if the header is missing, partial or
+reordered it stops before any write. With a `drive.file` OAuth token, where
+Drive refuses to copy a template the app did not create, it creates a new
+workbook and copies each tab with `sheets.copyTo`, then restores the tab names
+so the dropdowns sourced from `Config` still resolve. Evidence tabs are
+inserted after `Tickets` and before `Config`. The template validates only a
+fixed block of ticket rows (6–26 in the current template), so after writing
+n tickets the publisher reads each dropdown column's rule from the copy's
+first data row and applies it to every populated row (6 through 5+n) with one
+`setDataValidation` per column; rows below the last ticket and the template
+itself are not changed, and the receipt lists the ranges. Old ticket values
+are cleared with `updateCells` limited to `userEnteredValue`, because
+`values.clear` also deleted the template's dropdowns on the cleared cells. After writing, the publisher
+reads back the ticket rows (`Tickets!B6:I<n>`) and each evidence tab's used
+range and stops with `PublishReceiptError` if anything differs from what was
+sent (numbers read back as text and trimmed empty cells are not differences);
+on success it prints a receipt with the sheet ID, ranges and row counts.
+
+To check the template's Priority and Ticket Classification dropdowns against
+the contract without publishing anything, run
+
+    crawler-cli technical-audit-questions --check-template \
+      [--google-sheets-template <url-or-id>] [--google-sheets-contract <json>] \
+      [--google-sheets-credentials <service-account.json>]
+
+It reads the data validation on the first 100 rows under the Tickets header,
+resolves `ONE_OF_LIST` values or `ONE_OF_RANGE` sources (for example
+`Config!A2:A5`), prints each column's values against the contract, and exits
+with code 2 on any difference. It makes no writes and needs no `--audit` or
+`--out`; authentication is the same as for publishing
+(`GOOGLE_DOCS_OAUTH_TOKEN_FILE` or `--google-sheets-credentials`).
+
 #### Discovery source reconciliation
 
 `reconcile-sources` joins one run's internal link graph with XML sitemaps, a

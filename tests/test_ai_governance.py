@@ -210,7 +210,7 @@ class _Engine:
         self._robots = _Robots(rules)
         self.config = SimpleNamespace(user_agent_for=lambda _url: "crawler_cli/0.1")
 
-    async def _bounded_fetch_response(self, url: str):
+    async def _bounded_fetch_response(self, url: str, on_skip=None):
         self.fetched.append(url)
         return self.responses.get(url)
 

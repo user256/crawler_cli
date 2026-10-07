@@ -17,6 +17,18 @@ from typing import Any
 # Registry entries, audits and answers are JSON documents.
 Json = Mapping[str, Any]
 
+# A link inside an H2 or H3 heading, matched against its saved XPath.  The
+# pattern is valid both as a Python ``re`` and as a PostgreSQL ``~*`` regex, so
+# the Q39 answerer and the heading-link population count agree on the rule.
+# Links that wrap a heading (``a > h2|h3``, ``a > * > h2|h3``) also count for
+# Q39 (ticket 421), but no XPath pattern can find them: the link's own XPath
+# ends in ``/a``, and ``links_json`` keeps only the first link per target on a
+# page, so a card whose image link comes first drops its heading link.  They
+# come from the stored HTML instead, and failing links to their targets carry
+# ``HEADING_WRAPPING_LINK_FIELD``.
+HEADING_LINK_XPATH_PATTERN = r"/h[23](\[[0-9]+\])?(/|$)"
+HEADING_WRAPPING_LINK_FIELD = "wraps_heading"
+
 
 @dataclass(frozen=True)
 class Evidence:
@@ -31,12 +43,34 @@ class Evidence:
     qualification: str | None = None
     note: str = ""
     language_check: str | None = None
+    # Plural noun for what the denominator counts (pages, hosts, host-agent
+    # policies...).  It often differs from the question's finding unit.
+    denominator_unit: str | None = None
 
 
 @dataclass(frozen=True)
 class Answerer:
     basis: str
     answer: Callable[[Json, Json, Json | None], Evidence]
+    # Fallback denominator unit when the evidence does not name one.
+    denominator_unit: str | None = None
+
+
+def unit_label(count: int, unit: str) -> str:
+    """``count`` with ``unit`` (a plural noun phrase) in singular or plural form."""
+
+    return f"{count:,} {unit if count != 1 else singular_unit(unit)}"
+
+
+def singular_unit(unit: str) -> str:
+    """Singular form of a plural unit noun phrase: "host-agent policies" -> "host-agent policy"."""
+
+    head, _, last = unit.rpartition(" ")
+    if last.endswith("ies") and len(last) > 3:
+        last = last[:-3] + "y"
+    elif last.endswith("s") and not last.endswith("ss"):
+        last = last[:-1]
+    return f"{head} {last}" if head else last
 
 
 def _profile_value(profile: Mapping[str, object], dotted_key: str) -> object | None:

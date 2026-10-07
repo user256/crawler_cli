@@ -4,6 +4,49 @@ A list of tickets, their status and the md file which summarises action taken fo
 **Authoritative register** for status, acceptance notes, and delivery order.
 Ticket files remain the source of truth for scope and DoD.
 
+### Post-merge audit QA (2026-10-06)
+
+PR **#118 is merged** at `72629af`; the replacement part of ticket **409** is
+complete. Probe-producer follow-ups in that ticket remain open.
+[QA report](./qa-new-audit-2026-10-06/README.md) and
+[all 104 question/ticket mappings](./qa-new-audit-2026-10-06/question-matrix.md).
+
+- QA baseline was **1,866 passed, 60 skipped**; lint passed; formatting failed (417).
+- Fixes for 410–418, the Q39 part of 393 and the rest of 406 are in
+  **PR #119** (`fix/postmerge-qa-integration`): **2,022 passed, 61 skipped**
+  without a database, **2,073 passed, 9 skipped** with a scratch
+  `CRAWLER_CLI_TEST_DSN`; lint and formatting pass; `reproduce.py` exits 0.
+- Runner: **63 registered answerers**, **40 unimplemented questions** covered
+  by existing question tickets, **1 deliberately manual/external question**.
+- Saved Rainbet bundle plus TLS observations replays with unchanged totals:
+  **1 Issue, 22 Needs validation, 1 Healthy, 80 Pending**; only Q39's
+  denominator and ticket units changed.
+- Live public-site probes (419) and the live Sheets publish on both the drive.file and full-`drive` paths (420) were certified 2026-10-07.
+
+- `410` `done` [Keep failed robots fetches as unknown observations](./ticket-410-ai-governance-unread-robots-bundle.md) — **P1**.
+- `411` `done` [Keep capped AI-governance probes below Healthy](./ticket-411-ai-governance-capped-coverage.md) — **P1**.
+- `412` `done` [Do not turn failed language probes into confirmed locale issues](./ticket-412-locale-probe-failed-fetch-verdict.md) — **P1**.
+- `413` `done` [Compare primary content rather than raw HTML bytes for Q25](./ticket-413-locale-probe-primary-content.md) — **P1**.
+- `414` `done` [Attribute stored TLS headers to the final response host](./ticket-414-tls-final-response-identity.md) — **P1**.
+- `415` `done` [Use the shared HSTS parser in the Q63 answerer](./ticket-415-q63-shared-hsts-parser.md) — **P2**.
+- `416` `done` [Preserve denominator units in question-derived tickets](./ticket-416-question-ticket-denominator-units.md) — **P2**.
+- `417` `done` [Restore the pinned formatting gate](./ticket-417-postmerge-format-gate.md) — **P2**.
+- `418` `done` [Restore per-report snapshot capability checks after PR #118](./ticket-418-legacy-snapshot-capability-checks.md) — **P1**.
+- `419` `done` [Live public-site QA of the reattached probes](./ticket-419-live-probe-qa.md) — **P1.**
+- `420` `done` [Live Google Sheets publish QA for the template-contract publisher](./ticket-420-live-sheets-publish-qa.md) — **P1.** drive.file fallback, failure paths and `--check-template` verified live 2026-10-07 (two defects fixed in `b6d8812`); full-`drive` publish passed the same afternoon after a third fix (`values.clear` deleted the template's dropdowns; `e33ff78`, ticket 428).
+- `421` `done` [Decide whether links that wrap a heading count for Q39](./ticket-421-q39-heading-link-definition.md) — **P2.**
+- `422` `done` [Make database-backed tests safe to run and run them in CI](./ticket-422-db-test-safety-and-ci-dsn.md) — **P2.**
+- `423` `done` [Record why an /llms.txt fetch failed in AI-governance observations](./ticket-423-llms-txt-failure-reasons.md) — **P3.**
+- `424` `done` [Sheets publisher follow-ups carried over from ticket 223](./ticket-424-sheets-publisher-polish.md) — **P3.**
+- `425` `done` [Treat a bot challenge as unanswered in the Accept-Language probe](./ticket-425-locale-probe-challenge-not-a-status.md) — **P1, 419 live QA D1.**
+- `426` `done` [Mark the locale-probe collection partial when comparisons were not answered](./ticket-426-locale-probe-partial-coverage.md) — **P2, 419 live QA D2.**
+- `427` `done` [Let the live probes use the crawl's transport, identity and pace options](./ticket-427-probe-engine-transport-options.md) — **P2, 419 live QA D3.**
+- `428` `done` [Dropdowns on every ticket row, and a workbook that reports actual issues only](./ticket-428-sheets-dropdowns-and-issue-only-workbook.md) — **P2.** User request after the 420 live run; verified live on both copy paths 2026-10-07.
+
+Next unreserved ticket number is **429**.
+
+Earlier positions below are historical.
+
 ### Current position (2026-09-29)
 
 - **Review / integration:** no GitHub pull requests were open. The historical technical-audit PR stack (183–213) was already present on `origin/master`; its disposable worktrees were stale review artifacts.
@@ -714,7 +757,7 @@ existing-ticket reuse and review finding coverage.
 - `390` `implemented (local)` [Say truthfully how Q46 footer evidence is collected](./ticket-390-stream-c-q46-footer-parity-docs.md) — **P3, Stream C QA fix.**
 - `391` `implemented (local)` [Tighten observed-answer edge cases](./ticket-391-stream-c-observed-answer-edge-cases.md) — **P3, Stream C QA fix.**
 - `392` `implemented (local)` [Downgrade other answers only when a run gate answers Yes](./ticket-392-integration-run-gate-scope.md) — **P1, integration QA fix.**
-- `393` `implemented (local)` [Count the indexable-page population for Q15 and Q71](./ticket-393-integration-indexable-population.md) — **P1, integration QA fix; Q39 part open.**
+- `393` `implemented (local)` [Count the indexable-page population for Q15 and Q71](./ticket-393-integration-indexable-population.md) — **P1, integration QA fix; Q39 part done in PR #119; definition follow-up in 421.**
 - `394` `proposed` [Give Q94 and Q41 rows their own ticket language](./ticket-394-integration-q94-q41-ticket-language.md) — **P3, integration QA.**
 - `395` `implemented (local)` [Trust frontier depth for Q44 only when it is click depth from a homepage](./ticket-395-integration-q44-click-depth-provenance.md) — **P1, integration QA fix; homepage BFS follow-up open.**
 - `396` `implemented (local)` [Never answer Q91 Healthy from an empty or partial link population](./ticket-396-integration-q91-zero-population.md) — **P1, integration QA fix.**
@@ -788,7 +831,7 @@ existing-ticket reuse and review finding coverage.
 - `390` `implemented (local)` [Say truthfully how Q46 footer evidence is collected](./ticket-390-stream-c-q46-footer-parity-docs.md) — **P3, Stream C QA fix.**
 - `391` `implemented (local)` [Tighten observed-answer edge cases](./ticket-391-stream-c-observed-answer-edge-cases.md) — **P3, Stream C QA fix.**
 - `392` `implemented (local)` [Downgrade other answers only when a run gate answers Yes](./ticket-392-integration-run-gate-scope.md) — **P1, integration QA fix.**
-- `393` `implemented (local)` [Count the indexable-page population for Q15 and Q71](./ticket-393-integration-indexable-population.md) — **P1, integration QA fix; Q39 part open.**
+- `393` `implemented (local)` [Count the indexable-page population for Q15 and Q71](./ticket-393-integration-indexable-population.md) — **P1, integration QA fix; Q39 part done in PR #119; definition follow-up in 421.**
 - `394` `proposed` [Give Q94 and Q41 rows their own ticket language](./ticket-394-integration-q94-q41-ticket-language.md) — **P3, integration QA.**
 - `395` `implemented (local)` [Trust frontier depth for Q44 only when it is click depth from a homepage](./ticket-395-integration-q44-click-depth-provenance.md) — **P1, integration QA fix; homepage BFS follow-up open.**
 - `396` `implemented (local)` [Never answer Q91 Healthy from an empty or partial link population](./ticket-396-integration-q91-zero-population.md) — **P1, integration QA fix.**
@@ -820,7 +863,7 @@ reuses either range; the next unreserved number after both lineages is **410**.
 - `403` `implemented (local)` [Never clear a client tab that merely shares a name with an audit tab](./ticket-403-register-publisher-foreign-tab-guard.md) — **P1, QA fix for full-manual-review-audit.**
 - `404` `proposed` [Decide whether input-request tickets belong in the client register](./ticket-404-register-input-request-tickets-policy.md) — **P2.**
 - `405` `proposed` [Keep the control ledger and manual-review tab out of the client copy, and Config last](./ticket-405-register-ledger-tabs-in-client-workbook.md) — **P2.**
-- `406` `proposed` [Finish ticket 223: template mapping, copy fallback and destination header check](./ticket-406-mapped-template-publish-gaps.md) — **P2.**
+- `406` `done` [Finish ticket 223: template mapping, copy fallback and destination header check](./ticket-406-mapped-template-publish-gaps.md) — **P2.**
 - `407` `proposed` [Register publisher review nits](./ticket-407-register-review-nits.md) — **P3.**
 - `408` `proposed` [Port the question runner and stream collectors onto master's audit contract](./ticket-408-port-question-runner-onto-master-contract.md) — **P1:** the `feature/technical-audit-183` lineage cannot merge textually; per-check port with the Rainbet evidence matrix.
-- `409` `in progress` [Replace the old technical audit with the three-stream audit](./ticket-409-new-audit-replaces-old.md) — **P0:** merge of the question-runner lineage onto master; deletion of the old audit files and the Rainbet re-run outstanding.
+- `409` `merged; follow-ups open` [Replace the old technical audit with the three-stream audit](./ticket-409-new-audit-replaces-old.md) — **P0:** PR #118 merged; deletion and saved Rainbet replay complete. Missing probe producers remain follow-up work.

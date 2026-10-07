@@ -21,7 +21,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .audit_observations import observation_collections
+from .audit_observation_adapters import LLMS_TXT_UNREAD_STATES
 from .robots import _RobotsRules
+from .transport_security import HSTS_PRELOAD_MIN_MAX_AGE, parse_strict_transport_security
 from .technical_audit_evidence import (
     Answerer,
     Evidence,
@@ -49,6 +51,21 @@ AI_CRAWLERS = (
     "CCBot",
 )
 _QUESTION_RULE_CODES = {"canonical_changed", "indexing_directive_changed", "hreflang_changed"}
+# What one tested record of each observation kind counts, when an answer is
+# not grouped by template.  The denominator unit is often not the finding unit.
+_RECORD_UNITS = {
+    "html-signals": "pages",
+    "render-trace": "pages",
+    "render-parity": "pages",
+    "mobile-render": "pages",
+    "listing-controls": "pages",
+    "google-render-inspection": "URLs",
+    "verified-google-fetch": "URLs",
+    "utility-path-probe": "URLs",
+    "external-link-recheck": "links",
+    "competitor-topic-gap": "topics",
+    "tls-probe": "hosts",
+}
 # robots.txt statuses that prove there is no file; every other non-2xx response is unread.
 _NO_ROBOTS_STATUSES = frozenset({404, 410})
 
@@ -140,6 +157,7 @@ def _evaluate(
         coverage_complete=observed.complete,
         qualification=qualification,
         note=" ".join(notes),
+        denominator_unit="templates" if by_template else _RECORD_UNITS.get(kind, f"{kind} records"),
     )
 
 
@@ -647,11 +665,30 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
     by_url: dict[str, list[dict[str, Any]]] = {}
     changes_by_url: dict[str, list[str]] = {}
     untested = 0
+    unanswered: dict[str, int] = {}
+    control_unanswered: dict[str, set[str]] = {}
+    markup_only = 0
     for record in observed.records:
         changes = _locale_probe_changes(record)
         if changes is UNTESTED:
             untested += 1
+            control = record.get("control_failure")
+            if isinstance(control, Mapping):
+                reason = str(control.get("skip_reason") or control.get("outcome") or "unknown")
+                control_unanswered.setdefault(reason, set()).add(str(record.get("url")))
+            for side in ("baseline", "variant"):
+                failure = record.get(f"{side}_failure")
+                if isinstance(failure, Mapping):
+                    reason = str(failure.get("skip_reason") or failure.get("outcome") or "unknown")
+                elif _int_or_none(record.get(f"{side}_status")) in _RATE_LIMIT_STATUSES:
+                    # A bundle adapted before ticket 425 kept a challenged 429 as a status.
+                    reason = f"rate_limited:{record[f'{side}_status']}"
+                else:
+                    continue
+                unanswered[reason] = unanswered.get(reason, 0) + 1
             continue
+        if record.get("raw_body_differs") is True and record.get("primary_content_differs") is False:
+            markup_only += 1
         url = str(record["url"])
         by_url.setdefault(url, []).append(record)
         if changes:
@@ -663,6 +700,17 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
     note = f"Observations: {observed.scopes()}."
     if untested:
         note += f" {untested:,} probes lack a baseline or variant status, Location or content comparison."
+    if unanswered:
+        reasons = ", ".join(f"{reason} {count:,}" for reason, count in sorted(unanswered.items()))
+        note += f" Requests never answered, so not compared: {reasons}."
+    if control_unanswered:
+        reasons = ", ".join(f"{reason} {len(urls):,}" for reason, urls in sorted(control_unanswered.items()))
+        note += f" Repeated header-less control never answered, so content not compared (URLs): {reasons}."
+    if markup_only:
+        note += (
+            f" {markup_only:,} probes differ only outside the primary content (scripts, attributes or markup);"
+            " review-only evidence, not counted."
+        )
     if not by_url:
         return Evidence(available=False, note=note)
     return Evidence(
@@ -674,10 +722,26 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
     )
 
 
-def _locale_probe_changes(probe: Json) -> object:
-    """Differences one probe shows; UNTESTED when nothing differs and a comparison was never recorded."""
+_RATE_LIMIT_STATUSES = frozenset({429})
 
-    if probe.get("baseline_status") is None or probe.get("variant_status") is None:
+
+def _locale_probe_changes(probe: Json) -> object:
+    """Differences one probe shows; UNTESTED when nothing differs and a comparison was never recorded.
+
+    Only real HTTP statuses compare: a status of 0 or None means the request was
+    never answered (fetch error, timeout, robots or scope rejection, bot
+    challenge), so that variant is untested rather than a status change
+    (tickets 412, 425).  A 429 is a rate limit, never a language response.  Raw-body
+    differences are review evidence only; just ``primary_content_differs``
+    counts as changed content (ticket 413).
+    """
+
+    if _http_status(probe.get("baseline_status")) is None or _http_status(probe.get("variant_status")) is None:
+        return UNTESTED
+    # A challenge or rate limit answers the client's pace or identity, not its
+    # language; the adapter leaves its status None, and a 429 kept by a bundle
+    # adapted before ticket 425 is read the same way.
+    if probe.get("baseline_status") in _RATE_LIMIT_STATUSES or probe.get("variant_status") in _RATE_LIMIT_STATUSES:
         return UNTESTED
     what = []
     if probe["baseline_status"] != probe["variant_status"]:
@@ -693,6 +757,11 @@ def _locale_probe_changes(probe: Json) -> object:
     elif probe.get("primary_content_differs") is None and not what:
         return UNTESTED
     return what
+
+
+def _http_status(value: object) -> int | None:
+    status = _int_or_none(value) if not isinstance(value, bool) else None
+    return status if status is not None and 100 <= status <= 599 else None
 
 
 def _host_exposure(*, mitigations: tuple[str, ...]) -> Callable[..., Evidence]:
@@ -773,17 +842,22 @@ def _hsts_ocsp(record: Json, _q: Json, _p: Json | None) -> object:
     if "hsts_header" not in record:
         return UNTESTED
     problems = []
-    header = str(record.get("hsts_header") or "")
-    if not header:
+    raw = record.get("hsts_header")
+    # One RFC 6797 parser for every HSTS consumer (ticket 415): optional
+    # whitespace and quoted values are valid, a repeated directive is not.
+    policy = parse_strict_transport_security(raw if isinstance(raw, str) else None)
+    if not policy.present:
         problems.append("no Strict-Transport-Security header")
+    elif not policy.valid:
+        # A user agent ignores an invalid header outright, so none of its directives count.
+        problems.append(f"invalid Strict-Transport-Security header ({', '.join(policy.errors)})")
     else:
-        directives = [part.strip().casefold() for part in header.split(";")]
-        max_age = next((part.split("=", 1)[1].strip('" ') for part in directives if part.startswith("max-age=")), "")
-        if not max_age.isdigit() or int(max_age) < 31_536_000:
-            problems.append(f"max-age {max_age or 'missing'}")
-        for directive in ("includesubdomains", "preload"):
-            if directive not in directives:
-                problems.append(f"no {directive}")
+        if policy.max_age is None or policy.max_age < HSTS_PRELOAD_MIN_MAX_AGE:
+            problems.append(f"max-age {policy.max_age}")
+        if not policy.include_subdomains:
+            problems.append("no includesubdomains")
+        if not policy.preload:
+            problems.append("no preload")
     preload = record.get("preload_status")
     if preload is not None and str(preload).casefold() != "preloaded":
         problems.append(f"preload list status {preload}")
@@ -827,6 +901,22 @@ def _utility_paths(record: Json, _q: Json, _p: Json | None) -> object:
     return None
 
 
+def _llms_txt_note(record: Mapping[str, object]) -> str | None:
+    """How a robots-txt record's /llms.txt probe reads in a note (ticket 423).
+
+    An unread file (explicit ``llms_txt_outcome: "unknown"``, or a pre-423
+    bundle whose state says it was never fetched) is untested, never absent.
+    """
+    status = record.get("llms_txt_status")
+    outcome = record.get("llms_txt_outcome")
+    if outcome is None and status is None:
+        return None
+    if outcome == "unknown" or (outcome is None and status in LLMS_TXT_UNREAD_STATES):
+        reason = record.get("llms_txt_unknown_reason") or status
+        return f"untested ({reason})" if reason else "untested"
+    return str(status) if status is not None else None
+
+
 def _ai_crawler_policy(audit: Json, question: Json, profile: Json | None) -> Evidence:
     observed = _Observed(audit, "robots-txt")
     if not observed.collections:
@@ -841,8 +931,14 @@ def _ai_crawler_policy(audit: Json, question: Json, profile: Json | None) -> Evi
     for record in observed.records:
         host = str(record["host"])
         status = _int_or_none(record.get("status"))
-        if record.get("llms_txt_status") is not None:
-            llms.append(f"{host} /llms.txt {record['llms_txt_status']}")
+        llms_note = _llms_txt_note(record)
+        if llms_note:
+            llms.append(f"{host} /llms.txt {llms_note}")
+        if record.get("fetch_outcome") == "unknown":
+            # Ticket 410: the fetch never produced a readable response.
+            reason = record.get("unknown_reason")
+            unknown_hosts.append(f"{host} ({reason})" if reason else host)
+            continue
         if 200 <= (status or 0) < 300 and record.get("body") is not None:
             body = str(record["body"])
         elif status in _NO_ROBOTS_STATUSES:
@@ -873,9 +969,12 @@ def _ai_crawler_policy(audit: Json, question: Json, profile: Json | None) -> Evi
                         **record["_provenance"],
                     }
                 )
+    omitted = _omitted_population(observed.collections)
     note = f"Observations: {observed.scopes()}. Verdicts are for the site root path."
     if unknown_hosts:
         note += f" robots.txt unavailable or unread for: {', '.join(unknown_hosts)}."
+    if omitted:
+        note += f" Eligible hosts never probed (capped): {', '.join(omitted)}."
     if llms:
         note += f" {'; '.join(llms)} (reported only; not a defect)."
     if not policy:
@@ -891,10 +990,25 @@ def _ai_crawler_policy(audit: Json, question: Json, profile: Json | None) -> Evi
     return Evidence(
         rows=rows,
         denominator=tested,
-        scope_complete=not unknown_hosts and not undeclared,
-        coverage_complete=observed.complete,
+        scope_complete=not unknown_hosts and not undeclared and not omitted,
+        coverage_complete=observed.complete and not omitted,
         note=note,
     )
+
+
+def _omitted_population(collections: Iterable[Mapping[str, Any]]) -> list[str]:
+    """Eligible items a collection's population says were never selected (ticket 411)."""
+    omitted: list[str] = []
+    for item in collections:
+        population = item.get("population")
+        if not isinstance(population, Mapping):
+            continue
+        names = population.get("omitted")
+        if isinstance(names, list) and names:
+            omitted.extend(str(name) for name in names)
+        elif isinstance(population.get("omitted_count"), int) and population["omitted_count"] > 0:
+            omitted.append(f"{population['omitted_count']} unnamed")
+    return omitted
 
 
 # --- supplied third-party evidence -------------------------------------------
@@ -943,16 +1057,19 @@ OBSERVED_ANSWERERS: dict[str, Answerer] = {
             by_template=True,
         ),
     ),
-    "Q25": Answerer("locale-probe status, Location and content per variant", _locale_probes),
+    "Q25": Answerer("locale-probe status, Location and content per variant", _locale_probes, denominator_unit="URLs"),
     "Q27": Answerer(
         "host-probe of profile non-production hosts",
         _needs_profile("nonproduction_hosts", _host_exposure(mitigations=("noindex",))),
+        denominator_unit="hosts",
     ),
     "Q28": Answerer(
         "external-link-recheck status and affiliate rel",
         _observe("external-link-recheck", _external_links, fields=("source_url", "target_url", "status", "rel")),
     ),
-    "Q29": Answerer("render-trace lab vitals and image dimensions per template", _lab_vitals),
+    "Q29": Answerer(
+        "render-trace lab vitals and image dimensions per template", _lab_vitals, denominator_unit="templates"
+    ),
     "Q31": Answerer(
         "supplied verified-Google versus visitor fetch comparison",
         _observe("verified-google-fetch", _verified_google_fetch, fields=("url", "google_fetch_method")),
@@ -979,6 +1096,7 @@ OBSERVED_ANSWERERS: dict[str, Answerer] = {
     "Q43": Answerer(
         "html-signals followed external links by page share",
         _needs_profile("allowed_external_domains", _sitewide_external_links),
+        denominator_unit="pages",
     ),
     "Q45": Answerer(
         "html-signals pages with hreflang alternates and no sibling link",
@@ -1001,7 +1119,9 @@ OBSERVED_ANSWERERS: dict[str, Answerer] = {
         _observe("render-trace", _preconnects, by_template=True),
     ),
     "Q65": Answerer("html-signals analytics preloads", _observe("html-signals", _tracking_preloads, by_template=True)),
-    "Q66": Answerer("image-resources content types of in-content raster images", _image_formats),
+    "Q66": Answerer(
+        "image-resources content types of in-content raster images", _image_formats, denominator_unit="images"
+    ),
     "Q67": Answerer(
         "html-signals inline @font-face rules and font preloads",
         _observe(
@@ -1020,6 +1140,7 @@ OBSERVED_ANSWERERS: dict[str, Answerer] = {
         _needs_profile(
             "nonproduction_hosts", _host_exposure(mitigations=("noindex", "canonical_to_main_host", "robots_blocked"))
         ),
+        denominator_unit="hosts",
     ),
     "Q85": Answerer(
         "render-parity canonical, title, robots and hreflang changes",
@@ -1029,12 +1150,17 @@ OBSERVED_ANSWERERS: dict[str, Answerer] = {
         "html-signals render-blocking head resources",
         _observe("html-signals", _render_blocking_head, by_template=True),
     ),
-    "Q92": Answerer("html-signals form actions", _insecure_forms),
+    "Q92": Answerer("html-signals form actions", _insecure_forms, denominator_unit="forms"),
     "Q95": Answerer(
         "mobile-render overlay share and primary-content ratio",
         _observe("mobile-render", _interstitial, by_template=True),
     ),
-    "Q96": Answerer("robots-txt verdicts for AI crawlers against the profile policy", _ai_crawler_policy),
+    # Q96 tests one declared policy per host and AI user agent.
+    "Q96": Answerer(
+        "robots-txt verdicts for AI crawlers against the profile policy",
+        _ai_crawler_policy,
+        denominator_unit="host-agent policies",
+    ),
     "Q102": Answerer(
         "utility-path-probe against the approved path classes",
         _observe(

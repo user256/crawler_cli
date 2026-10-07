@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 from crawler_cli.__main__ import _OPT_IN_REPORTS, _REPORT_NAMES
-from crawler_cli.reports import CrawlReports
+from crawler_cli.extract import generate_xpath, parse_html, wraps_heading
+from crawler_cli.reports import CrawlReports, _heading_wrapping_links, mark_heading_wrapping_links
 from crawler_cli.technical_audit import TECHNICAL_AUDIT_REPORTS, build_technical_audit
+from crawler_cli.technical_audit_evidence import HEADING_LINK_XPATH_PATTERN
 from crawler_cli.technical_audit_questions import answer_questions, load_question_registry
 
 SITE = "https://example.com"
@@ -88,6 +91,175 @@ def test_q71_and_q15_count_only_indexable_pages() -> None:
     answers = _answers(reports)
     for qid in ("Q15", "Q71"):
         assert (answers[qid]["status"], answers[qid]["denominator"]) == ("Healthy", 2), qid
+
+
+# --- 393 / Q39: the H2/H3 heading-link population is counted ---------------------
+
+
+def _heading_failure(issue: str = "error_target", xpath: str = "/html/body/h2/a") -> dict[str, object]:
+    return {"issue": issue, "source_url": f"{SITE}/a", "target_url": f"{SITE}/x", "xpath": xpath}
+
+
+def _heading_counts(found: int, tested: int, wrapping: int | None = 0) -> dict[str, object]:
+    return {
+        "heading_link_count": found,
+        "heading_link_tested_count": tested,
+        "heading_link_wrapping_count": wrapping,
+    }
+
+
+def test_q39_is_healthy_over_a_counted_heading_link_population() -> None:
+    body_only = [_heading_failure(xpath="/html/body/p/a")]
+    answer = _answers({"internal-link-quality": body_only}, **_heading_counts(6, 6))["Q39"]
+    assert (answer["status"], answer["answer"]) == ("Healthy", "No")
+    assert (answer["denominator"], answer["denominator_unit"]) == (6, "heading links")
+
+
+def test_q39_heading_failures_stay_an_issue_with_a_ticket_over_the_tested_count() -> None:
+    reports = {"internal-link-quality": [_heading_failure(), _heading_failure("redirect_target", "/html/body/h3/a")]}
+    answer = _answers(reports, **_heading_counts(9, 7))["Q39"]
+    assert (answer["status"], answer["answer"], answer["ticket"]) == ("Issue", "Yes", True)
+    assert (answer["affected_count"], answer["denominator"]) == (2, 7)
+
+
+def test_q39_untested_heading_links_keep_a_clean_result_below_healthy() -> None:
+    answer = _answers({"internal-link-quality": []}, **_heading_counts(10, 8))["Q39"]
+    assert answer["status"] == "Needs validation" and answer["denominator"] == 8
+    assert any("2 of 10 heading links" in note and "not tested" in note for note in answer["notes"])
+
+
+def test_q39_cannot_pass_when_no_heading_link_was_found() -> None:
+    for found, tested in ((0, 0), (3, 0)):
+        answer = _answers({"internal-link-quality": []}, **_heading_counts(found, tested))
+        q39 = answer["Q39"]
+        assert q39["status"] != "Healthy", (found, tested)
+        assert q39["denominator"] is None
+        assert any("could not be tested" in note for note in q39["notes"])
+
+
+def test_q39_audit_without_heading_link_counts_keeps_the_old_answer() -> None:
+    answer = _answers({"internal-link-quality": []})["Q39"]
+    assert (answer["status"], answer["answer"], answer["denominator"]) == ("Needs validation", "No (partial)", None)
+    assert any("heading-link population is not counted" in note for note in answer["notes"])
+
+
+# --- 421 / Q39: links that wrap an H2/H3 are heading links too ----------------------
+
+# A card whose image link comes first: links_json keeps only that link for /card,
+# so the heading-wrapping anchor never reaches it and its XPath ends in /a anyway.
+CARD_HTML = (
+    "<html><body>"
+    '<h2><a href="/inside">Inside</a></h2>'
+    '<div><a href="/card"><img src="c.png" alt="Card"></a><a href="/card#top"><h3>Card</h3></a></div>'
+    '<a href="/grid"><div class="title"><h2>Grid</h2></div></a>'
+    '<a href="/deep"><div><div><h3>Too deep</h3></div></div></a>'
+    '<a href="/h1"><h1>Not H2/H3</h1></a>'
+    '<a href="https://other.example/"><h3>External</h3></a>'
+    '<a href="/plain">Plain</a>'
+    "</body></html>"
+)
+
+
+def test_wraps_heading_matches_a_h2_h3_and_one_wrapper_level_only() -> None:
+    soup = parse_html(CARD_HTML)
+    wrapped = {str(anchor["href"]) for anchor in soup.find_all("a", href=True) if wraps_heading(anchor)}
+    assert wrapped == {"/card#top", "/grid", "https://other.example/"}
+
+
+def test_heading_wrapping_links_use_the_crawlers_xpath_and_link_normalisation() -> None:
+    soup = parse_html(CARD_HTML)
+    rows = _heading_wrapping_links(f"{SITE}/blog", soup, f"{SITE}/blog/")
+    card = soup.find_all("a", href="/card#top")[0]
+    assert rows == [
+        {"source_url": f"{SITE}/blog", "target_url": f"{SITE}/card", "xpath": generate_xpath(card)},
+        {
+            "source_url": f"{SITE}/blog",
+            "target_url": f"{SITE}/grid",
+            "xpath": generate_xpath(soup.find("a", href="/grid")),
+        },
+    ]
+    assert not re.search(HEADING_LINK_XPATH_PATTERN, str(rows[0]["xpath"]), re.IGNORECASE)
+
+
+def test_failing_links_are_flagged_when_their_page_wraps_a_heading_around_the_same_target() -> None:
+    wrapping = [{"source_url": f"{SITE}/a", "target_url": f"{SITE}/x", "xpath": "/html/body/a[2]"}]
+    rows = [_heading_failure(xpath="/html/body/a[1]"), {**_heading_failure(), "target_url": f"{SITE}/y"}]
+    marked = mark_heading_wrapping_links(rows, wrapping)
+    assert [row.get("wraps_heading") for row in marked] == [True, None]
+    assert mark_heading_wrapping_links(rows, []) is rows
+
+
+def test_q39_counts_a_failing_link_that_wraps_a_heading() -> None:
+    wrapped = {**_heading_failure(xpath="/html/body/div/a"), "wraps_heading": True}
+    reports = {"internal-link-quality": [wrapped, _heading_failure(xpath="/html/body/p/a")]}
+    answer = _answers(reports, **_heading_counts(3, 3, wrapping=2))["Q39"]
+    assert (answer["status"], answer["answer"], answer["ticket"]) == ("Issue", "Yes", True)
+    assert (answer["affected_count"], answer["denominator"]) == (1, 3)
+    assert any("2 heading links wrap their heading" in note for note in answer["notes"])
+
+
+def test_q39_is_healthy_over_wrapping_heading_links_alone() -> None:
+    answer = _answers({"internal-link-quality": []}, **_heading_counts(137, 137, wrapping=137))["Q39"]
+    assert (answer["status"], answer["denominator"], answer["denominator_unit"]) == ("Healthy", 137, "heading links")
+
+
+def test_q39_is_not_healthy_when_the_wrapping_form_was_not_checked() -> None:
+    answer = _answers({"internal-link-quality": []}, **_heading_counts(6, 6, wrapping=None))["Q39"]
+    assert (answer["status"], answer["denominator"]) == ("Needs validation", 6)
+    assert any("wrap an H2/H3" in note and "not checked" in note for note in answer["notes"])
+
+
+class _PopulationStore:
+    def __init__(self, pages: list[tuple[str, str]]) -> None:
+        self.pages = pages
+
+    async def iter_run_html(self, *, run_id: str | None = None, batch_size: int = 200):
+        for page in self.pages:
+            yield page
+
+
+class _PopulationReports(CrawlReports):
+    def __init__(self, pages: list[tuple[str, str]]) -> None:
+        super().__init__(_PopulationStore(pages))  # type: ignore[arg-type]
+        self.queries: list[tuple[str, tuple[object, ...]]] = []
+
+    async def _run_id(self) -> str:
+        return "run-1"
+
+    async def _fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+        self.queries.append((query, args))
+        if "heading_links" in query:
+            return [{"heading_link_count": 5, "heading_link_tested_count": 4}]
+        return []
+
+
+def test_heading_link_population_unions_inside_and_wrapping_links() -> None:
+    reports = _PopulationReports([(f"{SITE}/blog", CARD_HTML)])
+    population = asyncio.run(reports.heading_link_population(has_links_json=True))
+    assert population == {"heading_link_count": 5, "heading_link_tested_count": 4, "heading_link_wrapping_count": 2}
+    query, args = next((query, args) for query, args in reports.queries if "heading_links" in query)
+    assert args[:2] == ("run-1", HEADING_LINK_XPATH_PATTERN)
+    assert args[2] == [f"{SITE}/blog", f"{SITE}/blog"]
+    assert args[3] == [f"{SITE}/card", f"{SITE}/grid"]
+    assert "UNION" in query and "unnest($3::TEXT[], $4::TEXT[], $5::TEXT[])" in query
+    assert "final_status_code IS NOT NULL" in query
+
+
+def test_heading_link_population_without_stored_html_or_links_json() -> None:
+    no_html = asyncio.run(_PopulationReports([]).heading_link_population(has_links_json=True))
+    assert no_html["heading_link_count"] == 5 and no_html["heading_link_wrapping_count"] is None
+    reports = _PopulationReports([(f"{SITE}/blog", CARD_HTML)])
+    unknown = asyncio.run(reports.heading_link_population(has_links_json=False))
+    assert set(unknown.values()) == {None}
+    assert reports.queries == []
+
+
+def test_heading_link_pattern_matches_only_h2_and_h3_links() -> None:
+    def matches(xpath: str) -> bool:
+        return re.search(HEADING_LINK_XPATH_PATTERN, xpath, re.IGNORECASE) is not None
+
+    assert matches("/html/body/h2/a") and matches("/html/body/div[2]/h3[4]/span/a") and matches("/HTML/BODY/H2/A")
+    assert not matches("/html/body/h1/a") and not matches("/html/body/h4/a") and not matches("/html/body/p/a")
 
 
 # --- 395: Q44 only trusts depths that are click depths from a homepage -----------

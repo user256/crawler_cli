@@ -29,7 +29,19 @@ crawler-cli technical-audit-questions --audit audit.json --site-profile profile.
 - `--robots-txt HOST=FILE` takes a robots.txt body saved by the operator.
 - `--ai-governance` fetches each seed origin's robots.txt and /llms.txt through
   the guarded engine and writes `robots-txt` records (status, body,
-  llms_txt_status).
+  llms_txt_status). A robots.txt that was not read (timeout, denied
+  destination, challenge, truncated body, no response) is kept as a record with
+  `fetch_outcome: "unknown"`, a null status and an `unknown_reason`, and makes
+  the collection partial. `--ai-governance-max-origins` caps the probed seed
+  origins; the collection's `population` records the eligible, selected and
+  omitted origins, and a cap below the eligible count makes coverage partial,
+  so Q96 cannot reach Healthy from a sample. The /llms.txt probe carries its
+  own `llms_txt_outcome` (`fetched` or `unknown`) and, when unread (timeout,
+  denied destination, challenge, robots unavailable or disallowed),
+  `llms_txt_unknown_reason`; the scope lists unread hosts and Q96 reports them
+  as untested, never absent. /llms.txt is reported only, so it does not change
+  robots coverage. Bundles without these fields still load; an unread
+  `llms_txt_status` there is also read as untested.
 - `--probe-accept-language` probes the seed and locale roots with a fixed
   Accept-Language set (ticket 260), persists the session (ticket 264) and
   writes `locale-probe` records.
@@ -85,12 +97,12 @@ that collected them.
 | `mobile-render` | url | template, overlay_viewport_share (0–1), overlay_kind, raw_primary_words, rendered_primary_words | Q95 |
 | `listing-controls` | url, control | template, element, changes_listing, crawlable_href | Q38 |
 | `image-resources` | image_url, content_type | page_url, in_content | Q66 |
-| `locale-probe` | url, variant | baseline_status, variant_status, baseline_location, variant_location (null when there is no Location header), primary_content_differs; a probe is clean only when all five are recorded | Q25 |
+| `locale-probe` | url, variant | baseline_status, variant_status, baseline_location, variant_location (null when there is no Location header), primary_content_differs (visible text of `<main>` or `<body>`, scripts and attributes ignored, null unless a repeated header-less control matched; raw_body_differs is review-only); a probe is clean only when all five are recorded. A status of 0 or null means the request was never answered (fetch error, timeout, robots or scope rejection; see baseline_failure/variant_failure), so that variant is untested, never a status change. baseline_outcome/variant_outcome and the failure `outcome` say why: `fetch_failed` (sent, never answered: a connection error or timeout, skip reason `fetch_error:...`), `not_admitted` (the crawler refused to send it: robots, scope, destination guard, budget), each with a `redirect_target_` form for a later hop, or `fetch_error` (status 0 with no reason). Bundles saved before this split label a timeout `not_admitted`; the adapter reads its `fetch_error:...` skip reason as `fetch_failed` | Q25 |
 | `host-probe` | host | status, content_type (unknown when null, so a 200 is a candidate for review, not an Issue), auth_required, noindex, canonical_to_main_host, robots_blocked, discovered_via | Q27, Q77 |
 | `utility-path-probe` | url | path_class (`protected` or `public-utility`, from the approved policy), status, auth_required, exposes_content, noindex, robots_blocked (a public-utility path needs both noindex and robots_blocked recorded) | Q102 |
 | `external-link-recheck` | source_url, target_url | status, rel (required for an affiliate link; null when the anchor has none), affiliate | Q28 |
 | `tls-probe` | host | hsts_header (null when absent), preload_status, ocsp_stapled | Q63 |
-| `robots-txt` | host, status | body (required with a 2xx status; a 404 or 410 means no file and allows everything; a redirect, any other 4xx or a 5xx is unread), llms_txt_status | Q96 |
+| `robots-txt` | host; plus an integer status, or `fetch_outcome: "unknown"` with an `unknown_reason` and no status | body (required with a 2xx status; a 404 or 410 means no file and allows everything; a redirect, any other 4xx or a 5xx is unread), llms_txt_status, llms_txt_outcome (`fetched` needs llms_txt_status; `unknown` needs llms_txt_unknown_reason) | Q96 |
 | `google-render-inspection` | url, template, tool | primary_content_present, blocked_resources, render_error | Q18 |
 | `verified-google-fetch` | url | content_differs, links_differ, directives_differ (all three must be recorded for a matching fetch), google_fetch_method | Q31 |
 | `competitor-topic-gap` | topic, site_covers, competitors_covering | query, method | Q50 |

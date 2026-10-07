@@ -19,6 +19,7 @@ from urllib.parse import quote as _urlquote, urlsplit
 
 if TYPE_CHECKING:
     from .models import CrawlJobResult, CrawlResult
+    from .google_sheets import PublishReceipt
 
 from .adaptive_rate import format_pressure_summary
 from .archive import audit_archive_urls
@@ -86,9 +87,14 @@ from .intent_signature import DEFAULT_THIN_SIGNATURE_WORDS
 from .persistence import AsyncpgStore, MemoryStore, database_name_from_dsn
 from .redaction import CorrelationDigest, SECRETS, project_url, scrub_text
 from .remap import Remap
-from .reports import CrawlReports
+from .reports import TECHNICAL_AUDIT_REPORT_CAPABILITIES, CrawlReports, mark_heading_wrapping_links
 from .technical_audit import TECHNICAL_AUDIT_REPORTS, audit_sheet_tables, build_technical_audit
-from .technical_audit_tickets import TicketLanguageError, build_ticket_register, load_ticket_language
+from .technical_audit_tickets import (
+    TicketLanguageError,
+    build_ticket_register,
+    load_ticket_language,
+    ticketed_check_ids,
+)
 from .validators import (
     non_negative_float,
     non_negative_int,
@@ -837,6 +843,73 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         adaptive_max_retry_after_seconds=getattr(args, "adaptive_max_retry_after", 60.0),
         scope_predicate=scope_predicate,
     )
+
+
+def _probe_engine_config(args: argparse.Namespace, seed_origins: list[str], allowed_hosts: set[str]) -> CrawlConfig:
+    """Guarded engine config for the live observation probes (ticket 427).
+
+    Takes the same transport and identity options as ``crawl`` (``--http-backend``,
+    ``--impersonate``, ``--custom-ua``, ``--no-challenge-detection``) plus a
+    per-request delay, so a protected site can be probed the way it was crawled.
+    As in ``crawl``, an impersonated fingerprint keeps the profile's own
+    User-Agent unless ``--custom-ua`` is given.  The address-pinned destination
+    guard only reaches aiohttp sockets, so curl_cffi probes use the resolver
+    guard, which is what ``crawl`` uses by default.
+    """
+    impersonate = getattr(args, "curl_impersonate", "") or ""
+    custom_ua = getattr(args, "custom_ua", None)
+    backend = getattr(args, "http_backend", None) or (
+        "curl_cffi" if impersonate and impersonate != "none" else "aiohttp"
+    )
+    if impersonate and impersonate != "none" and backend != "curl_cffi":
+        raise ValueError("--impersonate needs --http-backend curl_cffi")
+    if impersonate and impersonate != "none" and not custom_ua:
+        user_agent = ""
+    else:
+        user_agent = custom_ua or "canonicalbot/0.1"
+    delay = getattr(args, "probe_delay", 1.0)
+    if delay is None or delay < 0:
+        raise ValueError("--probe-delay must be zero or more seconds")
+    return CrawlConfig(
+        backend=backend,
+        user_agent=user_agent,
+        curl_impersonate=impersonate,
+        # 0 rate means no limiter; a delay is the minimum gap between requests.
+        rate_limit_per_second=(1.0 / delay) if delay > 0 else 0.0,
+        detect_challenges=not getattr(args, "no_challenge_detection", False),
+        same_host_only=True,
+        allowed_hosts=sorted(allowed_hosts),
+        respect_robots_txt=True,
+        max_concurrency=2,
+        per_host_concurrency=1,
+        max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
+        destination_guard="pinned" if backend == "aiohttp" else "resolver",
+        challenge_escalate_to_browser=False,
+        scope_predicate=cast(Any, build_site_file_scope(seed_origins, allowed_hosts, None)),
+    )
+
+
+def _locale_probe_scope(
+    evidence: list[dict[str, object]], records: list[dict[str, object]], target_count: int, population: int
+) -> tuple[str, str]:
+    """Scope text and coverage state for the locale-probe collection (ticket 426).
+
+    Complete only when every eligible root was probed and every baseline,
+    repeat and variant request was answered; a challenged, rate-limited,
+    refused or failed request leaves the collection partial.
+    """
+    coverage = next((row for row in evidence if row.get("record_type") == "coverage"), {})
+    unanswered = coverage.get("unanswered_probe_outcomes")
+    unanswered = unanswered if isinstance(unanswered, dict) else {}
+    incomparable = sum(1 for record in records if record.get("baseline_failure") or record.get("variant_failure"))
+    scope = f"{target_count} of {population} eligible roots; {len(records)} header variants"
+    if unanswered:
+        reasons = ", ".join(f"{outcome} {count}" for outcome, count in sorted(unanswered.items()))
+        scope += f"; {sum(unanswered.values())} probe requests unanswered ({reasons})"
+    if incomparable:
+        scope += f"; {incomparable} of {len(records)} comparisons lack an answered baseline or variant"
+    complete = bool(population) and target_count >= population and not unanswered and not incomparable
+    return scope, "complete" if complete else "partial"
 
 
 def _add_postgres_args(parser: argparse.ArgumentParser) -> None:
@@ -2626,13 +2699,6 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
         capabilities = run_context.get("schema_capabilities", {})
         if not isinstance(capabilities, dict):
             capabilities = {}
-        capability_by_report = {
-            "image-issues": "images_json",
-            "internal-link-quality": "links_json",
-            "tracking-parameter-links": "links_json",
-            "near-duplicates": "content_hash_simhash",
-            "locale-content-alignment": "run_intent_signatures",
-        }
         evidence = {}
         supplied_inputs: dict[str, list[dict[str, object]]] = {}
         if args.search_evidence:
@@ -2659,13 +2725,21 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
                 continue
             if name in {"inventory-interactions", "supplied-search-evidence"}:
                 continue
-            if name in {"render-url-candidates", "render-attempts"}:
-                evidence[name] = await _fetch_report(reports, name, args)
-                continue
-            capability = capability_by_report.get(name)
-            if capability and capabilities.get(capability) is not True:
+            # An older snapshot table lacks newer columns: leave the report
+            # out so its checks read as unavailable instead of failing the run.
+            required = TECHNICAL_AUDIT_REPORT_CAPABILITIES.get(name, ())
+            if any(capabilities.get(capability) is not True for capability in required):
                 continue
             evidence[name] = await _fetch_report(reports, name, args)
+        # Q39 (tickets 393, 421): count the heading-link population, inside or
+        # wrapping an H2/H3, and flag failing links whose page links to the
+        # same target from an anchor that wraps a heading.
+        has_links_json = capabilities.get("links_json") is True
+        run_context.update(await reports.heading_link_population(has_links_json=has_links_json))
+        if has_links_json and "internal-link-quality" in evidence:
+            evidence["internal-link-quality"] = mark_heading_wrapping_links(
+                evidence["internal-link-quality"], await reports.heading_wrapping_links()
+            )
         final_run = await store.get_crawl_run(run_id)
         initial_updated_at = run_context.get("updated_at")
         final_updated_at = final_run.get("updated_at") if final_run else None
@@ -2690,7 +2764,8 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
 
     audit = build_technical_audit(crawl_run_id=run_id, reports=evidence, run_context=run_context)
     try:
-        audit["ticket_register"] = build_ticket_register(audit, load_ticket_language(args.ticket_language))
+        ticket_language = load_ticket_language(args.ticket_language)
+        audit["ticket_register"] = build_ticket_register(audit, ticket_language)
     except TicketLanguageError as exc:
         print(f"Error: ticket language {exc}", file=sys.stderr)
         return EXIT_VALIDATION
@@ -2699,28 +2774,96 @@ async def _run_technical_audit(args: argparse.Namespace) -> int:
     output.write_text(json.dumps(audit, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     print(f"Wrote deterministic technical audit to {output}")
 
-    if args.google_sheets_template:
-        from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services
-
-        try:
-            drive, sheets = google_services(credential_path(args.google_sheets_credentials))
-            title = args.google_sheets_title or f"Technical SEO Audit – {run_id}"
-            url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
-                template=args.google_sheets_template,
-                title=title,
-                folder_id=args.google_sheets_folder,
-                tables=audit_sheet_tables(audit),
-            )
-        except (RuntimeError, ValueError) as exc:
-            print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
+    if _google_sheets_requested(args):
+        receipt = _publish_google_sheet(
+            args,
+            f"Technical SEO Audit – {run_id}",
+            audit_sheet_tables(audit, ticketed_check_ids(audit, ticket_language)),
+        )
+        if receipt is None:
             return EXIT_VALIDATION
-        print(f"Published technical audit workbook: {url}")
+        print(f"Published technical audit workbook: {receipt.url}")
+        for line in receipt.summary_lines():
+            print(line)
 
     return EXIT_SUCCESS
 
 
+def _google_sheets_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "google_sheets_template", None) or getattr(args, "google_sheets_contract", None))
+
+
+def _publish_google_sheet(
+    args: argparse.Namespace, default_title: str, tables: dict[str, list[list[object]]]
+) -> PublishReceipt | None:
+    """Copy the contract's template (or --google-sheets-template), publish and read back.
+
+    Returns the ``PublishReceipt``, or None after printing an error (including a
+    ``PublishReceiptError`` when the read-back differs from what was sent).
+    """
+    from .google_sheets import (
+        GoogleSheetsTemplatePublisher,
+        credential_path,
+        google_api_error,
+        google_services,
+        load_template_contract,
+    )
+
+    try:
+        contract = load_template_contract(getattr(args, "google_sheets_contract", None))
+        drive, sheets = google_services(credential_path(args.google_sheets_credentials))
+        return GoogleSheetsTemplatePublisher(drive, sheets, contract).publish(
+            template=args.google_sheets_template,
+            title=args.google_sheets_title or default_title,
+            folder_id=args.google_sheets_folder,
+            tables=tables,
+        )
+    except (RuntimeError, ValueError) as exc:
+        print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
+        return None
+    except Exception as exc:
+        message = google_api_error(exc)
+        if message is None:
+            raise
+        print(f"Error: Google Sheets publish failed: {message}", file=sys.stderr)
+        return None
+
+
+def _check_google_sheets_template(args: argparse.Namespace) -> int:
+    """Compare the template's dropdown sources with the contract's value sets; read-only."""
+    from .google_sheets import (
+        check_template_validation,
+        credential_path,
+        google_api_error,
+        google_services,
+        load_template_contract,
+    )
+
+    try:
+        contract = load_template_contract(getattr(args, "google_sheets_contract", None))
+        _drive, sheets = google_services(credential_path(getattr(args, "google_sheets_credentials", None)))
+        report = check_template_validation(sheets, contract, template=getattr(args, "google_sheets_template", None))
+    except (RuntimeError, ValueError) as exc:
+        print(f"Error: Google Sheets template check failed: {exc}", file=sys.stderr)
+        return EXIT_VALIDATION
+    except Exception as exc:
+        message = google_api_error(exc)
+        if message is None:
+            raise
+        print(f"Error: Google Sheets template check failed: {message}", file=sys.stderr)
+        return EXIT_VALIDATION
+    for line in report.lines():
+        print(line)
+    return EXIT_SUCCESS if report.ok else EXIT_VALIDATION
+
+
 def _run_technical_audit_questions(args: argparse.Namespace) -> int:
     """Answer every registry question from one saved audit bundle; no database or network."""
+    if getattr(args, "check_template", False):
+        return _check_google_sheets_template(args)
+    if not getattr(args, "audit", None) or not getattr(args, "out", None):
+        print("Error: technical-audit-questions needs --audit and --out (unless --check-template)", file=sys.stderr)
+        return EXIT_VALIDATION
     from .audit_observations import ObservationError, attach_observations, load_observation_bundle
     from .technical_audit_questions import (
         QuestionRegistryError,
@@ -2768,23 +2911,17 @@ def _run_technical_audit_questions(args: argparse.Namespace) -> int:
     summary = ", ".join(f"{name} {counts.get(name, 0)}" for name in ("Issue", "Needs validation", "Healthy", "Pending"))
     print(f"Wrote {len(answers)} question answers and {len(tickets)} draft tickets to {output} ({summary})")
 
-    if args.google_sheets_template:
-        from .google_sheets import GoogleSheetsTemplatePublisher, credential_path, google_services
-
-        try:
-            drive, sheets = google_services(credential_path(args.google_sheets_credentials))
-            title = args.google_sheets_title or f"Technical SEO Audit – {audit.get('crawl_run_id')}"
-            url = GoogleSheetsTemplatePublisher(drive, sheets).publish(
-                template=args.google_sheets_template,
-                title=title,
-                folder_id=args.google_sheets_folder,
-                tables=questions_sheet_tables(audit, registry, answers, tickets),
-                locate_ticket_header=True,
-            )
-        except (RuntimeError, ValueError) as exc:
-            print(f"Error: Google Sheets publish failed: {exc}", file=sys.stderr)
+    if _google_sheets_requested(args):
+        receipt = _publish_google_sheet(
+            args,
+            f"Technical SEO Audit – {audit.get('crawl_run_id')}",
+            questions_sheet_tables(audit, registry, answers, tickets),
+        )
+        if receipt is None:
             return EXIT_VALIDATION
-        print(f"Published question workbook: {url}")
+        print(f"Published question workbook: {receipt.url}")
+        for line in receipt.summary_lines():
+            print(line)
     return EXIT_SUCCESS
 
 
@@ -2855,7 +2992,7 @@ async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
         import asyncpg
 
         from .audit_observation_adapters import (
-            llms_txt_status_by_host,
+            llms_txt_probe_by_host,
             locale_probe_records,
             robots_txt_record,
             tls_probe_records,
@@ -2883,40 +3020,77 @@ async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
                 print("Error: the run records no seed hosts, so live probes have no origin to target", file=sys.stderr)
                 return EXIT_VALIDATION
             if getattr(args, "ai_governance", False) or getattr(args, "probe_accept_language", False):
-                probe_engine = CrawlEngine(
-                    CrawlConfig(
-                        same_host_only=True,
-                        allowed_hosts=sorted(allowed_hosts),
-                        respect_robots_txt=True,
-                        max_concurrency=2,
-                        per_host_concurrency=1,
-                        max_response_bytes=MAX_RESPONSE_BYTES_DEFAULT,
-                        destination_guard="pinned",
-                        challenge_escalate_to_browser=False,
-                        scope_predicate=cast(Any, build_site_file_scope(seed_origins, allowed_hosts, None)),
-                    )
-                )
+                probe_engine = CrawlEngine(_probe_engine_config(args, seed_origins, allowed_hosts))
             if getattr(args, "ai_governance", False):
                 assert probe_engine is not None
-                origins = seed_origins[: max(1, args.ai_governance_max_origins)]
-                collected = await collect_ai_governance(
-                    probe_engine, seed_origins=origins, max_origins=max(1, args.ai_governance_max_origins)
-                )
-                llms = llms_txt_status_by_host(collected)
+                # Ticket 411: the cap selects a sample of the eligible seed
+                # origins; the omitted ones stay in the collection's population
+                # and make its coverage partial even when every fetch succeeds.
+                eligible = list(dict.fromkeys(origin.lower() for origin in seed_origins))
+                cap = max(1, args.ai_governance_max_origins)
+                origins, omitted_origins = eligible[:cap], eligible[cap:]
+                collected = await collect_ai_governance(probe_engine, seed_origins=origins, max_origins=cap)
+                llms = llms_txt_probe_by_host(collected)
                 records = []
                 for origin in origins:
                     host = urlsplit(origin).netloc.lower()
-                    response = await probe_engine._bounded_fetch_response(f"{origin.rstrip('/')}/robots.txt")
-                    records.append(robots_txt_record(host, response, llms.get(host)))
-                unread = [str(record["host"]) for record in records if record["status"] is None]
+                    reasons: list[str] = []
+                    response = await probe_engine._bounded_fetch_response(
+                        f"{origin.rstrip('/')}/robots.txt", on_skip=reasons.append
+                    )
+                    # Ticket 410: an unread file stays as an unknown record for its host.
+                    # Ticket 423: an unread /llms.txt is unknown with its reason, never absent.
+                    llms_probe = llms.get(host, {})
+                    records.append(
+                        robots_txt_record(
+                            host,
+                            response,
+                            llms_probe.get("status"),
+                            unknown_reason=reasons[-1] if reasons else None,
+                            llms_txt_outcome_value=llms_probe.get("outcome"),
+                            llms_txt_unknown_reason=llms_probe.get("unknown_reason"),
+                        )
+                    )
+                unread = [
+                    f"{record['host']} ({record['unknown_reason']})"
+                    for record in records
+                    if record.get("fetch_outcome") == "unknown"
+                ]
+                omitted_hosts = [urlsplit(origin).netloc for origin in omitted_origins]
+                scope = f"{len(origins)} of {len(eligible)} eligible seed origins (cap {cap})"
+                if omitted_hosts:
+                    scope += f"; omitted by cap: {', '.join(omitted_hosts)}"
+                if unread:
+                    scope += f"; not read: {', '.join(unread)}"
+                llms_unread = [
+                    f"{record['host']} ({record['llms_txt_unknown_reason']})"
+                    for record in records
+                    if record.get("llms_txt_outcome") == "unknown"
+                ]
+                if llms_unread:
+                    # /llms.txt is reported only (not a Q96 verdict input), so it
+                    # does not change robots coverage, but its gaps stay visible.
+                    scope += f"; /llms.txt not read (untested): {', '.join(llms_unread)}"
                 collections.append(
                     collection(
                         "robots-txt",
                         records,
                         source="crawler-cli technical-audit-observations --ai-governance: guarded live robots.txt and /llms.txt fetch",
-                        scope=f"{len(records)} seed origins"
-                        + (f"; not fetched: {', '.join(unread)}" if unread else ""),
-                        coverage_state="partial" if unread else "complete",
+                        scope=scope,
+                        coverage_state="partial" if unread or omitted_hosts else "complete",
+                        population={
+                            "unit": "seed origins",
+                            "eligible_count": len(eligible),
+                            "selected_count": len(origins),
+                            "omitted_count": len(omitted_origins),
+                            "cap": cap,
+                            "eligible": [urlsplit(origin).netloc for origin in eligible],
+                            "selected": [urlsplit(origin).netloc for origin in origins],
+                            "omitted": omitted_hosts,
+                            "unread": [
+                                str(record["host"]) for record in records if record.get("fetch_outcome") == "unknown"
+                            ],
+                        },
                     )
                 )
             if getattr(args, "probe_accept_language", False):
@@ -2933,13 +3107,14 @@ async def _run_technical_audit_observations(args: argparse.Namespace) -> int:
                 )
                 await store.persist_language_probe_evidence(run_id, evidence, session_id=str(uuid.uuid4()))
                 records = locale_probe_records(evidence)
+                scope, coverage_state = _locale_probe_scope(evidence, records, len(targets), population)
                 collections.append(
                     collection(
                         "locale-probe",
                         records,
                         source="crawler-cli technical-audit-observations --probe-accept-language: guarded Accept-Language probes",
-                        scope=f"{len(targets)} of {population} eligible roots; {len(records)} header variants",
-                        coverage_state="complete" if population and len(targets) >= population else "partial",
+                        scope=scope,
+                        coverage_state=coverage_state,
                     )
                 )
             if getattr(args, "tls_probe", False):
@@ -4686,10 +4861,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     audit_parser.add_argument(
         "--google-sheets-template",
-        help="Copy this Google Sheets template and publish the Tickets and evidence tabs.",
+        help="Copy this Google Sheets template (default: the template contract's) and publish the Tickets and the evidence tabs of checks with issues.",
     )
     audit_parser.add_argument("--google-sheets-title", help="Title for the copied Google Sheet.")
     audit_parser.add_argument("--google-sheets-folder", help="Optional Google Drive folder ID for the copied sheet.")
+    audit_parser.add_argument(
+        "--google-sheets-contract",
+        help="Template contract JSON (template ID, Tickets tab, columns, dropdown values, protected tabs); "
+        "default templates/google-sheets-template-contract.json. Its template is used when "
+        "--google-sheets-template is omitted.",
+    )
     audit_parser.add_argument(
         "--google-sheets-credentials",
         help="Service-account credential file; otherwise GOOGLE_DOCS_OAUTH_TOKEN_FILE is used.",
@@ -4702,9 +4883,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Answer the audit template's Questions tab from a saved technical-audit JSON",
     )
     questions_parser.add_argument(
-        "--audit", required=True, help="technical-audit JSON written by technical-audit --out"
+        "--audit", help="technical-audit JSON written by technical-audit --out (required unless --check-template)"
     )
-    questions_parser.add_argument("--out", required=True, help="Write the question answers JSON to this path")
+    questions_parser.add_argument(
+        "--out", help="Write the question answers JSON to this path (required unless --check-template)"
+    )
     questions_parser.add_argument(
         "--site-profile",
         help="Site profile JSON (see templates/site-profile.example.json); questions needing it stay Pending without it.",
@@ -4724,15 +4907,29 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     questions_parser.add_argument(
         "--google-sheets-template",
-        help="Copy this Google Sheets template and publish the Questions, Tickets and data tabs.",
+        help="Copy this Google Sheets template (default: the template contract's) and publish the ticketed answers only: Questions, Tickets and their data tabs.",
     )
     questions_parser.add_argument("--google-sheets-title", help="Title for the copied Google Sheet.")
     questions_parser.add_argument(
         "--google-sheets-folder", help="Optional Google Drive folder ID for the copied sheet."
     )
     questions_parser.add_argument(
+        "--google-sheets-contract",
+        help="Template contract JSON (template ID, Tickets tab, columns, dropdown values, protected tabs); "
+        "default templates/google-sheets-template-contract.json. Its template is used when "
+        "--google-sheets-template is omitted.",
+    )
+    questions_parser.add_argument(
         "--google-sheets-credentials",
         help="Service-account credential file; otherwise GOOGLE_DOCS_OAUTH_TOKEN_FILE is used.",
+    )
+    questions_parser.add_argument(
+        "--check-template",
+        action="store_true",
+        help="Read-only: compare the template's Priority / Ticket Classification dropdown sources "
+        "(--google-sheets-template, else the contract's) with the contract's value sets, print the "
+        "diff and exit non-zero on a mismatch. Answers nothing and writes nothing; --audit and --out "
+        "are not needed.",
     )
 
     observations_parser = subparsers.add_parser(
@@ -4786,6 +4983,39 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     observations_parser.add_argument(
         "--accept-language-max-hops", type=int, default=5, help="Redirect hops followed per Accept-Language probe."
+    )
+    probe_transport = observations_parser.add_argument_group(
+        "Live probe transport (--ai-governance, --probe-accept-language)",
+        "Same transport and identity options as crawl, so a protected site is probed the way it was crawled.",
+    )
+    probe_transport.add_argument("--http-backend", choices=["aiohttp", "curl_cffi"], help="HTTP backend for probes")
+    probe_transport.add_argument(
+        "--impersonate",
+        dest="curl_impersonate",
+        default="",
+        metavar="TARGET",
+        help="curl_cffi only: browser TLS/HTTP fingerprint for probes (e.g. firefox). Implies "
+        "--http-backend curl_cffi. Pass a matching --custom-ua: Cloudflare blocks a mismatched one.",
+    )
+    probe_transport.add_argument(
+        "--custom-ua",
+        "--user-agent",
+        dest="custom_ua",
+        help="User-Agent for probes (default canonicalbot/0.1, or the impersonated profile's own).",
+    )
+    probe_transport.add_argument(
+        "--no-challenge-detection",
+        action="store_true",
+        help="Turn off the engine's body-signature challenge detector for probes (Turnstile pages "
+        "false-positive). A cf-mitigated: challenge header or a challenge page on 403/429/503 is still "
+        "recorded as challenged and never compared.",
+    )
+    probe_transport.add_argument(
+        "--probe-delay",
+        type=non_negative_float,
+        default=1.0,
+        metavar="SECONDS",
+        help="Minimum gap between probe requests (default 1.0; 0 disables the limiter).",
     )
     observations_parser.add_argument(
         "--tls-probe",

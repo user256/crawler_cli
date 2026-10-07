@@ -6,12 +6,15 @@ from typing import Any, cast
 from urllib.parse import parse_qsl, urljoin, urlparse
 
 from .amp import urls_match
-from .extract import parse_html
+from bs4 import BeautifulSoup
+
+from .extract import generate_xpath, parse_html, wraps_heading
 from .hashing import hamming64
 from .html_audit import canonical_targets, inspect_stored_html
 from .hreflang_audit import hreflang_facts
 from .semantic_html_audit import inspect_semantic_html
 from .persistence import AsyncpgStore
+from .technical_audit_evidence import HEADING_LINK_XPATH_PATTERN, HEADING_WRAPPING_LINK_FIELD
 
 
 _TRACKING_PARAMETERS = {
@@ -36,6 +39,66 @@ _H1 = re.compile(r"<h1\b[^>]*>(.*?)</h1\s*>", re.IGNORECASE | re.DOTALL)
 _TAG = re.compile(r"<[^>]+>")
 _HOMEPAGE_PATHS = frozenset({"", "/", "/index.html", "/index.htm", "/index.php"})
 _MAX_CLUSTER_URLS = 50
+
+# page_run_snapshots columns added by migrations after the table first
+# shipped.  A database crawled by an older version can lack any of them, so
+# technical_audit_context reports each one in ``schema_capabilities``.
+SNAPSHOT_OPTIONAL_COLUMNS = (
+    "amphtml_url",
+    "analytics_json",
+    "canonical_evidence_json",
+    "canonical_urls_json",
+    "cls",
+    "content_extracted",
+    "hreflang_json",
+    "images_json",
+    "indexability_evidence_json",
+    "inp_ms",
+    "lcp_ms",
+    "links_json",
+    "redirect_chain_json",
+    "render_discovery_attempted",
+    "render_discovery_complete",
+    "render_discovery_skip_reason",
+    "robots_json",
+    "schema_json",
+    "total_duration_seconds",
+    "ttfb_seconds",
+    "variant_kind",
+)
+
+# Capabilities each technical-audit report's SQL needs.  The audit skips a
+# report whose capabilities are missing, so its checks read as unavailable
+# instead of the run crashing on an older snapshot table.  A report absent
+# from this map reads only columns every snapshot table has, or guards its
+# own.  tests/test_technical_audit_legacy_schema.py keeps the map in step
+# with the SQL each report issues.
+TECHNICAL_AUDIT_REPORT_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "orphans": (
+        "canonical_urls_json",
+        "content_extracted",
+        "links_json",
+        "render_discovery_attempted",
+        "render_discovery_complete",
+    ),
+    "schema-compatibility": ("schema_json",),
+    "image-issues": ("images_json",),
+    "internal-link-quality": ("canonical_urls_json", "links_json"),
+    "tracking-parameter-links": ("links_json",),
+    "near-duplicates": ("content_hash_simhash",),
+    "internal-authority": ("links_json",),
+    "locale-content-alignment": ("content_extracted", "hreflang_json", "run_intent_signatures"),
+    "render-attempts": (
+        "render_discovery_attempted",
+        "render_discovery_complete",
+        "render_discovery_skip_reason",
+    ),
+    "metadata-duplicates": ("canonical_urls_json", "content_extracted"),
+    "hreflang-validation": ("canonical_urls_json", "content_extracted", "hreflang_json"),
+    "profile-indexability-pages": ("canonical_urls_json", "content_extracted", "links_json"),
+    "discovery-source-provenance": ("links_json",),
+    "performance-pages": ("ttfb_seconds",),
+}
 
 
 def _json_value(value: object) -> object:
@@ -204,10 +267,53 @@ def _build_link_graph(
 _EMPTY_ANCHORS_PER_PAGE = 100
 
 
-def _empty_anchor_page_row(url: str, html: str) -> dict[str, object]:
+def _heading_wrapping_links(url: str, soup: BeautifulSoup, base_url: str | None = None) -> list[dict[str, object]]:
+    """Internal links on one page that wrap an H2/H3 (``a > h2|h3`` or ``a > * > h2|h3``), for Q39.
+
+    Targets are normalised as ``extract_links`` does (resolved against the
+    page's final URL, fragment dropped), so they join to the run's saved
+    targets and to the ``internal-link-quality`` rows of the same page.  The
+    XPath is the anchor's own, from the crawler's ``generate_xpath``.
+    """
+    base = base_url or url
+    base_host = urlparse(base).netloc.casefold()
+    rows: list[dict[str, object]] = []
+    for anchor in soup.find_all("a", href=True):
+        if not wraps_heading(anchor):
+            continue
+        parsed = urlparse(urljoin(base, str(anchor.get("href", "")).strip()))
+        if parsed.scheme not in {"http", "https"} or parsed.netloc.casefold() != base_host:
+            continue
+        rows.append(
+            {"source_url": url, "target_url": parsed._replace(fragment="").geturl(), "xpath": generate_xpath(anchor)}
+        )
+    return rows
+
+
+def mark_heading_wrapping_links(
+    rows: list[dict[str, object]], wrapping: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """Flag link rows whose page links to the same target from a heading-wrapping anchor.
+
+    Matched on (source, target), not XPath: ``links_json`` keeps one link per
+    target per page, so the saved row often carries the XPath of a card's
+    image link rather than of its heading link.  The target is the same.
+    """
+    pairs = {(str(row["source_url"]), str(row["target_url"])) for row in wrapping}
+    if not pairs:
+        return rows
+    return [
+        {**row, HEADING_WRAPPING_LINK_FIELD: True}
+        if (str(row.get("source_url")), str(row.get("target_url"))) in pairs
+        else row
+        for row in rows
+    ]
+
+
+def _empty_anchor_page_row(url: str, html: str, soup: BeautifulSoup | None = None) -> dict[str, object]:
     """Count a page's internal anchors and list only those with no text, capped per page."""
     source_host = urlparse(url).netloc.casefold()
-    soup = parse_html(html)
+    soup = soup if soup is not None else parse_html(html)
     total = 0
     empty: list[dict[str, object]] = []
     truncated = False
@@ -327,25 +433,27 @@ class CrawlReports:
         stats["run_sitemap_source_count"] = _int_or_none(sitemap_sources[0].get("n")) if sitemap_sources else 0
         # Q81: did the origin slow down while the run read it?  Compare the
         # median TTFB of the first and last tenth of timed fetches.
-        drift = await self._fetch(
-            """
-            WITH timed AS (
-                SELECT ttfb_seconds, ntile(10) OVER (ORDER BY fetched_at) AS decile
-                FROM page_run_snapshots WHERE run_id = $1 AND ttfb_seconds IS NOT NULL
+        # Snapshot tables older than the timing columns have no TTFB to compare.
+        if "ttfb_seconds" in snapshot_columns:
+            drift = await self._fetch(
+                """
+                WITH timed AS (
+                    SELECT ttfb_seconds, ntile(10) OVER (ORDER BY fetched_at) AS decile
+                    FROM page_run_snapshots WHERE run_id = $1 AND ttfb_seconds IS NOT NULL
+                )
+                SELECT COUNT(*)::INT AS ttfb_sample_count,
+                       (percentile_cont(0.5) WITHIN GROUP (ORDER BY ttfb_seconds) FILTER (WHERE decile = 1) * 1000)::DOUBLE PRECISION
+                           AS ttfb_early_median_ms,
+                       (percentile_cont(0.5) WITHIN GROUP (ORDER BY ttfb_seconds) FILTER (WHERE decile = 10) * 1000)::DOUBLE PRECISION
+                           AS ttfb_late_median_ms
+                FROM timed
+                """,
+                run_id,
             )
-            SELECT COUNT(*)::INT AS ttfb_sample_count,
-                   (percentile_cont(0.5) WITHIN GROUP (ORDER BY ttfb_seconds) FILTER (WHERE decile = 1) * 1000)::DOUBLE PRECISION
-                       AS ttfb_early_median_ms,
-                   (percentile_cont(0.5) WITHIN GROUP (ORDER BY ttfb_seconds) FILTER (WHERE decile = 10) * 1000)::DOUBLE PRECISION
-                       AS ttfb_late_median_ms
-            FROM timed
-            """,
-            run_id,
-        )
-        if drift:
-            stats.update(drift[0])
+            if drift:
+                stats.update(drift[0])
         locale_signature_count: int | None = None
-        if has_signatures:
+        if has_signatures and has_extraction_state and "hreflang_json" in snapshot_columns:
             signature_coverage = await self._fetch(
                 """
                 SELECT COUNT(DISTINCT sig.signature_hash)::INT AS locale_signature_count
@@ -389,9 +497,7 @@ class CrawlReports:
             "seed_hosts": seed_hosts,
             "declared_allowed_hosts": declared_hosts,
             "schema_capabilities": {
-                "content_extracted": has_extraction_state,
-                "images_json": has_images,
-                "links_json": "links_json" in snapshot_columns,
+                **{column: column in snapshot_columns for column in SNAPSHOT_OPTIONAL_COLUMNS},
                 "content_hash_simhash": "content_hash_simhash" in snapshot_columns,
                 "run_intent_signatures": has_signatures,
             },
@@ -498,14 +604,25 @@ class CrawlReports:
             return None
 
     async def https_response_headers(self) -> list[dict[str, object]]:
-        """Final status and response headers of every stored HTTPS response, for the TLS probe adapter."""
+        """Final response identity, status and headers of every stored HTTPS response (ticket 414).
+
+        ``headers_json`` and ``final_status_code`` describe the *final*
+        response after redirects, so the row is selected and attributed by
+        ``final_url`` (the snapshot's ``final_url_id``), not by the requested
+        URL. ``requested_url`` is kept only as provenance. A snapshot with no
+        retained final URL has no known response identity and is not
+        returned. An HTTP seed that finished on HTTPS is included; an HTTPS
+        seed that finished on HTTP is not HTTPS evidence and is excluded.
+        """
         run_id = await self._run_id()
         return await self._fetch(
             """
-            SELECT u.url, s.final_status_code, s.headers_json
-            FROM page_run_snapshots s JOIN urls u ON u.id = s.url_id
-            WHERE s.run_id = $1 AND u.url LIKE 'https://%'
-            ORDER BY u.url
+            SELECT u.url AS requested_url, fu.url AS final_url, s.final_status_code, s.headers_json
+            FROM page_run_snapshots s
+            JOIN urls u ON u.id = s.url_id
+            JOIN urls fu ON fu.id = s.final_url_id
+            WHERE s.run_id = $1 AND lower(fu.url) LIKE 'https://%'
+            ORDER BY fu.url, u.url
             """,
             run_id,
         )
@@ -638,9 +755,11 @@ class CrawlReports:
             str(row["url"]): row
             for row in await self._fetch(
                 """
-                SELECT u.url, s.overall_indexable, s.final_status_code, s.headers_json, s.title
+                SELECT u.url, s.overall_indexable, s.final_status_code, s.headers_json, s.title,
+                       final_url.url AS final_url
                 FROM page_run_snapshots s
                 JOIN urls u ON u.id = s.url_id
+                LEFT JOIN urls final_url ON final_url.id = s.final_url_id
                 WHERE s.run_id = $1 AND s.html_compressed IS NOT NULL
                 """,
                 run_id,
@@ -650,6 +769,7 @@ class CrawlReports:
         semantic: list[dict[str, object]] = []
         soft_404: list[dict[str, object]] = []
         anchors: list[dict[str, object]] = []
+        heading_wrapping: list[dict[str, object]] = []
         async for url, html in self.store.iter_run_html(run_id=run_id):
             state = page_state.get(url, {})
             findings.extend(_stored_html_rows(url, html, state))
@@ -657,12 +777,16 @@ class CrawlReports:
             candidate = _soft_404_candidate(url, html, state)
             if candidate is not None:
                 soft_404.append(candidate)
-            anchors.append(_empty_anchor_page_row(url, html))
+            soup = parse_html(html)
+            anchors.append(_empty_anchor_page_row(url, html, soup))
+            final_url = state.get("final_url")
+            heading_wrapping.extend(_heading_wrapping_links(url, soup, str(final_url) if final_url else None))
         self._stored_html_cache = {
             "stored-html": findings,
             "semantic-html": semantic,
             "soft404": soft_404,
             "empty-anchor-links": anchors,
+            "heading-wrapping-links": heading_wrapping,
         }
         return self._stored_html_cache
 
@@ -879,6 +1003,66 @@ class CrawlReports:
         grows with pages, not with every internal link on the site.
         """
         return (await self._stored_html_pass())["empty-anchor-links"]
+
+    async def heading_link_population(self, *, has_links_json: bool) -> dict[str, int | None]:
+        """Count Q39's heading-link population: links inside an H2/H3 and links that wrap one.
+
+        The internal-link-quality report keeps only failing links, so the
+        population is counted here.  A link is a heading link when its saved
+        XPath lies inside an H2/H3 (``links_json``) or when its anchor wraps
+        an H2/H3 (``a > h2|h3`` or ``a > * > h2|h3``, from the stored HTML;
+        ticket 421).  Links are distinct by source, target and XPath, and a
+        link is tested when its target has a saved status in this run.
+
+        ``heading_link_wrapping_count`` is None when the run stored no HTML,
+        so the wrapping form could not be checked; all three are None without
+        ``links_json``.
+        """
+        if not has_links_json:
+            return {"heading_link_count": None, "heading_link_tested_count": None, "heading_link_wrapping_count": None}
+        run_id = await self._run_id()
+        stored = await self._stored_html_pass()
+        # The pass yields one semantic-html row per stored page.
+        html_checked = bool(stored["semantic-html"])
+        wrapping = sorted(
+            {
+                (str(row["source_url"]), str(row["target_url"]), str(row["xpath"]))
+                for row in stored["heading-wrapping-links"]
+            }
+        )
+        heading = await self._fetch(
+            """
+            WITH heading_links AS (
+                SELECT source.url AS source_url, link ->> 'href' AS target_url, link ->> 'xpath' AS xpath
+                FROM page_run_snapshots s
+                JOIN urls source ON source.id = s.url_id
+                CROSS JOIN LATERAL jsonb_array_elements(s.links_json) link
+                WHERE s.run_id = $1 AND (link ->> 'xpath') ~* $2
+                UNION
+                SELECT wrapping.source_url, wrapping.target_url, wrapping.xpath
+                FROM unnest($3::TEXT[], $4::TEXT[], $5::TEXT[]) AS wrapping(source_url, target_url, xpath)
+            )
+            SELECT COUNT(*)::INT AS heading_link_count,
+                   COUNT(*) FILTER (WHERE target.final_status_code IS NOT NULL)::INT AS heading_link_tested_count
+            FROM heading_links h
+            LEFT JOIN urls target_url ON target_url.url = h.target_url
+            LEFT JOIN page_run_snapshots target ON target.run_id = $1 AND target.url_id = target_url.id
+            """,
+            run_id,
+            HEADING_LINK_XPATH_PATTERN,
+            [row[0] for row in wrapping],
+            [row[1] for row in wrapping],
+            [row[2] for row in wrapping],
+        )
+        return {
+            "heading_link_count": _int_or_none(heading[0].get("heading_link_count")) if heading else 0,
+            "heading_link_tested_count": _int_or_none(heading[0].get("heading_link_tested_count")) if heading else 0,
+            "heading_link_wrapping_count": len(wrapping) if html_checked else None,
+        }
+
+    async def heading_wrapping_links(self) -> list[dict[str, object]]:
+        """Internal links that wrap an H2/H3, one row per anchor, from the shared stored-HTML pass."""
+        return (await self._stored_html_pass())["heading-wrapping-links"]
 
     async def redirect_chains(self) -> list[dict[str, object]]:
         run_id = await self._run_id()

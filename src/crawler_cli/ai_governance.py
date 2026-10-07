@@ -407,7 +407,13 @@ async def collect_ai_governance(
             row: dict[str, object] = {"origin": _safe_url(origin), "path": path, "kind": kind, "url": _safe_url(url)}
             row["observed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             if rules is None:
-                row["state"] = "robots_unavailable_not_fetched"
+                row.update(
+                    {
+                        "state": "robots_unavailable_not_fetched",
+                        "fetch_outcome": "unknown",
+                        "unknown_reason": "robots_unavailable",
+                    }
+                )
                 llms_rows.append(row)
                 continue
             decision = await engine._robots.check(url)
@@ -415,18 +421,29 @@ async def collect_ai_governance(
                 row.update(
                     {
                         "state": "robots_disallowed_not_fetched",
+                        "fetch_outcome": "unknown",
+                        "unknown_reason": "robots_disallowed",
                         "matched_rule": decision.matched_rule,
                         "matched_user_agent": decision.matched_user_agent,
                     }
                 )
                 llms_rows.append(row)
                 continue
-            response = await engine._bounded_fetch_response(url)
+            # Ticket 423: record why a context file was not read, as the robots fetch does (ticket 410).
+            reasons: list[str] = []
+            response = await engine._bounded_fetch_response(url, on_skip=reasons.append)
             if response is None:
-                row["state"] = "fetch_unavailable"
+                row.update(
+                    {
+                        "state": "fetch_unavailable",
+                        "fetch_outcome": "unknown",
+                        "unknown_reason": reasons[-1] if reasons else "no_response",
+                    }
+                )
                 complete = False
             else:
                 row.update(classify_llms_response(response, kind=kind))
+                row["fetch_outcome"] = "fetched"
             llms_rows.append(row)
     return {
         "record_type": "coverage",

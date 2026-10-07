@@ -15,7 +15,17 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .technical_audit import TECHNICAL_AUDIT_CHECK_CONTRACT, TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES
-from .technical_audit_evidence import Answerer, Evidence, Json, _int_or_none, _path_and_query, _profile_value
+from .technical_audit_evidence import (
+    HEADING_LINK_XPATH_PATTERN,
+    HEADING_WRAPPING_LINK_FIELD,
+    Answerer,
+    Evidence,
+    Json,
+    _int_or_none,
+    _path_and_query,
+    _profile_value,
+    unit_label,
+)
 from .technical_audit_tickets import _placeholders, _render, _sample_urls, ticket_sheet_table
 from .profile_indexability_audit import analyse_profile_indexability
 from .crawl_depth_audit import analyse_priority_crawl_depth
@@ -204,6 +214,20 @@ def _check(audit: Json, identifier: str) -> Json | None:
     return None
 
 
+# What each contract check's denominator counts.  Most count stored or parsed
+# HTML pages; the rest are listed here.
+_CHECK_DENOMINATOR_UNITS = {
+    "nonhtml-search-assets": "documents",
+    "locale-html-lang": "content signatures",
+    "rendered-robots-links": "interaction captures",
+    "supplied-search-evidence": "records",
+}
+
+
+def _check_denominator_unit(identifier: str) -> str:
+    return _CHECK_DENOMINATOR_UNITS.get(identifier, "pages")
+
+
 def _from_check(
     identifier: str,
     *,
@@ -231,6 +255,7 @@ def _from_check(
             qualification=str(check["qualification"]) if check.get("qualification") else None,
             note=scope_note,
             language_check=identifier,
+            denominator_unit=_check_denominator_unit(identifier),
         )
 
     return answer
@@ -257,7 +282,10 @@ def _with_template(
 
 
 def _heading_link(row: Json) -> bool:
-    return bool(re.search(r"/h[23](?:\[\d+\])?(?:/|$)", str(row.get("xpath", "")), re.IGNORECASE))
+    """A link inside an H2/H3 (by XPath) or one whose target is also linked by an anchor wrapping one."""
+    if row.get(HEADING_WRAPPING_LINK_FIELD) is True:
+        return True
+    return bool(re.search(HEADING_LINK_XPATH_PATTERN, str(row.get("xpath", "")), re.IGNORECASE))
 
 
 def _heading_target_failure(row: Json) -> bool:
@@ -266,6 +294,70 @@ def _heading_target_failure(row: Json) -> bool:
     return _heading_link(row) and any(
         issue in {"error_target", "redirect_target", "noncanonical_target"}
         for issue in issues  # type: ignore[union-attr]
+    )
+
+
+def _heading_link_targets(audit: Json, question: Json, profile: Json | None) -> Evidence:
+    """Q39: failing heading-link targets over the counted H2/H3 link population.
+
+    A heading link sits inside an H2/H3 or wraps one (``a > h2|h3`` or
+    ``a > * > h2|h3``; decided in ticket 421).  The internal-link-targets
+    collector returns only links whose target fails, so the population comes
+    from ``run_context``: ``heading_link_count`` (all heading links) and
+    ``heading_link_tested_count`` (those whose target has a saved status in
+    the run).  The tested count is the denominator; zero means the rule could
+    not be tested.  An audit saved before these counts existed reports no
+    denominator and keeps a clean result below Healthy, and one that could not
+    check the wrapping form (``heading_link_wrapping_count`` missing) is not
+    Healthy either.
+    """
+    evidence = _from_check("internal-link-targets", keep=_heading_target_failure)(audit, question, profile)
+    if not evidence.available:
+        return evidence
+    raw_context = audit.get("run_context")
+    context = raw_context if isinstance(raw_context, Mapping) else {}
+    found = _int_or_none(context.get("heading_link_count"))
+    tested = _int_or_none(context.get("heading_link_tested_count"))
+    if found is None or tested is None:
+        note = (
+            "The heading-link population is not counted in this audit (the internal-link-targets collector keeps "
+            "only failing links), so a run without failing heading links is not confirmed Healthy; regenerate the "
+            "audit to count it."
+        )
+        return Evidence(
+            **{
+                **evidence.__dict__,
+                "denominator": None,
+                "denominator_unit": "heading links",
+                "scope_complete": False,
+                "note": note,
+            }
+        )
+    notes = [evidence.note] if evidence.note else []
+    wrapping = _int_or_none(context.get("heading_link_wrapping_count"))
+    if wrapping is None:
+        notes.append(
+            "Links that wrap an H2/H3 (<a><h3>...</h3></a>) were not checked: the run stored no HTML or the audit "
+            "predates ticket 421, so only links inside a heading were counted; regenerate the audit to count them."
+        )
+    elif wrapping:
+        verb = "wraps its" if wrapping == 1 else "wrap their"
+        notes.append(f"{unit_label(wrapping, 'heading links')} {verb} heading (<a><h3>...</h3></a>).")
+    if found > tested:
+        notes.append(
+            f"{found - tested:,} of {unit_label(found, 'heading links')} point to targets without a saved status "
+            "in this run and were not tested."
+        )
+    return Evidence(
+        **{
+            **evidence.__dict__,
+            "denominator": tested,
+            "denominator_unit": "heading links",
+            # Untested heading links are unknown, so a clean result over part of the population is not Healthy.
+            # So is a population that could not include links wrapping a heading.
+            "scope_complete": evidence.scope_complete and found <= tested and wrapping is not None,
+            "note": "; ".join(notes),
+        }
     )
 
 
@@ -308,6 +400,7 @@ def _duplicate_head_elements(audit: Json, question: Json, profile: Json | None) 
         denominator=metadata.denominator,
         coverage_complete=metadata.coverage_complete and canonical.coverage_complete,
         language_check="metadata-basics",
+        denominator_unit=metadata.denominator_unit,
     )
 
 
@@ -324,7 +417,7 @@ def _within_indexable_pages(audit: Json, evidence: Evidence) -> Evidence:
     count = _indexable_page_count(audit)
     if not evidence.available or count is None:
         return evidence
-    return Evidence(**{**evidence.__dict__, "denominator": count})
+    return Evidence(**{**evidence.__dict__, "denominator": count, "denominator_unit": "indexable pages"})
 
 
 def _indexable_heading_issues(audit: Json, question: Json, profile: Json | None) -> Evidence:
@@ -371,6 +464,7 @@ def _header_html_parity(audit: Json, question: Json, profile: Json | None) -> Ev
         denominator=robots.denominator,
         coverage_complete=robots.coverage_complete and canonical.coverage_complete,
         language_check="indexability-segmentation",
+        denominator_unit=robots.denominator_unit,
     )
 
 
@@ -396,6 +490,7 @@ def _semantic_landmarks(audit: Json, question: Json, profile: Json | None) -> Ev
         qualification="review_required",
         note="Rows are page-level source candidates; confirm their template grouping before raising a ticket.",
         language_check="semantic-html",
+        denominator_unit="pages",
     )
 
 
@@ -407,6 +502,7 @@ def _semantic_toc(audit: Json, question: Json, profile: Json | None) -> Evidence
         denominator=len(eligible) if available else None,
         available=available,
         language_check="semantic-html",
+        denominator_unit="pages",
     )
 
 
@@ -436,6 +532,7 @@ def _profile_indexability(question_id: str) -> Callable[[Json, Json, Json | None
             coverage_complete=result.complete,
             note="; ".join(result.unavailable_reasons),
             language_check="profile-indexability-pages",
+            denominator_unit="pages",
         )
 
     return answer
@@ -465,6 +562,7 @@ def _semantic_figure_caption(audit: Json, question: Json, profile: Json | None) 
         qualification="review_required",
         note=note,
         language_check="semantic-html",
+        denominator_unit="images",
     )
 
 
@@ -527,6 +625,7 @@ def _crawl_depth(audit: Json, question: Json, profile: Json | None) -> Evidence:
         coverage_complete=result.complete,
         note="; ".join([*notes, *result.unavailable_reasons]),
         language_check="crawl-depth-pages",
+        denominator_unit="priority pages",
     )
 
 
@@ -565,6 +664,7 @@ def _performance_distribution(audit: Json, question: Json, profile: Json | None)
         coverage_complete=result.complete,
         note="; ".join(result.unavailable_reasons),
         language_check="performance-pages",
+        denominator_unit="timed pages",
     )
 
 
@@ -614,6 +714,7 @@ def _empty_anchors(audit: Json, question: Json, profile: Json | None) -> Evidenc
         ),
         note="; ".join(notes),
         language_check="empty-anchor-links",
+        denominator_unit="links",
     )
 
 
@@ -642,7 +743,7 @@ def _run_gate(audit: Json, question: Json, profile: object) -> Evidence:
         count = _int_or_none(context.get(key))
         if count and html and count / html > limit:
             fail(label, f"{count:,} of {html:,}", f"<= {limit:.0%}")
-    return Evidence(rows=failures, denominator=1)
+    return Evidence(rows=failures, denominator=1, denominator_unit="runs")
 
 
 _MIN_DRIFT_SAMPLES = 20
@@ -682,6 +783,7 @@ def _rate_limit_gate(audit: Json, question: Json, profile: object) -> Evidence:
         scope_complete=drift_tested,
         coverage_complete=context.get("completion_state") == "complete",
         note=note,
+        denominator_unit="runs",
     )
 
 
@@ -727,8 +829,8 @@ ANSWERERS: dict[str, Answerer] = {
     "Q30": Answerer("supplied Search Console / URL Inspection records", _from_check("supplied-search-evidence")),
     "Q32": Answerer("locale-html-lang shared-signature rows", _from_check("locale-html-lang")),
     "Q39": Answerer(
-        "internal-link-targets error, redirect and non-canonical targets linked from an H2/H3",
-        _from_check("internal-link-targets", keep=_heading_target_failure),
+        "internal-link-targets error, redirect and non-canonical targets linked from inside or around an H2/H3",
+        _heading_link_targets,
     ),
     "Q41": Answerer(
         "hreflang-html-http locale-folder mismatches",
@@ -809,6 +911,7 @@ def _answer_one(
         "answer": "",
         "affected_count": None,
         "denominator": None,
+        "denominator_unit": None,
         "notes": notes,
         "rows": [],
         "ticket": False,
@@ -835,6 +938,8 @@ def _answer_one(
     answer.update(
         affected_count=affected,
         denominator=evidence.denominator,
+        # Fall back to "items" rather than assume the denominator counts the finding unit.
+        denominator_unit=evidence.denominator_unit or answerer.denominator_unit or "items",
         rows=rows,
         language_check=evidence.language_check,
         qualification=evidence.qualification,
@@ -842,7 +947,7 @@ def _answer_one(
     if not rows and evidence.denominator == 0:
         # An empty tested population is not evidence that the rule passed.
         notes.append("No items in the tested population, so the rule could not be tested.")
-        answer.update(affected_count=None, denominator=None, rows=[])
+        answer.update(affected_count=None, denominator=None, denominator_unit=None, rows=[])
         return answer
     matched = _meets_threshold(affected, evidence.denominator, entry.get("threshold"))
     if matched is None:
@@ -922,15 +1027,22 @@ def question_ticket_rows(
         }
         values = _placeholders(audit, pseudo_check, evidence)
         values["unit"] = str(entry["unit"])
+        denominator_unit = _denominator_unit(answer)
+        values["denominator_unit"] = denominator_unit
         source = language_checks.get(answer.get("language_check")) if isinstance(language_checks, Mapping) else None
         source = source if isinstance(source, Mapping) else {}
         classification, priority = _ticket_grade(entry)
-        count = f"{affected:,} {entry['unit']}"
+        count = unit_label(affected, str(entry["unit"]))
         tested = ""
         if answer.get("denominator"):
-            # Contract denominators count parsed HTML pages, whatever the question's unit.
-            share = f" ({values['affected_pct']})" if entry["unit"] == "pages" else ""
-            tested = f", across {int(answer['denominator']):,} pages tested{share}"
+            # The denominator counts its own population (pages, hosts, policies...),
+            # which need not be the question's finding unit; a share needs both to match.
+            # A qualified population ("indexable pages") still shares the finding unit.
+            finding_unit = str(entry["unit"]).casefold()
+            population_unit = denominator_unit.casefold()
+            same_unit = population_unit == finding_unit or population_unit.endswith(" " + finding_unit)
+            share = f" ({values['affected_pct']})" if same_unit and values["affected_pct"] else ""
+            tested = f", across {unit_label(int(answer['denominator']), denominator_unit)} tested{share}"
         description = "\n\n".join(
             part
             for part in (
@@ -971,6 +1083,18 @@ def question_ticket_rows(
     return rows
 
 
+def _denominator_unit(answer: Json) -> str:
+    return str(answer.get("denominator_unit") or "items")
+
+
+def _tested_summary(answer: Json) -> str:
+    """Tested population with its unit, for the Questions tab notes."""
+    denominator = _int_or_none(answer.get("denominator"))
+    if denominator is None:
+        return ""
+    return f"Tested: {unit_label(denominator, _denominator_unit(answer))}."
+
+
 def _ticket_grade(entry: Json) -> tuple[str, str]:
     classification = str(entry.get("classification") or "Issue")
     priority = str(entry.get("priority") or "Medium")
@@ -992,7 +1116,13 @@ def questions_sheet_tables(
     answers: Sequence[Json],
     tickets: Sequence[Mapping[str, str]],
 ) -> dict[str, list[list[object]]]:
-    """Questions tab with answers, the Tickets tab, and one data tab per Yes answer."""
+    """The workbook for actual issues only: Questions, Tickets and one data tab per ticketed answer.
+
+    An answer is an issue when it produces a ticket (``answer["ticket"]``, the
+    same gate as ``question_ticket_rows``).  Healthy, Pending, No and
+    Needs-validation-without-a-ticket answers are left out of every tab; the
+    answers JSON written by ``--out`` keeps all of them.
+    """
 
     entries = {str(entry["id"]): entry for entry in registry["questions"]}
     ticket_numbers: dict[str, int] = {}
@@ -1001,10 +1131,12 @@ def questions_sheet_tables(
     question_rows: list[list[object]] = [list(QUESTION_SHEET_COLUMNS)]
     data_tabs: dict[str, list[list[object]]] = {}
     for answer in answers:
+        if not answer.get("ticket"):
+            continue
         entry = entries[str(answer["id"])]
         rows = answer.get("rows") or []
         tab = ""
-        if rows and answer.get("answer") == "Yes":
+        if rows:
             tab = data_tab_name(entry)
             data_tabs[tab] = _data_table(rows)
         denominator = answer.get("denominator")
@@ -1020,7 +1152,11 @@ def questions_sheet_tables(
                 "" if denominator is None else denominator,
                 entry["issue_if"],
                 entry["why"],
-                " ".join(str(note) for note in answer.get("notes", []) or []),
+                " ".join(
+                    part
+                    for part in (_tested_summary(answer), *(str(note) for note in answer.get("notes", []) or []))
+                    if part
+                ),
                 tab,
                 ticket_numbers.get(str(entry["id"]), ""),
             ]

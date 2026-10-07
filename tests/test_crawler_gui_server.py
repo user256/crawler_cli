@@ -167,6 +167,7 @@ def test_live_category_tabs_puts_archive_before_external_links():
     assert tabs[-2]["id"] == "url"
     assert tabs[-1]["id"] == "social"
 
+
 def test_overview_from_counts_reports_whole_run_aggregates():
     # Counts come from the run-wide SQL aggregate, not the page window, so a
     # 2-page window over a 100-page run still describes all 100.
@@ -210,12 +211,18 @@ def test_structured_data_of_handles_strings_and_dicts():
 
 
 def test_saved_snapshot_populates_report_categories_and_nested_schema_name():
-    page = server.page_from_row(_snapshot_row(
-        h2_tags="First\nSecond", images_json=[{"url": "https://site.example/a.png"}],
-        hreflang_json=[{"href": "https://site.example/fr", "hreflang": "fr"}],
-        schema_json=[{"type": "Organization", "parsed_data": json.dumps({"name": "Stored name"}), "is_valid": True}],
-        robots_json=["noarchive"],
-    ), has_snapshots=True)
+    page = server.page_from_row(
+        _snapshot_row(
+            h2_tags="First\nSecond",
+            images_json=[{"url": "https://site.example/a.png"}],
+            hreflang_json=[{"href": "https://site.example/fr", "hreflang": "fr"}],
+            schema_json=[
+                {"type": "Organization", "parsed_data": json.dumps({"name": "Stored name"}), "is_valid": True}
+            ],
+            robots_json=["noarchive"],
+        ),
+        has_snapshots=True,
+    )
     assert {"structured-data", "images", "hreflang", "h2", "url", "response-codes"} <= set(page["categoryHints"])
     assert page["structuredData"][0]["name"] == "Stored name"
     assert page["h2Count"] == 2
@@ -224,12 +231,19 @@ def test_saved_snapshot_populates_report_categories_and_nested_schema_name():
 
 def test_saved_html_evidence_recovers_social_and_links_without_fetching():
     from crawler_cli.compression import compress_html
-    result = server.saved_html_evidence({"url_id": 1, "url": "https://site.example/page", "html_compressed": compress_html('''
+
+    result = server.saved_html_evidence(
+        {
+            "url_id": 1,
+            "url": "https://site.example/page",
+            "html_compressed": compress_html("""
       <html><head><base href="https://cdn.example/assets/">
       <meta property="og:title" content="A &amp; B"><meta name="twitter:card" content="summary">
       <meta property="og:locale:alternate" content="fr"><meta property="og:locale:alternate" content="de">
       <script src="app.js"></script><script type="application/ld+json">{}</script></head>
-      <body><a href="https://other.example/path" rel="nofollow">External</a></body></html>''')})
+      <body><a href="https://other.example/path" rel="nofollow">External</a></body></html>"""),
+        }
+    )
     assert result["social"][0] == {"property": "og:title", "content": "A & B"}
     assert len(result["social"]) == 4
     assert result["scripts"] == [{"url": "https://cdn.example/assets/app.js", "type": "text/javascript"}]
@@ -242,10 +256,15 @@ def test_resume_restores_scope_and_refuses_incompatible_backend():
     from crawler_cli.config import CrawlConfig
     from crawler_cli.engine import _crawl_run_config_hash, _crawl_run_config_snapshot
     from crawler_gui.resume import resume_configuration
+
     config = CrawlConfig(backend="curl_cffi", same_host_only=True, path_exclude=["/private"])
     seeds = ["https://site.example/"]
     saved = _crawl_run_config_snapshot(config, seeds)
-    row = {"config_json": json.dumps(saved), "seed_urls_json": json.dumps(seeds), "config_hash": _crawl_run_config_hash(saved)}
+    row = {
+        "config_json": json.dumps(saved),
+        "seed_urls_json": json.dumps(seeds),
+        "config_hash": _crawl_run_config_hash(saved),
+    }
     restored, restored_seeds = resume_configuration(row)
     assert restored.backend == "curl_cffi"
     assert restored.path_exclude == ["/private"]
@@ -257,13 +276,16 @@ def test_resume_restores_scope_and_refuses_incompatible_backend():
 @pytest.mark.asyncio
 async def test_source_fallback_keeps_run_evidence_and_labels_global_facts():
     from unittest.mock import AsyncMock
+
     store = server.LiveStore("unused")
     store.has_run_url_sources = store.has_url_sources = True
     conn = AsyncMock()
     conn.fetch.side_effect = [
         [{"url_id": 1, "source": "link", "detail": "parent"}],
-        [{"url_id": 1, "source": "link", "detail": "parent"},
-         {"url_id": 1, "source": "archive_org", "detail": "old import"}],
+        [
+            {"url_id": 1, "source": "link", "detail": "parent"},
+            {"url_id": 1, "source": "archive_org", "detail": "old import"},
+        ],
     ]
     result = await store._url_sources(conn, "selected", [1])
     assert result[1] == [
@@ -276,9 +298,14 @@ async def test_source_fallback_keeps_run_evidence_and_labels_global_facts():
 async def test_resume_endpoint_does_not_launch_an_exhausted_run():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
+
     launcher = SimpleNamespace(resume=AsyncMock())
     store = SimpleNamespace(resume_plan=AsyncMock(return_value={"canResume": False, "reason": "No queued URLs"}))
-    request = SimpleNamespace(app={"store": store, "launcher": launcher}, match_info={"run_id": "complete-run"}, json=AsyncMock(return_value={}))
+    request = SimpleNamespace(
+        app={"store": store, "launcher": launcher},
+        match_info={"run_id": "complete-run"},
+        json=AsyncMock(return_value={}),
+    )
     with pytest.raises(server.web.HTTPConflict, match="Conflict"):
         await server.resume_handler(request)
     launcher.resume.assert_not_awaited()

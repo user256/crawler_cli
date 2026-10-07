@@ -8,7 +8,7 @@ claim that a check is healthy.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
@@ -798,11 +798,19 @@ def build_technical_audit(
     }
 
 
-def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[object]]]:
-    """Return only the tabs which have deterministic content to publish.
+def audit_sheet_tables(
+    audit: Mapping[str, object], ticketed_checks: Collection[str] = ()
+) -> dict[str, list[list[object]]]:
+    """Return the workbook tabs for actual issues only.
 
-    Existing template formatting is retained by the publisher.  Detail tabs
-    are created only when that test produced rows.
+    A check is an issue when it has affected rows (``evidence``) or produced a
+    ticket (``ticketed_checks``, from ``ticketed_check_ids``).  Overview lists
+    the run metadata and only those checks; passing, partial-with-no-rows,
+    unavailable and not-applicable checks without a ticket are left out, and
+    detail tabs are written only for checks with affected rows (the tested
+    population in ``verified_evidence`` is no longer published).  The audit
+    JSON keeps every check.  Existing template formatting is retained by the
+    publisher.
     """
 
     checks = audit.get("checks", [])
@@ -829,8 +837,13 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
         ["Registry checks", len(registry) if isinstance(registry, list) else 0],
         ["Candidate/action rows", len(audit_log) if isinstance(audit_log, list) else 0],
     ]
+    ticketed = {str(identifier) for identifier in ticketed_checks}
+    issue_checks = []
     for check in checks:
         assert isinstance(check, Mapping)
+        if check.get("evidence") or str(check["id"]) in ticketed:
+            issue_checks.append(check)
+    for check in issue_checks:
         overview.append([str(check["title"]), str(check["status"])])
 
     tables: dict[str, list[list[object]]] = {
@@ -857,14 +870,11 @@ def audit_sheet_tables(audit: Mapping[str, object]) -> dict[str, list[list[objec
         from .technical_audit_tickets import ticket_sheet_table
 
         tables["Tickets"] = ticket_sheet_table([row for row in ticket_register if isinstance(row, Mapping)])
-    for check in checks:
-        assert isinstance(check, Mapping)
+    for check in issue_checks:
         evidence = check["evidence"]
         assert isinstance(evidence, list)
-        verified_evidence = check.get("verified_evidence", [])
-        assert isinstance(verified_evidence, list)
-        if evidence or verified_evidence:
-            tables[str(check["detail_sheet"])] = _table(evidence or verified_evidence)
+        if evidence:
+            tables[str(check["detail_sheet"])] = _table(evidence)
     return tables
 
 
