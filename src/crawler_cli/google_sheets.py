@@ -418,16 +418,30 @@ class GoogleSheetsTemplatePublisher:
         and data validation.  Tabs are copied in template order, the default
         empty tab is removed, and each ``Copy of X`` is renamed back to ``X``
         so cross-tab references such as the Config dropdown sources resolve.
+
+        ``copyTo`` drops data validation that refers to another tab (live run,
+        ticket 420: all 42 Config-sourced Priority / Classification rules were
+        lost), so every source tab's validation rules are read first and set
+        again on the renamed copies in the same batch.
         """
-        source = (
-            self.sheets.spreadsheets()
-            .get(spreadsheetId=source_id, fields="sheets.properties(sheetId,title,index)")
-            .execute()
-        )
-        tabs = sorted(
-            (sheet["properties"] for sheet in source.get("sheets", [])),
-            key=lambda properties: int(properties.get("index", 0)),
-        )
+        try:
+            source = (
+                self.sheets.spreadsheets()
+                .get(spreadsheetId=source_id, includeGridData=True, fields=_SOURCE_TABS_FIELDS)
+                .execute()
+            )
+        except Exception as exc:  # googleapiclient is optional; match its HttpError by shape.
+            status = _http_status(exc)
+            if status not in {403, 404}:
+                raise
+            raise RuntimeError(
+                f"template {source_id} could not be copied: Drive refused files.copy and the Sheets API "
+                f"cannot read it either (HTTP {status}). A drive.file token also needs the spreadsheets "
+                "scope for the copyTo fallback; otherwise authorise the full drive scope or share the "
+                "template with the account."
+            ) from exc
+        source_sheets = sorted(source.get("sheets", []), key=lambda sheet: int(sheet["properties"].get("index", 0)))
+        tabs = [sheet["properties"] for sheet in source_sheets]
         if not tabs:
             raise RuntimeError(f"template {source_id} has no tabs to copy")
         created = (
@@ -441,7 +455,8 @@ class GoogleSheetsTemplatePublisher:
         spreadsheet_id = str(created["spreadsheetId"])
         placeholder_ids = [int(sheet["properties"]["sheetId"]) for sheet in created.get("sheets", [])]
         requests: list[dict[str, object]] = []
-        for tab in tabs:
+        validation_requests: list[dict[str, object]] = []
+        for sheet, tab in zip(source_sheets, tabs):
             copied = (
                 self.sheets.spreadsheets()
                 .sheets()
@@ -460,11 +475,17 @@ class GoogleSheetsTemplatePublisher:
                     }
                 }
             )
+            validation_requests.extend(_set_validation_requests(sheet, int(copied["sheetId"])))
         # Delete the placeholder first so its name cannot collide with a
-        # template tab being renamed back (for example "Sheet1").
+        # template tab being renamed back (for example "Sheet1"), and restore
+        # the validation only after the renames so "=Config!..." resolves.
         self.sheets.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id,
-            body={"requests": [{"deleteSheet": {"sheetId": sheet_id}} for sheet_id in placeholder_ids] + requests},
+            body={
+                "requests": [{"deleteSheet": {"sheetId": sheet_id}} for sheet_id in placeholder_ids]
+                + requests
+                + validation_requests
+            },
         ).execute()
         if folder_id:
             previous = self.drive.files().get(fileId=spreadsheet_id, fields="parents", supportsAllDrives=True).execute()
@@ -767,6 +788,65 @@ def credential_path(value: str | None) -> str | None:
     if not path.is_file():
         raise ValueError("--google-sheets-credentials must name a credential file")
     return str(path)
+
+
+_SOURCE_TABS_FIELDS = (
+    "sheets(properties(sheetId,title,index),data(startRow,startColumn,rowData(values(dataValidation))))"
+)
+
+
+def _set_validation_requests(sheet: Mapping[str, Any], sheet_id: int) -> list[dict[str, object]]:
+    """``setDataValidation`` requests recreating a source tab's rules on ``sheet_id``.
+
+    Rules are grouped into vertical runs of identical rules per column, so a
+    dropdown applied to F6:F26 becomes one request.
+    """
+    cells: dict[tuple[int, int], Mapping[str, Any]] = {}
+    for block in sheet.get("data", []) or []:
+        row_base, column_base = int(block.get("startRow", 0)), int(block.get("startColumn", 0))
+        for row_offset, row in enumerate(block.get("rowData", []) or []):
+            for column_offset, cell in enumerate(row.get("values", []) or []):
+                rule = cell.get("dataValidation") if isinstance(cell, Mapping) else None
+                if rule:
+                    cells[(row_base + row_offset, column_base + column_offset)] = rule
+    requests: list[dict[str, object]] = []
+    for row, column in sorted(cells, key=lambda key: (key[1], key[0])):
+        rule = cells[(row, column)]
+        if row > 0 and cells.get((row - 1, column)) == rule:
+            continue  # inside a run that started above
+        end = row + 1
+        while cells.get((end, column)) == rule:
+            end += 1
+        requests.append(
+            {
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row,
+                        "endRowIndex": end,
+                        "startColumnIndex": column,
+                        "endColumnIndex": column + 1,
+                    },
+                    "rule": dict(rule),
+                }
+            }
+        )
+    return requests
+
+
+def google_api_error(exc: BaseException) -> str | None:
+    """A one-line message for a Google API ``HttpError``, or None for any other exception."""
+    status = _http_status(exc)
+    if status is None:
+        return None
+    hint = ""
+    if status in {401, 403, 404}:
+        hint = (
+            " The token cannot reach that file: check it holds the spreadsheets scope (and drive, or "
+            "drive.file plus access to the file) and belongs to an account that can open it."
+        )
+    reason = str(getattr(exc, "reason", None) or exc).rstrip(". ")
+    return f"Google API returned HTTP {status}: {reason}.{hint}"
 
 
 def _http_status(exc: BaseException) -> int | None:
