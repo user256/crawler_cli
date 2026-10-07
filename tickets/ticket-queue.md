@@ -41,8 +41,9 @@ complete. Probe-producer follow-ups in that ticket remain open.
 - `425` `done` [Treat a bot challenge as unanswered in the Accept-Language probe](./ticket-425-locale-probe-challenge-not-a-status.md) — **P1, 419 live QA D1.**
 - `426` `done` [Mark the locale-probe collection partial when comparisons were not answered](./ticket-426-locale-probe-partial-coverage.md) — **P2, 419 live QA D2.**
 - `427` `done` [Let the live probes use the crawl's transport, identity and pace options](./ticket-427-probe-engine-transport-options.md) — **P2, 419 live QA D3.**
+- `428` `open` [Dropdowns on every ticket row, and a workbook that reports actual issues only](./ticket-428-sheets-dropdowns-and-issue-only-workbook.md) — **P2.** User request after the 420 live run.
 
-Next unreserved ticket number is **428**.
+Next unreserved ticket number is **429**.
 
 Earlier positions below are historical.
 
