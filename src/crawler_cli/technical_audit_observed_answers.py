@@ -665,11 +665,16 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
     changes_by_url: dict[str, list[str]] = {}
     untested = 0
     unanswered: dict[str, int] = {}
+    control_unanswered: dict[str, set[str]] = {}
     markup_only = 0
     for record in observed.records:
         changes = _locale_probe_changes(record)
         if changes is UNTESTED:
             untested += 1
+            control = record.get("control_failure")
+            if isinstance(control, Mapping):
+                reason = str(control.get("skip_reason") or control.get("outcome") or "unknown")
+                control_unanswered.setdefault(reason, set()).add(str(record.get("url")))
             for side in ("baseline", "variant"):
                 failure = record.get(f"{side}_failure")
                 if isinstance(failure, Mapping):
@@ -697,6 +702,9 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
     if unanswered:
         reasons = ", ".join(f"{reason} {count:,}" for reason, count in sorted(unanswered.items()))
         note += f" Requests never answered, so not compared: {reasons}."
+    if control_unanswered:
+        reasons = ", ".join(f"{reason} {len(urls):,}" for reason, urls in sorted(control_unanswered.items()))
+        note += f" Repeated header-less control never answered, so content not compared (URLs): {reasons}."
     if markup_only:
         note += (
             f" {markup_only:,} probes differ only outside the primary content (scripts, attributes or markup);"

@@ -234,6 +234,9 @@ def locale_probe_records(evidence: Sequence[Mapping[str, object]]) -> list[dict[
                     "variant_outcome": _outcome(probe),
                     "baseline_failure": _failure(baseline),
                     "variant_failure": _failure(probe),
+                    # The repeated header-less control gates the content comparison (413);
+                    # its failure says why primary content stayed unknown (425).
+                    "control_failure": _failure(repeat),
                     "collection_qualification": probe.get("qualification"),
                 }
             )

@@ -581,3 +581,30 @@ async def test_fully_answered_locale_probe_stays_complete() -> None:
     assert evidence[0]["complete"] is True and evidence[0]["unanswered_probe_count"] == 0
     assert _locale_probe_scope(evidence, records, 1, 1)[1] == "complete"
     assert _locale_probe_scope(evidence, records, 1, 2)[1] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_challenged_repeat_control_leaves_content_unknown_and_says_why() -> None:
+    # The ticket 425 live re-check: every variant answered 200 with the same main text,
+    # then Cloudflare challenged the repeated header-less control request.
+    calls = count()
+
+    def handler(url: str, language: str | None) -> Response:
+        if next(calls) == 8:  # the ninth request is the repeat control
+            return 429, {"cf-mitigated": "challenge"}, _CHALLENGE_PAGE, None
+        return _ok(_page(_EN_MAIN, head=f'<meta name="nonce" content="{language}">'))
+
+    evidence, records, answer = await _run_engine(_RawEngine(handler))
+
+    assert all(row["primary_content_differs"] is None for row in records)
+    assert all(row["raw_body_differs"] is True for row in records)
+    assert _record(records)["control_failure"] == {
+        "outcome": "challenged",
+        "skip_reason": "challenge:cloudflare",
+        "hop": 0,
+    }
+    assert evidence[0]["complete"] is False and evidence[0]["unanswered_probe_outcomes"] == {"challenged": 1}
+    assert answer["status"] == "Pending" and answer["ticket"] is False
+    assert "Repeated header-less control never answered, so content not compared (URLs): challenge:cloudflare 1" in (
+        " ".join(answer["notes"])
+    )
