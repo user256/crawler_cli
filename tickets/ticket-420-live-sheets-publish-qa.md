@@ -13,7 +13,7 @@ actual dropdown sources.
 
 ## Tasks and acceptance criteria
 
-- [ ] With a token holding full `drive` scope, publish the saved Rainbet
+- [x] With a token holding full `drive` scope, publish the saved Rainbet
       question answers via `technical-audit-questions --google-sheets-template`
       into a scratch folder; confirm rows land at `B6:I`, B3's `COUNTA(B6:B)`
       counts them, the header at B5 is intact and Config is untouched.
@@ -33,11 +33,12 @@ actual dropdown sources.
 
 ## Status
 
-partial (Priority: **P1**). Filed 2026-10-07; fixes under test are in PR #119.
-Related: 189, 223, 406, 424. Live run 2026-10-07 on `fix/ticket-420`: four of five
-criteria done. The full-`drive` publish (first box) is still open because no full-drive
-token exists and creating one needs the user's interactive browser consent. The exact
-commands are in the run record.
+done (Priority: **P1**). Filed 2026-10-07; fixes under test are in PR #119.
+Related: 189, 223, 406, 424, 428. Live run 2026-10-07 on `fix/ticket-420`: four of five
+criteria done. The full-`drive` publish (first box) was done the same afternoon on
+`fix/ticket-428`, after the user created a full-drive token. It passed after one more fix:
+the publisher's `values.clear` had been deleting the template's dropdowns on the
+`files.copy` path (commit `e33ff78`).
 
 ## Live run, 2026-10-07
 
@@ -64,3 +65,21 @@ unchanged afterwards.
 - **Observation:** the template validates only rows 6–26, so ticket rows 27+ get no dropdown.
 
 Fix commit: `b6d8812` (tests for both defects; full suite 2047 passed).
+
+## Full-drive publish, 2026-10-07 (afternoon, `fix/ticket-428`)
+
+Token `google-drive-oauth-token.full-drive.json` (`drive`, `spreadsheets`). The Rainbet publish
+went through `files.copy` into a scratch folder, and the workbook
+`14-x_qr8gw6zDlwwQHkKiXxZsEQkBFPWuilYpGijowFU` (trashed) was checked:
+
+- 9 rows at `Tickets!B6:I14`, and B3 shows "Count of tickets: 9".
+- The B5 header and the 5 frozen rows are intact, and Config is identical to the template.
+- Tab order: Tickets, Questions, 9 data tabs, Config.
+- The dropdowns are on every ticket row, and `--check-template` on the copy passes.
+- The receipt printed 11 ranges verified by read-back.
+
+**Defect, fixed in `e33ff78`:** the first full-drive run had no dropdowns at all.
+`values.clear` on `Tickets!B6:I10000` deleted the template's own `F6:G26` rules, which a plain
+`files.copy` keeps. The publisher now clears values with `updateCells`
+(`fields: userEnteredValue`), which keeps them. Details are in the
+[run record](./qa-new-audit-2026-10-06/live-sheets-run.md).

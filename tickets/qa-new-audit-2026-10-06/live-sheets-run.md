@@ -41,7 +41,7 @@ browser consent, so step 1 was not run (see "What the user must run").
 
 | # | Check | Result |
 |---|---|---|
-| 1 | Full `drive` scope publish | **Not run.** No full-drive token. Command below. |
+| 1 | Full `drive` scope publish | **Not run this morning.** No full-drive token. Done in the afternoon run below: **pass** after one more fix. |
 | 2 | `drive.file` + `spreadsheets`: `files.copy` refused → `copyTo` fallback | **Defect found and fixed** (dropdowns lost); everything else passed |
 | 2c | Same, after the fix | **Pass** |
 | 2d | `drive.file` only | Fails as expected, since the token cannot read the template at all. Before the fix this was a raw `HttpError` traceback with exit 1 (**second defect, fixed**). It now prints a clear error and exits 2. Nothing is created. |
@@ -118,7 +118,7 @@ Full suite after the fix: `pytest -q -m "not playwright_smoke"` → 2047 passed,
   header check on a Drive copy, but not with a full `drive` token on a template the app did
   not create.
 
-## What the user must run (step 1, full `drive` scope)
+## What the user must run (step 1, full `drive` scope; done 2026-10-07, see the afternoon run below)
 
 1. Create a full-drive token with an interactive browser consent. This writes a new file
    and leaves the existing token alone:
@@ -153,3 +153,117 @@ Full suite after the fix: `pytest -q -m "not playwright_smoke"` → 2047 passed,
    passes. A `files.copy` copy should keep the dropdowns natively. Trash the workbook and folder afterwards.
    If the `/tmp` replay inputs have been cleaned, any saved Rainbet `technical-audit` JSON
    works as `--audit`. The inputs used here are listed in [saved-run-replay.json](./saved-run-replay.json).
+
+## Step 1 and ticket 428, live run 2026-10-07 (afternoon)
+
+Branch `fix/ticket-428` (based on `fix/postmerge-qa-integration` at `adccf49`). The user
+created `~/.config/google/google-drive-oauth-token.full-drive.json` (scopes `drive`,
+`spreadsheets`, account john@canonicals.co.uk). Inputs were the same saved Rainbet replay
+files as above (`rainbet-audit-merged.json` + `rainbet-obs-tls.json`, still present in the
+earlier session's scratchpad). Each run reproduced **104 answers, 9 draft tickets (Issue 1,
+Needs validation 22, Healthy 1, Pending 80)**, and the `--out` JSON from the full-drive and
+the drive.file runs was byte-identical. The template was only read. Its `Tickets!A1:J40` and
+`Config!A1:Z200` formulas, tabs and frozen rows were snapshotted before the runs and were
+identical afterwards; Drive `modifiedTime` is still 2026-03-10, and its own dropdowns are
+still `F6:G26` only.
+
+### Scratch IDs (all trashed)
+
+| ID | What |
+|---|---|
+| `10zFJS95zydc-Tz6Cd-6vJUtCMbI2vmnZ` | scratch folder "crawler_cli ticket-428 live QA scratch 2026-10-07 (delete me)" (created with the drive.file token) |
+| `1TR0sfvE3y-VEVXdTiGzM40mHqSC_JGHm_mj27gP5O8I` | run 1: full `drive`, Rainbet, before the fix (dropdowns lost) |
+| `1MeFe5_N4rxtBKNtvcbq-IrYcjbugaYTr0_4g9u1_RQw` | probe: plain `files.copy` of the template, then `values.clear` experiments |
+| `19rCJqsT0T6BPaopUJXwvF35UdLexl2HwCvRy-dwte90` | probe 2: plain `files.copy`, `updateCells` clear experiment |
+| `14-x_qr8gw6zDlwwQHkKiXxZsEQkBFPWuilYpGijowFU` | run 1b: full `drive`, Rainbet, after the fix (**step 1**) |
+| `1cB3Du3fL-OfPlUp2aHYfhD1YH9Vd5apZ0FC36RM3ckI` | run 2: `drive.file` (copyTo fallback), Rainbet |
+| `1gONY8X2AkLkhXgj1GeMoxKM1rokjWntQuSfFq4n4m5E` | run 3: `drive.file` (copyTo fallback), 30 synthetic tickets |
+| `1FGAmlbwCnUAEOXl3jf_nYqPpXMKM0owGb_WFgFYBzQw` | run 4: full `drive` (`files.copy`), 30 synthetic tickets |
+
+### Defect found in step 1, fixed (commit `e33ff78`)
+
+**On the `files.copy` path the publish deleted the template's dropdowns.** Run 1's receipt had
+no dropdown line and the workbook had **0** validated cells. A plain `files.copy` keeps all 42
+(`F6:G26`) (probe), but the publisher's `values.clear` of `'Tickets'!B6:I10000` deleted the
+dropdowns on every cleared cell. Clearing a single cell (`F7`) deleted just that one. Rules set
+through the API (`setDataValidation`, as the copyTo fallback does) survived the same clear,
+which is why the drive.file run 2c this morning kept them. The template's rules appear to be
+UI-made dropdowns that `values.clear` treats as cell content. An `updateCells` request limited
+to `fields: userEnteredValue` cleared the values and kept every rule (probe 2). The publisher
+now clears the ticket columns that way, and it reads the first-row rules before any write.
+Before this fix, every full-`drive` publish had shipped with no Priority / Classification
+dropdowns.
+
+### Outcomes
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Full `drive` publish of Rainbet (run 1b) | **Pass** (after the fix above) |
+| 2 | `drive.file` publish of Rainbet (copyTo fallback, run 2) | **Pass** |
+| 3 | 30 tickets, copyTo fallback (run 3) | **Pass.** Dropdowns on rows 6–35 |
+| 4 | 30 tickets, `files.copy` (run 4) | **Pass.** Dropdowns on rows 6–35 |
+
+Run 1b command:
+
+```sh
+GOOGLE_DOCS_OAUTH_TOKEN_FILE=~/.config/google/google-drive-oauth-token.full-drive.json PYTHONPATH=src \
+  ~/GitRepos/crawler_cli/.venv/bin/python -m crawler_cli technical-audit-questions \
+  --audit $R/rainbet-audit-merged.json --observations $R/rainbet-obs-tls.json --out t428-full-drive-answers.json \
+  --google-sheets-template 1T9BRLgaFDZ99Lx3q53Av75eZZM32BIJc0nahVPQpGmU \
+  --google-sheets-folder 10zFJS95zydc-Tz6Cd-6vJUtCMbI2vmnZ \
+  --google-sheets-title "SCRATCH t428 run1b full drive Rainbet after fix (delete me)"
+```
+
+Run 2 was the same with `google-drive-oauth-token.json`. Runs 3 and 4 called
+`GoogleSheetsTemplatePublisher.publish` directly with 30 synthetic ticket rows (Tickets only).
+
+Runs 1b and 2 gave the same results:
+
+- **Copy path:** run 1b used `files.copy`. The printed URL is Drive's `webViewLink`
+  (`…/edit?usp=drivesdk`), which only that path returns, and the same token copied the template
+  directly in both probes. Run 2 went through the copyTo fallback, and its URL is the Sheets
+  `spreadsheetUrl` (`…/edit?ouid=…`).
+- **Rows at `B6:I`:** 9 ticket rows at `Tickets!B6:I14` (Q11, Q15, Q41, Q58, Q94, Q22, Q72, Q91, Q63).
+- **B3:** the formula is still `=CONCATENATE("Count of tickets: ",COUNTA(B6:B))` and it shows
+  **"Count of tickets: 9"** (30 in runs 3 and 4).
+- **B5 header:** `Tickets!A1:J5` is identical to the template, and 5 rows are still frozen.
+- **Config untouched:** `Config!A1:Z200` (formulas) is identical to the template.
+- **Tab order:** Tickets, Questions, Q11 On-page, Q15 On-page, Q41 International & URL structure,
+  Q58 On-page & SERP features, Q94 Header vs HTML parity, Q22 Internal linking, Q72 Redirects &
+  internal links, Q91 Internal link quality, Q63 Server performance & security, **Config** last.
+- **Folder:** `parents` = the scratch folder only, for both tokens.
+- **Issue rows and tabs only (ticket 428):** the Questions tab has its 13-column header and
+  **9 rows**, exactly the ticketed answers in answer order, each linked to its ticket. All 9 are
+  `Needs validation` (coverage-incomplete Yes answers with a ticket). The 95 non-issue answers
+  (Healthy, Pending, No, and the four Yes answers without a ticket: Q13, Q51, Q54, Q81, which had
+  data tabs this morning) appear nowhere. The tab set is exactly Tickets, Questions, Config and
+  the 9 ticketed answers' data tabs. This morning's run 2c had 105 Questions rows and 13 data
+  tabs. The `--out` JSON still holds all 104 answers.
+- **Dropdowns:** `F6:G26` (the template's own rules, `=Config!$B$2:$B` / `=Config!$A$2:$A`)
+  are intact. With 9 tickets, the extension re-applies the same rule to rows 6–14. In runs 3 and 4
+  (30 tickets) rows **6–35** of F and G are validated from the same sources, on both copy paths.
+  Rows past the last ticket keep the template's state.
+- **Receipt (run 1b):**
+
+  ```
+  Receipt: spreadsheet 14-x_qr8gw6zDlwwQHkKiXxZsEQkBFPWuilYpGijowFU; 11 ranges verified by read-back
+    'Tickets'!B6:I14: 9 rows
+    'Questions'!A1:M10: 10 rows
+    'Q11 On-page'!A1:E131: 131 rows
+    'Q15 On-page'!A1:H994: 994 rows
+    'Q41 International & URL structure'!A1:E6: 6 rows
+    'Q58 On-page & SERP features'!A1:V161: 161 rows
+    'Q94 Header vs HTML parity'!A1:I1638: 1638 rows
+    'Q22 Internal linking'!A1:J22322: 22322 rows
+    'Q72 Redirects & internal links'!A1:J79: 79 rows
+    'Q91 Internal link quality'!A1:E501: 501 rows
+    'Q63 Server performance & security'!A1:F2: 2 rows
+    dropdowns applied to every ticket row: 'Tickets'!F6:F14, 'Tickets'!G6:G14
+  ```
+
+  Run 2's receipt was the same apart from the ID. Runs 3 and 4 printed
+  `'Tickets'!B6:I35: 30 rows` and `dropdowns applied to every ticket row: 'Tickets'!F6:F35, 'Tickets'!G6:G35`.
+- **`--check-template` on the run 1b workbook:** passes, exit 0, for both columns.
+
+Full suite after the fix: `pytest -q -m "not playwright_smoke"` → 2107 passed, 56 skipped,
+7 deselected. `ruff check` and `ruff format --check` (0.16.6) are clean.
