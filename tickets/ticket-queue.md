@@ -38,8 +38,11 @@ complete. Probe-producer follow-ups in that ticket remain open.
 - `422` `proposed` [Make database-backed tests safe to run and run them in CI](./ticket-422-db-test-safety-and-ci-dsn.md) — **P2.**
 - `423` `proposed` [Record why an /llms.txt fetch failed in AI-governance observations](./ticket-423-llms-txt-failure-reasons.md) — **P3.**
 - `424` `proposed` [Sheets publisher follow-ups carried over from ticket 223](./ticket-424-sheets-publisher-polish.md) — **P3.**
+- `425` `proposed` [Treat a bot challenge as unanswered in the Accept-Language probe](./ticket-425-locale-probe-challenge-not-a-status.md) — **P1, 419 live QA D1.**
+- `426` `proposed` [Mark the locale-probe collection partial when comparisons were not answered](./ticket-426-locale-probe-partial-coverage.md) — **P2, 419 live QA D2.**
+- `427` `proposed` [Let the live probes use the crawl's transport, identity and pace options](./ticket-427-probe-engine-transport-options.md) — **P2, 419 live QA D3.**
 
-Next unreserved ticket number is **425**.
+Next unreserved ticket number is **428**.
 
 Next unreserved ticket number: **419**. Earlier positions below are historical.
 
