@@ -321,6 +321,7 @@ jobs:
               metas = [n for n in zf.namelist() if n.endswith(".dist-info/METADATA")]
               assert len(metas) == 1, metas
               meta = zf.read(metas[0]).decode()
+              wheel_names = set(zf.namelist())
           for needle in (
               "Name: crawler-cli",
               "License: MIT",
@@ -337,6 +338,16 @@ jobs:
               "Provides-Extra: test",
           ):
               assert needle in meta, f"missing {needle!r} in wheel METADATA"
+          # Runtime JSON templates are loaded with importlib.resources; a wheel
+          # without them raises TemplateContractError / QuestionRegistryError.
+          for template in (
+              "google-sheets-template-contract.json",
+              "site-profile.example.json",
+              "technical-audit-questions.json",
+              "technical-audit-ticket-language.json",
+          ):
+              member = f"crawler_cli/templates/{template}"
+              assert member in wheel_names, f"{member} missing from wheel"
 
           with tarfile.open(sdists[0], "r:gz") as tf:
               names = tf.getnames()

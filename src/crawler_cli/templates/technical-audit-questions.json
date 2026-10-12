@@ -54,7 +54,7 @@
     "robots": "robots.txt fetched in the run",
     "sitemaps": "sitemaps discovered in the run",
     "probes": "active probes (variants, synthetic 404s, conditional requests, locale)",
-    "site-profile": "a site profile JSON (see templates/site-profile.example.json)",
+    "site-profile": "a site profile JSON (see crawler_cli/templates/site-profile.example.json)",
     "gsc": "a supplied Search Console export",
     "logs": "supplied server logs with verified bot identity",
     "backlinks": "a supplied backlink export",

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .package_templates import template_path, template_source
+
 
 _SHEET_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,}$")
 _SHEET_URL_PATTERN = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
@@ -114,12 +116,12 @@ TEMPLATE_CONTRACT_VERSION = "crawler-cli/google-sheets-template-contract/1"
 
 
 def default_template_contract_path() -> Path:
-    return Path(__file__).parents[2] / "templates" / "google-sheets-template-contract.json"
+    return template_path("google-sheets-template-contract.json")
 
 
 def load_template_contract(path: str | Path | None = None) -> dict[str, Any]:
     """Load and validate the template contract the publisher maps tables through."""
-    target = Path(path) if path else default_template_contract_path()
+    target = template_source(path, "google-sheets-template-contract.json")
     try:
         payload = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -191,7 +193,8 @@ class GoogleSheetsTemplatePublisher:
 
     The template ID, Tickets tab name, ticket columns, allowed dropdown values
     and protected tabs come from a template contract
-    (``templates/google-sheets-template-contract.json`` by default).  The
+    (the bundled ``crawler_cli/templates/google-sheets-template-contract.json``
+    by default, loaded with importlib.resources).  The
     generated ``Tickets`` table is always written beneath the copied
     workbook's own header, which is located and checked before any write;
     there is no fixed-row or A2 fallback.

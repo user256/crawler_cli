@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 - The technical audit is now the three-stream question-runner audit (ticket 409): `technical-audit` writes the deterministic bundle, `technical-audit-observations` adds run-scoped observations (including the re-attached AI-governance, Accept-Language and TLS probes) and `technical-audit-questions` answers the Q1-Q104 registry. The previous contract projection, manual-review register and ticket-register publisher are removed.
+- Fixed: the audit question registry, ticket language, site-profile example and Google Sheets template contract now ship inside the wheel (`crawler_cli/templates/`, loaded with importlib.resources). They previously lived in an unpackaged repository `templates/` directory, so `technical-audit-questions` and the Sheets publisher failed from an installed wheel.
 
 ## [Unreleased]
 

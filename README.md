@@ -689,7 +689,7 @@ check and every answer.
 
 The template ID, Tickets tab name, ticket columns, allowed Priority and
 Ticket Classification values and protected tabs (`Config`) come from
-[`templates/google-sheets-template-contract.json`](templates/google-sheets-template-contract.json);
+[`src/crawler_cli/templates/google-sheets-template-contract.json`](src/crawler_cli/templates/google-sheets-template-contract.json);
 pass `--google-sheets-contract` to use another, and omit
 `--google-sheets-template` to copy the contract's template. Generated tickets
 are checked against the contract before anything is copied. After copying, the

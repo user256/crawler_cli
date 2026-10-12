@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .package_templates import template_path, template_source
 from .technical_audit import TECHNICAL_AUDIT_CHECK_CONTRACT, TECHNICAL_AUDIT_LEGACY_CHECK_ID_ALIASES
 from .technical_audit_evidence import (
     HEADING_LINK_XPATH_PATTERN,
@@ -57,15 +58,15 @@ class QuestionRegistryError(ValueError):
 
 
 def default_question_registry_path() -> Path:
-    return Path(__file__).parents[2] / "templates" / "technical-audit-questions.json"
+    return template_path("technical-audit-questions.json")
 
 
 def default_site_profile_example_path() -> Path:
-    return Path(__file__).parents[2] / "templates" / "site-profile.example.json"
+    return template_path("site-profile.example.json")
 
 
 def load_question_registry(path: str | Path | None = None) -> dict[str, object]:
-    target = Path(path) if path else default_question_registry_path()
+    target = template_source(path, "technical-audit-questions.json")
     try:
         payload = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -133,7 +134,7 @@ def questions_markdown(registry: Mapping[str, object]) -> str:
     lines = [
         "# Technical audit questions",
         "",
-        "Generated from [`templates/technical-audit-questions.json`](../templates/technical-audit-questions.json); "
+        "Generated from [`src/crawler_cli/templates/technical-audit-questions.json`](../src/crawler_cli/templates/technical-audit-questions.json); "
         "edit the JSON, not this file. Every question is phrased so that **Yes means a problem**; "
         "`Issue if` is the rule that makes the answer Yes.",
         "",

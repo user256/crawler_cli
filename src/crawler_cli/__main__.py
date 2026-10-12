@@ -4877,7 +4877,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     audit_parser.add_argument(
         "--ticket-language",
-        help="Ticket-language JSON. Defaults to templates/technical-audit-ticket-language.json.",
+        help="Ticket-language JSON. Defaults to the bundled crawler_cli/templates/technical-audit-ticket-language.json.",
     )
     audit_parser.add_argument(
         "--google-sheets-template",
@@ -4888,7 +4888,7 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument(
         "--google-sheets-contract",
         help="Template contract JSON (template ID, Tickets tab, columns, dropdown values, protected tabs); "
-        "default templates/google-sheets-template-contract.json. Its template is used when "
+        "default the bundled crawler_cli/templates/google-sheets-template-contract.json. Its template is used when "
         "--google-sheets-template is omitted.",
     )
     audit_parser.add_argument(
@@ -4910,15 +4910,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     questions_parser.add_argument(
         "--site-profile",
-        help="Site profile JSON (see templates/site-profile.example.json); questions needing it stay Pending without it.",
+        help="Site profile JSON (see crawler_cli/templates/site-profile.example.json); questions needing it stay Pending without it.",
     )
     questions_parser.add_argument(
         "--questions",
-        help="Question registry JSON. Defaults to templates/technical-audit-questions.json.",
+        help="Question registry JSON. Defaults to the bundled crawler_cli/templates/technical-audit-questions.json.",
     )
     questions_parser.add_argument(
         "--ticket-language",
-        help="Ticket-language JSON. Defaults to templates/technical-audit-ticket-language.json.",
+        help="Ticket-language JSON. Defaults to the bundled crawler_cli/templates/technical-audit-ticket-language.json.",
     )
     questions_parser.add_argument(
         "--observations",
@@ -4936,7 +4936,7 @@ def _build_parser() -> argparse.ArgumentParser:
     questions_parser.add_argument(
         "--google-sheets-contract",
         help="Template contract JSON (template ID, Tickets tab, columns, dropdown values, protected tabs); "
-        "default templates/google-sheets-template-contract.json. Its template is used when "
+        "default the bundled crawler_cli/templates/google-sheets-template-contract.json. Its template is used when "
         "--google-sheets-template is omitted.",
     )
     questions_parser.add_argument(

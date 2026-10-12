@@ -1,6 +1,6 @@
 # Technical audit questions
 
-Generated from [`templates/technical-audit-questions.json`](../templates/technical-audit-questions.json); edit the JSON, not this file. Every question is phrased so that **Yes means a problem**; `Issue if` is the rule that makes the answer Yes.
+Generated from [`src/crawler_cli/templates/technical-audit-questions.json`](../src/crawler_cli/templates/technical-audit-questions.json); edit the JSON, not this file. Every question is phrased so that **Yes means a problem**; `Issue if` is the rule that makes the answer Yes.
 
 ## Statuses
 

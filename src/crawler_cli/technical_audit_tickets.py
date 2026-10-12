@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from typing import SupportsIndex, SupportsInt
 from pathlib import Path
 
+from .package_templates import template_path, template_source
+
 
 TICKET_COLUMNS = (
     "Label",
@@ -25,11 +27,11 @@ class TicketLanguageError(ValueError):
 
 
 def default_ticket_language_path() -> Path:
-    return Path(__file__).parents[2] / "templates" / "technical-audit-ticket-language.json"
+    return template_path("technical-audit-ticket-language.json")
 
 
 def load_ticket_language(path: str | Path | None = None) -> dict[str, object]:
-    target = Path(path) if path else default_ticket_language_path()
+    target = template_source(path, "technical-audit-ticket-language.json")
     try:
         payload = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

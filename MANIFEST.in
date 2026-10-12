@@ -10,6 +10,7 @@ graft tests
 graft docs
 global-exclude *.py[cod] *.so .DS_Store
 global-exclude */__pycache__/*
+prune src/crawler_cli/.mypy_cache
 prune runs
 prune tickets
 exclude uv.lock
