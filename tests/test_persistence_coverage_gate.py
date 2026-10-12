@@ -11,12 +11,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 import asyncpg
 import pytest
 import pytest_asyncio
 
+from crawler_cli.dsn import DSN_DATABASE_PARAMS, resolve_dsn_database
 from crawler_cli.models import CrawlResult, ExtractedContent, RobotsDirectives
 from crawler_cli.persistence import AsyncpgStore, CRAWL_TABLES, SCHEMA_STATEMENTS
 from crawler_cli.reports import CrawlReports
@@ -525,11 +526,15 @@ async def test_drop_crawl_database_isolated_from_test_dsn(dsn: str, allow_databa
     parsed = urlparse(dsn)
     db_name = "crawler_cli_test_drop_probe"
     assert db_name.startswith("crawler_cli_test_")
-    assert db_name != parsed.path.lstrip("/"), "probe must not be the test database itself"
+    assert db_name != resolve_dsn_database(dsn), "probe must not be the test database itself"
+    # Preserve query parameters (sslmode, host) for admin connects, minus the
+    # database selectors, which would conflict with the new path.
+    query = urlencode(
+        [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k not in DSN_DATABASE_PARAMS]
+    )
     maintenance = f"{parsed.scheme}://{parsed.netloc}/postgres"
-    # Preserve query (sslmode) if present on original DSN for admin connects.
-    if parsed.query:
-        maintenance = f"{maintenance}?{parsed.query}"
+    if query:
+        maintenance = f"{maintenance}?{query}"
 
     admin = await asyncpg.connect(maintenance)
     try:
@@ -539,8 +544,8 @@ async def test_drop_crawl_database_isolated_from_test_dsn(dsn: str, allow_databa
         await admin.close()
 
     probe_dsn = f"{parsed.scheme}://{parsed.netloc}/{db_name}"
-    if parsed.query:
-        probe_dsn = f"{probe_dsn}?{parsed.query}"
+    if query:
+        probe_dsn = f"{probe_dsn}?{query}"
 
     store = AsyncpgStore(probe_dsn)
     await store.initialize()

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -20,6 +20,8 @@ if str(SRC) not in sys.path:
 # packages.
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
+
+from crawler_cli.dsn import AmbiguousDatabaseError, resolve_dsn_database  # noqa: E402
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -40,38 +42,35 @@ TEST_DATABASE_PREFIX = "crawler_cli_test_"
 ALLOW_DATABASE_DDL_ENV = "CRAWLER_CLI_TEST_ALLOW_DATABASE_DDL"
 
 
-def dsn_database_name(dsn: str) -> str:
-    """Return the database name a libpq DSN (URL or key=value form) selects.
-
-    An empty string means the DSN names no database (libpq would then fall
-    back to the user name), which the guard treats as unsafe.
-    """
-    dsn = dsn.strip()
-    if "://" in dsn:
-        parsed = urlparse(dsn)
-        query_names = parse_qs(parsed.query).get("dbname")
-        if query_names:
-            return query_names[-1]
-        return parsed.path.lstrip("/").split("/")[0]
-    name = ""
-    for part in dsn.split():
-        key, sep, value = part.partition("=")
-        if sep and key.strip() == "dbname":
-            name = value.strip().strip("'\"")
-    return name
+# asyncpg is the only driver the database-backed tests use (AsyncpgStore and the
+# drop probe pass the DSN alone, no database= kwarg), so the guard resolves the
+# name with crawler_cli.dsn, which mirrors asyncpg and refuses ambiguous DSNs
+# (path vs ?dbname= conflict, repeated keys, service file, empty name, user-name
+# fallback). Only the crawler_cli_test_ prefix rule is test-specific.
+def dsn_database_name(dsn: str, *, environ: Mapping[str, str] | None = None) -> str:
+    """Return the database asyncpg would connect to; raise AmbiguousDatabaseError if ambiguous."""
+    return resolve_dsn_database(dsn, environ=environ)
 
 
-def check_test_dsn(dsn: str) -> None:
-    """Raise pytest.UsageError unless ``dsn`` names a crawler_cli_test_* database.
+def check_test_dsn(dsn: str, *, environ: Mapping[str, str] | None = None) -> None:
+    """Raise pytest.UsageError unless ``dsn`` selects a crawler_cli_test_* database.
 
-    Plain ``str.startswith`` on the parsed name: never an SQL LIKE, whose ``_``
+    The name is resolved as asyncpg resolves it (see :func:`dsn_database_name`)
+    and compared with plain ``str.startswith``: never an SQL LIKE, whose ``_``
     is a wildcard (the 2026-06-05 incident).
     """
-    name = dsn_database_name(dsn)
+    try:
+        name = dsn_database_name(dsn, environ=environ)
+    except AmbiguousDatabaseError as exc:
+        raise pytest.UsageError(
+            f"{TEST_DSN_ENV}: {exc}. It must select exactly one scratch database whose name "
+            f"starts with {TEST_DATABASE_PREFIX!r}; the database-backed tests truncate every "
+            "crawl table. See docs/testing-with-postgres.md."
+        ) from None
     if not name.startswith(TEST_DATABASE_PREFIX) or name == TEST_DATABASE_PREFIX:
         raise pytest.UsageError(
             f"{TEST_DSN_ENV} must name a scratch database whose name starts with "
-            f"{TEST_DATABASE_PREFIX!r} (got {name or '<none>'!r}). The database-backed "
+            f"{TEST_DATABASE_PREFIX!r} (got {name!r}). The database-backed "
             "tests truncate every crawl table, so they refuse to run against any other "
             "database. See docs/testing-with-postgres.md."
         )

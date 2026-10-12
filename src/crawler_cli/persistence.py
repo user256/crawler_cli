@@ -6,10 +6,11 @@ import json
 import time
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, TypedDict, cast
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 from .amp import VARIANT_KIND_AMP, classify_amp_variants, urls_match
 from .compression import compress_html, decompress_html, is_compressed
+from .dsn import DSN_DATABASE_PARAMS, AmbiguousDatabaseError, resolve_dsn_database
 from .detection.analytics import AnalyticsDetectionResult
 from .hashing import sha256_hash, simhash64, simhash_to_signed, simhash_to_unsigned
 from .extract import extract_links
@@ -1225,10 +1226,21 @@ CRAWL_TABLES: tuple[str, ...] = SECURITY_TABLES + (
 
 
 def database_name_from_dsn(dsn: str) -> str:
-    path = urlparse(dsn).path.strip("/")
-    if not path:
-        return "postgres"
-    return path.split("/")[0]
+    """Return the database asyncpg connects to for ``dsn``; never a guess.
+
+    Raises :class:`~crawler_cli.dsn.AmbiguousDatabaseError` (a ``ValueError``)
+    when the DSN does not determine one database unambiguously. Used by the
+    destructive and ``--confirm`` paths, so it never defaults to ``postgres``.
+    """
+    return resolve_dsn_database(dsn)
+
+
+# Server databases a crawl drop must never target.
+PROTECTED_DATABASES = frozenset({"postgres", "template0", "template1"})
+
+
+def _quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
 
 
 def encode_html_for_storage(text: str, *, compress: bool) -> bytes | None:
@@ -4588,14 +4600,34 @@ class AsyncpgStore:
             await conn.execute(f"TRUNCATE TABLE {table_list} RESTART IDENTITY CASCADE")
 
     async def drop_crawl_database(self, *, maintenance_dsn: str | None = None) -> None:
+        """DROP exactly the database asyncpg connects to with ``self.dsn``.
+
+        Refuses (``ValueError``) before connecting anywhere when that database
+        is ambiguous, is a server maintenance database, or is the database the
+        maintenance DSN itself targets.
+        """
         db_name = database_name_from_dsn(self.dsn)
+        if db_name in PROTECTED_DATABASES:
+            raise ValueError(f"refusing to drop protected database {db_name!r}")
         if maintenance_dsn is None:
+            # Same server: keep host/port/sslmode query parameters (a socket
+            # host given as ?host= would otherwise switch servers), drop only
+            # the database selectors.
             parsed = urlparse(self.dsn)
-            maintenance_dsn = (
-                f"{parsed.scheme}://{parsed.netloc}/postgres"
-                if parsed.scheme
-                else self.dsn.rsplit("/", 1)[0] + "/postgres"
-            )
+            kept = [
+                (key, value)
+                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                if key not in DSN_DATABASE_PARAMS
+            ]
+            maintenance_dsn = f"{parsed.scheme}://{parsed.netloc}/postgres"
+            if kept:
+                maintenance_dsn += "?" + urlencode(kept)
+        try:
+            maintenance_name = database_name_from_dsn(maintenance_dsn)
+        except AmbiguousDatabaseError as exc:
+            raise AmbiguousDatabaseError(f"maintenance {exc}") from None
+        if maintenance_name == db_name:
+            raise ValueError(f"refusing to drop {db_name!r}: the maintenance DSN connects to that same database")
         admin = await asyncpg.connect(maintenance_dsn)
         try:
             await admin.execute(
@@ -4606,7 +4638,7 @@ class AsyncpgStore:
                 """,
                 db_name,
             )
-            await admin.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+            await admin.execute(f"DROP DATABASE IF EXISTS {_quote_identifier(db_name)}")
         finally:
             await admin.close()
         await self.close()

@@ -14,7 +14,12 @@ can hold operator databases, so two guards apply (ticket 422):
    usage error unless the DSN's database name starts with `crawler_cli_test_`.
    It checks the parsed name with `str.startswith`. It never uses SQL `LIKE`,
    because `_` is a wildcard there; that wildcard is how seven operator
-   databases were dropped on 2026-06-05.
+   databases were dropped on 2026-06-05. The name is resolved the way asyncpg
+   resolves it: the URL path wins (percent-decoded), and `?dbname=` /
+   `?database=` apply only when there is no path. The guard also refuses a
+   DSN whose path and query name different databases, a DSN that names no
+   database unless `PGDATABASE` names a `crawler_cli_test_*` one, and the
+   libpq `key=value` form, which asyncpg cannot use.
 2. **DDL opt-in.** `test_drop_crawl_database_isolated_from_test_dsn` creates
    and drops the database `crawler_cli_test_drop_probe`, named exactly. It
    skips unless `CRAWLER_CLI_TEST_ALLOW_DATABASE_DDL=1` is set. Only set the

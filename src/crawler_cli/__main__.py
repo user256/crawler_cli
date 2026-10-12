@@ -335,9 +335,14 @@ def _add_confirm_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _require_confirm(args: argparse.Namespace, dsn: str) -> int | None:
-    db_name = database_name_from_dsn(dsn)
     if args.dry_run:
         return None
+    try:
+        # The database asyncpg actually connects to; refuses ambiguous DSNs.
+        db_name = database_name_from_dsn(dsn)
+    except ValueError as exc:
+        print(f"Refusing to modify the database: {exc}", file=sys.stderr)
+        return 2
     if getattr(args, "confirm", None) != db_name:
         print(
             f"Refusing to modify database {db_name!r} without --confirm {db_name}",
@@ -4391,9 +4396,15 @@ async def _run_compact_html(args: argparse.Namespace) -> int:
 
 async def _run_delete_crawl(args: argparse.Namespace) -> int:
     dsn = _build_dsn(args)
+    try:
+        # Resolve before connecting: the name shown, confirmed and dropped is
+        # the one asyncpg connects to, or the command refuses outright.
+        db_name = database_name_from_dsn(dsn)
+    except ValueError as exc:
+        print(f"Refusing to delete: {exc}", file=sys.stderr)
+        return 2
     store = _store_from_args(args)
     await store.initialize()
-    db_name = database_name_from_dsn(dsn)
     try:
         counts = await store.table_row_counts()
         queued, pending, done = await store.frontier_stats_all_runs()
@@ -4421,9 +4432,13 @@ async def _run_delete_crawl(args: argparse.Namespace) -> int:
             print(f"Re-run with --confirm {db_name} to proceed.", file=sys.stderr)
             return 2
         if args.mode == "drop-database":
-            await store.drop_crawl_database(
-                maintenance_dsn=args.maintenance_dsn or None,
-            )
+            try:
+                await store.drop_crawl_database(
+                    maintenance_dsn=args.maintenance_dsn or None,
+                )
+            except ValueError as exc:
+                print(f"Refusing to drop: {exc}", file=sys.stderr)
+                return 2
             print(f"Dropped database {db_name}")
         else:
             await store.truncate_crawl_tables()
