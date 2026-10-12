@@ -858,9 +858,14 @@ def _probe_engine_config(args: argparse.Namespace, seed_origins: list[str], allo
     """
     impersonate = getattr(args, "curl_impersonate", "") or ""
     custom_ua = getattr(args, "custom_ua", None)
-    backend = getattr(args, "http_backend", None) or (
-        "curl_cffi" if impersonate and impersonate != "none" else "aiohttp"
-    )
+    requested_backend = getattr(args, "http_backend", None)
+    backend: BackendName
+    if requested_backend in ("aiohttp", "curl_cffi"):
+        backend = requested_backend
+    elif requested_backend:
+        raise ValueError("--http-backend must be aiohttp or curl_cffi")
+    else:
+        backend = "curl_cffi" if impersonate and impersonate != "none" else "aiohttp"
     if impersonate and impersonate != "none" and backend != "curl_cffi":
         raise ValueError("--impersonate needs --http-backend curl_cffi")
     if impersonate and impersonate != "none" and not custom_ua:

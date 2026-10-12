@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from typing import SupportsIndex, SupportsInt
 from pathlib import Path
 
 
@@ -132,7 +133,8 @@ def _ticket_source(check: Mapping[str, object], entry: Mapping[str, object]) -> 
 
 
 def ticket_sheet_table(rows: list[Mapping[str, str]]) -> list[list[object]]:
-    return [list(TICKET_COLUMNS), *[[row.get(column, "") for column in TICKET_COLUMNS] for row in rows]]
+    body: list[list[object]] = [[row.get(column, "") for column in TICKET_COLUMNS] for row in rows]
+    return [list(TICKET_COLUMNS), *body]
 
 
 def _placeholders(audit: Mapping[str, object], check: Mapping[str, object], evidence: object) -> dict[str, str]:
@@ -229,7 +231,7 @@ def _append(left: str, right: str) -> str:
 
 def _integer(value: object) -> int:
     try:
-        return int(value) if value is not None else 0
+        return int(value) if isinstance(value, (str, bytes, bytearray, SupportsInt, SupportsIndex)) else 0
     except (TypeError, ValueError):
         return 0
 

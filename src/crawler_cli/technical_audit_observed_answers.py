@@ -691,7 +691,7 @@ def _locale_probes(audit: Json, question: Json, profile: Json | None) -> Evidenc
             markup_only += 1
         url = str(record["url"])
         by_url.setdefault(url, []).append(record)
-        if changes:
+        if isinstance(changes, list) and changes:
             changes_by_url.setdefault(url, []).append(f"{record['variant']}: {', '.join(changes)}")
     rows = [
         {"url": url, "finding": "; ".join(changes), **by_url[url][0]["_provenance"]}

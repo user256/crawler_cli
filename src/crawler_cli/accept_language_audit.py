@@ -315,7 +315,7 @@ def _primary_content(raw_html: str | None) -> dict[str, object]:
     soup = BeautifulSoup(raw_html, "html.parser")
     for tag in soup(list(_NON_PRIMARY_TAGS)):
         tag.decompose()
-    region = soup.find("main") or soup.find(attrs={"role": "main"})
+    region = soup.find("main") or soup.find(None, {"role": "main"})
     basis = "main_visible_text"
     if region is None:
         region, basis = soup.find("body"), "body_visible_text"

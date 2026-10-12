@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, cast
+from typing import Any, SupportsIndex, SupportsInt, cast
 from urllib.parse import parse_qsl, urljoin, urlparse
 
 from .amp import urls_match
@@ -183,7 +183,7 @@ def _soft_404_candidate(url: str, html: str, state: dict[str, object]) -> dict[s
 
 def _int_or_none(value: object) -> int | None:
     try:
-        return int(value) if value is not None else None
+        return int(value) if isinstance(value, (str, bytes, bytearray, SupportsInt, SupportsIndex)) else None
     except (TypeError, ValueError):
         return None
 
