@@ -12,6 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+# crawler_gui/ is a repo-root development tool, not part of the wheel, so
+# `pip install -e .` never makes it importable. server.py and its tests import
+# `crawler_gui.resume`, which needs the repo root on sys.path. Bare `pytest`
+# (as CI runs it) does not add the working directory; `python -m pytest` does,
+# which is why this only failed in CI. Appended so it cannot shadow installed
+# packages.
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
