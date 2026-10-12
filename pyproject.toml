@@ -125,6 +125,12 @@ license-files = ["LICENSE"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Runtime JSON templates (audit question registry, ticket language, site-profile
+# example, Google Sheets template contract) are loaded with importlib.resources
+# and must ship in the wheel.
+[tool.setuptools.package-data]
+crawler_cli = ["templates/*.json"]
+
 [project.scripts]
 crawler-cli = "crawler_cli.__main__:main"
 

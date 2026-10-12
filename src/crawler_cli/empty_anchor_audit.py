@@ -175,7 +175,8 @@ def _parse_record(
     xpath = _optional_text(record.get("xpath"))
     anchor_text = _optional_text(record.get("anchor_text"))
     image_alts = _image_alts(record)
-    if image_alts is _INVALID:
+    # _image_alts returns a tuple, None, or the _INVALID sentinel.
+    if image_alts is not None and not isinstance(image_alts, tuple):
         return None
     return source_url, target_url, xpath, anchor_text, image_alts
 

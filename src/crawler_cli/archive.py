@@ -221,15 +221,18 @@ async def discover_historical_urls(
             if page_urls is None or not page_urls:
                 break
             raw_urls.extend(page_urls)
-            if len(
-                _clean_archive_urls(
-                    raw_urls,
-                    strip_extensions=se,
-                    strip_paths=sp,
-                    force_https=force_https,
-                    force_www=force_www,
+            if (
+                len(
+                    _clean_archive_urls(
+                        raw_urls,
+                        strip_extensions=se,
+                        strip_paths=sp,
+                        force_https=force_https,
+                        force_www=force_www,
+                    )
                 )
-            ) >= config.archive_max_urls:
+                >= config.archive_max_urls
+            ):
                 break
 
     return _clean_archive_urls(

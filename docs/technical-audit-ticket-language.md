@@ -1,6 +1,6 @@
 # Technical audit ticket language
 
-Generated from [`templates/technical-audit-ticket-language.json`](../templates/technical-audit-ticket-language.json); edit the JSON, not this file. One entry per contract check ID, in contract order, giving the default text for the `Tickets` tab of the [Technical SEO Audit template](https://docs.google.com/spreadsheets/d/1T9BRLgaFDZ99Lx3q53Av75eZZM32BIJc0nahVPQpGmU/edit?gid=0#gid=0).
+Generated from [`src/crawler_cli/templates/technical-audit-ticket-language.json`](../src/crawler_cli/templates/technical-audit-ticket-language.json); edit the JSON, not this file. One entry per contract check ID, in contract order, giving the default text for the `Tickets` tab of the [Technical SEO Audit template](https://docs.google.com/spreadsheets/d/1T9BRLgaFDZ99Lx3q53Av75eZZM32BIJc0nahVPQpGmU/edit?gid=0#gid=0).
 
 ## How a check row becomes a ticket
 

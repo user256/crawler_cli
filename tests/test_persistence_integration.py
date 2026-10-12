@@ -3,11 +3,8 @@
 These tests are skipped when CRAWLER_CLI_TEST_DSN is not set.  In CI they
 run against a postgres:16 service container.
 
-Local usage:
-    docker run -d -e POSTGRES_USER=crawler -e POSTGRES_PASSWORD=crawler \
-        -e POSTGRES_DB=crawler_test -p 5432:5432 postgres:16
-    CRAWLER_CLI_TEST_DSN=postgresql://crawler:crawler@localhost:5432/crawler_test \
-        pytest tests/test_persistence_integration.py -v
+The DSN's database name must start with ``crawler_cli_test_`` (conftest
+refuses anything else; ticket 422). Local recipe: docs/testing-with-postgres.md.
 """
 
 from __future__ import annotations
@@ -22,7 +19,7 @@ import pytest
 import pytest_asyncio
 
 from crawler_cli.detection.analytics import AnalyticsDetectionResult, AnalyticsHit
-from crawler_cli.extract import extract_page_data
+from crawler_cli.extract import extract_links, extract_page_data
 from crawler_cli.hashing import sha256_hash, simhash64
 from crawler_cli.models import DiscoveredLink, ExtractedContent, HreflangLink, RobotsDirectives
 from crawler_cli.models import (
@@ -35,7 +32,8 @@ from crawler_cli.models import (
 from crawler_cli import CrawlConfig, CrawlEngine
 from crawler_cli.intent_overlap import compute_exclusion
 from crawler_cli.persistence import AsyncpgStore, CRAWL_TABLES, SCHEMA_STATEMENTS
-from crawler_cli.reports import CrawlReports
+from crawler_cli.reports import SNAPSHOT_OPTIONAL_COLUMNS, CrawlReports
+from crawler_cli.technical_audit_evidence import HEADING_LINK_XPATH_PATTERN
 
 
 _DSN = os.environ.get("CRAWLER_CLI_TEST_DSN", "")
@@ -112,41 +110,124 @@ async def test_technical_audit_marks_legacy_snapshot_reports_unavailable(store: 
     )
     await store.update_crawl_run_status(run_id, "complete")
     assert store.pool is not None
-    async with store.pool.acquire() as conn:
-        await conn.execute(
-            """ALTER TABLE page_run_snapshots
-               DROP COLUMN content_extracted,
-               DROP COLUMN indexability_evidence_json,
-               DROP COLUMN redirect_chain_json,
-               DROP COLUMN canonical_evidence_json"""
-        )
-
     out = tmp_path / "legacy-technical-audit.json"
     args = _build_parser().parse_args(
         ["technical-audit", "--postgres-dsn", store.dsn, "--crawl-run-id", run_id, "--out", str(out)]
     )
     try:
-        assert await _dispatch(args) == 0
-        payload = json.loads(out.read_text())
-        checks = {check["id"]: check for check in payload["checks"]}
-        for check_id in (
-            "orphan-candidates",
-            "redirect-chains",
-            "metadata-and-locale",
-            "canonical-consistency",
-            "hreflang-consistency",
-            "performance-and-conditional-requests",
-            "internal-authority-inventory",
-        ):
-            assert checks[check_id]["status"] in {"partial", "unavailable"}
-
+        async with store.pool.acquire() as conn:
+            await conn.execute("ALTER TABLE page_run_snapshots DROP COLUMN content_extracted")
         reports = CrawlReports(store, run_id=run_id)
         history = await reports.current_site_join_inventory()
         assert len(history) == 1
         assert history[0]["content_extracted"] is None
+
+        # Drop every other column a migration added after the table first shipped.
+        async with store.pool.acquire() as conn:
+            await conn.execute(
+                "ALTER TABLE page_run_snapshots "
+                + ", ".join(
+                    f"DROP COLUMN {column}" for column in SNAPSHOT_OPTIONAL_COLUMNS if column != "content_extracted"
+                )
+            )
+        assert await _dispatch(args) == 0
+        payload = json.loads(out.read_text())
+        assert not any(payload["run_context"]["schema_capabilities"][column] for column in SNAPSHOT_OPTIONAL_COLUMNS)
+        checks = {check["id"]: check for check in payload["checks"]}
+        for check_id in (
+            "orphan-candidates",
+            "internal-link-targets",
+            "internal-authority",
+            "image-markup",
+            "metadata-duplicates-aliases",
+            "hreflang-html-http",
+            "performance-distribution",
+        ):
+            assert checks[check_id]["status"] in {"partial", "unavailable"}, check_id
     finally:
         # Restore the shared integration schema even when an assertion fails.
         await store.initialize()
+
+
+@pytest.mark.asyncio
+async def test_heading_link_regex_behaves_the_same_in_postgres(store: AsyncpgStore) -> None:
+    """HEADING_LINK_XPATH_PATTERN is used as a PostgreSQL ~* regex and a Python re (ticket 421)."""
+    import re
+
+    xpaths = [
+        "/html/body/h2/a",
+        "/html/body/div[2]/h3[4]/span/a",
+        "/HTML/BODY/H2/A",
+        "/[document]/html/body/h3",
+        "/html/body/h1/a",
+        "/html/body/h4/a",
+        "/html/body/h23/a",
+        "/html/body/div/a/h3",
+        "/html/body/p/a",
+    ]
+    assert store.pool is not None
+    async with store.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT x, x ~* $2 AS matched FROM unnest($1::TEXT[]) AS x", xpaths, HEADING_LINK_XPATH_PATTERN
+        )
+    postgres = {row["x"]: row["matched"] for row in rows}
+    python = {x: re.search(HEADING_LINK_XPATH_PATTERN, x, re.IGNORECASE) is not None for x in xpaths}
+    assert postgres == python
+    assert [x for x in xpaths if python[x]] == xpaths[:4] + ["/html/body/div/a/h3"]
+
+
+@pytest.mark.asyncio
+async def test_q39_counts_links_inside_and_wrapping_a_heading(store: AsyncpgStore, tmp_path: Path) -> None:
+    """Both heading-link shapes reach the Q39 population and its failure filter (ticket 421)."""
+    from crawler_cli.__main__ import _build_parser, _dispatch
+    from crawler_cli.technical_audit_questions import answer_questions, load_question_registry
+
+    run_id = "heading-links"
+    site = "https://headings.example"
+    source = f"{site}/blog"
+    # links_json keeps the card's image link for /card; the heading-wrapping
+    # anchor to the same target exists only in the stored HTML.
+    html = (
+        "<html><head><title>Blog</title></head><body>"
+        '<h2><a href="/inside">Inside</a></h2>'
+        '<div><a href="/card"><img src="c.png" alt="Card"></a><a href="/card"><h3>Card</h3></a></div>'
+        '<a href="/plain">Plain</a>'
+        "</body></html>"
+    )
+
+    def page(url: str, status: int, body: str) -> CrawlResult:
+        return CrawlResult(
+            requested_url=url,
+            final_url=url,
+            status=status,
+            headers={"content-type": "text/html"},
+            content_type="text/html",
+            fetch_backend="test",
+            extracted=extract_page_data(body, url, {}),
+            raw_html=body,
+            discovered_links=extract_links(body, url),
+        )
+
+    await store.create_crawl_run(run_id, seed_urls=[source], config_hash="headings", config={})
+    await store.persist(page(source, 200, html))
+    await store.persist(page(f"{site}/inside", 200, "<html><head><title>Inside</title></head><body>i</body></html>"))
+    await store.persist(page(f"{site}/card", 404, "<html><head><title>Gone</title></head><body>g</body></html>"))
+    await store.update_crawl_run_status(run_id, "complete")
+
+    reports = CrawlReports(store, run_id=run_id)
+    population = await reports.heading_link_population(has_links_json=True)
+    assert population == {"heading_link_count": 2, "heading_link_tested_count": 2, "heading_link_wrapping_count": 1}
+
+    out = tmp_path / "headings-audit.json"
+    args = _build_parser().parse_args(
+        ["technical-audit", "--postgres-dsn", store.dsn, "--crawl-run-id", run_id, "--out", str(out)]
+    )
+    assert await _dispatch(args) == 0
+    audit = json.loads(out.read_text())
+    assert audit["run_context"]["heading_link_count"] == 2
+    q39 = next(answer for answer in answer_questions(audit, load_question_registry(), None) if answer["id"] == "Q39")
+    assert (q39["answer"], q39["affected_count"], q39["denominator"]) == ("Yes", 1, 2)
+    assert q39["rows"][0]["target_url"] == f"{site}/card"
 
 
 @pytest.mark.asyncio

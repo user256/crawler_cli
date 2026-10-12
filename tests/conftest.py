@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,16 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+# crawler_gui/ is a repo-root development tool, not part of the wheel, so
+# `pip install -e .` never makes it importable. server.py and its tests import
+# `crawler_gui.resume`, which needs the repo root on sys.path. Bare `pytest`
+# (as CI runs it) does not add the working directory; `python -m pytest` does,
+# which is why this only failed in CI. Appended so it cannot shadow installed
+# packages.
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+from crawler_cli.dsn import AmbiguousDatabaseError, resolve_dsn_database  # noqa: E402
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -19,6 +31,66 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Run real Chromium-backed Playwright smoke tests.",
     )
+
+
+# Ticket 422: database-backed tests TRUNCATE every crawl table and one of them
+# creates and drops a scratch database on the DSN's server. They must never be
+# pointed at an operator database, so the DSN's database name has to carry this
+# prefix, and database DDL needs a second, explicit opt-in.
+TEST_DSN_ENV = "CRAWLER_CLI_TEST_DSN"
+TEST_DATABASE_PREFIX = "crawler_cli_test_"
+ALLOW_DATABASE_DDL_ENV = "CRAWLER_CLI_TEST_ALLOW_DATABASE_DDL"
+
+
+# asyncpg is the only driver the database-backed tests use (AsyncpgStore and the
+# drop probe pass the DSN alone, no database= kwarg), so the guard resolves the
+# name with crawler_cli.dsn, which mirrors asyncpg and refuses ambiguous DSNs
+# (path vs ?dbname= conflict, repeated keys, service file, empty name, user-name
+# fallback). Only the crawler_cli_test_ prefix rule is test-specific.
+def dsn_database_name(dsn: str, *, environ: Mapping[str, str] | None = None) -> str:
+    """Return the database asyncpg would connect to; raise AmbiguousDatabaseError if ambiguous."""
+    return resolve_dsn_database(dsn, environ=environ)
+
+
+def check_test_dsn(dsn: str, *, environ: Mapping[str, str] | None = None) -> None:
+    """Raise pytest.UsageError unless ``dsn`` selects a crawler_cli_test_* database.
+
+    The name is resolved as asyncpg resolves it (see :func:`dsn_database_name`)
+    and compared with plain ``str.startswith``: never an SQL LIKE, whose ``_``
+    is a wildcard (the 2026-06-05 incident).
+    """
+    try:
+        name = dsn_database_name(dsn, environ=environ)
+    except AmbiguousDatabaseError as exc:
+        raise pytest.UsageError(
+            f"{TEST_DSN_ENV}: {exc}. It must select exactly one scratch database whose name "
+            f"starts with {TEST_DATABASE_PREFIX!r}; the database-backed tests truncate every "
+            "crawl table. See docs/testing-with-postgres.md."
+        ) from None
+    if not name.startswith(TEST_DATABASE_PREFIX) or name == TEST_DATABASE_PREFIX:
+        raise pytest.UsageError(
+            f"{TEST_DSN_ENV} must name a scratch database whose name starts with "
+            f"{TEST_DATABASE_PREFIX!r} (got {name!r}). The database-backed "
+            "tests truncate every crawl table, so they refuse to run against any other "
+            "database. See docs/testing-with-postgres.md."
+        )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    dsn = os.environ.get(TEST_DSN_ENV, "")
+    if dsn:
+        check_test_dsn(dsn)
+
+
+def database_ddl_allowed() -> bool:
+    return os.environ.get(ALLOW_DATABASE_DDL_ENV, "") == "1"
+
+
+@pytest.fixture
+def allow_database_ddl() -> None:
+    """Skip unless the run explicitly opted in to CREATE/DROP DATABASE (ticket 422)."""
+    if not database_ddl_allowed():
+        pytest.skip(f"creates and drops a database on the test server; set {ALLOW_DATABASE_DDL_ENV}=1 to run it")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -77,8 +149,6 @@ def _disable_asyncpg_ssl_for_test_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
     tracing; CI's service container is fine either way. Only activates when the
     integration DSN is set so unit tests are untouched.
     """
-    import os
-
     if not os.environ.get("CRAWLER_CLI_TEST_DSN"):
         return
 

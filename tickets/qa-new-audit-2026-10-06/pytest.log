@@ -1,0 +1,42 @@
+........................................................................ [  3%]
+.........................s..s..s..s..................................... [  7%]
+........................................................................ [ 11%]
+........................................................................ [ 14%]
+........................................................................ [ 18%]
+........................................................................ [ 22%]
+........................................................................ [ 26%]
+........................................................................ [ 29%]
+........................................................................ [ 33%]
+........................................................................ [ 37%]
+........................................................................ [ 41%]
+.....................s.................................................. [ 44%]
+........................................................................ [ 48%]
+........................................................................ [ 52%]
+........................................................................ [ 56%]
+.......................s................................................ [ 59%]
+........................................................................ [ 63%]
+.ssssssssssss...ssssssssssssssssssssssssssssssssssssssss................ [ 67%]
+........................................................................ [ 71%]
+........................................................................ [ 74%]
+......................................s................................. [ 78%]
+........................................................................ [ 82%]
+........................................................................ [ 86%]
+........................................................................ [ 89%]
+........................................................................ [ 93%]
+........................................................................ [ 97%]
+.....................................................                    [100%]
+=============================== warnings summary ===============================
+tests/contract/test_security_proofs.py::test_authenticated_crawl_logs_and_artifact_never_contain_secret[basic]
+tests/contract/test_security_proofs.py::test_credentials_survive_same_origin_redirect[basic-aiohttp]
+tests/test_auth.py::test_aiohttp_basic_auth_not_forwarded_to_cross_origin_redirect
+  /home/user256/worktrees/crawler_cli-audit-qa/src/crawler_cli/backends.py:366: DeprecationWarning: BasicAuth is deprecated and will be removed in aiohttp 4.0; use aiohttp.encode_basic_auth() with headers={'Authorization': ...} instead
+    return aiohttp.BasicAuth(creds[0], creds[1])
+
+tests/contract/test_security_proofs.py::test_authenticated_crawl_logs_and_artifact_never_contain_secret[basic]
+tests/contract/test_security_proofs.py::test_credentials_survive_same_origin_redirect[basic-aiohttp]
+tests/test_auth.py::test_aiohttp_basic_auth_not_forwarded_to_cross_origin_redirect
+  /home/user256/worktrees/crawler_cli-audit-qa/src/crawler_cli/backends.py:887: DeprecationWarning: The 'auth' parameter is deprecated and will be removed in v4; pass headers={'Authorization': aiohttp.encode_basic_auth(login, password)} instead
+    response = await response_cm.__aenter__()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1866 passed, 60 skipped, 6 warnings in 66.73s (0:01:06)

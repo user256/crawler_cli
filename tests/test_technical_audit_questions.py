@@ -10,8 +10,10 @@ from crawler_cli.__main__ import _run_technical_audit_questions
 from crawler_cli.html_audit import inspect_stored_html
 from crawler_cli.technical_audit import build_technical_audit
 from crawler_cli.technical_audit_questions import (
+    QUESTION_SHEET_COLUMNS,
     QuestionRegistryError,
     answer_questions,
+    data_tab_name,
     default_site_profile_example_path,
     load_question_registry,
     question_ticket_rows,
@@ -390,11 +392,41 @@ def test_sheet_tables_link_questions_to_tickets_and_data_tabs() -> None:
     tables = questions_sheet_tables(audit, registry, answers, tickets)
 
     questions = {row[1]: row for row in tables["Questions"][1:]}
-    assert len(questions) == 104
+    assert tables["Questions"][0] == list(QUESTION_SHEET_COLUMNS)
     assert questions["Q16"][4:6] == ["Yes", "Issue"]
     assert questions["Q16"][11] == "Q16 Structured data" and "Q16 Structured data" in tables
-    assert tables["Tickets"][int(questions["Q16"][12])][0].startswith("Q16 Structured data: 1 pages")
-    assert questions["Q2"][11] == "" and questions["Q2"][12] == ""
+    assert tables["Tickets"][int(questions["Q16"][12])][0].startswith("Q16 Structured data: 1 page")
+    # Ticket 428: the workbook reports actual issues only, so the Questions tab
+    # holds exactly the ticketed answers, each linked to its ticket row.
+    assert len(answers) == 104
+    assert list(questions) == [answer["id"] for answer in answers if answer.get("ticket")]
+    assert [int(row[12]) for row in tables["Questions"][1:]] == list(range(1, len(tickets) + 1))
+    assert "Q2" not in questions
+
+
+def test_sheet_tables_leave_out_every_non_issue_answer() -> None:
+    # Ticket 428: Healthy, Pending, No and Needs-validation-without-a-ticket
+    # answers appear nowhere in the workbook; the answers themselves are unchanged.
+    audit = _audit()
+    registry = load_question_registry()
+    answers = answer_questions(audit, registry)
+    before = json.dumps(answers, sort_keys=True, default=str)
+    tickets = question_ticket_rows(audit, registry, answers, load_ticket_language())
+    tables = questions_sheet_tables(audit, registry, answers, tickets)
+
+    by_id = _by_id(answers)
+    assert by_id["Q13"]["answer"] == "Yes" and not by_id["Q13"]["ticket"] and by_id["Q13"]["rows"]
+    assert {answer["status"] for answer in answers} >= {"Healthy", "Pending", "Needs validation"}
+    statuses = {row[5] for row in tables["Questions"][1:]}
+    assert statuses <= {"Issue", "Needs validation"}
+    assert all(row[1] in {t["question_id"] for t in tickets} for row in tables["Questions"][1:])
+    entries = {entry["id"]: entry for entry in registry["questions"]}
+    expected_tabs = {
+        data_tab_name(entries[answer["id"]]) for answer in answers if answer.get("ticket") and answer.get("rows")
+    }
+    assert set(tables) == {"Questions", "Tickets", *expected_tabs}
+    assert data_tab_name(entries["Q13"]) not in tables
+    assert json.dumps(answers, sort_keys=True, default=str) == before
     ticket = next(row for row in tickets if row["question_id"] == "Q22")
     assert ticket["Suggested Solution"]  # reused from the internal-link-targets ticket language
     assert "https://example.com/a" in ticket["Description"]
@@ -443,4 +475,56 @@ def test_ticket_percentages_survive_thousands_separated_denominators() -> None:
     tickets = question_ticket_rows(audit, registry, answer_questions(audit, registry), load_ticket_language())
 
     q16 = next(row for row in tickets if row["question_id"] == "Q16")
-    assert "1 pages, across 10,852 pages tested (0%)" in q16["Description"]
+    assert "1 page, across 10,852 pages tested (<1%)" in q16["Description"]
+
+
+def test_ticket_keeps_the_share_for_a_qualified_population_of_the_finding_unit() -> None:
+    # "993 pages across 9,211 indexable pages" is a like-for-like share.
+    audit = _audit()
+    registry = load_question_registry()
+    answers = [
+        {**answer, "ticket": True, "affected_count": 993, "denominator": 9_211, "denominator_unit": "indexable pages"}
+        for answer in answer_questions(audit, registry)
+        if answer["id"] == "Q16"
+    ]
+    (q16,) = question_ticket_rows(audit, registry, answers, load_ticket_language())
+    assert "993 pages, across 9,211 indexable pages tested (11%)" in q16["Description"]
+
+
+def test_ticket_share_never_rounds_a_finding_away() -> None:
+    from crawler_cli.technical_audit_tickets import _share
+
+    assert _share(500, 627_923) == "<1%"
+    assert _share(0, 10) == "0%"
+    assert _share(999, 1_000) == ">99%"
+    assert _share(10, 10) == "100%"
+    assert _share(1, 0) == ""
+
+
+def test_ticket_names_the_denominator_unit_when_it_differs_from_the_finding_unit() -> None:
+    # Ticket 416: Q22 counts links, but its contract denominator counts parsed pages.
+    audit = _audit()
+    registry = load_question_registry()
+    answers = answer_questions(audit, registry)
+    tickets = {
+        row["question_id"]: row for row in question_ticket_rows(audit, registry, answers, load_ticket_language())
+    }
+
+    assert _by_id(answers)["Q22"]["denominator_unit"] == "pages"
+    assert "Yes: 2 links, across 100 pages tested in run run-1." in tickets["Q22"]["Description"]
+    assert "Yes: 1 page, across 100 pages tested (1%) in run run-1." in tickets["Q16"]["Description"]
+
+
+def test_every_answered_question_carries_an_explicit_denominator_unit() -> None:
+    for answer in answer_questions(_audit(), load_question_registry()):
+        if answer["denominator"] is not None:
+            assert answer["denominator_unit"] not in {None, "items"}, answer["id"]
+
+
+def test_unit_label_uses_singular_for_one() -> None:
+    from crawler_cli.technical_audit_evidence import unit_label
+
+    assert unit_label(1, "host-agent policies") == "1 host-agent policy"
+    assert unit_label(2, "host-agent policies") == "2 host-agent policies"
+    assert unit_label(1, "URLs") == "1 URL" and unit_label(1, "URL families") == "1 URL family"
+    assert unit_label(1, "user agents") == "1 user agent" and unit_label(1_200, "pages") == "1,200 pages"

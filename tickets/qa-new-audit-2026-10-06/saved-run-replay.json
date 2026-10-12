@@ -1,0 +1,13 @@
+{
+  "audit_source": "/tmp/claude-1000/-home-user256-GitRepos-crawler-cli/ca4a10eb-b3eb-47a4-a694-11cc849028a7/scratchpad/rainbet-audit-merged.json",
+  "observations_source": "/tmp/claude-1000/-home-user256-GitRepos-crawler-cli/ca4a10eb-b3eb-47a4-a694-11cc849028a7/scratchpad/rainbet-obs-tls.json",
+  "crawl_run_id": "rainbet-20260925-v4",
+  "profile": null,
+  "counts": {
+    "Pending": 80,
+    "Needs validation": 22,
+    "Healthy": 1,
+    "Issue": 1
+  },
+  "differences_from_saved_answer_summary": []
+}
