@@ -757,12 +757,12 @@ existing-ticket reuse and review finding coverage.
 - `390` `implemented (local)` [Say truthfully how Q46 footer evidence is collected](./ticket-390-stream-c-q46-footer-parity-docs.md) — **P3, Stream C QA fix.**
 - `391` `implemented (local)` [Tighten observed-answer edge cases](./ticket-391-stream-c-observed-answer-edge-cases.md) — **P3, Stream C QA fix.**
 - `392` `implemented (local)` [Downgrade other answers only when a run gate answers Yes](./ticket-392-integration-run-gate-scope.md) — **P1, integration QA fix.**
-- `393` `implemented (local)` [Count the indexable-page population for Q15 and Q71](./ticket-393-integration-indexable-population.md) — **P1, integration QA fix; Q39 part done in PR #119; definition follow-up in 421.**
+- `393` `done` [Count the indexable-page population for Q15 and Q71](./ticket-393-integration-indexable-population.md) — **P1, integration QA fix; Q39 part done in PR #119; definition follow-up in 421. Merged in #118 (`b69f7c7`).**
 - `394` `proposed` [Give Q94 and Q41 rows their own ticket language](./ticket-394-integration-q94-q41-ticket-language.md) — **P3, integration QA.**
-- `395` `implemented (local)` [Trust frontier depth for Q44 only when it is click depth from a homepage](./ticket-395-integration-q44-click-depth-provenance.md) — **P1, integration QA fix; homepage BFS follow-up open.**
-- `396` `implemented (local)` [Never answer Q91 Healthy from an empty or partial link population](./ticket-396-integration-q91-zero-population.md) — **P1, integration QA fix.**
-- `397` `implemented (local)` [Collect empty-anchor facts in the shared stored-HTML pass, bounded per page](./ticket-397-integration-empty-anchor-single-pass.md) — **P1, integration QA fix.**
-- `398` `implemented (local)` [Make Q88 match its registry entry and keep untemplated pages in scope](./ticket-398-integration-q88-registry-alignment.md) — **P2, integration QA fix.**
+- `395` `done` [Trust frontier depth for Q44 only when it is click depth from a homepage](./ticket-395-integration-q44-click-depth-provenance.md) — **P1, integration QA fix; homepage BFS follow-up open. Merged in #118 (`b69f7c7`).**
+- `396` `done` [Never answer Q91 Healthy from an empty or partial link population](./ticket-396-integration-q91-zero-population.md) — **P1, integration QA fix. Merged in #118 (`b69f7c7`).**
+- `397` `done` [Collect empty-anchor facts in the shared stored-HTML pass, bounded per page](./ticket-397-integration-empty-anchor-single-pass.md) — **P1, integration QA fix. Merged in #118 (`b69f7c7`).**
+- `398` `done` [Make Q88 match its registry entry and keep untemplated pages in scope](./ticket-398-integration-q88-registry-alignment.md) — **P2, integration QA fix. Merged in #118 (`b69f7c7`).**
 - `399` `proposed` [Stream A follow-ups found in integration QA](./ticket-399-integration-stream-a-followups.md) — **P3, integration QA.**
 
 Deferred lanes remain below.
@@ -831,12 +831,12 @@ existing-ticket reuse and review finding coverage.
 - `390` `implemented (local)` [Say truthfully how Q46 footer evidence is collected](./ticket-390-stream-c-q46-footer-parity-docs.md) — **P3, Stream C QA fix.**
 - `391` `implemented (local)` [Tighten observed-answer edge cases](./ticket-391-stream-c-observed-answer-edge-cases.md) — **P3, Stream C QA fix.**
 - `392` `implemented (local)` [Downgrade other answers only when a run gate answers Yes](./ticket-392-integration-run-gate-scope.md) — **P1, integration QA fix.**
-- `393` `implemented (local)` [Count the indexable-page population for Q15 and Q71](./ticket-393-integration-indexable-population.md) — **P1, integration QA fix; Q39 part done in PR #119; definition follow-up in 421.**
+- `393` `done` [Count the indexable-page population for Q15 and Q71](./ticket-393-integration-indexable-population.md) — **P1, integration QA fix; Q39 part done in PR #119; definition follow-up in 421. Merged in #118 (`b69f7c7`).**
 - `394` `proposed` [Give Q94 and Q41 rows their own ticket language](./ticket-394-integration-q94-q41-ticket-language.md) — **P3, integration QA.**
-- `395` `implemented (local)` [Trust frontier depth for Q44 only when it is click depth from a homepage](./ticket-395-integration-q44-click-depth-provenance.md) — **P1, integration QA fix; homepage BFS follow-up open.**
-- `396` `implemented (local)` [Never answer Q91 Healthy from an empty or partial link population](./ticket-396-integration-q91-zero-population.md) — **P1, integration QA fix.**
-- `397` `implemented (local)` [Collect empty-anchor facts in the shared stored-HTML pass, bounded per page](./ticket-397-integration-empty-anchor-single-pass.md) — **P1, integration QA fix.**
-- `398` `implemented (local)` [Make Q88 match its registry entry and keep untemplated pages in scope](./ticket-398-integration-q88-registry-alignment.md) — **P2, integration QA fix.**
+- `395` `done` [Trust frontier depth for Q44 only when it is click depth from a homepage](./ticket-395-integration-q44-click-depth-provenance.md) — **P1, integration QA fix; homepage BFS follow-up open. Merged in #118 (`b69f7c7`).**
+- `396` `done` [Never answer Q91 Healthy from an empty or partial link population](./ticket-396-integration-q91-zero-population.md) — **P1, integration QA fix. Merged in #118 (`b69f7c7`).**
+- `397` `done` [Collect empty-anchor facts in the shared stored-HTML pass, bounded per page](./ticket-397-integration-empty-anchor-single-pass.md) — **P1, integration QA fix. Merged in #118 (`b69f7c7`).**
+- `398` `done` [Make Q88 match its registry entry and keep untemplated pages in scope](./ticket-398-integration-q88-registry-alignment.md) — **P2, integration QA fix. Merged in #118 (`b69f7c7`).**
 - `399` `proposed` [Stream A follow-ups found in integration QA](./ticket-399-integration-stream-a-followups.md) — **P3, integration QA.**
 
 **Deferred lanes**
