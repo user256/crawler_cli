@@ -46,17 +46,20 @@ def _extracted(lang: str | None) -> ExtractedContent:
 class _FakeEngine:
     """Records exact request headers and per-hop purposes; never touches the network."""
 
-    def __init__(self, handler: Handler, *, blocked: set[str] | None = None) -> None:
+    def __init__(
+        self, handler: Handler, *, blocked: set[str] | None = None, skips: dict[str, str] | None = None
+    ) -> None:
         self.config = SimpleNamespace(follow_redirects=True, request_headers={"X-Existing": "kept"})
         self.handler = handler
-        self.blocked = blocked or set()
+        # url -> skip reason for a status-0 result; ``blocked`` is robots shorthand.
+        self.skips = {url: "robots_txt_disallow" for url in blocked or ()} | (skips or {})
         self.requests: list[tuple[str, str, str | None, bool]] = []
 
     async def crawl(self, url: str, *, purpose: str = "discovered") -> CrawlResult:
         language = self.config.request_headers.get("Accept-Language")
         assert self.config.request_headers.get("X-Existing") == "kept"
         self.requests.append((url, purpose, language, self.config.follow_redirects))
-        if url in self.blocked:
+        if url in self.skips:
             return CrawlResult(
                 requested_url=url,
                 final_url=url,
@@ -66,7 +69,7 @@ class _FakeEngine:
                 fetch_backend="aiohttp",
                 extracted=None,
                 raw_html=None,
-                skip_reason="robots_txt_disallow",
+                skip_reason=self.skips[url],
             )
         status, headers, body = self.handler(url, language)
         lang = "es" if "lang='es'" in body else ("en" if "lang='en'" in body else None)
@@ -239,6 +242,84 @@ async def test_robots_blocked_target_is_not_admitted_not_trap():
     assert neutral["neutral_access_state"] == "not_admitted"
     probe = next(row for row in rows if row.get("observation_type") == "accept_language_probe")
     assert probe["redirect_chain"][0]["skip_reason"] == "robots_txt_disallow"
+
+
+# --- ticket 412 follow-up: a timeout is not an admission refusal ---------------
+
+_TIMEOUT = "fetch_error:TimeoutError"
+
+
+def _trap_reasons(rows: list[dict[str, object]]) -> dict[str, set[str]]:
+    reasons: dict[str, set[str]] = {}
+    for row in _by_type(rows, "bot_trap"):
+        reasons.setdefault(str(row["target_url"]), set()).add(str(row["trap_reason"]))
+    return reasons
+
+
+async def _unanswered_root(skip_reason: str) -> list[dict[str, object]]:
+    return await collect_accept_language_evidence(
+        _FakeEngine(lambda url, language: (200, {}, _EN), skips={"https://example.com/": skip_reason}),
+        ["https://example.com/"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_timeout_is_fetch_failed_not_not_admitted():
+    rows = await _unanswered_root(_TIMEOUT)
+    probes = [row for row in rows if row.get("observation_type") == "accept_language_probe"]
+    assert {row["outcome"] for row in probes} == {"fetch_failed"}
+    assert probes[0]["redirect_chain"][0]["skip_reason"] == _TIMEOUT
+    neutral = next(row for row in rows if row.get("observation_type") == "neutral_access")
+    assert neutral["neutral_access_state"] == "fetch_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "skip_reason",
+    ["robots_txt_disallow", "path_out_of_scope:outside_prefix", "destination_denied:private_address"],
+)
+async def test_real_refusal_still_says_not_admitted(skip_reason: str):
+    rows = await _unanswered_root(skip_reason)
+    probes = [row for row in rows if row.get("observation_type") == "accept_language_probe"]
+    assert {row["outcome"] for row in probes} == {"not_admitted"}
+    neutral = next(row for row in rows if row.get("observation_type") == "neutral_access")
+    assert neutral["neutral_access_state"] == "not_admitted"
+
+
+@pytest.mark.asyncio
+async def test_bot_trap_classification_is_unchanged_by_the_timeout_label():
+    # Unanswered target itself: neither a refusal nor a timeout is a bot trap.
+    for skip_reason in ("robots_txt_disallow", _TIMEOUT):
+        assert _trap_reasons(await _unanswered_root(skip_reason)) == {}
+
+    # Off-host redirect whose target is refused or times out: both left the primary host.
+    def handler(url: str, language: str | None) -> Response:
+        if url == "https://shop.example.com/":
+            return 302, {"Location": "https://geo.example.net/"}, ""
+        return 200, {}, _EN
+
+    by_reason: dict[str, list[dict[str, object]]] = {}
+    for skip_reason in ("robots_txt_disallow", _TIMEOUT):
+        by_reason[skip_reason] = await collect_accept_language_evidence(
+            _FakeEngine(handler, skips={"https://geo.example.net/": skip_reason}), ["https://shop.example.com/"]
+        )
+    expected = {"https://shop.example.com/": {"left_primary_host"}}
+    assert _trap_reasons(by_reason["robots_txt_disallow"]) == expected
+    assert _trap_reasons(by_reason[_TIMEOUT]) == expected
+    outcomes = {
+        reason: {row["outcome"] for row in rows if row.get("observation_type") == "accept_language_probe"}
+        for reason, rows in by_reason.items()
+    }
+    assert outcomes == {
+        "robots_txt_disallow": {"redirect_target_not_admitted"},
+        _TIMEOUT: {"redirect_target_fetch_failed"},
+    }
+
+    # Status 0 with no reason at all keeps its pre-split trap signal.
+    rows = await collect_accept_language_evidence(
+        _FakeEngine(lambda url, language: (0, {}, "")), ["https://example.com/"]
+    )
+    assert _trap_reasons(rows) == {"https://example.com/": {"fetch_error"}}
 
 
 @pytest.mark.asyncio

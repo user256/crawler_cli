@@ -392,6 +392,19 @@ def generate_xpath(element: Tag) -> str:
     return "/" + "/".join(path) if path else ""
 
 
+HEADING_LINK_TAGS = frozenset({"h2", "h3"})
+
+
+def wraps_heading(anchor: Tag) -> bool:
+    """True when *anchor* wraps an H2 or H3: ``a > h2|h3`` or ``a > * > h2|h3`` (ticket 421)."""
+    for child in anchor.find_all(True, recursive=False):
+        if child.name in HEADING_LINK_TAGS:
+            return True
+        if any(grandchild.name in HEADING_LINK_TAGS for grandchild in child.find_all(True, recursive=False)):
+            return True
+    return False
+
+
 def _anchor_text_for_link(anchor: Tag, href: str) -> str | None:
     anchor_text = anchor.get_text(strip=True)
     if not anchor_text:

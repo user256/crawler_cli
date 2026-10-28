@@ -14,6 +14,7 @@ import json
 import pytest
 
 from crawler_cli.__main__ import _build_parser, _dispatch, _normalize_argv
+from crawler_cli.reports import SNAPSHOT_OPTIONAL_COLUMNS
 
 
 class FakeStore:
@@ -49,9 +50,9 @@ class FakeReports:
             "parsed_html_count": 1,
             "hashed_count": 0,
             "image_reference_count": 0,
+            # A current snapshot table: every capability a report can need.
             "schema_capabilities": {
-                "images_json": True,
-                "links_json": True,
+                **dict.fromkeys(SNAPSHOT_OPTIONAL_COLUMNS, True),
                 "content_hash_simhash": True,
             },
         }
@@ -104,6 +105,12 @@ class FakeReports:
         return []
 
     async def empty_anchor_links(self):
+        return []
+
+    async def heading_link_population(self, *, has_links_json):
+        return {"heading_link_count": 0, "heading_link_tested_count": 0, "heading_link_wrapping_count": 0}
+
+    async def heading_wrapping_links(self):
         return []
 
     async def profile_indexability_pages(self):

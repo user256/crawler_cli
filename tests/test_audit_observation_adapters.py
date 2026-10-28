@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from crawler_cli.__main__ import _build_parser
+import pytest
+
+from crawler_cli.__main__ import _build_parser, _probe_engine_config
 from crawler_cli.audit_observation_adapters import (
+    llms_txt_probe_by_host,
     llms_txt_status_by_host,
     locale_probe_records,
     robots_txt_record,
@@ -28,6 +31,8 @@ def _probe(variant: str, status: int, *, location: str | None = None, sha: str |
         "final_status": final,
         "html_lang": "en",
         "body_sha256": sha,
+        "primary_content_sha256": sha,
+        "primary_content_basis": "main_visible_text",
         "redirect_chain": [{"url": "https://example.com/", "status": status, "location": location}],
     }
 
@@ -59,16 +64,23 @@ def test_robots_txt_record_keeps_the_body_only_for_a_2xx() -> None:
     ok = robots_txt_record("example.com", SimpleNamespace(status=200, text="User-agent: *\nDisallow: /x"), "valid")
     assert ok == {
         "host": "example.com",
+        "fetch_outcome": "fetched",
         "status": 200,
         "body": "User-agent: *\nDisallow: /x",
         "llms_txt_status": "valid",
+        "llms_txt_outcome": "fetched",
     }
     assert robots_txt_record("example.com", SimpleNamespace(status=301, text="moved"), None)["body"] is None
+    # Ticket 410: an unread file is an explicit unknown outcome with a reason.
     assert robots_txt_record("example.com", None, None) == {
         "host": "example.com",
+        "fetch_outcome": "unknown",
+        "unknown_reason": "no_response",
         "status": None,
         "body": None,
         "llms_txt_status": None,
+        "llms_txt_outcome": "unknown",
+        "llms_txt_unknown_reason": "not_probed",
     }
 
 
@@ -80,6 +92,34 @@ def test_llms_status_is_keyed_by_host() -> None:
         ]
     }
     assert llms_txt_status_by_host(collected) == {"example.com": "valid"}
+
+
+def test_llms_probe_carries_outcome_and_reason_and_derives_them_for_old_rows() -> None:
+    collected = {
+        "llms_files": [
+            {"origin": "https://a.example", "path": "/llms.txt", "state": "absent", "fetch_outcome": "fetched"},
+            {
+                "origin": "https://b.example",
+                "path": "/llms.txt",
+                "state": "fetch_unavailable",
+                "fetch_outcome": "unknown",
+                "unknown_reason": "timeout:ReadTimeout",
+            },
+            # Rows from a collector that predates ticket 423 carry only a state.
+            {"origin": "https://c.example", "path": "/llms.txt", "state": "fetch_unavailable"},
+            {"origin": "https://d.example", "path": "/llms.txt", "state": "robots_disallowed_not_fetched"},
+        ]
+    }
+    assert llms_txt_probe_by_host(collected) == {
+        "a.example": {"status": "absent", "outcome": "fetched", "unknown_reason": None},
+        "b.example": {"status": "fetch_unavailable", "outcome": "unknown", "unknown_reason": "timeout:ReadTimeout"},
+        "c.example": {"status": "fetch_unavailable", "outcome": "unknown", "unknown_reason": "no_response"},
+        "d.example": {
+            "status": "robots_disallowed_not_fetched",
+            "outcome": "unknown",
+            "unknown_reason": "robots_disallowed",
+        },
+    }
 
 
 def test_tls_probe_records_never_claim_preload_or_ocsp_that_was_not_observed() -> None:
@@ -136,3 +176,57 @@ def test_observations_parser_accepts_the_probe_flags() -> None:
     )
     assert args.ai_governance and args.probe_accept_language and args.tls_probe
     assert args.accept_language_max_targets == 3 and args.ai_governance_max_origins == 10
+
+
+def _observations_args(*extra: str):
+    return _build_parser().parse_args(
+        [
+            "technical-audit-observations",
+            "--crawl-run-id",
+            "run-1",
+            "--out",
+            "o.json",
+            "--probe-accept-language",
+            *extra,
+        ]
+    )
+
+
+def test_probe_engine_defaults_are_polite() -> None:
+    config = _probe_engine_config(_observations_args(), ["https://one.example/"], {"one.example"})
+    assert (config.backend, config.user_agent, config.curl_impersonate) == ("aiohttp", "canonicalbot/0.1", "")
+    assert config.min_interval_seconds == pytest.approx(1.0)
+    assert config.per_host_concurrency == 1 and config.detect_challenges is True
+    assert config.challenge_escalate_to_browser is False and config.destination_guard == "pinned"
+
+
+def test_probe_engine_takes_the_crawl_cloudflare_recipe() -> None:
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
+    args = _observations_args(
+        "--http-backend",
+        "curl_cffi",
+        "--impersonate",
+        "firefox",
+        "--custom-ua",
+        ua,
+        "--no-challenge-detection",
+        "--probe-delay",
+        "3",
+    )
+    config = _probe_engine_config(args, ["https://one.example/"], {"one.example"})
+    assert (config.backend, config.curl_impersonate, config.user_agent) == ("curl_cffi", "firefox", ua)
+    assert config.detect_challenges is False
+    assert config.min_interval_seconds == pytest.approx(3.0)
+    # The pinned guard cannot reach curl_cffi sockets; the crawl's resolver guard still applies.
+    assert config.destination_guard == "resolver"
+
+
+def test_probe_engine_impersonation_keeps_the_profile_user_agent_and_implies_curl_cffi() -> None:
+    config = _probe_engine_config(_observations_args("--impersonate", "firefox"), ["https://one.example/"], set())
+    assert (config.backend, config.user_agent) == ("curl_cffi", "")
+    assert _probe_engine_config(_observations_args("--probe-delay", "0"), [], set()).min_interval_seconds == 0.0
+
+
+def test_probe_engine_rejects_impersonation_on_aiohttp() -> None:
+    with pytest.raises(ValueError, match="curl_cffi"):
+        _probe_engine_config(_observations_args("--http-backend", "aiohttp", "--impersonate", "firefox"), [], set())

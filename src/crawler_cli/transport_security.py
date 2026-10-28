@@ -279,12 +279,26 @@ def transport_security_report(
     agents ignore it over HTTP). The header for a host is the one on its
     ``/`` response when that was crawled, otherwise on the first sorted URL.
     HTTP-to-HTTPS behaviour comes only from ``scheme`` URL-variant probes.
+
+    Stored headers belong to the final response after redirects, so each row
+    must carry that response's URL as ``final_url`` (ticket 414). Scheme and
+    host come from ``final_url`` only; ``requested_url`` (or ``url``) is
+    provenance and never decides the host, so a redirecting source host is
+    not given the destination's policy. A row with no ``final_url`` has no
+    known response identity and is counted, not guessed.
     """
     responses: dict[str, tuple[str, dict[str, str]]] = {}
+    requested: dict[str, set[str]] = {}
     http_rows = 0
     unusable = 0
+    identity_unknown = 0
     for row in performance_rows:
-        response_url = str(row.get("final_url") or row.get("url") or "")
+        final_url = row.get("final_url")
+        if not isinstance(final_url, str) or not final_url.strip():
+            identity_unknown += 1
+            continue
+        response_url = final_url.strip()
+        requested_url = str(row.get("requested_url") or row.get("url") or "")
         parsed = urlsplit(response_url)
         status = row.get("final_status_code")
         if parsed.scheme.lower() == "http":
@@ -300,6 +314,8 @@ def transport_security_report(
         current = responses.get(host)
         if current is None or _response_rank(response_url) < _response_rank(current[0]):
             responses[host] = (response_url, _header_map(row.get("headers_json")))
+        if requested_url:
+            requested.setdefault(response_url, set()).add(requested_url)
 
     redirects = _http_redirect_states(url_variant_rows)
     variant_available = bool(url_variant_rows) and url_variant_rows[0].get("record_type") == "coverage"
@@ -316,6 +332,7 @@ def transport_security_report(
                 "registrable_domain": assessment.registrable_domain,
                 "is_apex": assessment.is_apex,
                 "response_url": redact_url_without_digest(url),
+                "requested_urls": sorted(redact_url_without_digest(item) for item in requested.get(url, ())),
                 "hsts": policy.as_dict(),
                 "http_redirect_state": assessment.http_redirect_state,
                 "hsts_preload_eligible": assessment.hsts_preload_eligible,
@@ -341,6 +358,8 @@ def transport_security_report(
         "candidate_host_count": sum(row["record_type"] == "candidate" for row in host_rows),
         "http_rows_ignored_for_hsts": http_rows,
         "unusable_rows": unusable,
+        "response_identity_unknown_rows": identity_unknown,
+        "hsts_attribution": "final_response_host; requested_url is provenance only",
         "http_redirect_evidence": "scheme_variant_probes" if variant_available else "unavailable_not_probed",
         "hsts_preload_list_membership": "not_queried_requires_authoritative_external_lookup",
         "hsts_preload_criteria_not_observable": ["valid_certificate_chain", "all_subdomains_served_over_https"],

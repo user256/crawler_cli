@@ -1,0 +1,38 @@
+{
+  "version": "crawler-cli/google-sheets-template-contract/1",
+  "template": {
+    "name": "Technical SEO Audit - Template",
+    "url": "https://docs.google.com/spreadsheets/d/1T9BRLgaFDZ99Lx3q53Av75eZZM32BIJc0nahVPQpGmU/edit?gid=0#gid=0"
+  },
+  "tickets": {
+    "tab": "Tickets",
+    "columns": [
+      "Label",
+      "Description",
+      "Suggested Solution",
+      "Acceptance Criteria",
+      "Ticket Classification",
+      "Priority",
+      "How to Replicate",
+      "Notes / Documentation"
+    ],
+    "header_search": {
+      "max_rows": 40,
+      "max_columns": 26
+    },
+    "value_sets": {
+      "Ticket Classification": ["Error", "Issue", "Warning", "Improvement"],
+      "Priority": ["High", "Medium", "Low"]
+    }
+  },
+  "protected_tabs": ["Config"],
+  "verified_layout": {
+    "checked": "2026-10-07",
+    "method": "read-only Sheets API read of the template above",
+    "tab_order": ["Tickets", "Config"],
+    "header_cell": "B5",
+    "first_data_row": 6,
+    "frozen_rows": 5,
+    "note": "Column A holds prefilled row numbers, B3 holds the ticket-count formula over B6:B, and the Config tab sources the Priority and Ticket Classification dropdowns. The publisher locates the header dynamically within header_search; this block records what was observed and is not used to place rows."
+  }
+}

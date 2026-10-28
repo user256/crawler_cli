@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from typing import SupportsIndex, SupportsInt
 from pathlib import Path
+
+from .package_templates import template_path, template_source
 
 
 TICKET_COLUMNS = (
@@ -24,11 +27,11 @@ class TicketLanguageError(ValueError):
 
 
 def default_ticket_language_path() -> Path:
-    return Path(__file__).parents[2] / "templates" / "technical-audit-ticket-language.json"
+    return template_path("technical-audit-ticket-language.json")
 
 
 def load_ticket_language(path: str | Path | None = None) -> dict[str, object]:
-    target = Path(path) if path else default_ticket_language_path()
+    target = template_source(path, "technical-audit-ticket-language.json")
     try:
         payload = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -69,17 +72,11 @@ def build_ticket_register(audit: Mapping[str, object], language: Mapping[str, ob
         entry = language_checks[identifier]
         if not isinstance(entry, Mapping) or entry.get("ticket") is False:
             continue
+        source = _ticket_source(check, entry)
+        if source is None:
+            continue
         status = str(check.get("status", "unavailable"))
         evidence = check.get("evidence", [])
-        affected = _integer(check.get("affected_count"))
-        use_unavailable = status == "unavailable" and isinstance(entry.get("unavailable_ticket"), Mapping)
-        if status == "finding" or (status == "partial" and affected > 0):
-            source = entry
-        elif use_unavailable:
-            source = entry["unavailable_ticket"]
-            assert isinstance(source, Mapping)
-        else:
-            continue
         values = _placeholders(audit, check, evidence)
         description = _render(source.get("description"), values)
         notes = _render(source.get("notes", ""), values)
@@ -108,8 +105,38 @@ def build_ticket_register(audit: Mapping[str, object], language: Mapping[str, ob
     return rows
 
 
+def ticketed_check_ids(audit: Mapping[str, object], language: Mapping[str, object]) -> set[str]:
+    """IDs of the audit checks that ``build_ticket_register`` turns into a ticket."""
+    checks = audit.get("checks")
+    language_checks = language.get("checks")
+    if not isinstance(checks, list) or not isinstance(language_checks, Mapping):
+        return set()
+    ticketed: set[str] = set()
+    for check in checks:
+        if not isinstance(check, Mapping):
+            continue
+        entry = language_checks.get(str(check.get("id")))
+        if isinstance(entry, Mapping) and _ticket_source(check, entry) is not None:
+            ticketed.add(str(check["id"]))
+    return ticketed
+
+
+def _ticket_source(check: Mapping[str, object], entry: Mapping[str, object]) -> Mapping[str, object] | None:
+    """The ticket-language entry a check is ticketed from, or None when it gets no ticket."""
+    if entry.get("ticket") is False:
+        return None
+    status = str(check.get("status", "unavailable"))
+    if status == "finding" or (status == "partial" and _integer(check.get("affected_count")) > 0):
+        return entry
+    unavailable = entry.get("unavailable_ticket")
+    if status == "unavailable" and isinstance(unavailable, Mapping):
+        return unavailable
+    return None
+
+
 def ticket_sheet_table(rows: list[Mapping[str, str]]) -> list[list[object]]:
-    return [list(TICKET_COLUMNS), *[[row.get(column, "") for column in TICKET_COLUMNS] for row in rows]]
+    body: list[list[object]] = [[row.get(column, "") for column in TICKET_COLUMNS] for row in rows]
+    return [list(TICKET_COLUMNS), *body]
 
 
 def _placeholders(audit: Mapping[str, object], check: Mapping[str, object], evidence: object) -> dict[str, str]:
@@ -128,7 +155,7 @@ def _placeholders(audit: Mapping[str, object], check: Mapping[str, object], evid
         "denominator": denominator,
         "tested_count": _integer_or_blank(check.get("tested_count")),
         # denominator is display text ("10,852"); compute from the raw count.
-        "affected_pct": f"{round(100 * affected / population)}%" if population else "",
+        "affected_pct": _share(affected, population),
         "unit": _unit_for(check),
         "sample_urls": "\n".join(_sample_urls(evidence)),
         "evidence_tab": str(check.get("detail_sheet", "Evidence")),
@@ -169,6 +196,19 @@ def _sample_urls(evidence: object) -> list[str]:
     return urls
 
 
+def _share(affected: int, population: int) -> str:
+    """Whole-percent share; a non-zero count never rounds to 0% or a partial one to 100%."""
+
+    if not population:
+        return ""
+    pct = round(100 * affected / population)
+    if affected and pct == 0:
+        return "<1%"
+    if affected < population and pct == 100:
+        return ">99%"
+    return f"{pct}%"
+
+
 def _unit_for(check: Mapping[str, object]) -> str:
     identifier = str(check.get("id", ""))
     if identifier in {"internal-link-targets", "external-link-integrity"}:
@@ -193,7 +233,7 @@ def _append(left: str, right: str) -> str:
 
 def _integer(value: object) -> int:
     try:
-        return int(value) if value is not None else 0
+        return int(value) if isinstance(value, (str, bytes, bytearray, SupportsInt, SupportsIndex)) else 0
     except (TypeError, ValueError):
         return 0
 

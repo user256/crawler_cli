@@ -7,7 +7,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -1389,15 +1389,22 @@ class CrawlEngine:
         # local path flags do not apply to them — but the scope manifest does.
         return self.config.scope_denial_reason(url, purpose="sitemap")
 
-    async def _bounded_fetch_response(self, url: str):
+    async def _bounded_fetch_response(self, url: str, on_skip: Callable[[str], None] | None = None):
         """Fetch *url* under the same politeness controls as page crawls.
 
         Honours global concurrency, crawl-delay, rate limiting, per-host
         concurrency, circuit breaking, resilient/proxy retries, response
         caps (via the backend), and challenge handling (ticket 087).
-        Returns None when the fetch is skipped or fails.
+        Returns None when the fetch is skipped or fails. *on_skip*, when
+        given, receives a short machine-readable reason for that None (for
+        example ``timeout:ReadTimeout`` or ``challenge:cloudflare``) so a
+        caller can record why the response is unknown (ticket 410).
         """
         from .models import FetchResponse
+
+        def skipped(reason: str) -> None:
+            if on_skip is not None:
+                on_skip(reason)
 
         async with self._semaphore:
             try:
@@ -1409,6 +1416,7 @@ class CrawlEngine:
                     circuit = self._circuit_breakers.for_host(host)
                     if not circuit.should_allow():
                         logger.info("Skipping sitemap fetch for %s: circuit_breaker_open", url)
+                        skipped("circuit_breaker_open")
                         return None
                 host_sem = self._host_semaphore(host)
                 if host_sem is not None:
@@ -1431,6 +1439,7 @@ class CrawlEngine:
                     if self.config.circuit_breaker_enabled:
                         circuit = self._circuit_breakers.for_host(host)
                         self._record_breaker_failure(circuit, host, f"challenge:{challenge_kind}")
+                    skipped(f"challenge:{challenge_kind}")
                     return None
 
                 if response.body_truncated:
@@ -1439,6 +1448,7 @@ class CrawlEngine:
                         url,
                         response.body_truncation_reason or "max_response_bytes",
                     )
+                    skipped(f"truncated:{response.body_truncation_reason or 'max_response_bytes'}")
                     return None
 
                 if self.config.circuit_breaker_enabled:
@@ -1447,7 +1457,10 @@ class CrawlEngine:
                         self._record_breaker_failure(circuit, host, f"http_{response.status}")
                     else:
                         circuit.record_success()
-                return response if isinstance(response, FetchResponse) else None
+                if not isinstance(response, FetchResponse):
+                    skipped("no_response")
+                    return None
+                return response
             except ScopeManifestDenied as exc:
                 # A sitemap document or one of its redirect hops left the
                 # manifest. No request reached the network for the denied URL,
@@ -1458,6 +1471,7 @@ class CrawlEngine:
                     exc.reason,
                     extra={"event": "scope_manifest_denied", "url": exc.url, "reason": exc.reason},
                 )
+                skipped(f"scope_manifest_denied:{exc.reason}")
                 return None
             except DestinationRejection as exc:
                 # Same reasoning as the page path: an auxiliary fetch denied
@@ -1468,6 +1482,7 @@ class CrawlEngine:
                     exc.reason,
                     extra={"event": "destination_denied", "url": url, "reason": exc.reason},
                 )
+                skipped(f"destination_denied:{exc.reason}")
                 return None
             except Exception as exc:
                 host = urlparse(url).netloc.lower()
@@ -1475,6 +1490,8 @@ class CrawlEngine:
                 if self.config.circuit_breaker_enabled:
                     circuit = self._circuit_breakers.for_host(host)
                     self._record_breaker_failure(circuit, host, f"fetch_error:{type(exc).__name__}")
+                timed_out = isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.casefold()
+                skipped(f"{'timeout' if timed_out else 'fetch_error'}:{type(exc).__name__}")
                 return None
 
     def _scope_purpose(self, purpose: ConnectionPurpose) -> ScopePurpose:

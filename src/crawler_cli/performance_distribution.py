@@ -18,7 +18,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from math import floor, isfinite
-from typing import Literal
+from typing import Literal, SupportsFloat, SupportsIndex, SupportsInt
 
 
 DEFAULT_P90_MS = 600.0
@@ -233,7 +233,7 @@ def _status(page: Mapping[str, object]) -> int | None:
         value = page.get(key)
         if value is None:
             continue
-        if isinstance(value, bool):
+        if isinstance(value, bool) or not isinstance(value, (str, bytes, bytearray, SupportsInt, SupportsIndex)):
             return None
         try:
             status = int(value)
@@ -248,7 +248,7 @@ def _ttfb_ms(page: Mapping[str, object]) -> float | None:
         if key not in page or page[key] is None:
             continue
         value = page[key]
-        if isinstance(value, bool):
+        if isinstance(value, bool) or not isinstance(value, (str, bytes, bytearray, SupportsFloat, SupportsIndex)):
             return None
         try:
             milliseconds = float(value) * multiplier
