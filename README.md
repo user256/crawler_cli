@@ -267,6 +267,18 @@ scoping, never sent to other hosts (proven in
 `tests/contract/test_security_proofs.py`; the Playwright backend is excluded
 until ticket 129).
 
+Pre-issued static headers go through the same scoping. `--header 'Name: Value'`
+(repeatable) and `--headers-file PATH` (a JSON object or `Name: Value` lines,
+`#` comments allowed) send them only on requests to the primary seed host and
+never to `robots.txt`; the values are registered with the secret scrubber. This
+is how Shopify "Crawler access" Web Bot Auth works: the store owner issues a
+`Signature`, `Signature-Input` and `Signature-Agent` set from Shopify admin,
+valid for one domain and at most three months.
+
+```bash
+crawler-cli https://shop.example.com --headers-file ./shopify-webbotauth.headers
+```
+
 Page HTML is **gzip-compressed by default** in `pages.html_compressed`. Use `--no-html-compression` only for debugging. Legacy uncompressed rows can be migrated with `compact-html`.
 
 #### Advanced crawl options
@@ -723,7 +735,7 @@ crawler-cli compare-urls --pairs mapping.csv \
     --fail-on redirect_mismatch
 ```
 
-Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any` and exits **3** (findings) when tripped — distinct from `2` (usage error). Replacements are literal strings applied in order (no regex in v1).
+Each row reports both statuses, the redirect verdict (`redirect_ok`, `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`, `error_status`, `not_crawled`) and captured hop chain, `sha256_equal` / `simhash_distance` / `content_verdict`, and per-field deltas (title/h1/meta/word_count). It also carries per-side final URL, HTML/X canonical declarations and self-canonical state, meta/X-Robots directives, the crawler's robots.txt allowance, and an evidence state. `target_migration_verdict` independently surfaces `target_noindex`, `target_cross_canonical`, `target_robots_disallowed`, missing/unknown evidence and a fully evidenced healthy target, so a correct redirect is never treated as a proof that its destination can index. `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any` and exits **3** (findings) when tripped — distinct from `2` (usage error). Replacements are literal strings applied in order (no regex in v1).
 
 JSON outputs are wrapped in a versioned envelope (`{"schema_version": "crawler-cli/compare-urls/1", "rows": [...]}`; `compare` uses `crawler-cli/compare/1`, saved crawl artifacts carry `crawler-cli/crawl-artifact/8`). The exact shapes are frozen by the golden files in `tests/contract/` and documented in `docs/portal-integration-contract.md`.
 
@@ -1007,6 +1019,24 @@ Equivalent explicit form:
 crawler-cli https://example.com \
   --playwright-cdp-endpoint http://127.0.0.1:9222
 ```
+
+An attached browser's session is shared, not copied. crawler_cli opens each
+page as a new tab in the browser's existing default context, so the crawl sends
+that browser's cookies, including a Cloudflare `cf_clearance` you earned by
+passing a challenge by hand, and keeps its real User-Agent. Your own tabs stay
+open when the crawl disconnects. To crawl a Cloudflare-protected site this way:
+
+```bash
+# Chrome 136+ refuses remote debugging on the default profile, so use a
+# dedicated --user-data-dir (it persists between runs).
+chromium --remote-debugging-port=9222 --user-data-dir="$HOME/.cache/crawl-chrome"
+# pass the challenge manually in that window, then, from the same egress IP:
+crawler-cli --csv-file urls.csv --playwright-cdp-port 9222 \
+  --max-workers 1 --rate-limit 0.2
+```
+
+Don't pass `--user-agent`, `--impersonate` or a per-domain UA map in this mode:
+clearance is bound to the UA (and IP) that solved the challenge.
 
 Use `--playwright-cdp-host` if the debugging browser is bound somewhere other
 than `127.0.0.1`. CDP attach flags are mutually exclusive with `--obscura` and

@@ -201,3 +201,120 @@ async def test_curl_cffi_basic_auth_not_forwarded_to_cross_origin_redirect() -> 
     assert result.status == 200
     assert seen["start"] == "Basic dXNlcjpwYXNz"
     assert seen["destination"] is None
+
+
+def test_header_flag_builds_seed_scoped_custom_headers() -> None:
+    args = _build_parser().parse_args(
+        [
+            "crawl",
+            "https://shop.example.com/",
+            "--header",
+            'Signature-Agent: "https://shopify.com"',
+            "--header",
+            "Signature: sig1=:abc==:",
+        ]
+    )
+
+    auth = _build_auth(args)
+
+    assert auth == AuthConfig(
+        domain="shop.example.com",
+        custom_headers={"Signature-Agent": '"https://shopify.com"', "Signature": "sig1=:abc==:"},
+    )
+    assert auth.enabled
+    assert auth.applies_to("https://shop.example.com/products/x")
+    assert not auth.applies_to("https://cdn.example.net/x.js")
+    assert auth.auth_headers() == auth.custom_headers
+
+
+def test_headers_file_accepts_name_value_lines_and_header_flag_overrides(tmp_path) -> None:
+    headers_file = tmp_path / "shopify.headers"
+    headers_file.write_text(
+        "# issued from Shopify admin\n"
+        'Signature-Input: sig1=("@authority" "signature-agent");tag="web-bot-auth"\n'
+        "\n"
+        'Signature-Agent: "https://shopify.com"\n',
+        encoding="utf-8",
+    )
+    args = _build_parser().parse_args(
+        [
+            "crawl",
+            "https://shop.example.com",
+            "--headers-file",
+            str(headers_file),
+            "--header",
+            'Signature-Agent: "https://override.example"',
+        ]
+    )
+
+    auth = _build_auth(args)
+
+    assert auth is not None
+    assert auth.custom_headers == {
+        "Signature-Input": 'sig1=("@authority" "signature-agent");tag="web-bot-auth"',
+        "Signature-Agent": '"https://override.example"',
+    }
+
+
+def test_headers_file_accepts_json_object(tmp_path) -> None:
+    headers_file = tmp_path / "headers.json"
+    headers_file.write_text(
+        '{"X-Crawl-Token": "abc", "Signature-Agent": "\\"https://shopify.com\\""}', encoding="utf-8"
+    )
+    args = _build_parser().parse_args(["crawl", "https://shop.example.com", "--headers-file", str(headers_file)])
+
+    auth = _build_auth(args)
+
+    assert auth is not None
+    assert auth.custom_headers == {"X-Crawl-Token": "abc", "Signature-Agent": '"https://shopify.com"'}
+
+
+@pytest.mark.parametrize("bad", ["NoColonHere", ": value-only", "Bad Name: value"])
+def test_malformed_header_flag_is_rejected(bad: str) -> None:
+    args = _build_parser().parse_args(["crawl", "https://shop.example.com", "--header", bad])
+
+    with pytest.raises(ValueError, match="--header"):
+        _build_auth(args)
+
+
+def test_no_headers_and_no_auth_keeps_auth_disabled() -> None:
+    args = _build_parser().parse_args(["crawl", "https://shop.example.com"])
+
+    assert _build_auth(args) is None
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_custom_headers_sent_to_seed_host_only() -> None:
+    seen: dict[str, str | None] = {}
+
+    def make_handler(name: str):
+        async def handler(request: web.Request) -> web.Response:
+            seen[name] = request.headers.get("Signature-Agent")
+            return web.Response(text="ok")
+
+        return handler
+
+    seed_app = web.Application()
+    seed_app.router.add_get("/", make_handler("seed"))
+    other_app = web.Application()
+    other_app.router.add_get("/", make_handler("other"))
+    seed_runner, seed_url = await _start_app(seed_app)
+    other_runner, other_url = await _start_app(other_app)
+    seed_host = seed_url.removeprefix("http://")
+    backend = AiohttpBackend(
+        CrawlConfig(
+            auth=AuthConfig(domain=seed_host, custom_headers={"Signature-Agent": '"https://shopify.com"'}),
+            destination_guard="off",
+        )
+    )
+    try:
+        seed_result = await backend.fetch(f"{seed_url}/")
+        other_result = await backend.fetch(f"{other_url}/")
+    finally:
+        await backend.close()
+        await seed_runner.cleanup()
+        await other_runner.cleanup()
+
+    assert seed_result.status == 200 and other_result.status == 200
+    assert seen["seed"] == '"https://shopify.com"'
+    assert seen["other"] is None

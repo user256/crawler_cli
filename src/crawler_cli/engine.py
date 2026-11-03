@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -55,6 +56,7 @@ from .models import (
 from .persistence import AsyncpgStore, MemoryStore
 from .portal_policy import ConnectionPurpose
 from .robots import RobotsPolicyCache
+from .run_metadata import build_run_metadata, write_run_metadata
 from .serialization import (
     CRAWL_ARTIFACT_SCHEMA_VERSION,
     serialize_crawl_job,
@@ -1820,6 +1822,7 @@ class CrawlEngine:
             if save_to:
                 await self._save_results(job, save_to)
             return job
+        start_time = datetime.now(timezone.utc)
         crawl_run_id, run_snapshot, run_config_hash = await self._prepare_crawl_run(
             seeds,
             run_id=run_id,
@@ -1830,8 +1833,12 @@ class CrawlEngine:
         # Open the JSONL output file early so results stream out incrementally
         # rather than buffering the whole crawl in RAM (ticket-059).
         _jsonl_fh = None
+        _out_path = None
         if save_to:
             _out_path = Path(save_to)
+            if not _out_path.suffix:
+                _out_path = _out_path.with_suffix(".ndjson")
+                save_to = str(_out_path)
             _out_path.parent.mkdir(parents=True, exist_ok=True)
             _jsonl_fh = _out_path.open("w", encoding="utf-8")
         self._log_browser_runtime()
@@ -2360,6 +2367,18 @@ class CrawlEngine:
                 _jsonl_fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
                 _jsonl_fh.close()
                 _jsonl_fh = None
+
+                if _out_path is not None:
+                    meta = build_run_metadata(
+                        job,
+                        config=self.config,
+                        artifact_path=_out_path,
+                        started_at=start_time,
+                        ended_at=datetime.now(timezone.utc),
+                    )
+                    sidecar_file = write_run_metadata(meta, _out_path)
+                    job.run_metadata = meta
+                    job.sidecar_path = str(sidecar_file)
             await self.store.save_metadata(
                 "crawl_open",
                 {
@@ -2438,10 +2457,34 @@ class CrawlEngine:
         await self.store.frontier_mark_done(unique_urls)
 
     async def _save_results(self, job: CrawlJobResult, save_to: str) -> None:
-        payload = serialize_crawl_job(job, saved_to=save_to)
         path = Path(save_to)
+        if not path.suffix:
+            path = path.with_suffix(".ndjson")
+            save_to = str(path)
+            job.saved_to = save_to
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        if path.suffix in (".ndjson", ".jsonl"):
+            with path.open("w", encoding="utf-8") as fh:
+                for result in job.results:
+                    fh.write(json.dumps(serialize_crawl_result(result), ensure_ascii=False) + "\n")
+                summary = {
+                    "__type": "summary",
+                    "schema_version": CRAWL_ARTIFACT_SCHEMA_VERSION,
+                    "mode": job.mode,
+                    "run_id": job.run_id,
+                    "seed_urls": job.seed_urls,
+                    "max_urls": job.max_urls,
+                    **serialize_job_summary_metadata(job, saved_to=save_to),
+                }
+                fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
+        else:
+            payload = serialize_crawl_job(job, saved_to=save_to)
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        meta = build_run_metadata(job, config=self.config, artifact_path=path)
+        sidecar_file = write_run_metadata(meta, path)
+        job.run_metadata = meta
+        job.sidecar_path = str(sidecar_file)
 
     def _sample_memory_usage_percent(self) -> float | None:
         return _linux_memory_usage_percent()

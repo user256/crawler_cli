@@ -1108,3 +1108,36 @@ def test_failed_replacement_rolls_back_existing_install(tmp_path, monkeypatch):
 
     assert (install_dir / "obscura").read_bytes() == b"old-obscura"
     assert (install_dir / "obscura-worker").read_bytes() == b"old-worker"
+
+
+@pytest.mark.asyncio
+async def test_borrowed_cdp_context_is_not_reinitialised_on_recycle():
+    """Recycling a borrowed CDP context must not stack routes/init scripts on it."""
+    config = CrawlConfig(backend="playwright", playwright_cdp_endpoint="http://127.0.0.1:9222")
+    backend = PlaywrightBackend(config)
+    borrowed = MagicMock()
+    borrowed.route = AsyncMock()
+    borrowed.add_cookies = AsyncMock()
+    borrowed.add_init_script = AsyncMock()
+    borrowed.close = AsyncMock()
+    browser = MagicMock()
+    browser.contexts = [borrowed]
+    browser.new_context = AsyncMock()
+    backend._browser = browser
+    backend._cdp_connected = True
+
+    await backend._create_context_locked()
+    assert backend._context is borrowed
+    assert backend._owns_context is False
+    routes_after_start = borrowed.route.await_count
+
+    backend._context_request_count = 50
+    backend._context_recycle_requested = True
+    await backend._recycle_context_locked()
+
+    assert backend._context is borrowed
+    assert borrowed.route.await_count == routes_after_start
+    assert backend._context_request_count == 0
+    assert backend._context_recycle_requested is False
+    borrowed.close.assert_not_awaited()
+    browser.new_context.assert_not_awaited()

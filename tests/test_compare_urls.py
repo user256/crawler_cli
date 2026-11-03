@@ -31,13 +31,17 @@ def _src(
     chain=None,
     raw_html="<html><body><h1>H</h1><p>body text</p></body></html>",
     title="T",
+    canonical=None,
+    meta_robots=None,
+    x_robots_tag=None,
+    allowed_by_robots=None,
 ):
     extracted = ExtractedContent(
         title=title,
         meta_description=None,
-        meta_robots=RobotsDirectives(),
-        x_robots_tag=RobotsDirectives(),
-        canonical=None,
+        meta_robots=RobotsDirectives(raw=meta_robots or []),
+        x_robots_tag=RobotsDirectives(raw=x_robots_tag or []),
+        canonical=canonical,
         x_canonical=None,
         hreflang_links=[],
         html_lang=None,
@@ -58,6 +62,7 @@ def _src(
         content_hash_sha256=sha256_hash(raw_html),
         content_hash_simhash=simhash64(raw_html),
         redirect_chain=chain or [],
+        allowed_by_robots=allowed_by_robots,
     )
 
 
@@ -363,6 +368,65 @@ def test_build_pair_row_missing_target():
     row = build_pair_row(pair, src, None)
     assert row["content_verdict"] == "missing"
     assert row["sha256_equal"] is None
+    assert row["target_evidence_state"] == "unobserved"
+    assert row["target_canonical_state"] == "unobserved"
+    assert row["target_migration_verdict"] == "target_unobserved"
+
+
+@pytest.mark.parametrize(
+    ("target", "verdict", "canonical_state"),
+    [
+        (
+            _src(
+                "https://new/a",
+                "https://new/a",
+                canonical="https://new/a",
+                allowed_by_robots=True,
+            ),
+            "target_indexability_healthy",
+            "self",
+        ),
+        (
+            _src(
+                "https://new/a",
+                "https://new/a",
+                canonical="https://new/a",
+                meta_robots=["noindex, nofollow"],
+                allowed_by_robots=True,
+            ),
+            "target_noindex",
+            "self",
+        ),
+        (
+            _src(
+                "https://new/a",
+                "https://new/a",
+                canonical="https://new/other",
+                allowed_by_robots=True,
+            ),
+            "target_cross_canonical",
+            "cross",
+        ),
+        (
+            _src(
+                "https://new/a",
+                "https://new/a",
+                canonical="https://new/a",
+                allowed_by_robots=False,
+            ),
+            "target_robots_disallowed",
+            "self",
+        ),
+    ],
+)
+def test_target_indexability_contract_distinguishes_migration_failures(target, verdict, canonical_state):
+    pair = UrlPair("https://old/a", "https://new/a")
+    source = _src("https://old/a", "https://new/a", chain=[{"url": "https://old/a", "status": 301}])
+    row = build_pair_row(pair, source, target)
+    assert row["target_migration_verdict"] == verdict
+    assert row["target_canonical_state"] == canonical_state
+    assert row["target_final_url"] == "https://new/a"
+    assert row["target_evidence_state"] == "observed"
 
 
 def test_rows_failing_modes():

@@ -842,6 +842,7 @@ existing-ticket reuse and review finding coverage.
 - `397` `implemented (local)` [Collect empty-anchor facts in the shared stored-HTML pass, bounded per page](./ticket-397-integration-empty-anchor-single-pass.md) — **P1, integration QA fix.**
 - `398` `implemented (local)` [Make Q88 match its registry entry and keep untemplated pages in scope](./ticket-398-integration-q88-registry-alignment.md) — **P2, integration QA fix.**
 - `399` `proposed` [Stream A follow-ups found in integration QA](./ticket-399-integration-stream-a-followups.md) — **P3, integration QA.**
+- `400` `done` [crawler_cli: make onboarding artifacts self-describing](./ticket-400-onboarding-artifact-contract.md) — **P1:** emit companion run-metadata sidecar (.meta.json) for saved .ndjson artifacts with matching run ID, checksum, timestamps, completion state, and limits; preserve backwards-compatible reading of prior .json artifacts.
 
 Deferred lanes remain below.
 

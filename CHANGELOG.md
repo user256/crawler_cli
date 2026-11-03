@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--rate-limit N` exposes `CrawlConfig.rate_limit_per_second` on the CLI
+  (default 5.0 requests/second; `0` disables the limiter; negative or NaN is
+  rejected).
+
+- `--header 'Name: Value'` (repeatable) and `--headers-file PATH` send pre-issued
+  static request headers, such as Shopify Web Bot Auth `Signature`,
+  `Signature-Input` and `Signature-Agent`, on requests to the primary seed host.
+  They ride on the existing auth scoping (never sent to robots.txt or to other
+  hosts) and their values are registered with the secret scrubber.
+
 - Run-scoped technical-audit extensions: image reference extraction and issue
   reporting, internal link-quality evidence, tracking-parameter links,
   PageRank-like internal authority scores, and SimHash near-duplicate pairs.
@@ -43,6 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Loading accepts known historical versions.
 
 ### Fixed
+
+- CDP attach (`--playwright-cdp-port`/`--playwright-cdp-endpoint`) no longer
+  re-installs the destination-guard route, cookies and CWV init script onto the
+  borrowed browser context every `max_requests_per_context` requests; a context
+  crawler_cli does not own is kept as-is, like a persistent profile.
 
 - Run-scoped candidate tables no longer violate their `crawl_runs` foreign key
   when a caller persists without `CrawlEngine`, or after

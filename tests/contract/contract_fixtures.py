@@ -51,13 +51,15 @@ def make_extracted(
     h1: str | None = None,
     meta_description: str | None = None,
     canonical: str | None = None,
+    meta_robots: list[str] | None = None,
+    x_robots_tag: list[str] | None = None,
     word_count: int = 18,
 ) -> ExtractedContent:
     return ExtractedContent(
         title=title,
         meta_description=meta_description,
-        meta_robots=RobotsDirectives(),
-        x_robots_tag=RobotsDirectives(),
+        meta_robots=RobotsDirectives(raw=meta_robots or []),
+        x_robots_tag=RobotsDirectives(raw=x_robots_tag or []),
         canonical=canonical,
         x_canonical=None,
         hreflang_links=[],
@@ -81,6 +83,7 @@ def make_result(
     simhash: int | None = None,
     hash_content: bool = True,
     links: list[DiscoveredLink] | None = None,
+    allowed_by_robots: bool | None = None,
 ) -> CrawlResult:
     """Build a deterministic CrawlResult.
 
@@ -107,6 +110,7 @@ def make_result(
         content_hash_simhash=simhash,
         discovered_links=links or [],
         redirect_chain=chain or [],
+        allowed_by_robots=allowed_by_robots,
     )
 
 
@@ -215,20 +219,36 @@ def compare_urls_source_results() -> list[CrawlResult]:
 
 def compare_urls_target_results() -> list[CrawlResult]:
     return [
-        make_result(f"{NEW}/a", f"{NEW}/a", extracted=make_extracted(title="Alpha", h1="Alpha")),
+        # The first four rows also pin ticket 401's target evidence contract:
+        # self canonical, noindex, cross canonical and robots disallowed.
+        make_result(
+            f"{NEW}/a",
+            f"{NEW}/a",
+            extracted=make_extracted(title="Alpha", h1="Alpha", canonical=f"{NEW}/a"),
+            allowed_by_robots=True,
+        ),
         make_result(
             f"{NEW}/b",
             f"{NEW}/b",
             raw_html=HTML_ALPHA_NEAR,
-            extracted=make_extracted(title="Beta", h1="Beta"),
+            extracted=make_extracted(title="Beta", h1="Beta", canonical=f"{NEW}/b", meta_robots=["noindex"]),
+            allowed_by_robots=True,
         ),
         make_result(
             f"{NEW}/c",
             f"{NEW}/c",
             raw_html=HTML_CHANGED,
-            extracted=make_extracted(title="Gamma Rewritten", h1="Gamma", word_count=11),
+            extracted=make_extracted(
+                title="Gamma Rewritten", h1="Gamma", word_count=11, canonical=f"{NEW}/canonical-other"
+            ),
+            allowed_by_robots=True,
         ),
-        make_result(f"{NEW}/d", f"{NEW}/d", extracted=make_extracted(title="Delta", h1="Delta")),
+        make_result(
+            f"{NEW}/d",
+            f"{NEW}/d",
+            extracted=make_extracted(title="Delta", h1="Delta", canonical=f"{NEW}/d"),
+            allowed_by_robots=False,
+        ),
         make_result(f"{NEW}/e", f"{NEW}/e", extracted=make_extracted(title="Epsilon", h1="Epsilon")),
         make_result(f"{NEW}/f", f"{NEW}/f", extracted=make_extracted(title="Zeta", h1="Zeta")),
         # /h target deliberately absent -> content_verdict "missing".

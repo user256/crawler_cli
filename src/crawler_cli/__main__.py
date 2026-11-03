@@ -219,6 +219,60 @@ def _password_source_flag(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _parse_header_line(line: str, *, source: str) -> tuple[str, str]:
+    """Parse one ``Name: Value`` request header, rejecting anything malformed."""
+    name, sep, value = line.partition(":")
+    name = name.strip()
+    value = value.strip()
+    if not sep or not name:
+        raise ValueError(f"{source}: expected 'Name: Value', got {line!r}")
+    if any(ch.isspace() for ch in name) or "\n" in value or "\r" in value:
+        raise ValueError(f"{source}: invalid header name or value in {line!r}")
+    return name, value
+
+
+def _collect_request_headers(args: argparse.Namespace) -> dict[str, str]:
+    """Merge ``--header`` and ``--headers-file`` into one case-preserving map.
+
+    The file is either a JSON object or ``Name: Value`` lines (blank lines and
+    ``#`` comments ignored). Explicit ``--header`` flags win over the file so a
+    one-off override never requires editing a shared credentials file.
+    """
+    headers: dict[str, str] = {}
+    file_path = getattr(args, "request_headers_file", "") or ""
+    if file_path:
+        path = Path(file_path)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"Unable to read --headers-file {file_path!r}: {exc}") from exc
+        if text.lstrip().startswith("{"):
+            try:
+                loaded = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"--headers-file {file_path!r} is not valid JSON: {exc}") from exc
+            if not isinstance(loaded, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in loaded.items()
+            ):
+                raise ValueError(f"--headers-file {file_path!r} must be a JSON object of string values")
+            for name, value in loaded.items():
+                headers.update([_parse_header_line(f"{name}: {value}", source=f"--headers-file {file_path!r}")])
+        else:
+            for raw in text.splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                headers.update([_parse_header_line(line, source=f"--headers-file {file_path!r}")])
+    for line in getattr(args, "request_header", None) or []:
+        headers.update([_parse_header_line(line, source="--header")])
+    return headers
+
+
+def _primary_seed_host(args: argparse.Namespace) -> str:
+    seeds = _collect_seed_urls(args)
+    return urlsplit(seeds[0]).netloc.lower() if seeds else ""
+
+
 def _build_auth(args: argparse.Namespace) -> AuthConfig | None:
     auth_type = getattr(args, "auth_type", "") or ""
     username = getattr(args, "auth_username", "") or ""
@@ -239,12 +293,19 @@ def _build_auth(args: argparse.Namespace) -> AuthConfig | None:
     )
     if not password:
         password = token
+    # Static per-request headers (ticket: Shopify Web Bot Auth signatures and
+    # similar pre-issued credentials). They ride on AuthConfig so the existing
+    # host scoping and redirect-stripping apply; they are never sent to robots.txt.
+    custom_headers = _collect_request_headers(args)
     if not auth_type and not username and not token:
         if password_flag is not None:
             raise ValueError(f"{password_flag} requires --auth-username or --auth-type basic")
-        return None
-    if not auth_type:
+        if not custom_headers:
+            return None
+    if not auth_type and (username or token):
         auth_type = "basic" if username else "bearer"
+    for value in custom_headers.values():
+        SECRETS.register(value, label="request-header")
     # Ticket 153: register the literal credential values so every scrubber can
     # remove them verbatim from logs, exceptions and artifacts. The registry is
     # in-memory only and never renders the values it holds.
@@ -258,6 +319,10 @@ def _build_auth(args: argparse.Namespace) -> AuthConfig | None:
         username=username,
         password=password,
         token=token,
+        # Custom headers are scoped to the primary seed host so a per-domain
+        # credential is never offered to a third-party host.
+        domain=_primary_seed_host(args) if custom_headers else "",
+        custom_headers=custom_headers,
     )
 
 
@@ -683,6 +748,7 @@ def _build_config(args: argparse.Namespace) -> CrawlConfig:
         max_requests=getattr(args, "max_requests", MAX_REQUESTS_DEFAULT),
         max_bytes=getattr(args, "max_bytes", MAX_BYTES_DEFAULT),
         timeout_seconds=args.timeout,
+        rate_limit_per_second=getattr(args, "rate_limit_per_second", 5.0),
         playwright_network_idle_timeout_seconds=(
             args.wait_for_network_idle
             if getattr(args, "wait_for_network_idle", None) is not None
@@ -940,6 +1006,13 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
         type=positive_float,
         default=30.0,
         help="Per-request timeout in seconds",
+    )
+    parser.add_argument(
+        "--rate-limit",
+        dest="rate_limit_per_second",
+        type=non_negative_float,
+        default=5.0,
+        help="Max requests per second for the crawl (default 5.0; 0 disables the limiter)",
     )
     parser.add_argument("--js", action="store_true", help="Use Playwright (JS-enabled) backend")
     parser.add_argument(
@@ -1365,8 +1438,10 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
             "connect_over_cdp/goto can hang; no obscura serve / port needed."
         ),
     )
-    parser.add_argument("--output-dir", type=Path, help="Directory for CSV/JSON output")
-    parser.add_argument("--save-to", help="Path to save crawl JSON results")
+    parser.add_argument(
+        "--save-to",
+        help="Path to save portable crawl results (.ndjson or .json; companion metadata sidecar written alongside)",
+    )
     parser.add_argument(
         "--allow-persist-failures",
         action="store_true",
@@ -1488,6 +1563,25 @@ def _add_crawl_args(parser: argparse.ArgumentParser) -> None:
     auth.add_argument("--auth-token", help="Bearer token or password fallback")
     auth.add_argument("--auth-token-env", help="Read the bearer token from this environment variable")
     auth.add_argument("--auth-token-file", help="Read the bearer token from this file")
+    auth.add_argument(
+        "--header",
+        dest="request_header",
+        action="append",
+        default=[],
+        metavar="'Name: Value'",
+        help="Extra request header to send on requests to the primary seed host (repeatable). "
+        "Not sent to robots.txt or to requests addressed to other hosts; like --custom-ua, it is "
+        "carried across a redirect hop by the HTTP client. Use for pre-issued crawler credentials "
+        "such as Shopify Web Bot Auth Signature, Signature-Input and Signature-Agent headers.",
+    )
+    auth.add_argument(
+        "--headers-file",
+        dest="request_headers_file",
+        metavar="PATH",
+        help="File of extra request headers: a JSON object or 'Name: Value' lines ('#' comments "
+        "allowed). Same scoping as --header; --header values override the file. Keeps "
+        "credential-like header values out of process argv.",
+    )
     _add_postgres_args(parser)
 
 
@@ -1614,15 +1708,19 @@ async def _run_crawl(args: argparse.Namespace) -> int:
     _orig_sigint = _signal.signal(_signal.SIGINT, _stop_handler)
     _orig_sigterm = _signal.signal(_signal.SIGTERM, _stop_handler)
 
+    save_to = args.save_to
+    if save_to and not Path(save_to).suffix:
+        save_to = f"{save_to}.ndjson"
+
     _exit_code = 0
     try:
         if config.csv_urls and not config.csv_seed_mode:
-            job = await engine.crawl_list(config.csv_urls, save_to=args.save_to)
+            job = await engine.crawl_list(config.csv_urls, save_to=save_to)
         else:
             try:
                 job = await engine.crawl_open(
                     seeds,
-                    save_to=args.save_to,
+                    save_to=save_to,
                     run_id=args.resume or args.crawl_run_id,
                     resume=bool(args.resume),
                     allow_run_config_mismatch=args.allow_run_config_mismatch,
@@ -2911,6 +3009,26 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
                 f"(known versions: {', '.join(sorted(known_artifact_versions))})"
             )
 
+    def _attach_sidecar(job: CrawlJobResult) -> CrawlJobResult:
+        from .run_metadata import resolve_sidecar_path
+
+        sidecar_file = resolve_sidecar_path(path)
+        if sidecar_file and sidecar_file.is_file():
+            try:
+                meta = json.loads(sidecar_file.read_text(encoding="utf-8"))
+                if isinstance(meta, dict):
+                    job.run_metadata = meta
+                    job.sidecar_path = str(sidecar_file)
+                    if not job.run_id and meta.get("run_id"):
+                        job.run_id = str(meta["run_id"])
+                    if not job.seed_urls and meta.get("seed_urls"):
+                        job.seed_urls = list(meta["seed_urls"])
+                    if not job.crawl_run_status and meta.get("completion_state"):
+                        job.crawl_run_status = str(meta["completion_state"])
+            except Exception:
+                pass
+        return job
+
     raw_text = path.read_text(encoding="utf-8")
     try:
         payload = json.loads(raw_text)
@@ -2922,7 +3040,7 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
         summary = cast("_SavedJob", next((line for line in lines if line.get("__type") == "summary"), {}))
         _validate_schema_version(summary)
         results = [_load_result(line) for line in lines if line.get("__type") != "summary"]
-        return CrawlJobResult(
+        job = CrawlJobResult(
             mode=summary.get("mode", "open"),
             seed_urls=list(summary.get("seed_urls", []) or []),
             results=results,
@@ -2950,38 +3068,42 @@ def _load_saved_crawl(path: Path) -> "CrawlJobResult":
                 dict(summary["authorization_scope"]) if isinstance(summary.get("authorization_scope"), dict) else None
             ),
         )
+        return _attach_sidecar(job)
 
     if isinstance(payload, dict) and "results" in payload:
         _validate_schema_version(payload)
-        job = cast("_SavedJob", payload)
-        return CrawlJobResult(
-            mode=job.get("mode", "list"),
-            seed_urls=list(job.get("seed_urls", []) or []),
-            results=[_load_result(item) for item in job.get("results", []) or [] if isinstance(item, dict)],
-            saved_to=job.get("saved_to"),
-            max_urls=job.get("max_urls"),
-            run_id=job.get("run_id"),
-            retry_attempts=int(job.get("retry_attempts", 0) or 0),
-            interrupted=bool(job.get("interrupted", False)),
-            frontier_mark_done_failed_urls=list(job.get("frontier_mark_done_failed_urls", []) or []),
-            crawl_run_status=job.get("crawl_run_status"),
-            budget_requests_started=int(job.get("budget_requests_started", 0) or 0),
-            budget_wire_bytes=int(job.get("budget_wire_bytes", 0) or 0),
-            budget_decoded_bytes=int(job.get("budget_decoded_bytes", 0) or 0),
-            budget_accounted_bytes=int(job.get("budget_accounted_bytes", 0) or 0),
-            budget_stop_reason=job.get("budget_stop_reason"),
-            javascript_url_candidate_count=int(job.get("javascript_url_candidate_count", 0) or 0),
-            javascript_url_enqueued_count=int(job.get("javascript_url_enqueued_count", 0) or 0),
-            css_url_candidate_count=int(job.get("css_url_candidate_count", 0) or 0),
-            css_url_enqueued_count=int(job.get("css_url_enqueued_count", 0) or 0),
-            speculative_capped_count=int(job.get("speculative_capped_count", 0) or 0),
-            render_url_candidate_count=int(job.get("render_url_candidate_count", 0) or 0),
-            render_dom_enqueued_count=int(job.get("render_dom_enqueued_count", 0) or 0),
-            render_discovery_attempt_count=int(job.get("render_discovery_attempt_count", 0) or 0),
+        saved_payload = cast("_SavedJob", payload)
+        job = CrawlJobResult(
+            mode=saved_payload.get("mode", "list"),
+            seed_urls=list(saved_payload.get("seed_urls", []) or []),
+            results=[_load_result(item) for item in saved_payload.get("results", []) or [] if isinstance(item, dict)],
+            saved_to=saved_payload.get("saved_to"),
+            max_urls=saved_payload.get("max_urls"),
+            run_id=saved_payload.get("run_id"),
+            retry_attempts=int(saved_payload.get("retry_attempts", 0) or 0),
+            interrupted=bool(saved_payload.get("interrupted", False)),
+            frontier_mark_done_failed_urls=list(saved_payload.get("frontier_mark_done_failed_urls", []) or []),
+            crawl_run_status=saved_payload.get("crawl_run_status"),
+            budget_requests_started=int(saved_payload.get("budget_requests_started", 0) or 0),
+            budget_wire_bytes=int(saved_payload.get("budget_wire_bytes", 0) or 0),
+            budget_decoded_bytes=int(saved_payload.get("budget_decoded_bytes", 0) or 0),
+            budget_accounted_bytes=int(saved_payload.get("budget_accounted_bytes", 0) or 0),
+            budget_stop_reason=saved_payload.get("budget_stop_reason"),
+            javascript_url_candidate_count=int(saved_payload.get("javascript_url_candidate_count", 0) or 0),
+            javascript_url_enqueued_count=int(saved_payload.get("javascript_url_enqueued_count", 0) or 0),
+            css_url_candidate_count=int(saved_payload.get("css_url_candidate_count", 0) or 0),
+            css_url_enqueued_count=int(saved_payload.get("css_url_enqueued_count", 0) or 0),
+            speculative_capped_count=int(saved_payload.get("speculative_capped_count", 0) or 0),
+            render_url_candidate_count=int(saved_payload.get("render_url_candidate_count", 0) or 0),
+            render_dom_enqueued_count=int(saved_payload.get("render_dom_enqueued_count", 0) or 0),
+            render_discovery_attempt_count=int(saved_payload.get("render_discovery_attempt_count", 0) or 0),
             authorization_scope=(
-                dict(job["authorization_scope"]) if isinstance(job.get("authorization_scope"), dict) else None
+                dict(saved_payload["authorization_scope"])
+                if isinstance(saved_payload.get("authorization_scope"), dict)
+                else None
             ),
         )
+        return _attach_sidecar(job)
 
     raise ValueError(f"Unsupported crawl artifact format: {path}")
 
@@ -3350,6 +3472,28 @@ COMPARE_URLS_CSV_COLUMNS = [
     "simhash_distance",
     "content_verdict",
     "note",
+    # Ticket 401 additions.  These are appended so existing consumers retain
+    # their v1 column order; list values are JSON-encoded by the writer.
+    "source_evidence_state",
+    "target_evidence_state",
+    "target_final_url",
+    "source_canonical_url",
+    "target_canonical_url",
+    "source_html_canonical_url",
+    "target_html_canonical_url",
+    "source_x_canonical_url",
+    "target_x_canonical_url",
+    "source_canonical_state",
+    "target_canonical_state",
+    "source_self_canonical",
+    "target_self_canonical",
+    "source_meta_robots",
+    "target_meta_robots",
+    "source_x_robots_tag",
+    "target_x_robots_tag",
+    "source_robots_allowed",
+    "target_robots_allowed",
+    "target_migration_verdict",
 ]
 """Frozen CSV column order for ``compare-urls --output *.csv`` (ticket 3344).
 
@@ -3380,6 +3524,12 @@ def _write_compare_urls_output(rows: list[dict[str, object]], output: str) -> No
                 # URLs stay clean; hop count and the chain get their own columns.
                 flat["redirect_hops"] = len(chain)
                 flat["redirect_chain"] = _format_redirect_chain(chain)
+                for key, value in list(flat.items()):
+                    if isinstance(value, list):
+                        # A CSV cell needs a deterministic scalar while JSON
+                        # retains the native list.  ``[]`` means observed with
+                        # no directive; a blank cell remains unobserved.
+                        flat[key] = json.dumps(value, separators=(",", ":"))
                 writer.writerow(flat)
     else:
         payload = {"schema_version": COMPARE_URLS_SCHEMA_VERSION, "rows": rows}

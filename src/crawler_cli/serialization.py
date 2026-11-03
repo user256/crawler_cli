@@ -4,6 +4,30 @@ from typing import Any
 
 from .models import BrowserRuntime, CrawlJobResult, CrawlResult, ExtractedContent, FetchResponse
 from .redaction import redact_headers
+from .run_metadata import (
+    CRAWL_RUN_METADATA_SCHEMA_VERSION,
+    build_run_metadata,
+    read_run_metadata,
+    resolve_sidecar_path,
+    sidecar_path_for,
+    write_run_metadata,
+)
+
+__all__ = [
+    "CRAWL_ARTIFACT_SCHEMA_VERSION",
+    "CRAWL_RUN_METADATA_SCHEMA_VERSION",
+    "build_run_metadata",
+    "read_run_metadata",
+    "resolve_sidecar_path",
+    "sidecar_path_for",
+    "write_run_metadata",
+    "serialize_browser_runtime",
+    "serialize_fetch_response",
+    "serialize_extracted_content",
+    "serialize_crawl_result",
+    "serialize_job_summary_metadata",
+    "serialize_crawl_job",
+]
 
 CRAWL_ARTIFACT_SCHEMA_VERSION = "crawler-cli/crawl-artifact/8"
 """Schema identifier stamped on saved crawl artifacts (ticket 3344).

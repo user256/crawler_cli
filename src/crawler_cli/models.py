@@ -329,6 +329,10 @@ class CrawlJobResult:
     validity window, the exact allowed origins, the path policy, and the
     attestation notice — never the manifest's free-text notes or its filesystem
     path."""
+    sidecar_path: str | None = None
+    """Filesystem path to the companion run-metadata JSON sidecar (ticket 400)."""
+    run_metadata: dict[str, Any] | None = None
+    """Companion run-metadata document loaded from the sidecar (ticket 400)."""
 
     @property
     def crawled_count(self) -> int:

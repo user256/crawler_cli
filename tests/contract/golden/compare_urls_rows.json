@@ -39,6 +39,26 @@
           "changed": false
         }
       },
+      "source_evidence_state": "observed",
+      "source_canonical_url": null,
+      "source_html_canonical_url": null,
+      "source_x_canonical_url": null,
+      "source_canonical_state": "missing",
+      "source_self_canonical": null,
+      "source_meta_robots": [],
+      "source_x_robots_tag": [],
+      "source_robots_allowed": null,
+      "target_evidence_state": "observed",
+      "target_final_url": "https://new.example/a",
+      "target_canonical_url": "https://new.example/a",
+      "target_html_canonical_url": "https://new.example/a",
+      "target_x_canonical_url": null,
+      "target_canonical_state": "self",
+      "target_self_canonical": true,
+      "target_meta_robots": [],
+      "target_x_robots_tag": [],
+      "target_robots_allowed": true,
+      "target_migration_verdict": "target_indexability_healthy",
       "note": "homepage"
     },
     {
@@ -82,7 +102,29 @@
           "target": 18,
           "changed": false
         }
-      }
+      },
+      "source_evidence_state": "observed",
+      "source_canonical_url": null,
+      "source_html_canonical_url": null,
+      "source_x_canonical_url": null,
+      "source_canonical_state": "missing",
+      "source_self_canonical": null,
+      "source_meta_robots": [],
+      "source_x_robots_tag": [],
+      "source_robots_allowed": null,
+      "target_evidence_state": "observed",
+      "target_final_url": "https://new.example/b",
+      "target_canonical_url": "https://new.example/b",
+      "target_html_canonical_url": "https://new.example/b",
+      "target_x_canonical_url": null,
+      "target_canonical_state": "self",
+      "target_self_canonical": true,
+      "target_meta_robots": [
+        "noindex"
+      ],
+      "target_x_robots_tag": [],
+      "target_robots_allowed": true,
+      "target_migration_verdict": "target_noindex"
     },
     {
       "source_url": "https://old.example/c",
@@ -121,7 +163,27 @@
           "target": 11,
           "changed": true
         }
-      }
+      },
+      "source_evidence_state": "observed",
+      "source_canonical_url": null,
+      "source_html_canonical_url": null,
+      "source_x_canonical_url": null,
+      "source_canonical_state": "missing",
+      "source_self_canonical": null,
+      "source_meta_robots": [],
+      "source_x_robots_tag": [],
+      "source_robots_allowed": null,
+      "target_evidence_state": "observed",
+      "target_final_url": "https://new.example/c",
+      "target_canonical_url": "https://new.example/canonical-other",
+      "target_html_canonical_url": "https://new.example/canonical-other",
+      "target_x_canonical_url": null,
+      "target_canonical_state": "cross",
+      "target_self_canonical": false,
+      "target_meta_robots": [],
+      "target_x_robots_tag": [],
+      "target_robots_allowed": true,
+      "target_migration_verdict": "target_cross_canonical"
     },
     {
       "source_url": "https://old.example/d",
@@ -155,7 +217,27 @@
           "target": 18,
           "changed": false
         }
-      }
+      },
+      "source_evidence_state": "observed",
+      "source_canonical_url": null,
+      "source_html_canonical_url": null,
+      "source_x_canonical_url": null,
+      "source_canonical_state": "missing",
+      "source_self_canonical": null,
+      "source_meta_robots": [],
+      "source_x_robots_tag": [],
+      "source_robots_allowed": null,
+      "target_evidence_state": "observed",
+      "target_final_url": "https://new.example/d",
+      "target_canonical_url": "https://new.example/d",
+      "target_html_canonical_url": "https://new.example/d",
+      "target_x_canonical_url": null,
+      "target_canonical_state": "self",
+      "target_self_canonical": true,
+      "target_meta_robots": [],
+      "target_x_robots_tag": [],
+      "target_robots_allowed": false,
+      "target_migration_verdict": "target_robots_disallowed"
     },
     {
       "source_url": "https://old.example/e",
@@ -194,7 +276,27 @@
           "target": 18,
           "changed": false
         }
-      }
+      },
+      "source_evidence_state": "observed",
+      "source_canonical_url": null,
+      "source_html_canonical_url": null,
+      "source_x_canonical_url": null,
+      "source_canonical_state": "missing",
+      "source_self_canonical": null,
+      "source_meta_robots": [],
+      "source_x_robots_tag": [],
+      "source_robots_allowed": null,
+      "target_evidence_state": "observed",
+      "target_final_url": "https://new.example/e",
+      "target_canonical_url": null,
+      "target_html_canonical_url": null,
+      "target_x_canonical_url": null,
+      "target_canonical_state": "missing",
+      "target_self_canonical": null,
+      "target_meta_robots": [],
+      "target_x_robots_tag": [],
+      "target_robots_allowed": null,
+      "target_migration_verdict": "target_canonical_missing"
     },
     {
       "source_url": "https://old.example/f",
@@ -228,7 +330,27 @@
           "target": 18,
           "changed": true
         }
-      }
+      },
+      "source_evidence_state": "http_error",
+      "source_canonical_url": null,
+      "source_html_canonical_url": null,
+      "source_x_canonical_url": null,
+      "source_canonical_state": "unavailable",
+      "source_self_canonical": null,
+      "source_meta_robots": null,
+      "source_x_robots_tag": null,
+      "source_robots_allowed": null,
+      "target_evidence_state": "observed",
+      "target_final_url": "https://new.example/f",
+      "target_canonical_url": null,
+      "target_html_canonical_url": null,
+      "target_x_canonical_url": null,
+      "target_canonical_state": "missing",
+      "target_self_canonical": null,
+      "target_meta_robots": [],
+      "target_x_robots_tag": [],
+      "target_robots_allowed": null,
+      "target_migration_verdict": "target_canonical_missing"
     },
     {
       "source_url": "https://old.example/g",
@@ -262,7 +384,27 @@
           "target": null,
           "changed": false
         }
-      }
+      },
+      "source_evidence_state": "unobserved",
+      "source_canonical_url": null,
+      "source_html_canonical_url": null,
+      "source_x_canonical_url": null,
+      "source_canonical_state": "unobserved",
+      "source_self_canonical": null,
+      "source_meta_robots": null,
+      "source_x_robots_tag": null,
+      "source_robots_allowed": null,
+      "target_evidence_state": "unobserved",
+      "target_final_url": null,
+      "target_canonical_url": null,
+      "target_html_canonical_url": null,
+      "target_x_canonical_url": null,
+      "target_canonical_state": "unobserved",
+      "target_self_canonical": null,
+      "target_meta_robots": null,
+      "target_x_robots_tag": null,
+      "target_robots_allowed": null,
+      "target_migration_verdict": "target_unobserved"
     },
     {
       "source_url": "https://old.example/h",
@@ -301,7 +443,27 @@
           "target": null,
           "changed": true
         }
-      }
+      },
+      "source_evidence_state": "observed",
+      "source_canonical_url": null,
+      "source_html_canonical_url": null,
+      "source_x_canonical_url": null,
+      "source_canonical_state": "missing",
+      "source_self_canonical": null,
+      "source_meta_robots": [],
+      "source_x_robots_tag": [],
+      "source_robots_allowed": null,
+      "target_evidence_state": "unobserved",
+      "target_final_url": null,
+      "target_canonical_url": null,
+      "target_html_canonical_url": null,
+      "target_x_canonical_url": null,
+      "target_canonical_state": "unobserved",
+      "target_self_canonical": null,
+      "target_meta_robots": null,
+      "target_x_robots_tag": null,
+      "target_robots_allowed": null,
+      "target_migration_verdict": "target_unobserved"
     },
     {
       "source_url": "https://old.example/i",
@@ -340,7 +502,27 @@
           "target": 18,
           "changed": false
         }
-      }
+      },
+      "source_evidence_state": "observed",
+      "source_canonical_url": null,
+      "source_html_canonical_url": null,
+      "source_x_canonical_url": null,
+      "source_canonical_state": "missing",
+      "source_self_canonical": null,
+      "source_meta_robots": [],
+      "source_x_robots_tag": [],
+      "source_robots_allowed": null,
+      "target_evidence_state": "observed",
+      "target_final_url": "https://new.example/i",
+      "target_canonical_url": null,
+      "target_html_canonical_url": null,
+      "target_x_canonical_url": null,
+      "target_canonical_state": "missing",
+      "target_self_canonical": null,
+      "target_meta_robots": [],
+      "target_x_robots_tag": [],
+      "target_robots_allowed": null,
+      "target_migration_verdict": "target_canonical_missing"
     }
   ]
 }

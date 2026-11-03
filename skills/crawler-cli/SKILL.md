@@ -110,7 +110,12 @@ shell history and the process list. CLI flags override env vars.
 Default is HTTP (`aiohttp`, or `--http-backend curl_cffi`). `--js` switches to
 Playwright; `--obscura` uses the Obscura browser and implies `--js`.
 `--playwright-cdp-port 9222` attaches to an already-running Chrome/Edge started
-with `--remote-debugging-port`. For SPAs, `--wait-for-selector` waits for
+with `--remote-debugging-port`, and **shares that browser's session**: pages
+open as new tabs in its default context, so cookies (including a manually earned
+Cloudflare `cf_clearance`) and its real UA carry over. To get past a challenge,
+launch Chrome with a dedicated `--user-data-dir` (136+ blocks the default
+profile), solve it by hand, then crawl with `--max-workers 1 --rate-limit 0.2`
+and no `--user-agent`/`--impersonate`. For SPAs, `--wait-for-selector` waits for
 hydration before the DOM snapshot.
 
 When combining `--obscura` with `--analytics-detection` you must state
@@ -130,6 +135,32 @@ downgraded to Basic). Prefer `--auth-password-env/--auth-token-env` or the
 `-file` variants so secrets stay out of argv. Credentials are stripped on
 cross-origin redirects. `--cookie` / `--cookies-file` (storageState JSON or
 Netscape cookies.txt) get past a login wall; `--proxy` accepts HTTP or SOCKS.
+
+### Pre-issued static headers (Shopify Web Bot Auth)
+
+Shopify stores rate-limit unsigned crawlers: HTML pages tolerate a polite rate,
+but JSON endpoints such as `/products.json` answer `429` with `Retry-After: 60`.
+The store owner fixes this from Shopify admin (Online Store > Preferences >
+Crawler access), which issues a static HTTP Message Signature for one domain,
+valid at most three months and not renewable. It is three header values that
+are sent unchanged on every request; there is no key pair on our side.
+
+```bash
+# headers file: '#' comments, then one 'Name: Value' per line (or a JSON object)
+crawler-cli https://shop.example.com --headers-file ./shopify-webbotauth.headers
+# one-off:  --header 'Signature-Agent: "https://shopify.com"' (repeatable)
+```
+
+The headers go only to the primary seed host, never to `robots.txt`, and the
+values are scrubbed from logs. Run from the repo with `uv run crawler-cli`
+until the pipx install is refreshed; the flag landed on 2026-10-08.
+
+**Milroys of Soho (`milroysofsoho.com`)**: the client's signature lives in
+`runs/milroys-20261008/shopify-webbotauth.headers` (gitignored, mode 600,
+treat as a credential). It **expires 2027-01-06**; ask the client for a new one
+before then. `runs/milroys-20261008/crawl.sh smoke|full` wraps the crawl with
+the file, 2 rps, the `milroysofsoho_com_crawler` database and an expiry guard.
+Evidence and run ids are in that folder's `README.md`.
 
 ### Scope manifest
 
@@ -226,6 +257,11 @@ Rows carry both statuses, a redirect verdict (`redirect_ok`,
 `redirect_wrong_target`, `redirect_temporary`, `redirect_chain`, `no_redirect`,
 `error_status`, `not_crawled`) with the hop chain, `sha256_equal`,
 `simhash_distance`, `content_verdict`, and title/h1/meta/word-count deltas.
+They also carry source/target final URLs, canonical declarations and self-state,
+meta/X-Robots directives, robots.txt allowance and per-side evidence state.
+Use `target_migration_verdict` to assess target indexability separately from the
+redirect: it explicitly distinguishes noindex, cross-canonical,
+robots-disallowed, unknown/missing evidence and a healthy target.
 `--fail-on` accepts `redirect_mismatch`, `content_changed`, or `any`.
 
 **Raw versus rendered** parity from a single Playwright navigation:

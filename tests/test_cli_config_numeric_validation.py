@@ -79,6 +79,8 @@ def test_argparse_float_types_reject_nan_inf(fn, raw):
         ["--timeout", "0"],
         ["--timeout", "nan"],
         ["--timeout", "inf"],
+        ["--rate-limit", "-1"],
+        ["--rate-limit", "nan"],
         ["--max-response-bytes", "0"],
         ["--max-response-bytes", "-10"],
         ["--max-requests", "-1"],
@@ -114,6 +116,8 @@ def test_cli_rejects_invalid_numeric_flags(flags):
         ["--max-bytes", "0"],
         ["--wait-for-network-idle", "0"],
         ["--timeout", "0.001"],
+        ["--rate-limit", "0"],
+        ["--rate-limit", "0.25"],
         ["--memory-high-watermark", "100"],
         ["--memory-recovery-watermark", "0"],
     ],
@@ -128,6 +132,13 @@ def test_cli_accepts_boundary_and_sentinel_values(flags):
         _build_config(args)
     else:
         _build_config(args)
+
+
+def test_cli_rate_limit_maps_into_config():
+    args = _parse_crawl("--rate-limit", "0.25")
+    config = _build_config(args)
+    assert config.rate_limit_per_second == 0.25
+    assert config.min_interval_seconds == 4.0
 
 
 def test_cli_rejects_memory_recovery_not_below_high():

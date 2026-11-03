@@ -81,15 +81,20 @@ def test_compare_urls_row_semantics(tmp_path) -> None:
     assert rows["https://old.example/a"]["content_verdict"] == "identical"
     assert rows["https://old.example/a"]["note"] == "homepage"
     assert rows["https://old.example/a"]["redirect_chain"] == [{"url": "https://old.example/a", "status": 301}]
+    assert rows["https://old.example/a"]["target_migration_verdict"] == "target_indexability_healthy"
+    assert rows["https://old.example/a"]["target_canonical_state"] == "self"
 
     assert rows["https://old.example/b"]["redirect_verdict"] == "redirect_chain"
     assert rows["https://old.example/b"]["content_verdict"] == "near"
     assert rows["https://old.example/b"]["simhash_distance"] == 1
+    assert rows["https://old.example/b"]["target_migration_verdict"] == "target_noindex"
 
     assert rows["https://old.example/c"]["redirect_verdict"] == "redirect_temporary"
     assert rows["https://old.example/c"]["content_verdict"] == "changed"
+    assert rows["https://old.example/c"]["target_migration_verdict"] == "target_cross_canonical"
 
     assert rows["https://old.example/d"]["redirect_verdict"] == "no_redirect"
+    assert rows["https://old.example/d"]["target_migration_verdict"] == "target_robots_disallowed"
     assert rows["https://old.example/e"]["redirect_verdict"] == "redirect_wrong_target"
     assert rows["https://old.example/f"]["redirect_verdict"] == "error_status"
 
@@ -100,6 +105,8 @@ def test_compare_urls_row_semantics(tmp_path) -> None:
     assert rows["https://old.example/h"]["redirect_verdict"] == "redirect_ok"
     assert rows["https://old.example/h"]["content_verdict"] == "missing"
     assert rows["https://old.example/h"]["target_status"] is None
+    assert rows["https://old.example/h"]["target_evidence_state"] == "unobserved"
+    assert rows["https://old.example/h"]["target_migration_verdict"] == "target_unobserved"
 
     # Signed vs unsigned simhash: same fingerprint in both representations
     # must compare at distance 0 ("near", since the stored sha256s differ).

@@ -1,10 +1,10 @@
-source_url,target_url,source_status,target_status,source_final_url,redirect_verdict,redirect_hops,redirect_chain,sha256_equal,simhash_distance,content_verdict,note
-https://old.example/a,https://new.example/a,200,200,https://new.example/a,redirect_ok,1,https://old.example/a (301),True,0,identical,homepage
-https://old.example/b,https://new.example/b,200,200,https://new.example/b,redirect_chain,2,https://old.example/b (301) -> https://old.example/b-interim (301),False,1,near,
-https://old.example/c,https://new.example/c,200,200,https://new.example/c,redirect_temporary,1,https://old.example/c (302),False,27,changed,
-https://old.example/d,https://new.example/d,200,200,https://old.example/d,no_redirect,0,,True,0,identical,
-https://old.example/e,https://new.example/e,200,200,https://new.example/elsewhere,redirect_wrong_target,1,https://old.example/e (301),True,0,identical,
-https://old.example/f,https://new.example/f,404,200,https://old.example/f,error_status,0,,False,,unknown,
-https://old.example/g,https://new.example/g,,,,not_crawled,0,,,,missing,
-https://old.example/h,https://new.example/h,200,,https://new.example/h,redirect_ok,1,https://old.example/h (301),,,missing,
-https://old.example/i,https://new.example/i,200,200,https://new.example/i,redirect_ok,1,https://old.example/i (301),False,0,near,
+source_url,target_url,source_status,target_status,source_final_url,redirect_verdict,redirect_hops,redirect_chain,sha256_equal,simhash_distance,content_verdict,note,source_evidence_state,target_evidence_state,target_final_url,source_canonical_url,target_canonical_url,source_html_canonical_url,target_html_canonical_url,source_x_canonical_url,target_x_canonical_url,source_canonical_state,target_canonical_state,source_self_canonical,target_self_canonical,source_meta_robots,target_meta_robots,source_x_robots_tag,target_x_robots_tag,source_robots_allowed,target_robots_allowed,target_migration_verdict
+https://old.example/a,https://new.example/a,200,200,https://new.example/a,redirect_ok,1,https://old.example/a (301),True,0,identical,homepage,observed,observed,https://new.example/a,,https://new.example/a,,https://new.example/a,,,missing,self,,True,[],[],[],[],,True,target_indexability_healthy
+https://old.example/b,https://new.example/b,200,200,https://new.example/b,redirect_chain,2,https://old.example/b (301) -> https://old.example/b-interim (301),False,1,near,,observed,observed,https://new.example/b,,https://new.example/b,,https://new.example/b,,,missing,self,,True,[],"[""noindex""]",[],[],,True,target_noindex
+https://old.example/c,https://new.example/c,200,200,https://new.example/c,redirect_temporary,1,https://old.example/c (302),False,27,changed,,observed,observed,https://new.example/c,,https://new.example/canonical-other,,https://new.example/canonical-other,,,missing,cross,,False,[],[],[],[],,True,target_cross_canonical
+https://old.example/d,https://new.example/d,200,200,https://old.example/d,no_redirect,0,,True,0,identical,,observed,observed,https://new.example/d,,https://new.example/d,,https://new.example/d,,,missing,self,,True,[],[],[],[],,False,target_robots_disallowed
+https://old.example/e,https://new.example/e,200,200,https://new.example/elsewhere,redirect_wrong_target,1,https://old.example/e (301),True,0,identical,,observed,observed,https://new.example/e,,,,,,,missing,missing,,,[],[],[],[],,,target_canonical_missing
+https://old.example/f,https://new.example/f,404,200,https://old.example/f,error_status,0,,False,,unknown,,http_error,observed,https://new.example/f,,,,,,,unavailable,missing,,,,[],,[],,,target_canonical_missing
+https://old.example/g,https://new.example/g,,,,not_crawled,0,,,,missing,,unobserved,unobserved,,,,,,,,unobserved,unobserved,,,,,,,,,target_unobserved
+https://old.example/h,https://new.example/h,200,,https://new.example/h,redirect_ok,1,https://old.example/h (301),,,missing,,observed,unobserved,,,,,,,,missing,unobserved,,,[],,[],,,,target_unobserved
+https://old.example/i,https://new.example/i,200,200,https://new.example/i,redirect_ok,1,https://old.example/i (301),False,0,near,,observed,observed,https://new.example/i,,,,,,,missing,missing,,,[],[],[],[],,,target_canonical_missing

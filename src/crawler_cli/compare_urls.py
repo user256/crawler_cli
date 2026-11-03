@@ -242,6 +242,86 @@ def _field(result: CrawlResult | None, name: str) -> object:
     return None
 
 
+def _robots_directives(result: CrawlResult | None, attribute: str) -> list[str] | None:
+    """Return saved robots directives without treating a missing page as clean.
+
+    ``CrawlResult.allowed_by_robots`` describes the robots.txt decision made by
+    the crawler.  Meta and X-Robots-Tag directives are page evidence, so they
+    are deliberately separate in the comparison contract.  Keeping them as
+    lists also avoids silently collapsing an unknown observation into an empty
+    string in CSV output.
+    """
+    if result is None or result.extracted is None:
+        return None
+    directives = getattr(result.extracted, attribute)
+    return list(directives.raw)
+
+
+def _has_noindex(directives: list[str] | None) -> bool:
+    """Identify a noindex token from saved directive strings.
+
+    Saved artifacts retain the raw directives rather than the parsed boolean
+    flags, so this must work after an artifact round trip too.
+    """
+    if directives is None:
+        return False
+    return any(token.strip().lower() == "noindex" for value in directives for token in value.split(","))
+
+
+def _canonical_state(result: CrawlResult | None) -> tuple[str, str | None, bool | None]:
+    """Return canonical state, declared canonical and explicit self-state.
+
+    ``missing`` and ``unobserved`` are intentionally different.  A consumer
+    must not infer that an absent observation or absent canonical is healthy.
+    HTML canonical takes precedence over X-Canonical where both are present,
+    while both raw values remain in the row for diagnosis.
+    """
+    if result is None:
+        return "unobserved", None, None
+    if result.extracted is None:
+        return "unavailable", None, None
+    canonical = result.extracted.canonical or result.extracted.x_canonical
+    if not canonical:
+        return "missing", None, None
+    is_self = normalize_url_for_match(canonical) == normalize_url_for_match(result.final_url)
+    return ("self" if is_self else "cross"), canonical, is_self
+
+
+def _evidence_state(result: CrawlResult | None) -> str:
+    """Machine-readable observation state for one side of a mapping."""
+    if result is None:
+        return "unobserved"
+    if result.status == 0:
+        return "fetch_error"
+    if result.status >= 400:
+        return "http_error"
+    if result.extracted is None:
+        return "page_evidence_unavailable"
+    return "observed"
+
+
+def _target_migration_verdict(result: CrawlResult | None) -> str:
+    """Summarise target indexability without overloading redirect verdicts."""
+    state = _evidence_state(result)
+    if state != "observed":
+        return f"target_{state}"
+    assert result is not None and result.extracted is not None  # narrowed by state
+    if result.allowed_by_robots is False:
+        return "target_robots_disallowed"
+    meta = _robots_directives(result, "meta_robots")
+    x_robots = _robots_directives(result, "x_robots_tag")
+    if _has_noindex(meta) or _has_noindex(x_robots):
+        return "target_noindex"
+    canonical_state, _, _ = _canonical_state(result)
+    if canonical_state == "cross":
+        return "target_cross_canonical"
+    if canonical_state == "missing":
+        return "target_canonical_missing"
+    if result.allowed_by_robots is None:
+        return "target_robots_allowance_unknown"
+    return "target_indexability_healthy"
+
+
 def build_pair_row(
     pair: UrlPair,
     source: CrawlResult | None,
@@ -285,6 +365,24 @@ def build_pair_row(
         "content_verdict": content_verdict,
         "field_deltas": field_deltas,
     }
+    for side, result in (("source", source), ("target", target)):
+        canonical_state, canonical_url, self_canonical = _canonical_state(result)
+        extracted = result.extracted if result is not None else None
+        row.update(
+            {
+                f"{side}_evidence_state": _evidence_state(result),
+                f"{side}_final_url": result.final_url if result is not None else None,
+                f"{side}_canonical_url": canonical_url,
+                f"{side}_html_canonical_url": extracted.canonical if extracted is not None else None,
+                f"{side}_x_canonical_url": extracted.x_canonical if extracted is not None else None,
+                f"{side}_canonical_state": canonical_state,
+                f"{side}_self_canonical": self_canonical,
+                f"{side}_meta_robots": _robots_directives(result, "meta_robots"),
+                f"{side}_x_robots_tag": _robots_directives(result, "x_robots_tag"),
+                f"{side}_robots_allowed": result.allowed_by_robots if result is not None else None,
+            }
+        )
+    row["target_migration_verdict"] = _target_migration_verdict(target)
     if pair.note is not None:
         row["note"] = pair.note
     return row

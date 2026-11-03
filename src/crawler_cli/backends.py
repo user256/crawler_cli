@@ -1321,7 +1321,11 @@ class PlaywrightBackend(FetchBackend):
         )
 
     async def _recycle_context_locked(self) -> None:
-        if self._persistent_context:
+        # A borrowed CDP context (an operator's own Chrome, or Obscura's default
+        # context) is the same object before and after a "recycle", so recycling
+        # would only stack another guard route, cookie set and init script onto
+        # it. Treat it like a persistent profile: reset the counters, keep it.
+        if self._persistent_context or (self._cdp_connected and not self._owns_context):
             self._context_request_count = 0
             self._context_recycle_requested = False
             return
