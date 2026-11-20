@@ -24,7 +24,7 @@ from .amp import is_amp_url_shape
 from .archive import discover_historical_urls
 from .authorisation import ScopeManifestDenied, ScopePurpose, describe_manifest
 from .destination_policy import DestinationRejection, destination_capabilities
-from .backends import ObscuraFetchBackend, PlaywrightBackend, RateLimiter, build_backend
+from .backends import AiohttpBackend, ObscuraFetchBackend, PlaywrightBackend, RateLimiter, build_backend
 from .budget import RunBudget, RunBudgetExhausted
 from .challenge import detect_challenge
 from .circuit_breaker import CircuitBreaker, CircuitBreakerRegistry, CircuitState
@@ -263,9 +263,13 @@ class CrawlEngine:
             # session. Route it through the backend whenever either guard is
             # active; the legacy fetcher remains only for a fully unguarded run
             # (ticket 149, and ticket 148's budget for the Portal path).
+            # A Playwright run always routes it there too, so its HTTP
+            # document fetch takes the browser's proxy (ticket 429).
             fetch_response=(
                 self._fetch_for_purpose
-                if config.portal_connection_policy is not None or config.destination_guard != "off"
+                if config.portal_connection_policy is not None
+                or config.destination_guard != "off"
+                or isinstance(self.backend, PlaywrightBackend)
                 else None
             ),
         )
@@ -298,6 +302,14 @@ class CrawlEngine:
         # Lazily-built browser backend used to escalate challenged HTTP fetches
         # (ticket 074). Only created when an escalation actually happens.
         self._challenge_backend: PlaywrightBackend | None = None
+        # robots.txt and sitemaps are raw documents. The Playwright backend
+        # returns the rendered DOM (Chromium wraps plain text in <pre> and
+        # replaces XML with its tree viewer) and fails outright when no browser
+        # is installed, which robots handling then reads as "unreachable" and
+        # so disallow-all. Playwright runs fetch them over plain HTTP instead,
+        # through the same scope check and the aiohttp destination guard
+        # (ticket 429). ObscuraFetchBackend already dumps these raw.
+        self._document_backend: AiohttpBackend | None = None
         # Linked bundles are commonly shared by every page. Cache their raw
         # literals (not document-resolved URLs) so relative values can still
         # resolve correctly for each page without re-fetching the bundle.
@@ -1549,8 +1561,28 @@ class CrawlEngine:
         self._assert_response_in_scope(response, scope_purpose)
         return response
 
+    def _get_document_backend(self) -> AiohttpBackend | None:
+        """Return the HTTP backend for robots.txt and sitemaps on Playwright runs."""
+        if not isinstance(self.backend, PlaywrightBackend):
+            return None
+        if self._document_backend is None:
+            import dataclasses
+
+            overrides: dict[str, Any] = {"backend": "aiohttp"}
+            # A managed Obscura CDP browser egresses through obscura_proxy in
+            # preference to the general proxy (PlaywrightBackend.
+            # _start_managed_obscura); send the documents the same way.
+            if self.config.obscura_enabled and self.config.obscura_managed and self.config.obscura_proxy:
+                overrides.update(proxy=self.config.obscura_proxy, proxies=[], proxy_auth="")
+            self._document_backend = AiohttpBackend(dataclasses.replace(self.config, **overrides))
+        return self._document_backend
+
     async def _fetch_unscoped(self, url: str, purpose: ConnectionPurpose):
         """Perform the backend fetch itself, after admission has been decided."""
+        if purpose in ("robots", "sitemap"):
+            document_backend = self._get_document_backend()
+            if document_backend is not None:
+                return await document_backend.fetch_for_purpose(url, purpose)
         if self.config.portal_connection_policy is not None or self.config.destination_guard == "pinned":
             fetch_for_purpose = getattr(self.backend, "fetch_for_purpose", None)
             if fetch_for_purpose is None:
@@ -2469,6 +2501,10 @@ class CrawlEngine:
             with contextlib.suppress(Exception):
                 await self._render_discovery_backend.close()
             self._render_discovery_backend = None
+        if self._document_backend is not None:
+            with contextlib.suppress(Exception):
+                await self._document_backend.close()
+            self._document_backend = None
         close = getattr(self.backend, "close", None)
         if close is None:
             return

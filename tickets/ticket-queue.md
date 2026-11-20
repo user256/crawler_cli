@@ -43,7 +43,10 @@ complete. Probe-producer follow-ups in that ticket remain open.
 - `427` `done` [Let the live probes use the crawl's transport, identity and pace options](./ticket-427-probe-engine-transport-options.md) — **P2, 419 live QA D3.**
 - `428` `done` [Dropdowns on every ticket row, and a workbook that reports actual issues only](./ticket-428-sheets-dropdowns-and-issue-only-workbook.md) — **P2.** User request after the 420 live run; verified live on both copy paths 2026-10-07.
 
-Next unreserved ticket number is **429**.
+- `429` `in review` [--js crawls report every URL as blocked by robots](./ticket-429-js-robots-fetched-through-browser.md) — **P1.** robots.txt and sitemaps went through the browser page path. Builder: Claude (Opus 5.5); Codex gpt-5.6-terra QA PASS WITH NOTES (round 3). Live `--js` rerun pending a Chromium install.
+- `430` `proposed` [technical-audit leaves four run-level checks unavailable on every run](./ticket-430-technical-audit-run-level-collectors.md) — **P2.** Collectors dropped by PR #118; also records that the 2026-11-20 orphan count came from a stale checkout.
+
+Next unreserved ticket number is **431**.
 
 Earlier positions below are historical.
 
