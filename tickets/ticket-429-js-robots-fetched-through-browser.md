@@ -55,8 +55,11 @@ not the cause.
 - [x] Related suites (robots, sitemap, playwright, destination, engine,
       challenge, obscura, security, portal, proxy): 395 passed, 3 skipped. ruff
       check and format clean.
-- [ ] Live `--js` run against uisgebeatha.co.uk once Chromium is installed
-      (`.venv/bin/playwright install chromium`).
+- [x] Live `--js --web-vitals` run against uisgebeatha.co.uk on 2026-11-20:
+      "1 crawled, 0 blocked by robots", status 200, `allowed_by_robots` true,
+      LCP 364 ms, CLS 0. Playwright 1.60 cannot install its own Chromium on
+      Ubuntu 26.04 ("does not support chromium on ubuntu26.04-x64"), so the run
+      used the snap Chromium 156 via `--playwright-executable-path /snap/bin/chromium`.
 
 ## Review
 
