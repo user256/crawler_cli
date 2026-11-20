@@ -97,6 +97,17 @@ def _path_with_query(url: str) -> str:
     return path
 
 
+def _log_robots_fetch_failure(robots_url: str, exc: BaseException) -> None:
+    """Say why robots.txt was unreachable; the host is then fully disallowed."""
+    logger.warning(
+        "robots.txt fetch failed for %s (%s: %s); treating the host as unreachable, so every URL on it is disallowed",
+        robots_url,
+        type(exc).__name__,
+        str(exc).splitlines()[0] if str(exc) else "",
+        extra={"event": "robots_fetch_failed", "url": robots_url},
+    )
+
+
 @dataclass(slots=True)
 class RobotsDecision:
     allowed: bool
@@ -449,7 +460,8 @@ class RobotsPolicyCache:
                     guarded_response.headers,
                     guarded_response.status,
                 )
-            except Exception:
+            except Exception as exc:
+                _log_robots_fetch_failure(robots_url, exc)
                 return None, {}, 0
         proxy = self._select_proxy(robots_url)
         try:
@@ -467,7 +479,8 @@ class RobotsPolicyCache:
                     if status == 200:
                         return await http_response.text(errors="ignore"), headers, status
                     return None, headers, status
-        except Exception:
+        except Exception as exc:
+            _log_robots_fetch_failure(robots_url, exc)
             return None, {}, 0
 
     async def _fetch_and_parse(self, url: str) -> _RobotsRules | None:
